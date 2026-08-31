@@ -90,9 +90,9 @@ class MCPToolProxy(BaseTool):
         self.read_only = bool(ann.get("readOnlyHint", False))
         self.destructive = bool(ann.get("destructiveHint", False))
         self.open_world = bool(ann.get("openWorldHint", False))
-        self.always_load = bool(
-            meta.get("anthropic/alwaysLoad") or meta.get("alwaysLoad") or False
-        )
+        # MCP _meta vendor extensions are namespaced; "anthropic/alwaysLoad" is
+        # the only key with a cross-harness convention (cc Tool.ts).
+        self.always_load = bool(meta.get("anthropic/alwaysLoad"))
 
         server_config = (
             manager.get_server_config(server_name)
@@ -241,9 +241,10 @@ class MCPToolProxy(BaseTool):
             request_owner = None
             if context is not None:
                 metadata = getattr(context, "metadata", {}) or {}
+                run_context = getattr(context, "run_context", None)
                 request_owner = {
                     "session_id": str(
-                        metadata.get("_mcp_owner_session_id")
+                        getattr(run_context, "mcp_owner_session_id", "")
                         or getattr(context, "session_id", "")
                         or ""
                     ),
@@ -253,7 +254,15 @@ class MCPToolProxy(BaseTool):
                     "conversation_run_generation": metadata.get(
                         "conversation_run_generation"
                     ),
-                    "mcp_manager": self._manager,
+                    "mcp_manager": (
+                        getattr(run_context, "mcp_manager", None)
+                        or self._manager
+                    ),
+                    "hook_manager": (
+                        run_context.hook_manager
+                        if run_context is not None
+                        else None
+                    ),
                     "rollout_budget": metadata.get("_rollout_budget"),
                     "deadline_monotonic": getattr(context, "deadline_monotonic", None),
                     # Server-initiated MCP requests inherit the exact tool-call
@@ -394,6 +403,8 @@ class MCPToolRegistry:
                 self._server_tools[existing_owner] = [
                     name for name in previous_names if name != proxy.name
                 ]
+                self._tool_registry.unregister(proxy.name)
+                self._wire_name_owner.pop(proxy.name, None)
                 logger.info(
                     "[MCPRegistry] Manual server %s replaced plugin wire-name owner %s for %s",
                     server_name,

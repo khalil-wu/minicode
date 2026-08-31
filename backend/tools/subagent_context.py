@@ -21,7 +21,6 @@ _INTERNAL_RUNTIME_METADATA_KEYS = frozenset(
     {
         "_agent_state",
         "_agent_execution_profile",
-        "_current_tool_call_id",
         "_streamed_tool_output_ids",
         # Turn-local input/mailbox phase belongs to exactly one agent.  Handing
         # the parent's owner to a child lets the child's ``begin_turn`` rewrite
@@ -354,30 +353,6 @@ def build_agent_execution_profile(
         message_coordination=True,
         agent_lifecycle=False,
         scheduled_triggers=bool(agent_triggers_enabled),
-        constrained_async_surface=False,
-    )
-
-
-def build_delegating_agent_execution_profile(
-    *,
-    background: bool = True,
-) -> AgentExecutionProfile:
-    """Profile for a child that owns and coordinates a descendant tree.
-
-    The shape is independent of whichever model-facing dialect exposed the
-    spawn operation.  It runs through the same AgentRuntime/QueryEngine kernel
-    as ordinary children; only explicit delegation and lifecycle capabilities
-    differ.
-    """
-
-    return AgentExecutionProfile(
-        role="subagent",
-        delivery="background" if background else "foreground",
-        delegation="any",
-        task_coordination=False,
-        message_coordination=True,
-        agent_lifecycle=True,
-        scheduled_triggers=False,
         constrained_async_surface=False,
     )
 

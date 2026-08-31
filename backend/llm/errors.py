@@ -285,18 +285,6 @@ def is_retryable_llm_error(message: str | BaseException | None) -> bool:
     return classify_llm_error(message).retryable
 
 
-def llm_error_text(message: str | BaseException | None) -> str:
-    """Return the lowercased, flattened text of an LLM failure.
-
-    Unlike ``str(exc)`` this walks the ``__cause__``/``__context__`` chain and
-    includes the HTTP response body, so a raw ``httpx.HTTPStatusError`` — whose
-    ``str()`` is only ``Client error '400 Bad Request' for url ...`` — remains
-    inspectable by the adapters' keyword probes.
-    """
-
-    return _normalize_error_text(message)
-
-
 def llm_error_status_code(message: str | BaseException | None) -> int | None:
     """Return the first structured HTTP status carried by an LLM failure."""
 

@@ -57,6 +57,10 @@ export const SideChatPanel = () => {
       mountedRef.current = false;
       cleanupServerConversation();
       releasePreviewScope(id);
+      const state = useAppStore.getState();
+      if (state.previewOwnerConversationId === id) {
+        state.restorePreviewState(state.conversationId || undefined);
+      }
       removeSideChat(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -225,7 +229,12 @@ export const SideChatPanel = () => {
                 {getToolCallsFromMessage(m).length > 0 && (
                   <div className="flex flex-col gap-1">
                     {getToolCallsFromMessage(m).map((tc) => (
-                      <ToolCallCard key={tc.id} record={tc} workspaceDirectory={workingDirectory} />
+                      <ToolCallCard
+                        key={tc.id}
+                        record={tc}
+                        workspaceDirectory={workingDirectory}
+                        conversationId={id}
+                      />
                     ))}
                   </div>
                 )}

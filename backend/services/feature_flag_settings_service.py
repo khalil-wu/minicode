@@ -126,7 +126,7 @@ async def update_feature_flag_settings(
         else:
             settings_data.pop("feature_flags", None)
 
-    settings_data = _update_settings_json(apply_updates)
+    _update_settings_json(apply_updates)
     return {
         **get_feature_flag_settings(),
         "_config": load_config(),

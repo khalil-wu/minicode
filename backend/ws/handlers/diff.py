@@ -15,7 +15,7 @@ async def _send_scoped_event(
     event: Any,
 ) -> None:
     scope.apply(event.data)
-    await session._send_event(event)
+    await session.send_event(event)
 
 
 async def _emit_git_error(
@@ -79,7 +79,7 @@ async def handle_diff_git_stage_file(session: "WebSocketSession", data: dict[str
 
     try:
         scope = resolve_command_scope(session, data, require_conversation=False)
-        path = session._validate_git_relative_path(str(data.get("path", "")))
+        path = session.validate_git_relative_path(str(data.get("path", "")))
     except ValueError as exc:
         await emit_command_error(session, "diff.git_stage_file", exc)
         return True
@@ -98,7 +98,7 @@ async def handle_diff_git_unstage_file(session: "WebSocketSession", data: dict[s
 
     try:
         scope = resolve_command_scope(session, data, require_conversation=False)
-        path = session._validate_git_relative_path(str(data.get("path", "")))
+        path = session.validate_git_relative_path(str(data.get("path", "")))
     except ValueError as exc:
         await emit_command_error(session, "diff.git_unstage_file", exc)
         return True
@@ -153,7 +153,7 @@ async def handle_diff_git_revert_file(session: "WebSocketSession", data: dict[st
 
     try:
         scope = resolve_command_scope(session, data, require_conversation=False)
-        path = session._validate_git_relative_path(str(data.get("path", "")))
+        path = session.validate_git_relative_path(str(data.get("path", "")))
     except ValueError as exc:
         await emit_command_error(session, "diff.git_revert_file", exc)
         return True

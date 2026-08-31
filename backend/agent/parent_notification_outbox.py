@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import logging
 import threading
-import time
 import weakref
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -21,6 +20,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from backend.atomic_io import atomic_write_text, canonical_file_path_key
+from backend.agent.runtime_records import epoch_ms
 from backend.config import DATA_ROOT
 from filelock import FileLock
 
@@ -50,10 +50,6 @@ class ParentNotificationOutboxError(RuntimeError):
 
 class ParentNotificationOutboxCorruptionError(ParentNotificationOutboxError):
     """Raised when persisted outbox state cannot be trusted."""
-
-
-def _epoch_ms() -> int:
-    return int(time.time() * 1000)
 
 
 def _lock_for(path: Path) -> threading.Lock:
@@ -93,8 +89,8 @@ class ParentNotification:
     payload: dict[str, Any] = field(default_factory=dict)
     status: NotificationStatus = "pending"
     idempotency_key: str = ""
-    created_at_ms: int = field(default_factory=_epoch_ms)
-    updated_at_ms: int = field(default_factory=_epoch_ms)
+    created_at_ms: int = field(default_factory=epoch_ms)
+    updated_at_ms: int = field(default_factory=epoch_ms)
     delivered_at_ms: int | None = None
     acked_at_ms: int | None = None
     attempts: int = 0
@@ -119,8 +115,8 @@ class ParentNotification:
             payload=dict(data.get("payload") or {}),
             status=status,  # type: ignore[arg-type]
             idempotency_key=str(data.get("idempotency_key") or ""),
-            created_at_ms=int(data.get("created_at_ms") or _epoch_ms()),
-            updated_at_ms=int(data.get("updated_at_ms") or _epoch_ms()),
+            created_at_ms=int(data.get("created_at_ms") or epoch_ms()),
+            updated_at_ms=int(data.get("updated_at_ms") or epoch_ms()),
             delivered_at_ms=(
                 int(data["delivered_at_ms"])
                 if data.get("delivered_at_ms") is not None
@@ -408,7 +404,7 @@ class ParentNotificationOutbox:
             "conversation_id": str(data.get("conversation_id") or self.conversation_id),
             "notifications": active,
             "acked_notifications": retained_acked,
-            "updated_at_ms": _epoch_ms(),
+            "updated_at_ms": epoch_ms(),
         }
         _atomic_write_json(self.path, payload)
 
@@ -507,7 +503,7 @@ class ParentNotificationOutbox:
                 if item.notification_id != notification_id:
                     continue
                 target = item
-                now = _epoch_ms()
+                now = epoch_ms()
                 if bump_attempt:
                     item.attempts += 1
                 if status is not None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import logging
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,11 +14,8 @@ from backend.agent.prompt_cache import (
 from backend.agent.provider_protocol import (
     annotate_request_metadata_with_prompt_cache_fork,
 )
-from backend.llm.base import LLMAdapter, LLMMessage
+from backend.llm.base import LLMAdapter, LLMMessage, ToolCallEvent
 from backend.agent.lifecycle_observer import resolve_lifecycle_runtime
-
-logger = logging.getLogger(__name__)
-
 
 def _extension_message_content(value: Any) -> str:
     if isinstance(value, str):
@@ -38,38 +35,130 @@ def _extension_message_content(value: Any) -> str:
 
 def _coerce_extension_context_messages(
     values: Any,
-    fallback: list[LLMMessage],
 ) -> list[LLMMessage]:
-    """Keep context transforms inside MiniCode's typed provider contract."""
+    """Decode and validate the complete extension message contract."""
 
     if not isinstance(values, (list, tuple)):
-        return fallback
+        raise TypeError("extension context transform must return a message sequence")
     result: list[LLMMessage] = []
     for value in values:
         if isinstance(value, LLMMessage):
-            result.append(value)
+            result.append(deepcopy(value))
             continue
         if not isinstance(value, dict):
-            return fallback
-        role = str(value.get("role") or "user").strip().lower()
+            raise TypeError("extension context messages must be LLMMessage or mapping")
+        role = str(value.get("role") or "").strip().lower()
         if role == "custom":
             role = "user"
         if role not in {"system", "developer", "user", "assistant", "tool"}:
-            return fallback
+            raise ValueError(f"invalid extension context message role: {role!r}")
+        raw_tool_calls = value.get("tool_calls", value.get("toolCalls"))
+        tool_calls: list[ToolCallEvent] | None = None
+        if raw_tool_calls is not None:
+            if not isinstance(raw_tool_calls, (list, tuple)):
+                raise TypeError("extension message tool_calls must be a sequence")
+            tool_calls = []
+            for raw_call in raw_tool_calls:
+                if isinstance(raw_call, ToolCallEvent):
+                    tool_calls.append(deepcopy(raw_call))
+                    continue
+                if not isinstance(raw_call, dict):
+                    raise TypeError("extension tool call must be ToolCallEvent or mapping")
+                call_id = str(raw_call.get("id") or "").strip()
+                call_name = str(raw_call.get("name") or "").strip()
+                arguments = raw_call.get("arguments", raw_call.get("input"))
+                if not call_id or not call_name or not isinstance(arguments, dict):
+                    raise ValueError(
+                        "extension tool call requires id, name, and object arguments"
+                    )
+                tool_calls.append(
+                    ToolCallEvent(
+                        id=call_id,
+                        name=call_name,
+                        arguments=deepcopy(arguments),
+                        arguments_repaired=bool(
+                            raw_call.get(
+                                "arguments_repaired",
+                                raw_call.get("argumentsRepaired", False),
+                            )
+                        ),
+                        duplicate_id=bool(
+                            raw_call.get(
+                                "duplicate_id",
+                                raw_call.get("duplicateId", False),
+                            )
+                        ),
+                    )
+                )
         result.append(
             LLMMessage(
                 role=role,
                 content=_extension_message_content(value.get("content", "")),
                 name=(str(value["name"]) if value.get("name") is not None else None),
+                tool_calls=tool_calls,
                 tool_call_id=(
                     str(value["tool_call_id"])
                     if value.get("tool_call_id") is not None
                     else (str(value["toolCallId"]) if value.get("toolCallId") is not None else None)
                 ),
                 is_error=bool(value.get("is_error", value.get("isError", False))),
+                phase=str(value.get("phase") or ""),
+                provider_items=deepcopy(
+                    value.get("provider_items", value.get("providerItems", [])) or []
+                ),
+                images=deepcopy(value.get("images") or []),
+                documents=deepcopy(value.get("documents") or []),
+                attachment_refs=deepcopy(
+                    value.get("attachment_refs", value.get("attachmentRefs", [])) or []
+                ),
+                runtime_context=str(
+                    value.get(
+                        "runtime_context",
+                        value.get("runtimeContext", ""),
+                    )
+                    or ""
+                ),
+                timestamp_ms=(
+                    int(value.get("timestamp_ms", value.get("timestampMs")))
+                    if value.get("timestamp_ms", value.get("timestampMs")) is not None
+                    else None
+                ),
             )
         )
+    _validate_extension_tool_protocol(result)
     return result
+
+
+def _validate_extension_tool_protocol(messages: list[LLMMessage]) -> None:
+    pending: dict[str, str] = {}
+    seen_call_ids: set[str] = set()
+    for message in messages:
+        if message.role == "assistant":
+            if pending:
+                raise ValueError("extension context contains dangling tool calls")
+            for call in message.tool_calls or []:
+                call_id = str(call.id or "").strip()
+                if not call_id or call_id in seen_call_ids:
+                    raise ValueError(
+                        f"extension context contains duplicate tool call id: {call_id!r}"
+                    )
+                seen_call_ids.add(call_id)
+                pending[call_id] = call.name
+            continue
+        if message.role == "tool":
+            call_id = str(message.tool_call_id or "").strip()
+            if call_id not in pending:
+                raise ValueError(
+                    f"extension context contains orphan tool result: {call_id!r}"
+                )
+            pending.pop(call_id)
+            continue
+        if pending:
+            raise ValueError(
+                "extension context separates tool calls from their results"
+            )
+    if pending:
+        raise ValueError("extension context contains dangling tool calls")
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,33 +307,13 @@ async def prepare_turn_context(
     )
     messages = await context.build(state)
 
-    lifecycle_runtime = resolve_lifecycle_runtime(metadata)
+    lifecycle_runtime = resolve_lifecycle_runtime(
+        run_context=tool_context.run_context,
+    )
     emit_context = getattr(lifecycle_runtime, "emit_context", None)
     if callable(emit_context):
-        try:
-            transformed = await emit_context(messages)
-            messages = _coerce_extension_context_messages(transformed, messages)
-        except Exception as exc:
-            # ExtensionRunner normally isolates handler failures. Keep this
-            # boundary fail-open for a third-party runner implementation so a
-            # context transform cannot strand the model turn — but the
-            # skipped transform must be visible evidence, never silent.
-            logger.warning(
-                "Extension context transform failed; sending untransformed context: %s",
-                exc,
-            )
-            await turn_kernel.emit_runtime_span(
-                "context.build.extension_transform_failed",
-                span_id=f"{span_id}:extension",
-                phase="context",
-                status="failed",
-                label="context",
-                summary="Extension context transform failed; untransformed context sent",
-                started_at=epoch_ms(),
-                ended_at=epoch_ms(),
-                ui_visible=False,
-                data={"detail": str(exc)},
-            )
+        transformed = await emit_context(messages)
+        messages = _coerce_extension_context_messages(transformed)
 
     completed_at = epoch_ms()
     await turn_kernel.emit_runtime_span(

@@ -23,6 +23,12 @@ class StreamRetryDecision:
     delay_seconds: float
     max_attempts: int
 
+    @property
+    def max_retries(self) -> int:
+        """Public name for the retry budget (initial request excluded)."""
+
+        return self.max_attempts
+
 
 @dataclass
 class StreamRetryState:
@@ -63,7 +69,8 @@ class DefaultStreamRetryPolicy:
     ``random()*0.25*base``); the policy object, its settings surface and the
     error classification driving it are MiniCode's own.
 
-    Reads four AgentSettings fields: stream_max_attempts,
+    Reads four AgentSettings fields: stream_max_attempts (the maximum number
+    of retries; the initial request is excluded),
     stream_retry_delay_seconds, stream_retryable_substrings,
     stream_timeout_seconds.
     """

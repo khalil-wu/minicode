@@ -87,18 +87,6 @@ def raise_if_config_change_blocked(
         )
 
 
-async def require_config_change_allowed(
-    *,
-    source: str,
-    file_path: str = "",
-) -> Any | None:
-    """Run ConfigChange and raise a shared veto when live apply is forbidden."""
-
-    result = await run_config_change_hook(source=source, file_path=file_path)
-    raise_if_config_change_blocked(result, source=source, file_path=file_path)
-    return result
-
-
 async def run_config_change_hook(*, source: str, file_path: str = "") -> Any | None:
     """Run ConfigChange hooks and return their decision to the caller.
 

@@ -1,6 +1,9 @@
 import { normalizeToolDiff, type ToolCallRecord } from "../lib/tool-call-reducer";
 import { workspacePathComparisonKey } from "../lib/workspace-path";
-import { isAgentProgressPhase } from "../protocol/streaming-types";
+import {
+  isAgentProgressPhase,
+  isAgentProgressProviderState,
+} from "../protocol/streaming-types";
 import type {
   ArtifactPreview,
   ChatMessage,
@@ -47,6 +50,7 @@ export type BackendTranscriptMessage = {
   failure_recoverable?: unknown;
   steered?: unknown;
   steer_target_message_id?: unknown;
+  metadata?: unknown;
 };
 
 export type HydrateMessagesOptions = {
@@ -206,11 +210,31 @@ const isProgressVisibility = (value: unknown): value is "timeline" | "compact" |
 const stringValue = (value: unknown): string | undefined =>
   typeof value === "string" && value ? value : undefined;
 
+const toMessageSource = (value: unknown): ChatMessage["messageSource"] => {
+  if (!value || typeof value !== "object") return undefined;
+  const metadata = value as Record<string, unknown>;
+  if (String(metadata.source ?? "").trim().toLowerCase() !== "scheduled_task") {
+    return undefined;
+  }
+  const taskId = stringValue(metadata.scheduled_task_id ?? metadata.scheduledTaskId);
+  const runId = stringValue(metadata.scheduled_run_id ?? metadata.scheduledRunId);
+  return {
+    kind: "scheduled_task",
+    ...(taskId ? { taskId } : {}),
+    ...(runId ? { runId } : {}),
+  };
+};
+
 const booleanValue = (value: unknown): boolean | undefined =>
   typeof value === "boolean" ? value : undefined;
 
 const numberValue = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const nonNegativeNumberValue = (value: unknown): number | undefined => {
+  const number = numberValue(value);
+  return number == null ? undefined : Math.max(0, number);
+};
 
 const stringArrayValue = (value: unknown): string[] | undefined => {
   if (!Array.isArray(value)) return undefined;
@@ -264,6 +288,32 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
       ? tool.artifactId
       : typeof tool.artifact_id === "string"
         ? tool.artifact_id
+        : undefined,
+    artifactKind: typeof tool.artifactKind === "string"
+      ? tool.artifactKind
+      : typeof tool.artifact_kind === "string"
+        ? tool.artifact_kind
+        : undefined,
+    // Older child transcripts stored the image MIME under the generic
+    // media/mime keys and did not persist artifact_kind. Preserve those
+    // aliases so the activity projection can still identify screenshots.
+    artifactMediaType: typeof tool.artifactMediaType === "string"
+      ? tool.artifactMediaType
+      : typeof tool.artifact_media_type === "string"
+        ? tool.artifact_media_type
+        : typeof tool.mediaType === "string"
+          ? tool.mediaType
+          : typeof tool.media_type === "string"
+            ? tool.media_type
+            : typeof tool.mimeType === "string"
+              ? tool.mimeType
+              : typeof tool.mime_type === "string"
+                ? tool.mime_type
+                : undefined,
+    artifactBytes: typeof tool.artifactBytes === "number"
+      ? tool.artifactBytes
+      : typeof tool.artifact_bytes === "number"
+        ? tool.artifact_bytes
         : undefined,
     sourceUrl: typeof tool.sourceUrl === "string"
       ? tool.sourceUrl
@@ -366,6 +416,7 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
         ? tool.task_id
         : undefined,
     seq: numberValue(tool.seq),
+    scopeMigrationCount: numberValue(tool.scopeMigrationCount ?? tool.scope_migration_count),
     iterationId: typeof tool.iterationId === "string"
       ? tool.iterationId
       : typeof tool.iteration_id === "string"
@@ -538,6 +589,10 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
       const id = String(item.id ?? "").trim();
       const message = String(item.message ?? "").trim();
       if (!id || !message) continue;
+      const rawProviderState = item.providerState ?? item.provider_state;
+      const providerState = isAgentProgressProviderState(rawProviderState)
+        ? rawProviderState
+        : undefined;
       blocks.push({
         type: "progress",
         id,
@@ -569,9 +624,15 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
           : typeof item.step_id === "string"
             ? item.step_id
             : undefined,
-        count: typeof item.count === "number" ? item.count : undefined,
+        count: nonNegativeNumberValue(item.count),
         iterationId: stringValue(item.iterationId ?? item.iteration_id),
         ephemeral: booleanValue(item.ephemeral),
+        retryAttempt: nonNegativeNumberValue(item.retryAttempt ?? item.retry_attempt),
+        maxRetries: nonNegativeNumberValue(item.maxRetries ?? item.max_retries),
+        retryAfterMs: nonNegativeNumberValue(item.retryAfterMs ?? item.retry_after_ms),
+        errorMessage: stringValue(item.errorMessage ?? item.error_message),
+        operationId: stringValue(item.operationId ?? item.operation_id),
+        providerState,
         timestamp: toTimestamp(item.timestamp),
       });
     }
@@ -748,6 +809,7 @@ export const hydrateMessages = (
       id: typeof message.id === "string" && message.id ? message.id : `m-${index}-${timestamp}`,
       role,
       content,
+      messageSource: toMessageSource(message.metadata),
       blocks,
       artifacts: toArray<ArtifactPreview>(message.artifacts),
       attachmentRefs: toAttachmentRefs(message.attachmentRefs ?? message.attachments),

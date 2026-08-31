@@ -257,7 +257,7 @@ def _allowlisted_mapping(value: Any, fields: tuple[str, ...]) -> dict[str, Any]:
                 projected[key] = number
             continue
         if key in _PUBLIC_STRING_LIST_FIELDS:
-            projected[key] = _public_string_list(raw)
+            projected[key] = public_string_list(raw)
             continue
         projected[key] = public_text(raw, max_chars=2_048, single_line=True)
     return projected
@@ -365,12 +365,19 @@ def project_public_swarm_message(value: Any) -> dict[str, Any]:
     return projected
 
 
-def _public_string_list(value: Any, *, maximum: int = 256) -> list[str]:
+def public_string_list(
+    value: Any,
+    *,
+    maximum: int = 256,
+    item_max_chars: int = 2_048,
+) -> list[str]:
+    """Project a bounded list of values as redacted, unique strings."""
+
     if not isinstance(value, (list, tuple)):
         return []
     result: list[str] = []
     for item in value[:maximum]:
-        rendered = public_text(item, max_chars=2_048, single_line=True)
+        rendered = public_text(item, max_chars=item_max_chars, single_line=True)
         if rendered and rendered not in result:
             result.append(rendered)
     return result
@@ -431,7 +438,7 @@ def project_public_swarm_task(value: Any) -> dict[str, Any]:
     ):
         projected[key] = public_text(source.get(key), max_chars=maximum)
     for key in ("write_scope", "blocks", "blocked_by"):
-        values = _public_string_list(source.get(key))
+        values = public_string_list(source.get(key))
         if values:
             projected[key] = values
     raw_outputs = source.get("outputs")
@@ -584,7 +591,7 @@ def project_public_metric_payload(event: Any, value: Any) -> dict[str, Any]:
         if isinstance(source.get(key), bool):
             projected[key] = bool(source.get(key))
     if isinstance(source.get("subagent_ids"), (list, tuple)):
-        projected["subagent_ids"] = _public_string_list(
+        projected["subagent_ids"] = public_string_list(
             source.get("subagent_ids"),
             maximum=512,
         )

@@ -229,15 +229,6 @@ def build_conversation_summary(
     return truncate_middle(" | ".join(part for part in parts if part), CONVERSATION_SUMMARY_MAX_CHARS)
 
 
-def build_effective_transcript_content(message: dict[str, Any]) -> str:
-    role = str(message.get("role", "")).strip()
-    content = str(message.get("content", ""))
-    if role == "user":
-        attachments = normalize_attachment_payloads(message.get("attachments", []))
-        return build_effective_user_message(content, attachments)
-    return content
-
-
 def build_summary_from_transcript(
     transcript: list[dict[str, Any]],
     *,

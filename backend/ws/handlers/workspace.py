@@ -36,14 +36,14 @@ async def _activate_workspace_for_command(
         return True
 
     project_path = request.project_path
-    activated = await session._activate_workspace_path(
+    activated = await session.activate_workspace_path(
         str(project_path),
         announce=True,
         wait_for_initialize=True,
         error_command=command,
     )
     if activated and session.active_conversation_id:
-        branch = await asyncio.to_thread(session._git_branch_for, project_path)
+        branch = await asyncio.to_thread(session.git_branch_for, project_path)
         updated = await asyncio.to_thread(
             session.conversation_repo.update_workspace_binding,
             session.active_conversation_id,
@@ -70,7 +70,7 @@ async def _activate_workspace_for_command(
                 },
             )
             return True
-        await session._send_ws_payload(
+        await session.send_payload(
             workspace_conversation_switched_payload(updated),
             log_context="conversation.switched",
         )
@@ -78,7 +78,7 @@ async def _activate_workspace_for_command(
 
         broadcast_errors = await _broadcast_conversation_lists(session)
         if broadcast_errors:
-            await session._emit_command_result(
+            await session.emit_command_result(
                 command,
                 "Workspace activated, but one or more windows need to resynchronize.",
                 level="warning",
@@ -98,7 +98,7 @@ async def handle_workspace_recent(session: "WebSocketSession", data: dict[str, A
     from backend.services.workspace_service import list_workspace_recent_payload
 
     payload = await asyncio.to_thread(list_workspace_recent_payload)
-    await session._send_ws_payload(payload, log_context="workspace.recent.list")
+    await session.send_payload(payload, log_context="workspace.recent.list")
     return True
 
 
@@ -115,15 +115,15 @@ async def handle_workspace_recent_remove(session: "WebSocketSession", data: dict
         removed, payload = await asyncio.to_thread(remove_workspace_recent, path)
     except RecentProjectPersistenceError:
         logger.exception("Failed to persist removal of recent workspace metadata")
-        await session._emit_command_result(
+        await session.emit_command_result(
             "workspace.recent.remove",
             "Recent workspace metadata could not be saved; the list was left unchanged and no project files were touched.",
             level="error",
             data={"path": path, "reason": "persistence_failed", "retryable": True},
         )
         return True
-    await session._send_ws_payload(payload, log_context="workspace.recent.list")
-    await session._emit_command_result(
+    await session.send_payload(payload, log_context="workspace.recent.list")
+    await session.emit_command_result(
         "workspace.recent.remove",
         "Recent workspace entry removed." if removed else "Recent workspace entry was already absent.",
         level="success",
@@ -140,15 +140,15 @@ async def handle_workspace_recent_clear(session: "WebSocketSession", data: dict[
         removed, payload = await asyncio.to_thread(clear_workspace_recent)
     except RecentProjectPersistenceError:
         logger.exception("Failed to persist clearing recent workspace metadata")
-        await session._emit_command_result(
+        await session.emit_command_result(
             "workspace.recent.clear",
             "Recent workspace metadata could not be saved; the list was left unchanged and no project files were touched.",
             level="error",
             data={"reason": "persistence_failed", "retryable": True},
         )
         return True
-    await session._send_ws_payload(payload, log_context="workspace.recent.list")
-    await session._emit_command_result(
+    await session.send_payload(payload, log_context="workspace.recent.list")
+    await session.emit_command_result(
         "workspace.recent.clear",
         "Recent workspace list cleared.",
         level="success",
@@ -181,12 +181,12 @@ async def handle_git_pr_status(session: "WebSocketSession", data: dict[str, Any]
 
     try:
         scope = resolve_command_scope(session, data)
+        payload = await fetch_git_pr_status_payload(scope.workspace_root)
     except ValueError as exc:
         await emit_command_error(session, "git.pr_status", exc)
         return True
-    payload = await fetch_git_pr_status_payload(scope.workspace_root)
     scope.apply(payload)
-    await session._send_ws_payload(
+    await session.send_payload(
         payload,
         log_context="git.pr_status",
     )
@@ -211,12 +211,12 @@ async def _start_pr_auto_fix_if_needed(
     checks = payload.get("checks") if isinstance(payload.get("checks"), list) else []
     failed = [check for check in checks if isinstance(check, dict) and str(check.get("status") or "").lower() in {"failure", "failed", "error", "cancelled", "canceled"}]
     if not pr or not failed:
-        session._last_pr_auto_fix_signature = ""
+        session.last_pr_auto_fix_signature = ""
         return
-    if getattr(session, "_run_manager", None).has_active_run():
+    if session.run_manager.has_active_run():
         return
     signature = f"{pr.get('number')}:{','.join(sorted(str(check.get('name') or '') for check in failed))}"
-    if getattr(session, "_last_pr_auto_fix_signature", "") == signature:
+    if session.last_pr_auto_fix_signature == signature:
         return
     conversation_id = str(conversation_id or "").strip()
     if not conversation_id:
@@ -226,12 +226,12 @@ async def _start_pr_auto_fix_if_needed(
         f"PR #{pr.get('number')} has failing checks: {failed_names}. "
         "Inspect the failures, implement the smallest correct fix, run the relevant verification, and summarize the result."
     )
-    await session._start_agent_run(
+    await session.start_agent_run(
         prompt,
         conversation_id=conversation_id,
         metadata={"source": "pr_auto_fix", "pr_number": pr.get("number")},
     )
-    session._last_pr_auto_fix_signature = signature
+    session.last_pr_auto_fix_signature = signature
 
 
 async def handle_git_pr_automation_set(session: "WebSocketSession", data: dict[str, Any]) -> bool:
@@ -239,11 +239,13 @@ async def handle_git_pr_automation_set(session: "WebSocketSession", data: dict[s
     from backend.ws.command_results import emit_command_error
 
     try:
-        payload = await set_git_pr_automation_payload(session._current_workspace_root(), data)
+        scope = resolve_command_scope(session, data)
+        payload = await set_git_pr_automation_payload(scope.workspace_root, data)
     except ValueError as exc:
         await emit_command_error(session, "git.pr_automation.set", exc)
         return True
-    await session._send_ws_payload(payload, log_context="git.pr_status")
+    scope.apply(payload)
+    await session.send_payload(payload, log_context="git.pr_status")
     return True
 
 

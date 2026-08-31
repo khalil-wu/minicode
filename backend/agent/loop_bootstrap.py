@@ -11,14 +11,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
 from backend.agent.context import ContextBuilder
 from backend.agent.iteration_budget import resolve_turn_max_iterations
 from backend.agent.lifecycle_observer import (
-    install_lifecycle_runtime,
     resolve_lifecycle_runtime,
 )
 from backend.agent.loop_preflight import prepare_turn_input
@@ -33,6 +32,7 @@ from backend.agent.policies import (
     DefaultStreamRetryPolicy,
 )
 from backend.agent.query_chain import QueryChainTracking
+from backend.agent.run_context import RunContext
 from backend.agent.state import AgentState
 from backend.agent.rollout_budget import RolloutBudget
 from backend.agent.turn_budget import TurnBudgetController, TurnDeadlineController
@@ -68,6 +68,7 @@ class AgentLoopBootstrapRequest:
     emit_event: Any | None
     metadata: dict[str, Any] | None
     session_context: AgentLoopSessionContext | None
+    run_context: RunContext | None = None
     turn_kernel: TurnKernel | None = None
     state_prepared: bool = False
     initial_max_iterations_limit: int | None = None
@@ -106,9 +107,8 @@ class AgentLoopBootstrap:
     session_id: str
     task_id: str
     cost_session_id: str
-    hook_manager_token: Any | None
-    provider_hook_runner_token: Any | None
     agent_session: Any | None
+    run_context: RunContext = field(default_factory=RunContext)
 
 
 def _resolve_checkpoint_manager(state: AgentState) -> Any:
@@ -146,6 +146,7 @@ async def bootstrap_agent_loop(
     stream_callback = request.stream_callback
     emit_event = request.emit_event
     metadata = request.metadata
+    run_context = request.run_context
     session_context = request.session_context
     agent_session = (
         getattr(session_context, "agent_session", None)
@@ -163,14 +164,16 @@ async def bootstrap_agent_loop(
         stream_callback = stream_callback or session_context.stream_callback
         emit_event = emit_event or session_context.emit_event
         metadata = metadata or session_context.metadata
+        run_context = run_context or session_context.run_context
 
     external_metadata = metadata if isinstance(metadata, dict) else None
     resolved_metadata = dict(metadata or {})
+    run_context = run_context or RunContext()
     lifecycle_runtime = resolve_lifecycle_runtime(
-        resolved_metadata,
         session_context=session_context,
+        run_context=run_context,
     )
-    install_lifecycle_runtime(resolved_metadata, lifecycle_runtime)
+    run_context.lifecycle_runtime = lifecycle_runtime
     cancel_event = (
         session_context.cancel_event
         if session_context is not None and session_context.cancel_event is not None
@@ -192,6 +195,12 @@ async def bootstrap_agent_loop(
         token_budget=budget,
         agent_settings=settings,
     )
+    if run_context.llm_turn_context is not None:
+        run_context.llm_turn_context.lifecycle_runtime = lifecycle_runtime
+        run_context.llm_turn_context.cost_session_id = str(
+            run_context.cost_session_id or session_id or ""
+        )
+        context.bind_llm_turn_context(run_context.llm_turn_context)
     read_file_hashes = getattr(context, "read_file_hashes", None)
     if callable(read_file_hashes):
         # Share the context-owned map rather than copying it. Reads and writes
@@ -224,6 +233,7 @@ async def bootstrap_agent_loop(
         session_id=session_id,
         emit_event=emit_event,
         initial_user_message=user_message,
+        run_context=run_context,
     )
     for event in turn_kernel.start_events():
         yield event
@@ -268,7 +278,7 @@ async def bootstrap_agent_loop(
     # are layered below through PermissionContext and SandboxPolicy, so they
     # still constrain both native and external evaluators.
     turn_permission_checker = request.permission_checker
-    if isinstance(turn_permission_checker, PermissionChecker) and workspace_root is not None:
+    if isinstance(turn_permission_checker, PermissionChecker):
         turn_permission_checker = turn_permission_checker.with_workspace_root(workspace_root)
     resolved_mode, requirement_violation = managed_requirements.resolve_permission_mode(
         effective_permission_context.mode
@@ -336,17 +346,6 @@ async def bootstrap_agent_loop(
         merged = {key: list(value) for key, value in constraints.items()}
         merged["readable_roots"] = list(dict.fromkeys([
             *merged.get("readable_roots", []),
-            *skill_read_roots,
-        ]))
-        configured_allowlist = merged.get("allowlist")
-        if configured_allowlist is None and turn_permission_checker is not None:
-            policy_snapshot = getattr(turn_permission_checker, "policy_snapshot", None)
-            if callable(policy_snapshot):
-                configured_allowlist = list(
-                    policy_snapshot().get("path_allowlist", [])
-                )
-        merged["allowlist"] = list(dict.fromkeys([
-            *(configured_allowlist or []),
             *skill_read_roots,
         ]))
         return merged
@@ -440,6 +439,7 @@ async def bootstrap_agent_loop(
         session_id=session_id,
         task_id=task_id,
         metadata=dict(resolved_metadata),
+        run_context=run_context,
         cancel_event=cancel_event,
         emit_event=emit_event,
         approval_handler=request.approval_handler,
@@ -461,6 +461,17 @@ async def bootstrap_agent_loop(
         artifact_store=request.artifact_store,
         turn_diff_tracker=TurnDiffTracker(),
     )
+
+    def _commit_live_permission_context(
+        current: PermissionContext,
+    ) -> tuple[PermissionContext, Any]:
+        normalized = _normalize_live_permission(current)
+        policy = _sandbox_policy_for(normalized)
+        tool_context.permission = normalized
+        tool_context.sandbox_policy = policy
+        tool_context.allow_network = bool(policy.allow_network)
+        return normalized, policy
+
     if workspace_root is not None and "cwd" not in tool_context.metadata:
         tool_context.metadata["cwd"] = str(workspace_root)
     populate_prompt_context(
@@ -468,6 +479,7 @@ async def bootstrap_agent_loop(
         metadata=resolved_metadata,
         workspace_root=workspace_root,
         permission_context=effective_permission_context,
+        run_context=run_context,
     )
     tool_context.metadata["prompt_context"] = state.prompt_context
     tool_context.metadata["_context_builder"] = context
@@ -488,10 +500,12 @@ async def bootstrap_agent_loop(
     # Internal coordination tools need the live registry to resume a stopped
     # TaskTool agent from its durable sidechain transcript. Keep this runtime
     # handle out of model-visible prompt context.
-    tool_context.metadata["_tool_registry"] = request.tool_registry
+    tool_context.tool_registry = request.tool_registry
     if hook_scope_id:
         tool_context.metadata["hook_session_id"] = hook_scope_id
-    lifecycle_runtime = resolve_lifecycle_runtime(resolved_metadata)
+    lifecycle_runtime = resolve_lifecycle_runtime(
+        run_context=run_context,
+    )
     if lifecycle_runtime is not None:
         assert_active = getattr(lifecycle_runtime, "assert_active", None)
         if callable(assert_active):
@@ -514,112 +528,104 @@ async def bootstrap_agent_loop(
             )
     tool_context.metadata["_permission_context_normalizer"] = _normalize_live_permission
     tool_context.metadata["_sandbox_policy_factory"] = _sandbox_policy_for
+    tool_context.permission_context_committer = _commit_live_permission_context
     tool_context.deadline_monotonic = deadline_controller.turn_deadline
     turn_kernel.bind_tool_context(tool_context)
 
-    # CC resolves hooks per session cwd from user -> project -> local scopes.
-    # A ContextVar keeps concurrent desktop conversations from sharing the
-    # wrong project's hook set or process cwd. Bind only after the rest of the
-    # bootstrap graph is built, then transfer token ownership atomically with
-    # the returned bootstrap object.
+    # Resolve hooks once for this turn and keep the exact manager on RunContext.
     from backend.hooks.manager import (
-        bind_hook_manager,
         load_hook_manager_for_workspace,
         register_hook_manager_for_session,
-        unbind_hook_manager,
     )
 
-    hook_manager = load_hook_manager_for_workspace(
-        workspace_root,
-        requirements=managed_requirements,
-        config_layer_stack=turn_config_stack,
-        session_id=hook_scope_id,
-    )
+    hook_manager = run_context.hook_manager
+    if hook_manager is None:
+        hook_manager = load_hook_manager_for_workspace(
+            workspace_root,
+            requirements=managed_requirements,
+            config_layer_stack=turn_config_stack,
+            session_id=hook_scope_id,
+        )
     hook_manager.bind_runtime(
         llm=request.llm,
         tool_registry=request.tool_registry,
         tool_context=tool_context,
     )
-    hook_manager_token = bind_hook_manager(hook_manager)
-    provider_hook_runner_token = LLMAdapter.bind_provider_lifecycle_runtime(
-        lifecycle_runtime
+    run_context.hook_manager = hook_manager
+    context.bind_hook_manager(hook_manager)
+    preflight = await prepare_turn_input(
+        user_message,
+        state=state,
+        turn_kernel=turn_kernel,
+        session_id=hook_scope_id,
+        deadline=deadline_controller.turn_deadline,
+        cancel_event=cancel_event,
+        hook_manager=hook_manager,
+        resume_from_checkpoint=bool(
+            resolved_metadata.get("_query_engine_recovery_restored")
+        ),
     )
-    try:
-        preflight = await prepare_turn_input(
-            user_message,
-            state=state,
-            turn_kernel=turn_kernel,
-            session_id=hook_scope_id,
-            deadline=deadline_controller.turn_deadline,
-            cancel_event=cancel_event,
-            resume_from_checkpoint=bool(
-                resolved_metadata.get("_query_engine_recovery_restored")
-            ),
-        )
-        user_message = preflight.user_message
-        # Preserve SessionStart side-channel values in the turn metadata so
-        # downstream prompt/watcher integrations cannot accidentally lose them
-        # when the bootstrap object is handed to the main loop.
-        # Keep bootstrap compatible with older/custom preflight providers that
-        # return a small namespace instead of the current dataclass.  Session
-        # side-channel fields are additive and must never make an otherwise
-        # valid turn fail during migration.
-        initial_user_message = str(
-            getattr(preflight, "initial_user_message", "") or ""
-        ).strip()
-        watch_paths = getattr(preflight, "watch_paths", ())
-        if initial_user_message:
-            resolved_metadata["hook_initial_user_message"] = initial_user_message
-        if watch_paths:
-            resolved_metadata["hook_watch_paths"] = list(watch_paths)
-        register_hook_manager_for_session(
-            hook_scope_id,
-            hook_manager,
-            owner_session_id=session_id,
-        )
-        chain = QueryChainTracking(
-            user_message_preview=user_message[:100],
-            source=str(resolved_metadata.get("query_source") or "user"),
-        )
-        bootstrap_result = AgentLoopBootstrap(
-            user_message=user_message,
-            skill_manager=skill_manager,
-            emit_event=emit_event,
-            metadata=resolved_metadata,
-            external_metadata=external_metadata,
-            cancel_event=cancel_event,
-            settings=settings,
-            rollout_budget=rollout_budget,
-            budget=budget,
-            context=context,
-            state=state,
-            initial_max_iterations_limit=initial_max_iterations_limit,
-            turn_budget_controller=request.turn_budget_controller,
-            deadline_controller=deadline_controller,
-            turn_kernel=turn_kernel,
-            turn_started_at=turn_started_at,
-            preflight_deadline_reached=preflight.deadline_reached,
-            preflight_blocked=preflight.blocked,
-            preflight_block_message=preflight.block_message,
-            session_hook_result=preflight.session_hook_result,
-            prompt_hook_result=preflight.prompt_hook_result,
-            chain=chain,
-            stream_retry_policy=stream_retry_policy,
-            workspace_root=workspace_root,
-            effective_permission_context=effective_permission_context,
-            tool_context=tool_context,
-            permission_checker=turn_permission_checker,
-            session_id=session_id,
-            task_id=task_id,
-            cost_session_id=str(
-                resolved_metadata.get("cost_session_id") or session_id or ""
-            ).strip(),
-            hook_manager_token=hook_manager_token,
-            provider_hook_runner_token=provider_hook_runner_token,
-            agent_session=agent_session,
-        )
-    except BaseException:
-        LLMAdapter.unbind_provider_lifecycle_runtime(provider_hook_runner_token)
-        unbind_hook_manager(hook_manager_token)
-        raise
+    user_message = preflight.user_message
+    # Preserve SessionStart side-channel values in the turn metadata so
+    # downstream prompt/watcher integrations cannot accidentally lose them
+    # when the bootstrap object is handed to the main loop.
+    # Keep bootstrap compatible with older/custom preflight providers that
+    # return a small namespace instead of the current dataclass.  Session
+    # side-channel fields are additive and must never make an otherwise
+    # valid turn fail during migration.
+    initial_user_message = str(
+        getattr(preflight, "initial_user_message", "") or ""
+    ).strip()
+    watch_paths = getattr(preflight, "watch_paths", ())
+    if initial_user_message:
+        resolved_metadata["hook_initial_user_message"] = initial_user_message
+    if watch_paths:
+        resolved_metadata["hook_watch_paths"] = list(watch_paths)
+    register_hook_manager_for_session(
+        hook_scope_id,
+        hook_manager,
+        owner_session_id=session_id,
+    )
+    chain = QueryChainTracking(
+        user_message_preview=user_message[:100],
+        source=str(resolved_metadata.get("query_source") or "user"),
+    )
+    bootstrap_result = AgentLoopBootstrap(
+        user_message=user_message,
+        skill_manager=skill_manager,
+        emit_event=emit_event,
+        metadata=resolved_metadata,
+        run_context=run_context,
+        external_metadata=external_metadata,
+        cancel_event=cancel_event,
+        settings=settings,
+        rollout_budget=rollout_budget,
+        budget=budget,
+        context=context,
+        state=state,
+        initial_max_iterations_limit=initial_max_iterations_limit,
+        turn_budget_controller=request.turn_budget_controller,
+        deadline_controller=deadline_controller,
+        turn_kernel=turn_kernel,
+        turn_started_at=turn_started_at,
+        preflight_deadline_reached=preflight.deadline_reached,
+        preflight_blocked=preflight.blocked,
+        preflight_block_message=preflight.block_message,
+        session_hook_result=preflight.session_hook_result,
+        prompt_hook_result=preflight.prompt_hook_result,
+        chain=chain,
+        stream_retry_policy=stream_retry_policy,
+        workspace_root=workspace_root,
+        effective_permission_context=effective_permission_context,
+        tool_context=tool_context,
+        permission_checker=turn_permission_checker,
+        session_id=session_id,
+        task_id=task_id,
+        cost_session_id=str(
+            run_context.cost_session_id
+            or session_id
+            or ""
+        ).strip(),
+        agent_session=agent_session,
+    )
     yield bootstrap_result

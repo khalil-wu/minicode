@@ -13,7 +13,7 @@ from typing import Any
 
 from backend.agent.context import ContextBuilder
 from backend.agent.state import AgentState
-from backend.agent.tool_execution import execute_tool_batch
+from backend.agent.tool_batch_execution import execute_tool_batch
 from backend.agent.message import AgentEvent
 from backend.llm.base import ToolCallEvent
 from backend.permissions.checker import PermissionChecker
@@ -49,7 +49,6 @@ class ToolBatchRunner:
         self,
         tool_calls: list[ToolCallEvent],
         *,
-        prefetched_results: dict[str, Any] | None = None,
         prepared_tool_calls: list[ToolCallEvent] | None = None,
         execution_limit: int | None = None,
         execution_limit_reason: str = "",
@@ -64,7 +63,6 @@ class ToolBatchRunner:
             skill_manager=self.skill_manager,
             permission_context=self.permission_context,
             tool_ctx=self.tool_ctx,
-            prefetched_results=prefetched_results,
             prepared_tool_calls=prepared_tool_calls,
             execution_limit=execution_limit,
             execution_limit_reason=execution_limit_reason,

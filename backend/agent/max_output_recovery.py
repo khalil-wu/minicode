@@ -49,7 +49,11 @@ def _context_window_failure_error() -> str:
 def _request_output_cap(provider_raw_done: dict[str, Any] | None) -> tuple[str, int]:
     raw_done = provider_raw_done if isinstance(provider_raw_done, dict) else {}
     request_summary = raw_done.get("request_summary")
-    params = request_summary.get("request_params") if isinstance(request_summary, dict) else {}
+    params = (
+        request_summary.get("request_params")
+        if isinstance(request_summary, dict)
+        else {}
+    )
     if not isinstance(params, dict):
         return "", 0
     for field in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
@@ -121,7 +125,7 @@ async def recover_max_output(
     *,
     state: Any,
     stream_text: Any,
-    tool_executor: Any,
+    tool_tracker: Any,
     context_builder: Any,
     budget_runtime: Any,
     provider_items: list[dict[str, Any]],
@@ -133,7 +137,7 @@ async def recover_max_output(
 ) -> MaxOutputRecoveryResult:
     """Continue a truncated answer with CC's bounded multi-turn recovery."""
 
-    tool_executor.cancel_remaining()
+    tool_tracker.cancel_remaining()
     normalized_reason = str(finish_reason or "").strip().lower()
     context_window_exceeded = normalized_reason == "model_context_window_exceeded"
     partial_text = stream_text.accepted_answer_text(scrub_text)
@@ -143,7 +147,7 @@ async def recover_max_output(
         if partial_text == previous_partial:
             new_partial_text = ""
         elif partial_text.startswith(previous_partial):
-            new_partial_text = partial_text[len(previous_partial):]
+            new_partial_text = partial_text[len(previous_partial) :]
     no_progress_count = int(getattr(state, "max_output_no_progress_count", 0) or 0)
     if new_partial_text.strip():
         no_progress_count = 0
@@ -227,9 +231,7 @@ async def recover_max_output(
                 )
                 return MaxOutputRecoveryResult("retry", tuple(events))
 
-    accumulated_partial = str(
-        getattr(state, "max_output_partial_text", "") or ""
-    )
+    accumulated_partial = str(getattr(state, "max_output_partial_text", "") or "")
     if accumulated_partial.strip():
         state.reply = accumulated_partial
     terminal_error = (

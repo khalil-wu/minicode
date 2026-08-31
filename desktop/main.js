@@ -63,6 +63,7 @@ let resolvedApiBaseUrl =
   process.env.MINICODE_API_BASE_URL || `http://${BACKEND_HOST}:${BACKEND_PORT}`;
 let resolvedWsBaseUrl =
   process.env.MINICODE_WS_BASE_URL || `ws://${BACKEND_HOST}:${BACKEND_PORT}`;
+let backendRuntimeRevision = 0;
 const FRONTEND_DEV_URL = (process.env.MINICODE_FRONTEND_URL || "").trim();
 let resolvedFrontendUrl = FRONTEND_DEV_URL;
 const MANAGE_BACKEND = process.env.MINICODE_SKIP_BACKEND !== "1";
@@ -367,22 +368,34 @@ function exportDesktopDiagnostics() {
 // ---------------------------------------------------------------------------
 
 async function resolveBackendRuntime() {
+  let nextBackendPort = resolvedBackendPort;
   if (MANAGE_BACKEND && !backendSidecar.getBackendProcess()) {
-    resolvedBackendPort = await utils.findAvailablePort(BACKEND_PORT);
-    if (resolvedBackendPort !== BACKEND_PORT) {
-      appendDesktopLog(`[backend] port ${BACKEND_PORT} is busy; using ${resolvedBackendPort}`);
+    nextBackendPort = await utils.findAvailablePort(BACKEND_PORT);
+    if (nextBackendPort !== BACKEND_PORT) {
+      appendDesktopLog(`[backend] port ${BACKEND_PORT} is busy; using ${nextBackendPort}`);
     }
   }
 
+  let nextApiBaseUrl;
+  let nextWsBaseUrl;
   if (MANAGE_BACKEND) {
-    resolvedApiBaseUrl = `http://${BACKEND_HOST}:${resolvedBackendPort}`;
-    resolvedWsBaseUrl = `ws://${BACKEND_HOST}:${resolvedBackendPort}`;
+    nextApiBaseUrl = `http://${BACKEND_HOST}:${nextBackendPort}`;
+    nextWsBaseUrl = `ws://${BACKEND_HOST}:${nextBackendPort}`;
   } else {
-    resolvedApiBaseUrl =
-      process.env.MINICODE_API_BASE_URL || `http://${BACKEND_HOST}:${resolvedBackendPort}`;
-    resolvedWsBaseUrl =
-      process.env.MINICODE_WS_BASE_URL || `ws://${BACKEND_HOST}:${resolvedBackendPort}`;
+    nextApiBaseUrl =
+      process.env.MINICODE_API_BASE_URL || `http://${BACKEND_HOST}:${nextBackendPort}`;
+    nextWsBaseUrl =
+      process.env.MINICODE_WS_BASE_URL || `ws://${BACKEND_HOST}:${nextBackendPort}`;
   }
+
+  const runtimeChanged =
+    nextBackendPort !== resolvedBackendPort
+    || nextApiBaseUrl !== resolvedApiBaseUrl
+    || nextWsBaseUrl !== resolvedWsBaseUrl;
+  resolvedBackendPort = nextBackendPort;
+  resolvedApiBaseUrl = nextApiBaseUrl;
+  resolvedWsBaseUrl = nextWsBaseUrl;
+  if (runtimeChanged) backendRuntimeRevision += 1;
   process.env.MINICODE_BACKEND_PORT = String(resolvedBackendPort);
   process.env.MINICODE_API_BASE_URL = resolvedApiBaseUrl;
   process.env.MINICODE_WS_BASE_URL = resolvedWsBaseUrl;
@@ -391,6 +404,49 @@ async function resolveBackendRuntime() {
     process.env.MINICODE_FRONTEND_URL = resolvedFrontendUrl;
   }
   process.env.MINICODE_RUNTIME_TOKEN = RUNTIME_TOKEN;
+  return getBackendRuntimeConfig();
+}
+
+function getBackendRuntimeConfig() {
+  return {
+    revision: backendRuntimeRevision,
+    backendPort: resolvedBackendPort,
+    apiBaseUrl: resolvedApiBaseUrl,
+    wsBaseUrl: resolvedWsBaseUrl,
+    runtimeToken: RUNTIME_TOKEN,
+  };
+}
+
+async function launchManagedBackend() {
+  return backendSidecar.launchBackendSidecar({
+    resolveRuntime: resolveBackendRuntime,
+    getRuntime: getBackendRuntimeConfig,
+    timeoutMs: BACKEND_STARTUP_TIMEOUT_MS,
+  });
+}
+
+function publishBackendRuntimeChange(previousRuntime, nextRuntime) {
+  if (
+    previousRuntime.apiBaseUrl === nextRuntime.apiBaseUrl
+    && previousRuntime.wsBaseUrl === nextRuntime.wsBaseUrl
+  ) {
+    return;
+  }
+  const win = windowManager.getMainWindow();
+  if (!win || win.isDestroyed()) return;
+  win.webContents.send("minicode:runtime:changed", {
+    revision: nextRuntime.revision,
+    apiBaseUrl: nextRuntime.apiBaseUrl,
+    wsBaseUrl: nextRuntime.wsBaseUrl,
+  });
+}
+
+async function restartManagedBackend(reason) {
+  if (!MANAGE_BACKEND) return;
+  const previousRuntime = getBackendRuntimeConfig();
+  appendDesktopLog(`[backend] restarting sidecar after ${reason}`);
+  const nextRuntime = await launchManagedBackend();
+  publishBackendRuntimeChange(previousRuntime, nextRuntime);
 }
 
 function getRendererAdditionalArguments() {
@@ -774,6 +830,7 @@ backendSidecar.init({
   writeStderr,
   getAppRoot,
   sleep: utils.sleep,
+  restartBackend: restartManagedBackend,
   config: {
     manageBackend: MANAGE_BACKEND,
     pythonCommand: PYTHON_COMMAND,
@@ -862,6 +919,7 @@ ipcHandlers.init({
   embeddedBrowserManager,
   ptyManager,
   updater,
+  getRuntimeConfig: getBackendRuntimeConfig,
   getLastPickedWorkspaceRoot: () => lastPickedWorkspaceRoot,
   setLastPickedWorkspaceRoot: (v) => { lastPickedWorkspaceRoot = v; },
 });
@@ -877,11 +935,12 @@ async function attemptAppStartup(source = "startup") {
   appendDesktopLog(`[desktop] startup attempt (${source})`);
   try {
     backendSidecar.resetStopRequested();
-    await resolveBackendRuntime();
-    if (MANAGE_BACKEND && !backendSidecar.getBackendProcess()) {
-      backendSidecar.startBackendSidecar();
+    if (MANAGE_BACKEND) {
+      await launchManagedBackend();
+    } else {
+      const runtime = await resolveBackendRuntime();
+      await backendSidecar.waitForBackendReady(runtime.apiBaseUrl, BACKEND_STARTUP_TIMEOUT_MS);
     }
-    await backendSidecar.waitForBackendReady(resolvedApiBaseUrl, BACKEND_STARTUP_TIMEOUT_MS);
     await windowManager.createMainWindow();
     closeStartupFailureWindow();
     appendDesktopLog(`[desktop] startup attempt succeeded (${source})`);

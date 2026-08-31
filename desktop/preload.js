@@ -10,17 +10,29 @@ function readRuntimeArgument(prefix) {
   return argument ? argument.slice(prefix.length) : "";
 }
 
+function readRuntimeConfig() {
+  const value = ipcRenderer.sendSync("minicode:runtime:get");
+  if (!value || typeof value !== "object") return null;
+  if (typeof value.apiBaseUrl !== "string" || typeof value.wsBaseUrl !== "string") return null;
+  return value;
+}
+
+const mainRuntimeConfig = readRuntimeConfig();
 const apiBaseUrl =
+  mainRuntimeConfig?.apiBaseUrl ||
   readRuntimeArgument("--minicode-api-base-url=") ||
   process.env.MINICODE_API_BASE_URL ||
   `http://${DEFAULT_BACKEND_HOST}:${DEFAULT_BACKEND_PORT}`;
 const wsBaseUrl =
+  mainRuntimeConfig?.wsBaseUrl ||
   readRuntimeArgument("--minicode-ws-base-url=") ||
   process.env.MINICODE_WS_BASE_URL ||
   `ws://${DEFAULT_BACKEND_HOST}:${DEFAULT_BACKEND_PORT}`;
 const runtimeToken =
+  mainRuntimeConfig?.runtimeToken ||
   process.env.MINICODE_RUNTIME_TOKEN ||
   "";
+const runtimeRevision = Number(mainRuntimeConfig?.revision) || 0;
 const updateActivityRendererInstanceId = globalThis.crypto?.randomUUID?.()
   || `renderer-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 let updateActivityRevision = 0;
@@ -66,6 +78,7 @@ const runtimeConfig = {
       },
     },
     pickDirectory: () => ipcRenderer.invoke("minicode:pickDirectory"),
+    pickWorkspaceDirectory: () => ipcRenderer.invoke("minicode:workspace:pickDirectory"),
     trustWorkspace: (path) => ipcRenderer.invoke("minicode:workspace:trust", path),
     openExternal: (target) => ipcRenderer.invoke("minicode:openExternal", target),
     openPath: (target) => ipcRenderer.invoke("minicode:openPath", target),
@@ -143,6 +156,12 @@ const runtimeConfig = {
     }
   },
 };
+
+ipcRenderer.on("minicode:runtime:changed", (_event, payload) => {
+  const nextRevision = Number(payload?.revision) || 0;
+  if (nextRevision <= runtimeRevision) return;
+  window.location.reload();
+});
 
 if (process.contextIsolated) {
   ipcRenderer.on("minicode:menu:new-chat", () => window.dispatchEvent(new Event("new-conversation")));

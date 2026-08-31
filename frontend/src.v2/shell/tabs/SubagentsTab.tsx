@@ -140,6 +140,7 @@ const AgentDetail = ({
   onStop,
   transcriptMessages,
   workspaceRoot,
+  conversationId,
   transcriptLoading,
   transcriptError,
   onRefreshTranscript,
@@ -151,6 +152,8 @@ const AgentDetail = ({
   onStop: () => void;
   transcriptMessages: ChatMessage[];
   workspaceRoot: string;
+  /** The parent conversation owns the child journal's persisted artifacts. */
+  conversationId?: string;
   transcriptLoading: boolean;
   transcriptError: string;
   onRefreshTranscript: () => void;
@@ -230,6 +233,8 @@ const AgentDetail = ({
                 key={turn.id}
                 turn={turn}
                 isTranscriptMode
+                conversationId={conversationId}
+                workspaceRoot={workspaceRoot}
               />
             ))}
           </div>
@@ -433,6 +438,7 @@ export const SubagentsTab = () => {
         onStop={() => void stop(selectedView.id)}
         transcriptMessages={visibleTranscript.messages}
         workspaceRoot={workingDirectory}
+        conversationId={conversationId || undefined}
         transcriptLoading={transcriptLoading}
         transcriptError={transcriptError}
         onRefreshTranscript={() => void loadTranscript(selectedView.id)}

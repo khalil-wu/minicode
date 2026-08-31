@@ -9,7 +9,8 @@ from backend.permissions.context import ToolExecutionContext
 def runtime_from_context(context: ToolExecutionContext | None) -> AgentRuntime | None:
     if context is None:
         return None
-    runtime = context.metadata.get("agent_runtime") if isinstance(context.metadata, dict) else None
+    run_context = context.run_context
+    runtime = run_context.agent_runtime if run_context is not None else None
     return runtime if isinstance(runtime, AgentRuntime) else None
 
 

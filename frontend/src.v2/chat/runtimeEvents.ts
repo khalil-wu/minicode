@@ -20,6 +20,7 @@ import type {
   SubagentStartEvent,
   TaskUpdateEvent,
 } from "../protocol/events";
+import { isReplayedEvent as isReplayedRuntimeEvent } from "../protocol/events";
 import type { McpServerStatus, SubagentMessageState, SubagentState, TodoItem } from "../stores/types";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { fromBackendPermissionMode } from "../protocol/permissions";
@@ -273,9 +274,6 @@ const isActiveConversationEvent = (conversationId?: string): boolean => {
   return useAppStore.getState().conversationId === conversationId.trim();
 };
 
-const isReplayedRuntimeEvent = (event: ServerEvent): boolean =>
-  (event as ServerEvent & { __replayed?: boolean }).__replayed === true;
-
 const eventTimestampMs = (event: ServerEvent): number => {
   const parsed = Date.parse(String(event.timestamp || ""));
   return Number.isFinite(parsed) ? parsed : Date.now();
@@ -350,18 +348,55 @@ const eventMessageId = (event: unknown): string | undefined => {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 };
 
-const hasStreamingAssistantForMessage = (conversationId: string | undefined, messageId: string): boolean => {
+const eventTurnIdentity = (event: unknown): string | undefined => {
+  const payload = event as {
+    turn_id?: unknown;
+    turnId?: unknown;
+    run_id?: unknown;
+    runId?: unknown;
+  };
+  const value = payload.turn_id ?? payload.turnId ?? payload.run_id ?? payload.runId;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+};
+
+const runtimeMessagesForConversation = (conversationId: string | undefined) => {
   const state = useAppStore.getState();
   const targetId = conversationId?.trim();
-  if (!targetId) return false;
-  const messages = targetId === state.conversationId
-      ? state.messages
-      : state.sideChats[targetId]?.messages ?? state.conversationMessages[targetId] ?? [];
-  return messages.some((message) =>
-    message.id === messageId &&
-    message.role === "assistant" &&
-    Boolean(message.isStreaming || message.isThinkingStreaming),
+  if (!targetId) return [];
+  return targetId === state.conversationId
+    ? state.messages
+    : state.sideChats[targetId]?.messages ?? state.conversationMessages[targetId] ?? [];
+};
+
+const assistantForMessage = (conversationId: string | undefined, messageId: string) =>
+  runtimeMessagesForConversation(conversationId).find((message) =>
+    message.role === "assistant" && message.id === messageId,
   );
+
+const hasStreamingAssistantForMessage = (conversationId: string | undefined, messageId: string): boolean => {
+  const assistant = assistantForMessage(conversationId, messageId);
+  return Boolean(assistant?.isStreaming || assistant?.isThinkingStreaming);
+};
+
+const isProviderProgressEvent = (event: ServerEvent): boolean =>
+  event.type === "agent.progress"
+  && String((event as AgentProgressEvent).id || "").startsWith("provider:");
+
+const providerProgressFenceReason = (
+  conversationId: string | undefined,
+  messageId: string | undefined,
+  event: ServerEvent,
+): string | undefined => {
+  if (!conversationId?.trim() || !messageId?.trim()) return "missing_owner_or_message";
+  const assistant = assistantForMessage(conversationId, messageId);
+  if (!assistant) return "target_assistant_missing";
+  const incomingTurnId = eventTurnIdentity(event);
+  if (incomingTurnId && assistant.turnId && incomingTurnId !== assistant.turnId) {
+    return "turn_mismatch";
+  }
+  if (assistant.isStreaming || assistant.isThinkingStreaming) return undefined;
+  if (assistant.terminalStatus || assistant.completedAt) return "turn_already_terminal";
+  return "target_not_live";
 };
 
 const canApplyLateTerminalEvent = (
@@ -370,13 +405,10 @@ const canApplyLateTerminalEvent = (
   eventType: string,
 ): boolean => {
   if (!LATE_TURN_TERMINAL_EVENTS.has(eventType)) return false;
-  const state = useAppStore.getState();
   const targetId = conversationId?.trim();
   if (!targetId) return false;
-  const messages = targetId === state.conversationId
-      ? state.messages
-      : state.sideChats[targetId]?.messages ?? state.conversationMessages[targetId] ?? [];
-  const matchingAssistant = messages.find((message) => message.role === "assistant" && message.id === messageId);
+  const messages = runtimeMessagesForConversation(targetId);
+  const matchingAssistant = assistantForMessage(targetId, messageId);
   if (!matchingAssistant?.terminalStatus) return false;
   return !messages.some((message) =>
     message.role === "assistant"
@@ -536,6 +568,10 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
   const messageId = eventMessageId(e);
   const globalSessionSnapshot = e.type === "task.update"
     && Boolean((e as unknown as { session?: unknown }).session);
+  const providerFenceReason = isProviderProgressEvent(e)
+    ? providerProgressFenceReason(conversationId, messageId, e)
+    : undefined;
+  const providerWaitingForAssistant = providerFenceReason === "target_assistant_missing";
   if (TURN_SCOPED_RUNTIME_EVENTS.has(e.type) && !conversationId && !globalSessionSnapshot) {
     addInspectorPayload("message", `unowned:${e.type}:${messageId || "event"}`, {
       event: e.type,
@@ -544,11 +580,45 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
     });
     return true;
   }
+  if (isProviderProgressEvent(e)) {
+    // During reconnect/replay the provider frame can precede the assistant
+    // placeholder or its hydration snapshot. Keep that exact frame pending;
+    // the chat store will attach it once the owner exists. Every other fence
+    // remains terminal and is inspector-only.
+    if (providerFenceReason && !providerWaitingForAssistant) {
+      const providerEvent = e as AgentProgressEvent;
+      const providerId = String(providerEvent.id || providerEvent.operation_id || "provider").trim();
+      addInspectorPayload(
+        "provider",
+        `late:${conversationId || "session"}:${messageId || "event"}:${providerId}`,
+        {
+          event: "agent.progress",
+          dropped: true,
+          reason: providerFenceReason,
+          detail: "提供商重连事件未写入已结束或不匹配的会话回合",
+          conversation_id: conversationId,
+          message_id: messageId,
+          id: providerEvent.id,
+          status: providerEvent.status,
+          retry_attempt: providerEvent.retry_attempt,
+          max_retries: providerEvent.max_retries,
+          retry_after_ms: providerEvent.retry_after_ms,
+          error_message: providerEvent.error_message,
+          operation_id: providerEvent.operation_id,
+          provider_state: providerEvent.provider_state,
+          turn_id: eventTurnIdentity(e),
+          payload: e,
+        },
+      );
+      return true;
+    }
+  }
   if (
     messageId
     && TURN_SCOPED_RUNTIME_EVENTS.has(e.type)
     && !hasStreamingAssistantForMessage(conversationId, messageId)
     && !canApplyLateTerminalEvent(conversationId, messageId, e.type)
+    && !providerWaitingForAssistant
   ) {
     // `done` is the turn's delivery fence, so these rows cannot be rendered.
     // They still describe work that happened — `runtime.span` and
@@ -592,6 +662,12 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           step_id: ev.step_id,
           iteration_id: ev.iteration_id,
           count: ev.count,
+          retry_attempt: ev.retry_attempt,
+          max_retries: ev.max_retries,
+          retry_after_ms: ev.retry_after_ms,
+          error_message: ev.error_message,
+          operation_id: ev.operation_id,
+          provider_state: ev.provider_state,
           ephemeral: ev.ephemeral,
           replayed: isReplayedRuntimeEvent(e),
         });
@@ -613,6 +689,13 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           groupId: ev.group_id,
           stepId: ev.step_id,
           count: ev.count,
+          iterationId: ev.iteration_id,
+          retryAttempt: ev.retry_attempt,
+          maxRetries: ev.max_retries,
+          retryAfterMs: ev.retry_after_ms,
+          errorMessage: ev.error_message,
+          operationId: ev.operation_id,
+          providerState: ev.provider_state,
           ephemeral: ev.ephemeral,
         };
         if (ev.stage === "image_generation") {
@@ -625,6 +708,13 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
             replayed: isReplayedRuntimeEvent(e),
           });
         } else {
+          // Provider retry is one logical activity row.  Keep it in the
+          // assistant turn as well as the conversation activity store so the
+          // user sees the live ``正在重新连接 1/N`` state in the main transcript;
+          // both stores upsert by the same stable operation id.
+          if (String(ev.id || "").startsWith("provider:")) {
+            s.upsertMessageProgress(progress, conversationId, messageId);
+          }
           s.appendAgentProgress(progress, conversationId);
         }
       }

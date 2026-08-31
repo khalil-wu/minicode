@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable
 
 from backend.agent.budget_termination import (
@@ -106,6 +107,7 @@ def build_agent_loop_components(
         )
     if configured_session_policy is not None:
         metadata[SESSION_TOOLSET_POLICY_METADATA_KEY] = configured_session_policy
+    bootstrap.run_context.session_toolset_policy = configured_session_policy
 
     def current_session_toolset_policy() -> ToolsetPolicy | None:
         owner = bootstrap.agent_session
@@ -144,12 +146,13 @@ def build_agent_loop_components(
         base_policy=base_toolset_policy,
         tool_registry=tool_registry,
         disabled_tools=state.disabled_tools,
-        requires_explicit_workspace=bool(metadata.get("requires_explicit_workspace")),
+        requires_explicit_workspace=bootstrap.run_context.requires_explicit_workspace,
         workspace_root=bootstrap.workspace_root,
         permission_mode=str(tool_context.permission.mode or ""),
     )
     tool_context.metadata[ACTIVE_TOOLSET_POLICY_METADATA_KEY] = active_toolset_policy
-    mcp_manager = metadata.get("_mcp_manager")
+    bootstrap.run_context.toolset_policy = active_toolset_policy
+    mcp_manager = bootstrap.run_context.mcp_manager
     base_tool_schemas = tool_registry.get_schemas(
         permission_checker=permission_checker,
         permission_context=tool_context.permission,
@@ -211,7 +214,10 @@ def build_agent_loop_components(
             state=state,
             context=context,
             set_terminal_reason=_set_terminal_reason,
-            run_stop_failure_hook=run_stop_failure_hook,
+            run_stop_failure_hook=partial(
+                run_stop_failure_hook,
+                hook_manager=bootstrap.run_context.hook_manager,
+            ),
             terminal_projection=lambda status, reason: usage_terminal_projection(
                 usage(),
                 status=status,
@@ -245,6 +251,7 @@ def build_agent_loop_components(
         workspace_root=bootstrap.workspace_root,
         run_id=run_record.run_id,
         conversation_id=run_record.conversation_id,
+        provider_lifecycle_runtime=bootstrap.run_context.lifecycle_runtime,
     )
     tracking_source = prompt_cache_tracking_source(
         run_record=run_record,

@@ -1,7 +1,6 @@
 import math
 import time
 from collections import defaultdict
-from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any
 
@@ -124,16 +123,6 @@ class CostTracker:
         self._session_states: dict[str, CostTrackerState] = defaultdict(CostTrackerState)
         self._start_time = time.monotonic()
 
-    _session_scope: ContextVar[str] = ContextVar("llm_cost_session_scope", default="")
-
-    @classmethod
-    def bind_session(cls, session_id: str) -> Token:
-        return cls._session_scope.set(str(session_id or "").strip())
-
-    @classmethod
-    def unbind_session(cls, token: Token) -> None:
-        cls._session_scope.reset(token)
-
     @classmethod
     def get_instance(cls) -> "CostTracker":
         if cls._instance is None:
@@ -228,7 +217,7 @@ class CostTracker:
             cost=cost,
             elapsed_sec=elapsed_sec,
         )
-        scoped_session_id = str(session_id or "").strip() or self._session_scope.get()
+        scoped_session_id = str(session_id or "").strip()
         if scoped_session_id:
             self._add_usage(
                 self._session_states[scoped_session_id],

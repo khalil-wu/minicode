@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable
 
-from backend.hooks.runners import HookExecutionError
+from backend.hooks.runners import HookExecutionError, HookExecutionResult
 
 from backend.hooks.policy import event_policy
 
@@ -87,6 +87,7 @@ class HookExecution:
     completion_order: int
     duration_ms: int
     execution_failed: bool = False
+    backgrounded: bool = False
 
 
 def select_handlers(
@@ -129,18 +130,23 @@ def select_handlers(
 
 async def execute_handlers(
     entries: Iterable[Any],
-    execute: Callable[[Any], Awaitable[tuple[str, str, int]]],
+    execute: Callable[[Any], Awaitable[HookExecutionResult]],
 ) -> list[HookExecution]:
     """Run one matched batch concurrently, then restore config order."""
 
     async def run_one(
         configured_order: int,
         entry: Any,
-    ) -> tuple[int, Any, str, str, int, int, bool]:
+    ) -> tuple[int, Any, str, str, int, int, bool, bool]:
         started = time.monotonic()
         execution_failed = False
+        backgrounded = False
         try:
-            stdout, stderr, exit_code = await execute(entry)
+            result = await execute(entry)
+            stdout = result.stdout
+            stderr = result.stderr
+            exit_code = result.exit_code
+            backgrounded = result.backgrounded
         except asyncio.CancelledError:
             raise
         except HookExecutionError as exc:
@@ -149,7 +155,16 @@ async def execute_handlers(
         except Exception as exc:
             stdout, stderr, exit_code = "", f"Hook execution failed: {exc}", 1
         duration_ms = max(0, int((time.monotonic() - started) * 1000))
-        return configured_order, entry, stdout, stderr, exit_code, duration_ms, execution_failed
+        return (
+            configured_order,
+            entry,
+            stdout,
+            stderr,
+            exit_code,
+            duration_ms,
+            execution_failed,
+            backgrounded,
+        )
 
     tasks = [
         asyncio.create_task(run_one(configured_order, entry))
@@ -169,6 +184,7 @@ async def execute_handlers(
                 exit_code,
                 duration_ms,
                 execution_failed,
+                backgrounded,
             ) = await future
             completed.append(
                 HookExecution(
@@ -180,6 +196,7 @@ async def execute_handlers(
                     completion_order=completion_order,
                     duration_ms=duration_ms,
                     execution_failed=execution_failed,
+                    backgrounded=backgrounded,
                 )
             )
             completion_order += 1

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, TypeVar
 
 from backend.async_cleanup import cancel_and_drain
-from backend.hooks.manager import HookEvent, get_hook_manager
+from backend.hooks.manager import HookEvent
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,7 @@ async def prepare_turn_input(
     session_id: str,
     deadline: float | None,
     cancel_event: asyncio.Event | None,
+    hook_manager: Any | None,
     resume_from_checkpoint: bool = False,
 ) -> TurnPreflightResult:
     """Run hooks and schedule the one canonical turn input."""
@@ -55,7 +56,6 @@ async def prepare_turn_input(
     initial_user_message = ""
     watch_paths: tuple[str, ...] = ()
 
-    hook_manager = get_hook_manager()
     try:
         if (
             not deadline_reached
@@ -176,8 +176,8 @@ async def run_stop_failure_hook(
     *,
     error_details: str = "",
     last_assistant_message: str = "",
+    hook_manager: Any | None,
 ) -> None:
-    hook_manager = get_hook_manager()
     if not hook_manager or not hook_manager_has_hooks(hook_manager, HookEvent.STOP_FAILURE):
         return
     try:

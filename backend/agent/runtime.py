@@ -28,6 +28,7 @@ from backend.async_cleanup import (
 )
 from backend.config import DATA_ROOT, TokenBudget
 from backend.agent.runtime_records import (
+    AgentRole,
     AgentRunStatus,
     AgentRunPhase,
     SwarmTaskStatus,
@@ -115,8 +116,6 @@ class TerminalCommitError(RuntimeError):
 # Explicit four-type Agent taxonomy (plan §11.2)
 # ---------------------------------------------------------------------------
 
-AgentRole = Literal["primary", "subagent", "side_query", "background"]
-
 AGENT_ROLES: frozenset[str] = frozenset({"primary", "subagent", "side_query", "background"})
 
 # MiniCode executes up to four independent bounded workers in parallel.
@@ -143,32 +142,6 @@ RUNTIME_HEARTBEAT_INTERVAL_MS = max(
         int(os.environ.get("MINICODE_RUNTIME_HEARTBEAT_INTERVAL_MS", "10000")),
     ),
 )
-
-
-def _process_is_alive(process_id: int) -> bool:
-    if process_id <= 0:
-        return False
-    if process_id == os.getpid():
-        return True
-    if os.name == "nt":
-        import ctypes
-
-        handle = ctypes.windll.kernel32.OpenProcess(  # type: ignore[attr-defined]
-            0x1000,
-            False,
-            process_id,
-        )
-        if not handle:
-            return False
-        ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
-        return True
-    try:
-        os.kill(process_id, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 def _process_start_identity(process_id: int) -> str:

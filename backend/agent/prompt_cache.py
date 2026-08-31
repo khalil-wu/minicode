@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
-from backend.agent.prompting import diff_prompt_section_summaries, split_sys_prompt_prefix
+from backend.agent.prompting import (
+    _json_fingerprint,
+    _short_sha256,
+    diff_prompt_section_summaries,
+    split_sys_prompt_prefix,
+)
 
 
 _MAX_TRACKED_PROMPT_CACHE_SOURCES = 32
@@ -22,26 +26,6 @@ class _PromptCacheObservation:
     cache_read_tokens: int
     cache_creation_tokens: int
     observed_at: float
-
-
-def _short_sha256(value: str, length: int = 12) -> str:
-    if not value:
-        return ""
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
-
-
-def _json_fingerprint(value: Any, length: int = 12) -> str:
-    try:
-        raw = json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-    except TypeError:
-        raw = repr(value)
-    return _short_sha256(raw, length=length)
 
 
 def _tool_name_from_schema(schema: Any) -> str:

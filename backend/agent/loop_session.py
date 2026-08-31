@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from backend.agent.message import AgentEvent
+from backend.agent.run_context import RunContext
 from backend.agent.state import AgentState
 from backend.permissions.context import PermissionContext
 from backend.tools.toolset_runtime import resolve_context_toolset_policy
@@ -47,6 +48,7 @@ class AgentLoopSessionContext:
     stream_callback: Callable[[str], None] | None = None
     emit_event: Callable[[AgentEvent], None] | None = None
     metadata: dict[str, Any] | None = None
+    run_context: RunContext | None = None
 
 def prepare_turn_state(
     state: AgentState,
@@ -148,6 +150,7 @@ def populate_prompt_context(
     metadata: dict[str, Any],
     workspace_root: Path | None,
     permission_context: PermissionContext,
+    run_context: RunContext | None = None,
 ) -> None:
     """Expose volatile runtime context to the next user-turn prompt block."""
 
@@ -232,7 +235,12 @@ def populate_prompt_context(
         agent_mode if agent_mode in {"build", "plan", "review", "explore"} else "build"
     )
     prompt_context["previous_turn_aborted"] = bool(
-        metadata.get("previous_turn_aborted") or metadata.get("turn_aborted")
+        (
+            run_context.previous_turn_aborted
+            if run_context is not None
+            else metadata.get("previous_turn_aborted")
+        )
+        or metadata.get("turn_aborted")
     )
     # Keep the query-source identity in the durable turn context so
     # ContextBuilder can apply Claude Code's main-thread-only time-based

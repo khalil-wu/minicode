@@ -53,8 +53,7 @@ class ToolTransitionController:
         skill_manager: Any | None,
         tool_context: ToolExecutionContext,
         refresh_permission: Callable[[], bool],
-        cancel_prefetch: Callable[[], None],
-        prefetched_results: dict[str, Any],
+        clear_stream_tracking: Callable[[], None],
         record_tool_call: Callable[[], None],
     ) -> None:
         self.ctx = ctx
@@ -65,10 +64,7 @@ class ToolTransitionController:
         self.skill_manager = skill_manager
         self.tool_context = tool_context
         self.refresh_permission = refresh_permission
-        # Kept as a compatibility callback for recovery owners. It only clears
-        # stream diagnostics now; it must not start or replay tool work.
-        self.cancel_prefetch = cancel_prefetch
-        self.prefetched_results = prefetched_results
+        self.clear_stream_tracking = clear_stream_tracking
         self.record_tool_call = record_tool_call
 
     def start(
@@ -100,7 +96,7 @@ class ToolTransitionController:
         )
 
         if self.refresh_permission():
-            self.cancel_prefetch()
+            self.clear_stream_tracking()
 
         runner = ToolBatchRunner(
             ctx=self.ctx,
@@ -116,7 +112,6 @@ class ToolTransitionController:
             prepared=prepared,
             events=runner.run(
                 prepared.tool_calls,
-                prefetched_results=self.prefetched_results,
                 prepared_tool_calls=prepared.tool_calls,
                 execution_limit=execution_limit,
                 execution_limit_reason=execution_limit_reason,

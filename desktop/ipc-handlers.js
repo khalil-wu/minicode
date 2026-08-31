@@ -303,6 +303,12 @@ function registerIpcHandlers() {
   // Window controls
   // -----------------------------------------------------------------------
 
+  ipcMain.on("minicode:runtime:get", withMainSender("minicode:runtime:get", (event) => {
+    event.returnValue = typeof ctx.getRuntimeConfig === "function"
+      ? ctx.getRuntimeConfig()
+      : null;
+  }));
+
   ipcMain.handle("minicode:window:minimize", withMainSender("minicode:window:minimize", () => {
     const win = getWin();
     if (!win || win.isDestroyed()) return false;
@@ -346,10 +352,22 @@ function registerIpcHandlers() {
     if (result.canceled || result.filePaths.length === 0) {
       return "";
     }
-    if (typeof setLastPickedWorkspaceRoot === "function") {
-      setLastPickedWorkspaceRoot(path.resolve(result.filePaths[0]));
+    return path.resolve(result.filePaths[0]);
+  }));
+
+  ipcMain.handle("minicode:workspace:pickDirectory", withMainSender("minicode:workspace:pickDirectory", async () => {
+    const owner = (() => { const w = getWin(); return w && !w.isDestroyed() ? w : undefined; })();
+    const result = await dialog.showOpenDialog(owner, {
+      properties: ["openDirectory"],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return "";
     }
-    return rememberTrustedWorkspaceRoot(result.filePaths[0]);
+    const selected = path.resolve(result.filePaths[0]);
+    if (typeof setLastPickedWorkspaceRoot === "function") {
+      setLastPickedWorkspaceRoot(selected);
+    }
+    return rememberTrustedWorkspaceRoot(selected);
   }));
 
   ipcMain.handle("minicode:workspace:trust", withMainSender("minicode:workspace:trust", (_event, targetPath) => {

@@ -546,6 +546,7 @@ def _read_blocks(
     *,
     load_reason: str = "session_start",
     project_doc_max_bytes: int = INSTRUCTIONS_MAX_BYTES,
+    hook_manager: Any | None = None,
 ) -> tuple[GuidelineBlock, ...]:
     blocks: list[GuidelineBlock] = []
     project_instruction_bytes_used = 0
@@ -613,6 +614,7 @@ def _read_blocks(
             source_kind,
             load_reason="" if include_parent else load_reason,
             parent_file_path=include_parent,
+            hook_manager=hook_manager,
         )
     return tuple(blocks)
 
@@ -624,17 +626,14 @@ def _schedule_instructions_loaded_hook(
     load_reason: str = "",
     trigger_file_path: str = "",
     parent_file_path: str = "",
+    hook_manager: Any | None = None,
 ) -> None:
     try:
-        from backend.hooks import get_hook_manager
-
-        hook_mgr = get_hook_manager()
+        hook_mgr = hook_manager
         if not hook_mgr:
             return
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        return
-    except Exception:
         return
 
     memory_type = {
@@ -675,6 +674,7 @@ def load_project_guideline_bundle(
     project_root_markers: list[str] | tuple[str, ...] | None = None,
     project_doc_fallback_filenames: list[str] | tuple[str, ...] | None = None,
     project_doc_max_bytes: int | None = None,
+    hook_manager: Any | None = None,
 ) -> GuidelineBundle:
     workspace_path = _normalize_directory(workspace_dir)
     extra_paths = _normalize_additional_directories(
@@ -711,6 +711,7 @@ def load_project_guideline_bundle(
         specs,
         load_reason=load_reason,
         project_doc_max_bytes=max_bytes,
+        hook_manager=hook_manager,
     )
     rendered_markdown = ""
     if blocks:
@@ -739,6 +740,7 @@ def load_project_guidelines(
     project_root_markers: list[str] | tuple[str, ...] | None = None,
     project_doc_fallback_filenames: list[str] | tuple[str, ...] | None = None,
     project_doc_max_bytes: int | None = None,
+    hook_manager: Any | None = None,
 ) -> str:
     return load_project_guideline_bundle(
         workspace_dir=workspace_dir,
@@ -747,6 +749,7 @@ def load_project_guidelines(
         project_root_markers=project_root_markers,
         project_doc_fallback_filenames=project_doc_fallback_filenames,
         project_doc_max_bytes=project_doc_max_bytes,
+        hook_manager=hook_manager,
     ).rendered_markdown
 
 
@@ -757,6 +760,7 @@ def load_matching_project_rules(
     *,
     project_root_markers: list[str] | tuple[str, ...] | None = None,
     project_doc_fallback_filenames: list[str] | tuple[str, ...] | None = None,
+    hook_manager: Any | None = None,
 ) -> str:
     """Load conditional ` .minicode/rules` blocks matching files touched this turn."""
     workspace_path = _normalize_directory(workspace_dir)
@@ -831,6 +835,7 @@ def load_matching_project_rules(
             source_kind,
             load_reason="path_glob_match",
             trigger_file_path=matched_target,
+            hook_manager=hook_manager,
         )
     if not blocks:
         return ""

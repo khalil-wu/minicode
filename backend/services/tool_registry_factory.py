@@ -9,7 +9,7 @@ from typing import Any
 from backend.artifact.store import ArtifactStore
 from backend.attachments.store import AttachmentStore
 from backend.commands.catalog import get_builtin_command_catalog
-from backend.config import load_config
+from backend.config import AppConfig, load_config
 from backend.permissions.checker import PermissionChecker
 from backend.tools.agent_tools import AskUserTool, BriefTool, ReadArtifactTool, TaskStatusTool, TaskStopTool, TaskTool
 from backend.tools.agent_artifact_tools import PresentFileTool
@@ -42,6 +42,7 @@ from backend.tools.swarm_tools import (
 from backend.tools.terminal_tools import ReadTerminalTool
 
 logger = logging.getLogger(__name__)
+_WORKSPACE_ROOT_UNSET = object()
 
 
 def _current_bootstrap() -> Any | None:
@@ -60,6 +61,8 @@ def get_attachment_store() -> AttachmentStore:
 def build_tool_registry(
     artifact_store: ArtifactStore,
     *,
+    workspace_root: str | Path | None | object = _WORKSPACE_ROOT_UNSET,
+    config: AppConfig | None = None,
     llm_provider: Any | None = None,
     mcp_manager: Any | None = None,
 ) -> ToolRegistry:
@@ -76,6 +79,15 @@ def build_tool_registry(
 
     MCP tools are registered dynamically after connection.
     """
+    if workspace_root is _WORKSPACE_ROOT_UNSET:
+        from backend.workspace.state import get_active_workspace_root
+
+        resolved_workspace_root = get_active_workspace_root()
+    elif workspace_root is None:
+        resolved_workspace_root = None
+    else:
+        resolved_workspace_root = Path(workspace_root).expanduser().resolve()
+    config_snapshot = config or load_config(cwd=resolved_workspace_root)
     registry = ToolRegistry()
 
     registry.register(ReadFileTool(artifact_store))
@@ -106,9 +118,12 @@ def build_tool_registry(
         llm_provider=llm_provider,
         tool_registry_provider=lambda: registry,
         artifact_store=artifact_store,
-        permission_checker_provider=lambda: PermissionChecker(load_config().permissions),
-        agent_settings_provider=lambda: load_config().agent,
-        token_budget_provider=lambda: load_config().token_budget,
+        permission_checker_provider=PermissionChecker(
+            config_snapshot.permissions,
+            resolved_workspace_root,
+        ),
+        agent_settings_provider=config_snapshot.agent,
+        token_budget_provider=config_snapshot.token_budget,
     )
     registry.register(task_tool)
     registry.register(TaskStopTool())
@@ -162,14 +177,13 @@ def build_tool_registry(
     registry.register(LSPDocumentSymbolsTool())
 
     from backend.tools.git_tools import GitStatusTool, GitDiffTool, GitLogTool, GitCommitTool
-    registry.register(GitStatusTool())
-    registry.register(GitDiffTool())
-    registry.register(GitLogTool())
-    registry.register(GitCommitTool())
+    registry.register(GitStatusTool(resolved_workspace_root))
+    registry.register(GitDiffTool(resolved_workspace_root))
+    registry.register(GitLogTool(resolved_workspace_root))
+    registry.register(GitCommitTool(resolved_workspace_root))
 
     from backend.tools.fuzzy_search_tool import FuzzySearchTool
-    workspace_root = Path.cwd()
-    registry.register(FuzzySearchTool(workspace_root))
+    registry.register(FuzzySearchTool(resolved_workspace_root))
 
     from backend.tools.worktree_tools import (
         ListWorktreesTool,
@@ -187,7 +201,15 @@ def build_tool_registry(
     registry.register(ListWorktreeSnapshotsTool())
 
     from backend.tools.preview_tool import PreviewServerTool
-    registry.register(PreviewServerTool(workspace_root=str(workspace_root)))
+    registry.register(
+        PreviewServerTool(
+            workspace_root=(
+                str(resolved_workspace_root)
+                if resolved_workspace_root is not None
+                else None
+            )
+        )
+    )
 
     from backend.tools.plan_tool import EnterPlanModeTool, ExitPlanModeTool, UpdatePlanTool
     from backend.tools.schedule_cron_tool import (
@@ -196,8 +218,8 @@ def build_tool_registry(
         ScheduleCronDeleteTool,
     )
     registry.register(UpdatePlanTool())
-    registry.register(ExitPlanModeTool(workspace_root=workspace_root))
-    registry.register(EnterPlanModeTool(workspace_root=workspace_root))
+    registry.register(ExitPlanModeTool(workspace_root=resolved_workspace_root))
+    registry.register(EnterPlanModeTool(workspace_root=resolved_workspace_root))
     registry.register(ScheduleCronTool())
     registry.register(ScheduleCronListTool())
     registry.register(ScheduleCronDeleteTool())

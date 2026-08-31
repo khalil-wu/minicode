@@ -7,7 +7,11 @@ from collections.abc import Mapping
 from typing import Any
 
 from backend.agent.provider_protocol import provider_raw_for_projection
-from backend.agent.public_projection import project_public_usage, public_text
+from backend.agent.public_projection import (
+    project_public_usage,
+    public_string_list,
+    public_text,
+)
 from backend.secret_redaction import is_sensitive_field_name
 
 
@@ -139,17 +143,6 @@ def _public_json(
     return public_text(value, max_chars=4_096)
 
 
-def _string_list(value: Any, *, maximum: int = 256) -> list[str]:
-    if not isinstance(value, (list, tuple)):
-        return []
-    result: list[str] = []
-    for item in value[:maximum]:
-        text = public_text(item, max_chars=4_096, single_line=True)
-        if text and text not in result:
-            result.append(text)
-    return result
-
-
 def _public_diff(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
@@ -202,6 +195,8 @@ def project_public_tool_call(value: Any) -> dict[str, Any]:
         ("blockingReason", 12_000),
         ("summary", 50_000),
         ("artifactId", 2_048),
+        ("artifactKind", 64),
+        ("artifactMediaType", 128),
         ("sourceUrl", 4_096),
         ("extractionStatus", 128),
         ("contentPreview", 60_000),
@@ -240,7 +235,7 @@ def project_public_tool_call(value: Any) -> dict[str, Any]:
     if not isinstance(arguments, Mapping):
         arguments = source.get("arguments")
     projected["args"] = _public_json(arguments if isinstance(arguments, Mapping) else {})
-    for key in ("durationMs", "seq", "startedAt", "finishedAt"):
+    for key in ("durationMs", "seq", "startedAt", "finishedAt", "artifactBytes"):
         raw = source.get(key)
         if raw is None:
             snake_key = "".join(("_" + char.lower()) if char.isupper() else char for char in key)
@@ -264,7 +259,9 @@ def project_public_tool_call(value: Any) -> dict[str, Any]:
         ("removedFilePaths", "removedFilePaths"),
         ("removed_file_paths", "removedFilePaths"),
     ):
-        values = _string_list(source.get(source_key), maximum=2_048)
+        values = public_string_list(
+            source.get(source_key), maximum=2_048, item_max_chars=4_096
+        )
         if values:
             projected[target_key] = values
     error_info = source.get("errorInfo", source.get("error_info"))
@@ -357,6 +354,7 @@ def _project_block(value: Any) -> dict[str, Any] | None:
             "progress": (
                 "id", "stage", "phase", "status", "message", "label", "summary", "visibility",
                 "detail", "toolCallId", "toolName", "groupId", "stepId", "iterationId",
+                "providerState", "retryAttempt", "maxRetries", "retryAfterMs", "errorMessage", "operationId",
             ),
         }[block_type]
         block = {"type": block_type}
@@ -385,7 +383,9 @@ def _project_block(value: Any) -> dict[str, Any] | None:
                 block[key] = raw
         tool_ids = value.get("toolCallIds", value.get("tool_call_ids"))
         if isinstance(tool_ids, (list, tuple)):
-            block["toolCallIds"] = _string_list(tool_ids, maximum=2_048)
+            block["toolCallIds"] = public_string_list(
+                tool_ids, maximum=2_048, item_max_chars=4_096
+            )
         return block
     return None
 
@@ -422,7 +422,9 @@ def _project_context_snapshot(value: Any) -> dict[str, Any]:
                     count = _nonnegative_int(raw_entry.get(key))
                     if count is not None:
                         entry[key] = count
-                sources = _string_list(raw_entry.get("sources"), maximum=256)
+                sources = public_string_list(
+                    raw_entry.get("sources"), maximum=256, item_max_chars=4_096
+                )
                 if sources:
                     entry["sources"] = sources
                 if entry:
@@ -469,7 +471,7 @@ def _project_context_snapshot(value: Any) -> dict[str, Any]:
                     {
                         "id": todo_id,
                         "content": content,
-                        "activeForm": public_text(todo.get("activeForm", todo.get("active_form", content)), max_chars=12_000),
+                        "activeForm": public_text(todo.get("activeForm", content), max_chars=12_000),
                         "status": public_text(todo.get("status"), max_chars=64, single_line=True) or "pending",
                     }
                 )
@@ -618,12 +620,6 @@ def project_public_transcript_message(value: Any) -> dict[str, Any]:
                 data_url_budget=data_url_budget,
                 text_budget=public_json_text_budget,
             )
-    added_tools = _string_list(source.get("added_tool_names"), maximum=256)
-    if not added_tools:
-        added_tools = _string_list(source.get("addedToolNames"), maximum=256)
-    if added_tools:
-        projected["added_tool_names"] = added_tools
-        projected["addedToolNames"] = added_tools
     metadata = source.get("metadata")
     if isinstance(metadata, Mapping) and str(metadata.get("source") or "") == "scheduled_task":
         safe_metadata: dict[str, Any] = {"source": "scheduled_task"}
@@ -634,7 +630,9 @@ def project_public_transcript_message(value: Any) -> dict[str, Any]:
         iterations = _nonnegative_int(metadata.get("iterations"))
         if iterations is not None:
             safe_metadata["iterations"] = iterations
-        errors = _string_list(metadata.get("errors"), maximum=64)
+        errors = public_string_list(
+            metadata.get("errors"), maximum=64, item_max_chars=4_096
+        )
         if errors:
             safe_metadata["errors"] = errors
         projected["metadata"] = safe_metadata
@@ -686,9 +684,13 @@ def project_public_conversation(value: Any, *, include_transcript: bool = True) 
     for key in ("memory_polluted", "archived", "git_isolated"):
         if isinstance(source.get(key), bool):
             projected[key] = bool(source.get(key))
-    pollution_sources = _string_list(source.get("memory_pollution_sources"), maximum=256)
+    pollution_sources = public_string_list(
+        source.get("memory_pollution_sources"), maximum=256, item_max_chars=4_096
+    )
     projected["memory_pollution_sources"] = pollution_sources
-    deny_rules = _string_list(source.get("permission_deny_rules"), maximum=512)
+    deny_rules = public_string_list(
+        source.get("permission_deny_rules"), maximum=512, item_max_chars=4_096
+    )
     if deny_rules:
         projected["permission_deny_rules"] = deny_rules
     overrides = source.get("permission_overrides")

@@ -116,11 +116,11 @@ async def _dispatch_command(
 
 
 async def _emit_usage_warning(ws: "WebSocketSession", command: str, usage: str) -> None:
-    await ws._emit_command_result(command, usage, level="warning")
+    await ws.emit_command_result(command, usage, level="warning")
 
 
 async def _emit_command_unavailable(ws: "WebSocketSession", command: str) -> None:
-    await ws._emit_command_result(
+    await ws.emit_command_result(
         command,
         f"Command '/{command}' is unavailable in this runtime.",
         level="error",
@@ -145,7 +145,7 @@ async def _apply_permission_mode(
     if not handled:
         await _emit_command_unavailable(ws, command)
         return False
-    await ws._emit_command_result(
+    await ws.emit_command_result(
         command,
         f"Permission mode set to '{mode}'.",
         data={"mode": mode},
@@ -173,7 +173,7 @@ async def _handle_new(
         await _emit_command_unavailable(ws, "new")
         return True, ""
 
-    await ws._emit_command_result(
+    await ws.emit_command_result(
         "new",
         "Started a new conversation.",
     )
@@ -383,7 +383,7 @@ async def _handle_memory(
         await _emit_command_unavailable(ws, "memory")
         return True, ""
 
-    await ws._emit_command_result(
+    await ws.emit_command_result(
         "memory",
         f"Conversation memory mode set to '{memory_mode}'.",
         data={"memory_mode": memory_mode},
@@ -411,7 +411,7 @@ async def _handle_archive(
     if not handled:
         await _emit_command_unavailable(ws, "archive")
         return True, ""
-    await ws._emit_command_result(
+    await ws.emit_command_result(
         "archive",
         "Archived the current conversation.",
         data={"conversation_id": conversation_id},
@@ -439,7 +439,7 @@ async def _handle_unarchive(
     if not handled:
         await _emit_command_unavailable(ws, "unarchive")
         return True, ""
-    await ws._emit_command_result(
+    await ws.emit_command_result(
         "unarchive",
         "Unarchived the current conversation.",
         data={"conversation_id": conversation_id},
@@ -497,7 +497,7 @@ async def _handle_effort(
                 "source": "slash:/effort",
             },
         )
-        await ws._emit_command_result(
+        await ws.emit_command_result(
             "effort",
             "Reasoning effort was not applied because the active model "
             f"did not declare the '{effort}' level.",
@@ -516,7 +516,7 @@ async def _handle_effort(
     if not handled:
         await _emit_command_unavailable(ws, "effort")
         return True, ""
-    await ws._emit_command_result(
+    await ws.emit_command_result(
         "effort",
         f"Reasoning effort set to '{effort}'.",
         data={"reasoning_effort": effort},
@@ -603,7 +603,7 @@ async def _handle_help(
         "  /permissions rules add deny run_in_terminal",
         "  /permissions rules add override write_file confirm",
     ]
-    await ws._emit_command_result(
+    await ws.emit_command_result(
         "help",
         "\n".join(message_lines),
         data={
@@ -624,7 +624,7 @@ async def _handle_skills(
 
     await _dispatch_command(ws, "skills.list", {"source": "slash:/skills"})
     await _dispatch_command(ws, "skills.marketplace.list", {"source": "slash:/skills"})
-    await ws._emit_command_result(
+    await ws.emit_command_result(
         "skills",
         "Opening Skills browser.",
         data={"ui_action": "open_skills_marketplace"},
@@ -640,7 +640,7 @@ async def _handle_skill(
     if skill_name:
         return False, f"${skill_name}"
     await _dispatch_command(ws, "skills.list", {"source": "slash:/skill"})
-    await ws._emit_command_result("skill", "Choose a skill from the composer menu.")
+    await ws.emit_command_result("skill", "Choose a skill from the composer menu.")
     return True, ""
 
 
@@ -666,7 +666,7 @@ def _settings_handler(command: str, tab: str) -> SlashHandler:
         ws: "WebSocketSession", arg: str, attachments: Any
     ) -> tuple[bool, str]:
         _ = arg, attachments
-        await ws._emit_command_result(
+        await ws.emit_command_result(
             command,
             f"Opening {command} settings.",
             data={"ui_action": f"open_settings:{tab}"},
@@ -742,7 +742,7 @@ async def _handle_resume(
             active_conversation_id=_active_conversation_id(ws),
         )
     except (CheckpointServiceError, ValueError) as exc:
-        await ws._emit_command_result(
+        await ws.emit_command_result(
             "resume",
             str(exc),
             level="error",
@@ -750,20 +750,20 @@ async def _handle_resume(
         return True, ""
 
     if resume is None:
-        await ws._emit_command_result(
+        await ws.emit_command_result(
             "resume",
             "No incomplete checkpoint found for this conversation. The last task completed successfully or no checkpoint exists yet.",
             level="info",
         )
         return True, ""
 
-    await ws._emit_command_result(
+    await ws.emit_command_result(
         "resume",
         f"Resuming from iteration {resume.iteration}. Previous stop: {resume.stopped_reason}",
         level="success",
     )
 
-    await ws._start_agent_run(
+    await ws.start_agent_run(
         resume.user_message,
         conversation_id=resume.conversation_id,
         metadata={
@@ -851,7 +851,7 @@ def _build_template_handler(
         )
         if skill_dir:
             prompt = _substitute_skill_dir(prompt, skill_dir)
-        await ws._emit_command_result(
+        await ws.emit_command_result(
             command_name,
             f"Prepared template prompt for '/{command_name}'.",
         )

@@ -17,6 +17,7 @@ import type {
   SessionRestoredEvent,
   SessionSyncedEvent,
 } from "../protocol/events";
+import { isReplayedEvent } from "../protocol/events";
 import type { StreamBuffer } from "../lib/stream-buffer";
 import { pushToast } from "../overlays/ToastContainer";
 import { hydrateMessages, type BackendTranscriptMessage } from "./transcriptHydration";
@@ -49,6 +50,7 @@ import { selectableModelsForProvider } from "../lib/provider-models";
 import { normalizeContextLedger } from "./contextLedger";
 import {
   isAgentProgressPhase,
+  isAgentProgressProviderState,
 } from "../protocol/streaming-types";
 import { isDesktop, ptyKillConversation } from "../desktop/runtime";
 import { releasePreviewScope } from "./previewRequestScope";
@@ -65,9 +67,6 @@ type ProviderOAuthEvent =
   | ProviderOAuthDeviceCodeEvent
   | ProviderOAuthInfoEvent
   | ProviderOAuthProgressEvent;
-
-const isReplayedEvent = (event: ServerEvent): boolean =>
-  (event as ServerEvent & { __replayed?: boolean }).__replayed === true;
 
 const providerOAuthEventTime = (event: ServerEvent): number => {
   const parsed = typeof event.timestamp === "string" ? Date.parse(event.timestamp) : Number.NaN;
@@ -426,6 +425,10 @@ const normalizeAgentProgressFromSnapshot = (value: unknown, conversationId: stri
       const status = String(progress.status ?? "") as AgentProgressEntry["status"];
       const phase = String(progress.phase ?? "") as NonNullable<AgentProgressEntry["phase"]>;
       if (!PROGRESS_STAGES.has(stage) || !PROGRESS_STATUSES.has(status)) return [];
+      const rawProviderState = progress.providerState ?? progress.provider_state;
+      const providerState = isAgentProgressProviderState(rawProviderState)
+        ? rawProviderState
+        : undefined;
       const entry: AgentProgressEntry = {
         type: "progress" as const,
         id: String(progress.id ?? "").trim(),
@@ -444,6 +447,18 @@ const normalizeAgentProgressFromSnapshot = (value: unknown, conversationId: stri
         groupId: maybeString((progress.groupId ?? progress.group_id) as string | null | undefined),
         stepId: maybeString((progress.stepId ?? progress.step_id) as string | null | undefined),
         count: typeof progress.count === "number" ? progress.count : undefined,
+        retryAttempt: typeof (progress.retryAttempt ?? progress.retry_attempt) === "number"
+          ? Number(progress.retryAttempt ?? progress.retry_attempt)
+          : undefined,
+        maxRetries: typeof (progress.maxRetries ?? progress.max_retries) === "number"
+          ? Number(progress.maxRetries ?? progress.max_retries)
+          : undefined,
+        retryAfterMs: typeof (progress.retryAfterMs ?? progress.retry_after_ms) === "number"
+          ? Number(progress.retryAfterMs ?? progress.retry_after_ms)
+          : undefined,
+        errorMessage: maybeString((progress.errorMessage ?? progress.error_message) as string | null | undefined),
+        operationId: maybeString((progress.operationId ?? progress.operation_id) as string | null | undefined),
+        providerState,
         iterationId: maybeString((progress.iterationId ?? progress.iteration_id) as string | null | undefined),
         timestamp: typeof progress.timestamp === "number" ? progress.timestamp : Date.now(),
         conversationId: maybeString(progress.conversationId as string | null | undefined) ?? conversationId,
@@ -1359,6 +1374,7 @@ export const handleSessionEvent = (
           .filter((id) => !knownConversationIds.has(id));
         for (const removedId of removedConversationIds) {
           releasePreviewScope(removedId);
+          useAppStore.getState().clearPendingProviderProgress(removedId);
           useAppStore.getState().clearConversationControlPlaneState(removedId);
           if (isDesktop()) {
             void ptyKillConversation(removedId);

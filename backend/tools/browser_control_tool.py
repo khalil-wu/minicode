@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import os
 from ipaddress import ip_address
@@ -21,11 +22,13 @@ from backend.tools.base import (
     PermissionLevel,
     ToolResult,
     ToolSchema,
+    artifact_owner_workspace_root,
     truncate_tool_result,
 )
 from backend.tools.contracts import ToolSpec
 
 from backend.tools.browser_support import (
+    _DOM_SNAPSHOT_JS,
     _bool_arg,
     _cdp_session,
     _endpoint_error,
@@ -51,10 +54,72 @@ from backend.tools.browser_support import (
     _validate_float,
     _validate_int_range,
     _validate_ws_url,
-
+    API_IMAGE_MAX_BASE64_SIZE,
     DEFAULT_CDP_ENDPOINT,
     LOOPBACK_HOSTNAMES,
-    API_IMAGE_MAX_BASE64_SIZE,)
+)
+
+
+_SCREENSHOT_MEDIA_TYPES = frozenset({
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+})
+_SCREENSHOT_MAGIC: dict[str, tuple[bytes, ...]] = {
+    "image/png": (b"\x89PNG\r\n\x1a\n",),
+    "image/jpeg": (b"\xff\xd8\xff",),
+    "image/webp": (b"RIFF",),
+    "image/gif": (b"GIF87a", b"GIF89a"),
+}
+
+
+def _validated_screenshot_payload(
+    raw_data: Any,
+    declared_media_type: Any = "",
+) -> tuple[str, str, int]:
+    """Normalize and validate one browser screenshot before it is persisted."""
+
+    data = str(raw_data or "").strip()
+    if not data:
+        raise ValueError("browser returned no screenshot data")
+
+    media_type = str(declared_media_type or "").split(";", 1)[0].strip().lower()
+    if media_type == "image/jpg":
+        media_type = "image/jpeg"
+    if data.lower().startswith("data:"):
+        header, separator, encoded = data.partition(",")
+        if not separator or ";base64" not in header.lower():
+            raise ValueError("browser screenshot must be base64 encoded")
+        embedded_media_type = header[5:].split(";", 1)[0].strip().lower()
+        if embedded_media_type == "image/jpg":
+            embedded_media_type = "image/jpeg"
+        if embedded_media_type:
+            if media_type and media_type != embedded_media_type:
+                raise ValueError("browser screenshot MIME type does not match its data URL")
+            media_type = embedded_media_type
+        data = encoded.strip()
+
+    if not media_type:
+        media_type = "image/png"
+    if media_type not in _SCREENSHOT_MEDIA_TYPES:
+        raise ValueError(f"unsupported browser screenshot MIME type: {media_type or 'unknown'}")
+    if len(data) > API_IMAGE_MAX_BASE64_SIZE:
+        raise ValueError("browser screenshot exceeds the 5 MiB API image limit")
+    try:
+        decoded = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("browser screenshot contains invalid base64 data") from exc
+    if not decoded:
+        raise ValueError("browser screenshot is empty")
+    if media_type == "image/webp":
+        valid_magic = len(decoded) >= 12 and decoded.startswith(b"RIFF") and decoded[8:12] == b"WEBP"
+    else:
+        valid_magic = decoded.startswith(_SCREENSHOT_MAGIC[media_type])
+    if not valid_magic:
+        raise ValueError(f"browser screenshot data does not match {media_type}")
+    return data, media_type, len(decoded)
+
 
 class BrowserControlTool(BaseTool):
     """Chrome DevTools Protocol control for local browser sessions."""
@@ -71,7 +136,11 @@ class BrowserControlTool(BaseTool):
     read_only = True
     open_world = True
     result_kind = "browser"
-    activity_kind = "genericTool"
+    # Keep browser operations in their canonical activity lane all the way
+    # through tool-result projection.  The old genericTool value made the
+    # frontend render screenshots as an undifferentiated tool and prevented
+    # browser-specific disclosure/thumbnail behavior from being selected.
+    activity_kind = "browser"
     display_label = "Browser"
     max_result_chars = None
 
@@ -378,27 +447,43 @@ class BrowserControlTool(BaseTool):
             return ToolResult(content=truncate_tool_result(_format_targets(targets), self._MAX_RESULT_CHARS), result_kind=self.result_kind, display_summary=f"浏览器页面：{len(targets)}")
         if action == "screenshot":
             data = str(result.get("data") or "")
-            if not data:
-                return self._error_result("Embedded browser returned no screenshot data")
-            if len(data) > API_IMAGE_MAX_BASE64_SIZE:
-                return self._error_result("Embedded browser screenshot exceeds the 5 MiB API image limit")
-            raw_size = len(base64.b64decode(data, validate=True))
+            try:
+                data, media_type, raw_size = _validated_screenshot_payload(
+                    data,
+                    result.get("mimeType"),
+                )
+            except ValueError as exc:
+                return self._error_result(f"Embedded browser screenshot is invalid: {exc}")
             artifact_store = getattr(context, "artifact_store", None) if context else None
+            conversation_id = str(getattr(context, "conversation_id", "") or "").strip() if context else ""
+            workspace_root = artifact_owner_workspace_root(context)
             artifact_id = artifact_store.save(
-                f"data:{result.get('mimeType') or 'image/png'};base64,{data}",
+                data,
                 source="browser_control.embedded_screenshot",
-                type="image_base64",
+                type="image",
                 preview_lines=1,
+                conversation_id=conversation_id,
+                workspace_root=workspace_root,
+                media_type=media_type,
             ) if artifact_store is not None else None
             content = [
                 "Screenshot captured.",
                 f"Target: {target.get('id') or ''} {target.get('title') or ''}".rstrip(),
                 f"URL: {target.get('url') or ''}",
-                f"PNG bytes: {raw_size}",
+                f"{media_type} bytes: {raw_size}",
             ]
             if artifact_id:
                 content.append(f"Artifact: {artifact_id}")
-            return ToolResult(content="\n".join(content), artifact_id=artifact_id, artifact_preview=f"PNG screenshot, {raw_size} bytes" if artifact_id else None, result_kind=self.result_kind, display_summary="浏览器截图")
+            return ToolResult(
+                content="\n".join(content),
+                artifact_id=artifact_id,
+                artifact_preview=f"{media_type} screenshot, {raw_size} bytes" if artifact_id else None,
+                result_kind=self.result_kind,
+                display_summary="浏览器截图",
+                artifact_kind="image" if artifact_id else None,
+                artifact_media_type=media_type if artifact_id else None,
+                artifact_bytes=raw_size if artifact_id else None,
+            )
         if action == "navigate":
             return ToolResult(content=f"Navigation requested.\nTarget: {target.get('id') or ''} {target.get('title') or ''}\nURL: {target.get('url') or args.get('url') or ''}", result_kind=self.result_kind, display_summary="浏览器已导航")
         if action == "get_url":
@@ -441,10 +526,13 @@ class BrowserControlTool(BaseTool):
         return version, targets[: self._MAX_TARGETS]
 
     async def _list_targets(self, endpoint: str) -> list[dict[str, Any]]:
+        return (await self._fetch_all_targets(endpoint))[: self._MAX_TARGETS]
+
+    async def _fetch_all_targets(self, endpoint: str) -> list[dict[str, Any]]:
         async with httpx.AsyncClient(timeout=None, follow_redirects=False, trust_env=False) as client:
             response = await client.get(_endpoint_url(endpoint, "/json/list"))
             response.raise_for_status()
-        return _json_list(response.json())[: self._MAX_TARGETS]
+        return _json_list(response.json())
 
     async def _navigate(self, endpoint: str, args: dict[str, Any]) -> ToolResult:
         target = await self._select_target(endpoint, str(args.get("target_id") or "").strip())
@@ -479,28 +567,29 @@ class BrowserControlTool(BaseTool):
             await session.call("Page.enable")
             result = await session.call("Page.captureScreenshot", {"format": "png", "fromSurface": True})
         data = str((result or {}).get("data") or "")
-        if not data:
-            return self._error_result("CDP returned no screenshot data")
-        if len(data) > API_IMAGE_MAX_BASE64_SIZE:
-            return self._error_result("CDP screenshot exceeds the 5 MiB API image limit")
         try:
-            raw_size = len(base64.b64decode(data, validate=True))
-        except Exception:
-            raw_size = 0
+            data, media_type, raw_size = _validated_screenshot_payload(data, "image/png")
+        except ValueError as exc:
+            return self._error_result(f"CDP screenshot is invalid: {exc}")
         artifact_store = getattr(context, "artifact_store", None) if context else None
         artifact_id = None
         if artifact_store is not None:
+            conversation_id = str(getattr(context, "conversation_id", "") or "").strip() if context else ""
+            workspace_root = artifact_owner_workspace_root(context)
             artifact_id = artifact_store.save(
-                f"data:image/png;base64,{data}",
+                data,
                 source="browser_control.screenshot",
-                type="image_base64",
+                type="image",
                 preview_lines=1,
+                conversation_id=conversation_id,
+                workspace_root=workspace_root,
+                media_type=media_type,
             )
         content = [
             "Screenshot captured.",
             f"Target: {target.get('id')} {target.get('title') or ''}".rstrip(),
             f"URL: {target.get('url') or ''}",
-            f"PNG bytes: {raw_size}",
+            f"{media_type} bytes: {raw_size}",
         ]
         if artifact_id:
             content.append(f"Artifact: {artifact_id}")
@@ -509,9 +598,12 @@ class BrowserControlTool(BaseTool):
         return ToolResult(
             content="\n".join(content),
             artifact_id=artifact_id,
-            artifact_preview=f"PNG screenshot, {raw_size} bytes" if artifact_id else None,
+            artifact_preview=f"{media_type} screenshot, {raw_size} bytes" if artifact_id else None,
             result_kind=self.result_kind,
             display_summary="Browser screenshot",
+            artifact_kind="image" if artifact_id else None,
+            artifact_media_type=media_type if artifact_id else None,
+            artifact_bytes=raw_size if artifact_id else None,
         )
 
     async def _get_url(self, endpoint: str, args: dict[str, Any]) -> ToolResult:
@@ -703,7 +795,7 @@ class BrowserControlTool(BaseTool):
             return _runtime_value(await _runtime_evaluate(session, expression))
 
     async def _select_target(self, endpoint: str, target_id: str) -> dict[str, Any]:
-        targets = await self._list_targets(endpoint)
+        targets = await self._fetch_all_targets(endpoint)
         pages = [target for target in targets if str(target.get("type") or "") == "page"]
         if target_id:
             for target in targets:

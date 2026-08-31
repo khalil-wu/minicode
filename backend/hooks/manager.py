@@ -28,15 +28,14 @@ blocking exit from pre_tool_use blocks the call.
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import json
 import logging
 import os
 import re
 import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from backend.hooks.models import HookEvent
 
@@ -64,6 +63,33 @@ def _parse_json_stdout(stdout: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _async_hook_stdout(
+    stdout: str,
+) -> tuple[str, dict[str, Any] | None]:
+    """Remove the protocol handshake and resolve the async response object."""
+
+    visible_lines: list[str] = []
+    response: dict[str, Any] | None = None
+    for line in str(stdout or "").splitlines():
+        candidate = line.strip()
+        parsed: Any = None
+        if candidate.startswith("{"):
+            try:
+                parsed = json.loads(candidate)
+            except (TypeError, ValueError):
+                parsed = None
+        if isinstance(parsed, dict) and parsed.get("async") is True:
+            continue
+        if response is None and isinstance(parsed, dict):
+            response = parsed
+        visible_lines.append(line)
+
+    visible_stdout = "\n".join(visible_lines).strip()
+    if response is not None and response.get("suppress_output") is True:
+        visible_stdout = ""
+    return visible_stdout, response
+
+
 def _async_hook_context_messages(stdout: str, entry: Any) -> tuple[str, ...]:
     """Extract model context from one completed async hook response.
 
@@ -74,19 +100,7 @@ def _async_hook_context_messages(stdout: str, entry: Any) -> tuple[str, ...]:
     new model steer.
     """
 
-    response: dict[str, Any] | None = None
-    for line in str(stdout or "").splitlines():
-        candidate = line.strip()
-        if not candidate.startswith("{"):
-            continue
-        try:
-            parsed = json.loads(candidate)
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(parsed, dict) or "async" in parsed:
-            continue
-        response = parsed
-        break
+    _, response = _async_hook_stdout(stdout)
     if response is None:
         return ()
 
@@ -266,37 +280,42 @@ def _hook_verdict(stdout: str) -> tuple[bool, str] | None:
     return bool(payload["ok"]), str(reason or "")
 
 
-def _hook_condition_matches(
-    condition: str,
+def _prepare_hook_condition_matcher(
     *,
     event: "HookEvent | None" = None,
     match_target: str,
     env_extras: dict[str, str] | None,
     tool_registry: Any | None = None,
-) -> bool:
-    if not condition:
-        return True
+) -> Callable[[Any], bool]:
+    """Prepare one condition matcher for a preview or execution batch."""
+
     if event not in {
         HookEvent.PRE_TOOL_USE,
         HookEvent.POST_TOOL_USE,
         HookEvent.POST_TOOL_USE_FAILURE,
         HookEvent.PERMISSION_REQUEST,
     }:
-        return False
+        return lambda entry: not bool(str(getattr(entry, "condition", "") or "").strip())
     fields = env_extras or {}
     tool_name = fields.get("TOOL_NAME", match_target)
     arguments = _json_object(fields.get("TOOL_ARGS_JSON", ""))
     get_tool = getattr(tool_registry, "get_tool", None)
     tool = get_tool(tool_name) if callable(get_tool) else None
-    if tool is None:
-        return False
     from backend.permissions.content_rules import parse_content_rule, rule_matches_call
     from backend.tools.base import validate_tool_input
 
-    if validate_tool_input(tool, arguments):
-        return False
-    rule = parse_content_rule(condition)
-    return bool(rule is not None and rule_matches_call(rule, tool_name, arguments))
+    input_is_valid = tool is not None and not validate_tool_input(tool, arguments)
+
+    def condition_matches(entry: Any) -> bool:
+        condition = str(getattr(entry, "condition", "") or "").strip()
+        if not condition:
+            return True
+        if not input_is_valid:
+            return False
+        rule = parse_content_rule(condition)
+        return bool(rule is not None and rule_matches_call(rule, tool_name, arguments))
+
+    return condition_matches
 
 
 def _hook_input(
@@ -443,79 +462,6 @@ def _hook_input(
 
 def _hook_config_keys() -> dict[str, HookEvent]:
     return {event.value: event for event in HookEvent}
-
-
-def _read_settings_file(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return {}
-    return dict(value) if isinstance(value, dict) else {}
-
-
-def _merge_hook_settings(settings_layers: list[dict[str, Any]]) -> dict[str, Any]:
-    """Merge hook groups across scopes without inventing precedence rules.
-
-    Matching hooks from every active settings scope append in scope order
-    instead of replacing one another.
-    """
-    merged: dict[str, list[Any]] = {}
-    allowed_http_urls: list[str] | None = None
-    allowed_env_vars: list[str] | None = None
-    disable_all_hooks: bool | None = None
-    for settings in settings_layers:
-        hooks = settings.get("hooks") if isinstance(settings, dict) else None
-        if isinstance(hooks, dict):
-            for event_name in _hook_config_keys():
-                groups = hooks.get(event_name)
-                if isinstance(groups, list):
-                    merged.setdefault(event_name, []).extend(groups)
-        for names, current in (
-            (("allowed_http_hook_urls",), allowed_http_urls),
-            (("http_hook_allowed_env_vars",), allowed_env_vars),
-        ):
-            value = next((settings[name] for name in names if name in settings), None)
-            if value is None:
-                continue
-            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-                logger.warning("Ignoring invalid %s hook policy", names[0])
-                continue
-            if current is None:
-                current = []
-                if names[0] == "allowed_http_hook_urls":
-                    allowed_http_urls = current
-                else:
-                    allowed_env_vars = current
-            for item in value:
-                if item not in current:
-                    current.append(item)
-        if "disable_all_hooks" in settings:
-            disable_all_hooks = _coerce_hook_bool(
-                settings.get("disable_all_hooks"),
-                False,
-            )
-    result: dict[str, Any] = {
-        "hooks": merged,
-        "disable_all_hooks": bool(disable_all_hooks),
-    }
-    if allowed_http_urls is not None:
-        result["allowed_http_hook_urls"] = allowed_http_urls
-    if allowed_env_vars is not None:
-        result["http_hook_allowed_env_vars"] = allowed_env_vars
-    return result
-
-
-def _trusted_workspace_roots() -> set[str]:
-    """Read the desktop main process' authoritative workspace-trust ledger.
-
-    Project hooks execute arbitrary commands and require workspace trust, so
-    the backend must not infer trust merely because
-    a path arrived in a WebSocket payload. The Electron main process persists
-    native-picker approvals in this ledger under the shared state root.
-    """
-    from backend.workspace.trust import trusted_workspace_roots
-
-    return {os.path.normcase(str(root)) for root in trusted_workspace_roots()}
 
 
 def is_workspace_trusted_for_hooks(workspace_root: Path | None) -> bool:
@@ -849,17 +795,22 @@ class HookManager:
         from backend.hooks.dispatcher import select_handlers
         from backend.hooks.policy import event_policy
 
-        selected = select_handlers(
-            self.hooks.get(event, ()),
-            event=event,
-            match_target=match_target,
-            condition_matches=lambda entry: _hook_condition_matches(
-                entry.condition,
+        entries = self.hooks.get(event, ())
+        condition_matches = (
+            _prepare_hook_condition_matcher(
                 event=event,
                 match_target=match_target,
                 env_extras=env_extras,
                 tool_registry=self._tool_registry,
-            ),
+            )
+            if any(str(entry.condition or "").strip() for entry in entries)
+            else lambda _entry: True
+        )
+        selected = select_handlers(
+            entries,
+            event=event,
+            match_target=match_target,
+            condition_matches=condition_matches,
         )
         policy = event_policy(event)
         return tuple(
@@ -1370,17 +1321,21 @@ class HookManager:
         from backend.hooks.dispatcher import execute_handlers, select_handlers
         from backend.hooks.reducer import reduce_hook_executions
 
-        selected = select_handlers(
-            entries,
-            event=event,
-            match_target=match_target,
-            condition_matches=lambda entry: _hook_condition_matches(
-                entry.condition,
+        condition_matches = (
+            _prepare_hook_condition_matcher(
                 event=event,
                 match_target=match_target,
                 env_extras=env_extras,
                 tool_registry=self._tool_registry,
-            ),
+            )
+            if any(str(entry.condition or "").strip() for entry in entries)
+            else lambda _entry: True
+        )
+        selected = select_handlers(
+            entries,
+            event=event,
+            match_target=match_target,
+            condition_matches=condition_matches,
         )
         synchronous: list[_HookEntry] = []
         for entry in selected:
@@ -1419,6 +1374,8 @@ class HookManager:
         for execution in executions:
             entry = execution.entry
             if not entry.once:
+                continue
+            if execution.backgrounded:
                 continue
             self._inflight_once_hooks.discard(entry.entry_id)
             if execution_succeeded_for_once(
@@ -1460,7 +1417,8 @@ class HookManager:
         env_extras: dict[str, str] | None,
         *,
         runtime: Any | None = None,
-    ) -> tuple[str, str, int]:
+        allow_async_handshake: bool = True,
+    ) -> Any:
         from backend.hooks.runners import HookRuntimeBindings, execute_hook
 
         resolved_runtime = runtime or HookRuntimeBindings(
@@ -1471,6 +1429,20 @@ class HookManager:
             allowed_http_hook_urls=self.allowed_http_hook_urls,
             http_hook_allowed_env_vars=self.http_hook_allowed_env_vars,
         )
+        if allow_async_handshake:
+            completion_runtime = replace(
+                resolved_runtime,
+                register_async_command=None,
+            )
+            resolved_runtime = replace(
+                resolved_runtime,
+                register_async_command=lambda command: self._schedule_dynamic_async_command(
+                    command,
+                    entry,
+                    event,
+                    runtime=completion_runtime,
+                ),
+            )
         hook_fields = dict(env_extras or {})
         tool_context = resolved_runtime.tool_context
         metadata = getattr(tool_context, "metadata", {}) if tool_context is not None else {}
@@ -1532,6 +1504,34 @@ class HookManager:
             ),
             name=f"hook:{event.value}:{entry.raw_matcher or '*'}",
         )
+        self._track_async_task(task, event)
+
+    def _schedule_dynamic_async_command(
+        self,
+        command: Any,
+        entry: _HookEntry,
+        event: HookEvent,
+        *,
+        runtime: Any,
+    ) -> None:
+        process_id = f"async_hook_{command.process.pid}"
+        task = asyncio.create_task(
+            self._run_dynamic_async_command(
+                process_id,
+                command,
+                entry,
+                event,
+                runtime=runtime,
+            ),
+            name=f"hook:{event.value}:{entry.raw_matcher or '*'}:{process_id}",
+        )
+        self._track_async_task(task, event)
+
+    def _track_async_task(
+        self,
+        task: asyncio.Task[Any],
+        event: HookEvent,
+    ) -> None:
         self._async_tasks.add(task)
 
         def _done(done: asyncio.Task[Any]) -> None:
@@ -1545,6 +1545,58 @@ class HookManager:
 
         task.add_done_callback(_done)
 
+    async def _run_dynamic_async_command(
+        self,
+        process_id: str,
+        command: Any,
+        entry: _HookEntry,
+        event: HookEvent,
+        *,
+        runtime: Any,
+    ) -> None:
+        from backend.hooks.runners import HookExecutionError, finish_async_command
+
+        try:
+            result = await finish_async_command(command)
+        except asyncio.CancelledError:
+            if entry.once:
+                self._inflight_once_hooks.discard(entry.entry_id)
+            await _emit_async_hook_response(
+                process_id=process_id,
+                entry=entry,
+                event=event,
+                stdout="",
+                stderr="Hook cancelled",
+                exit_code=1,
+                outcome="cancelled",
+                tool_context=runtime.tool_context,
+            )
+            raise
+        except HookExecutionError as exc:
+            if entry.once:
+                self._inflight_once_hooks.discard(entry.entry_id)
+            await _emit_async_hook_response(
+                process_id=process_id,
+                entry=entry,
+                event=event,
+                stdout="",
+                stderr=str(exc),
+                exit_code=1,
+                outcome="error",
+                tool_context=runtime.tool_context,
+            )
+            raise
+
+        await self._complete_async_entry(
+            process_id,
+            entry,
+            event,
+            result.stdout,
+            result.stderr,
+            result.exit_code,
+            runtime=runtime,
+        )
+
     async def _run_async_entry(
         self,
         process_id: str,
@@ -1555,11 +1607,12 @@ class HookManager:
         runtime: Any,
     ) -> None:
         try:
-            stdout, stderr, exit_code = await self._execute_entry(
+            result = await self._execute_entry(
                 entry,
                 event,
                 env_extras,
                 runtime=runtime,
+                allow_async_handshake=False,
             )
         except asyncio.CancelledError:
             if entry.once:
@@ -1590,6 +1643,33 @@ class HookManager:
             )
             raise
 
+        await self._complete_async_entry(
+            process_id,
+            entry,
+            event,
+            result.stdout,
+            result.stderr,
+            result.exit_code,
+            runtime=runtime,
+        )
+
+    async def _complete_async_entry(
+        self,
+        process_id: str,
+        entry: _HookEntry,
+        event: HookEvent,
+        stdout: str,
+        stderr: str,
+        exit_code: int,
+        *,
+        runtime: Any,
+    ) -> None:
+        visible_stdout, response = _async_hook_stdout(stdout)
+        semantic_stdout = (
+            json.dumps(response, ensure_ascii=False)
+            if response is not None
+            else visible_stdout
+        )
         if entry.once:
             self._inflight_once_hooks.discard(entry.entry_id)
             from backend.hooks.reducer import execution_succeeded_for_once
@@ -1597,7 +1677,7 @@ class HookManager:
 
             synthetic = HookExecution(
                 entry=entry,
-                stdout=stdout,
+                stdout=semantic_stdout,
                 stderr=stderr,
                 exit_code=exit_code,
                 configured_order=0,
@@ -1616,17 +1696,16 @@ class HookManager:
         # the model for exit code 2.
         if not entry.async_rewake and stdout:
             self._async_context.extend(_async_hook_context_messages(stdout, entry))
-        if entry.async_rewake or stdout.strip():
-            await _emit_async_hook_response(
-                process_id=process_id,
-                entry=entry,
-                event=event,
-                stdout=stdout,
-                stderr=stderr,
-                exit_code=exit_code,
-                outcome="success" if exit_code == 0 else "error",
-                tool_context=runtime.tool_context,
-            )
+        await _emit_async_hook_response(
+            process_id=process_id,
+            entry=entry,
+            event=event,
+            stdout=visible_stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            outcome="success" if exit_code == 0 else "error",
+            tool_context=runtime.tool_context,
+        )
         if entry.async_rewake and exit_code == 2:
             self._enqueue_async_rewake(
                 process_id,
@@ -1640,7 +1719,7 @@ class HookManager:
                 "Async hook exited %d for event %s: stdout=%s stderr=%s",
                 exit_code,
                 event.value,
-                stdout[:200],
+                visible_stdout[:200],
                 stderr[:200],
             )
 
@@ -1664,7 +1743,8 @@ class HookManager:
                 entry.entry_id,
             )
             return
-        runtime = metadata.get("agent_runtime")
+        run_context = getattr(tool_context, "run_context", None)
+        runtime = run_context.agent_runtime if run_context is not None else None
         blocking_message = (
             f'{hook_event_name(event)} hook blocking error from command "{entry.command}": '
             f"{str(content or 'Hook blocked event')}"
@@ -1701,15 +1781,11 @@ class HookManager:
         return env
 
 _active_manager: HookManager | None = None
-_bound_manager: contextvars.ContextVar[HookManager | None] = contextvars.ContextVar(
-    "minicode_hook_manager",
-    default=None,
-)
 _session_hook_managers: dict[str, HookManager] = {}
 
 
 def get_hook_manager() -> HookManager | None:
-    return _bound_manager.get() or _active_manager
+    return _active_manager
 
 
 def get_hook_manager_for_session(session_id: str) -> HookManager | None:
@@ -1763,14 +1839,6 @@ def pop_hook_managers_for_owner(session_id: str) -> list[tuple[str, HookManager]
         seen.add(identity)
         selected.append((scope_id, manager))
     return selected
-
-
-def bind_hook_manager(manager: HookManager) -> contextvars.Token[HookManager | None]:
-    return _bound_manager.set(manager)
-
-
-def unbind_hook_manager(token: contextvars.Token[HookManager | None]) -> None:
-    _bound_manager.reset(token)
 
 
 def set_hook_manager(manager: HookManager | None) -> None:

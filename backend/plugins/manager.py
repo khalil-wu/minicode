@@ -290,12 +290,6 @@ class PluginManager:
         return result
 
 
-def get_plugin_manager(*, config_stack: Any | None = None) -> PluginManager:
-    """Construct a turn-scoped manager; callers own its snapshot lifetime."""
-
-    return PluginManager(config_stack=config_stack)
-
-
 def _registry_path() -> Path:
     explicit = os.environ.get("MINICODE_PLUGIN_REGISTRY", "").strip()
     if explicit:

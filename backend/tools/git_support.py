@@ -34,14 +34,10 @@ def _raise_if_cancelled(context: Any) -> None:
         raise asyncio.CancelledError
 
 
-def _decode_process_output(data: bytes | None) -> str:
-    return (data or b"").decode("utf-8", errors="replace")
-
-
-def _workspace_root(context: Any, fallback: Path) -> Path:
+def _workspace_root(context: Any, fallback: Path | None) -> Path | None:
     if context and getattr(context, "workspace_root", None):
         return Path(context.workspace_root).resolve()
-    return fallback.resolve()
+    return fallback.resolve() if fallback is not None else None
 
 
 def _resolve_work_dir(root: Path, path_value: Any) -> Path:

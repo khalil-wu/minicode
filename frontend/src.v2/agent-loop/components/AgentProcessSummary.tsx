@@ -8,6 +8,7 @@ type AgentProcessSummaryProps = {
   durationMs: number | null;
   failureMessage?: string;
   canCollapse?: boolean;
+  position?: "top" | "bottom";
   onToggle: () => void;
 };
 
@@ -18,11 +19,12 @@ export function AgentProcessSummary({
   durationMs,
   failureMessage,
   canCollapse = status === "completed",
+  position = "top",
   onToggle,
 }: AgentProcessSummaryProps) {
   const running = status === "running";
   const statusLabel = running
-    ? "开始处理"
+    ? "正在处理"
     : status === "failed"
       ? "出错"
       : status === "partial"
@@ -70,7 +72,10 @@ export function AgentProcessSummary({
 
   if (!hasTimelineItems || !canCollapse) {
     return (
-      <div className="chat-turn-process-summary-wrap agent-loop-process-summary-wrap">
+      <div
+        className="chat-turn-process-summary-wrap agent-loop-process-summary-wrap"
+        data-position={position}
+      >
         <div
           className="chat-turn-process-summary agent-loop-process-summary agent-loop-process-summary-static"
           aria-label={accessibleStatusLabel}
@@ -83,7 +88,10 @@ export function AgentProcessSummary({
   }
 
   return (
-    <div className="chat-turn-process-summary-wrap agent-loop-process-summary-wrap">
+    <div
+      className="chat-turn-process-summary-wrap agent-loop-process-summary-wrap"
+      data-position={position}
+    >
       <button
         type="button"
         className="chat-turn-process-summary agent-loop-process-summary"

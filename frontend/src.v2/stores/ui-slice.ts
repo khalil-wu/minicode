@@ -14,6 +14,7 @@ import {
   sendPromptResponseCommand,
 } from "../protocol/ws-outbox";
 import { desktop } from "../desktop/runtime";
+import { normalizeArtifactContentState } from "../lib/artifact-projection";
 import { buildApprovalResponseCommand } from "../protocol/prompt-responses";
 import {
   LS,
@@ -60,7 +61,7 @@ function cloneDiffReviewState(state: DiffReviewState | null): DiffReviewState | 
 }
 
 function cloneArtifactState(state: ArtifactContentState | null): ArtifactContentState | null {
-  return state ? { ...state } : null;
+  return state ? { ...normalizeArtifactContentState(state) } : null;
 }
 
 function emptyConversationWorkbenchState(): ConversationWorkbenchState {
@@ -68,6 +69,10 @@ function emptyConversationWorkbenchState(): ConversationWorkbenchState {
     diffReview: null,
     previewArtifact: null,
     livePreviewUrl: null,
+    previewServers: [],
+    previewLaunchConfigs: [],
+    previewLaunchProcesses: [],
+    previewVerification: null,
     terminalSessions: [],
     activeTerminalSessionId: null,
     rightStackTab: "tasks",
@@ -87,6 +92,14 @@ function cloneConversationWorkbenchState(state: ConversationWorkbenchState): Con
     ...state,
     diffReview: cloneDiffReviewState(state.diffReview),
     previewArtifact: cloneArtifactState(state.previewArtifact),
+    previewServers: (state.previewServers ?? []).map((server) => ({ ...server })),
+    previewLaunchConfigs: (state.previewLaunchConfigs ?? []).map((config) => ({ ...config })),
+    previewLaunchProcesses: (state.previewLaunchProcesses ?? []).map((process) => ({
+      ...process,
+      stderr_tail: process.stderr_tail ? [...process.stderr_tail] : process.stderr_tail,
+      output_tail: process.output_tail?.map((line) => ({ ...line })),
+    })),
+    previewVerification: state.previewVerification ? { ...state.previewVerification } : null,
     terminalSessions: (state.terminalSessions ?? []).map((session) => ({ ...session })),
     draft: state.draft ?? "",
     attachments: (state.attachments ?? []).map((attachment) => ({ ...attachment })),
@@ -102,6 +115,14 @@ function liveConversationWorkbenchState(s: AppStore): ConversationWorkbenchState
     diffReview: cloneDiffReviewState(s.diffReview),
     previewArtifact: cloneArtifactState(s.previewArtifact),
     livePreviewUrl: s.livePreviewUrl,
+    previewServers: s.previewServers.map((server) => ({ ...server })),
+    previewLaunchConfigs: s.previewLaunchConfigs.map((config) => ({ ...config })),
+    previewLaunchProcesses: s.previewLaunchProcesses.map((process) => ({
+      ...process,
+      stderr_tail: process.stderr_tail ? [...process.stderr_tail] : process.stderr_tail,
+      output_tail: process.output_tail?.map((line) => ({ ...line })),
+    })),
+    previewVerification: s.previewVerification ? { ...s.previewVerification } : null,
     terminalSessions: s.terminalSessions
       .filter((session) => session.conversationId === s.conversationId)
       .map((session) => ({ ...session })),
@@ -126,6 +147,81 @@ function storeConversationWorkbenchState(
   return {
     ...(s.conversationWorkbenchStates ?? {}),
     [conversationId]: cloneConversationWorkbenchState(state),
+  };
+}
+
+type PreviewWorkbenchPatch = Pick<
+  ConversationWorkbenchState,
+  "previewArtifact"
+  | "livePreviewUrl"
+  | "previewServers"
+  | "previewLaunchConfigs"
+  | "previewLaunchProcesses"
+  | "previewVerification"
+>;
+
+function updatePreviewWorkbench(
+  s: AppStore,
+  conversationId: string | undefined,
+  patch: Partial<PreviewWorkbenchPatch>,
+): Partial<AppStore> {
+  const targetId = String(conversationId || s.conversationId || "").trim();
+  if (!targetId) return patch as Partial<AppStore>;
+  // The first scoped preview update for the active conversation must retain
+  // its live mirror. Starting from an empty state loses an already-open image
+  // whenever an unrelated preview-server event arrives.
+  const current = s.conversationWorkbenchStates?.[targetId]
+    ?? (targetId === s.conversationId
+      ? liveConversationWorkbenchState(s)
+      : emptyConversationWorkbenchState());
+  const nextWorkbench: ConversationWorkbenchState = cloneConversationWorkbenchState({
+    ...current,
+    ...patch,
+  });
+  return {
+    conversationWorkbenchStates: {
+      ...(s.conversationWorkbenchStates ?? {}),
+      [targetId]: nextWorkbench,
+    },
+    ...(targetId === s.conversationId ? patch : {}),
+} as Partial<AppStore>;
+}
+
+function previewStateForConversation(s: AppStore, conversationId: string | undefined): PreviewWorkbenchPatch {
+  const targetId = String(conversationId || "").trim();
+  const stored = targetId ? s.conversationWorkbenchStates?.[targetId] : undefined;
+  if (stored) {
+    const next = cloneConversationWorkbenchState(stored);
+    return {
+      previewArtifact: next.previewArtifact,
+      livePreviewUrl: next.livePreviewUrl,
+      previewServers: next.previewServers,
+      previewLaunchConfigs: next.previewLaunchConfigs,
+      previewLaunchProcesses: next.previewLaunchProcesses,
+      previewVerification: next.previewVerification,
+    };
+  }
+  if (targetId && targetId === s.conversationId) {
+    return {
+      previewArtifact: cloneArtifactState(s.previewArtifact),
+      livePreviewUrl: s.livePreviewUrl,
+      previewServers: s.previewServers.map((server) => ({ ...server })),
+      previewLaunchConfigs: s.previewLaunchConfigs.map((config) => ({ ...config })),
+      previewLaunchProcesses: s.previewLaunchProcesses.map((process) => ({
+        ...process,
+        stderr_tail: process.stderr_tail ? [...process.stderr_tail] : process.stderr_tail,
+        output_tail: process.output_tail?.map((line) => ({ ...line })),
+      })),
+      previewVerification: s.previewVerification ? { ...s.previewVerification } : null,
+    };
+  }
+  return {
+    previewArtifact: null,
+    livePreviewUrl: null,
+    previewServers: [],
+    previewLaunchConfigs: [],
+    previewLaunchProcesses: [],
+    previewVerification: null,
   };
 }
 
@@ -188,6 +284,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   previewLaunchConfigs: [],
   previewLaunchProcesses: [],
   previewVerification: null,
+  previewOwnerConversationId: null,
   fileChanges: [],
   fileTreeVersion: 0,
   fileTreeRevealRequests: [],
@@ -505,6 +602,11 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         diffReview: next.diffReview,
         previewArtifact: next.previewArtifact,
         livePreviewUrl: next.livePreviewUrl,
+        previewServers: next.previewServers,
+        previewLaunchConfigs: next.previewLaunchConfigs,
+        previewLaunchProcesses: next.previewLaunchProcesses,
+        previewVerification: next.previewVerification,
+        previewOwnerConversationId: targetId ?? null,
         terminalSessions,
         activeTerminalSessionId,
         rightStackTab: next.rightStackTab,
@@ -534,6 +636,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       if (s.conversationId !== conversationId) return { conversationWorkbenchStates: next };
       return {
         ...emptyConversationWorkbenchState(),
+        previewOwnerConversationId: null,
         conversationWorkbenchStates: next,
       };
     }),
@@ -678,59 +781,165 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       }));
     }
   },
-  setPreviewArtifact: (artifact) => set({ previewArtifact: artifact }),
+  setPreviewArtifact: (artifact) =>
+    set((s) => {
+      const value = cloneArtifactState(artifact);
+      return {
+        ...updatePreviewWorkbench(s, s.conversationId ?? undefined, { previewArtifact: value }),
+        previewArtifact: value,
+      };
+    }),
   setConversationPreviewArtifact: (conversationId, artifact) =>
     set((s) => {
       const targetId = String(conversationId || "").trim();
       if (!targetId) return s;
-      const nextWorkbench = {
-        ...(s.conversationWorkbenchStates ?? {}),
-        [targetId]: {
-          ...(s.conversationWorkbenchStates?.[targetId] ?? emptyConversationWorkbenchState()),
-          previewArtifact: cloneArtifactState(artifact),
-        },
-      };
-      return targetId === s.conversationId
-        ? { previewArtifact: cloneArtifactState(artifact), conversationWorkbenchStates: nextWorkbench }
-        : { conversationWorkbenchStates: nextWorkbench };
+      return updatePreviewWorkbench(s, targetId, { previewArtifact: cloneArtifactState(artifact) });
     }),
-  setLivePreviewUrl: (url) => set({ livePreviewUrl: url }),
-  openLivePreview: (url) =>
+  setPreviewOwnerConversationId: (conversationId) =>
+    set({ previewOwnerConversationId: String(conversationId || "").trim() || null }),
+  restorePreviewState: (conversationId) =>
+    set((s) => {
+      const targetId = String(conversationId || s.conversationId || "").trim();
+      const preview = previewStateForConversation(s, targetId || undefined);
+      return {
+        ...preview,
+        previewOwnerConversationId: targetId || null,
+      };
+    }),
+  setLivePreviewUrl: (url, conversationId) =>
+    set((s) => {
+      const targetId = String(conversationId || s.conversationId || "").trim();
+      const value = url == null ? null : String(url);
+      // Background preview events populate their own conversation cache, but
+      // only an active conversation or an explicit open action may take over
+      // the visible preview surface.
+      const ownerPatch = value && (targetId === s.conversationId || !targetId)
+        ? { previewOwnerConversationId: targetId || null }
+        : s.previewOwnerConversationId === targetId
+          ? { previewOwnerConversationId: null }
+          : {};
+      return {
+        ...updatePreviewWorkbench(s, targetId || undefined, { livePreviewUrl: value }),
+        ...(targetId === s.conversationId || !targetId ? { livePreviewUrl: value } : {}),
+        ...ownerPatch,
+      };
+    }),
+  openLivePreview: (url, conversationId) =>
     set((s) => {
       const normalizedUrl = /^https?:\/\//i.test(url.trim()) ? url.trim() : `http://${url.trim()}`;
+      const targetId = String(conversationId || s.conversationId || "").trim();
       const rightSidebarWidth = preferredRightSidebarWidth("preview", s.rightSidebarWidth);
       if (rightSidebarWidth !== s.rightSidebarWidth) {
         writeLS(LS.layout.rightWidth, String(rightSidebarWidth));
       }
       writeLS(LS.layout.rightOpen, "1");
-      return { livePreviewUrl: normalizedUrl, rightStackTab: "preview", rightPanelOpen: true, rightSidebarWidth };
+      return {
+        ...updatePreviewWorkbench(s, targetId || undefined, { livePreviewUrl: normalizedUrl }),
+        ...(targetId === s.conversationId || !targetId ? { livePreviewUrl: normalizedUrl } : {}),
+        previewOwnerConversationId: targetId || null,
+        rightStackTab: "preview",
+        rightPanelOpen: true,
+        rightSidebarWidth,
+      };
     }),
-  setPreviewServers: (servers) => set({ previewServers: servers }),
-  addPreviewServer: (server) =>
-    set((s) => ({
-      previewServers: [
-        ...s.previewServers.filter((existing) => existing.port !== server.port),
-        server,
-      ],
-    })),
-  removePreviewServer: (port) =>
-    set((s) => ({
-      previewServers: s.previewServers.filter((existing) => existing.port !== port),
-    })),
-  setPreviewLaunchConfigs: (configs) => set({ previewLaunchConfigs: configs }),
-  setPreviewLaunchProcesses: (processes) => set({ previewLaunchProcesses: processes }),
-  upsertPreviewLaunchProcess: (process) =>
-    set((s) => ({
-      previewLaunchProcesses: [
-        process,
-        ...s.previewLaunchProcesses.filter((existing) => existing.id !== process.id),
-      ],
-    })),
-  removePreviewLaunchProcess: (id) =>
-    set((s) => ({
-      previewLaunchProcesses: s.previewLaunchProcesses.filter((process) => process.id !== id),
-    })),
-  setPreviewVerification: (verification) => set({ previewVerification: verification }),
+  setPreviewServers: (servers, conversationId) =>
+    set((s) => {
+      const value = servers.map((server) => ({ ...server }));
+      const targetId = String(conversationId || s.conversationId || "").trim();
+      return {
+        ...updatePreviewWorkbench(s, targetId || undefined, { previewServers: value }),
+        ...(targetId === s.conversationId || !targetId ? { previewServers: value } : {}),
+      };
+    }),
+  addPreviewServer: (server, conversationId) =>
+    set((s) => {
+      const targetId = String(conversationId || s.conversationId || "").trim();
+      const current = targetId === s.conversationId
+        ? s.previewServers
+        : s.conversationWorkbenchStates?.[targetId]?.previewServers ?? [];
+      const value = [
+        ...current.filter((existing) => existing.port !== server.port),
+        { ...server },
+      ];
+      return {
+        ...updatePreviewWorkbench(s, targetId || undefined, { previewServers: value }),
+        ...(targetId === s.conversationId || !targetId ? { previewServers: value } : {}),
+      };
+    }),
+  removePreviewServer: (port, conversationId) =>
+    set((s) => {
+      const targetId = String(conversationId || s.conversationId || "").trim();
+      const current = targetId === s.conversationId
+        ? s.previewServers
+        : s.conversationWorkbenchStates?.[targetId]?.previewServers ?? [];
+      const value = current.filter((existing) => existing.port !== port);
+      return {
+        ...updatePreviewWorkbench(s, targetId || undefined, { previewServers: value }),
+        ...(targetId === s.conversationId || !targetId ? { previewServers: value } : {}),
+      };
+    }),
+  setPreviewLaunchConfigs: (configs, conversationId) =>
+    set((s) => {
+      const value = configs.map((config) => ({ ...config }));
+      const targetId = String(conversationId || s.conversationId || "").trim();
+      return {
+        ...updatePreviewWorkbench(s, targetId || undefined, { previewLaunchConfigs: value }),
+        ...(targetId === s.conversationId || !targetId ? { previewLaunchConfigs: value } : {}),
+      };
+    }),
+  setPreviewLaunchProcesses: (processes, conversationId) =>
+    set((s) => {
+      const value = processes.map((process) => ({
+        ...process,
+        stderr_tail: process.stderr_tail ? [...process.stderr_tail] : process.stderr_tail,
+        output_tail: process.output_tail?.map((line) => ({ ...line })),
+      }));
+      const targetId = String(conversationId || s.conversationId || "").trim();
+      return {
+        ...updatePreviewWorkbench(s, targetId || undefined, { previewLaunchProcesses: value }),
+        ...(targetId === s.conversationId || !targetId ? { previewLaunchProcesses: value } : {}),
+      };
+    }),
+  upsertPreviewLaunchProcess: (process, conversationId) =>
+    set((s) => {
+      const targetId = String(conversationId || s.conversationId || "").trim();
+      const current = targetId === s.conversationId
+        ? s.previewLaunchProcesses
+        : s.conversationWorkbenchStates?.[targetId]?.previewLaunchProcesses ?? [];
+      const value = [
+        {
+          ...process,
+          stderr_tail: process.stderr_tail ? [...process.stderr_tail] : process.stderr_tail,
+          output_tail: process.output_tail?.map((line) => ({ ...line })),
+        },
+        ...current.filter((existing) => existing.id !== process.id),
+      ];
+      return {
+        ...updatePreviewWorkbench(s, targetId || undefined, { previewLaunchProcesses: value }),
+        ...(targetId === s.conversationId || !targetId ? { previewLaunchProcesses: value } : {}),
+      };
+    }),
+  removePreviewLaunchProcess: (id, conversationId) =>
+    set((s) => {
+      const targetId = String(conversationId || s.conversationId || "").trim();
+      const current = targetId === s.conversationId
+        ? s.previewLaunchProcesses
+        : s.conversationWorkbenchStates?.[targetId]?.previewLaunchProcesses ?? [];
+      const value = current.filter((process) => process.id !== id);
+      return {
+        ...updatePreviewWorkbench(s, targetId || undefined, { previewLaunchProcesses: value }),
+        ...(targetId === s.conversationId || !targetId ? { previewLaunchProcesses: value } : {}),
+      };
+    }),
+  setPreviewVerification: (verification, conversationId) =>
+    set((s) => {
+      const value = verification ? { ...verification } : null;
+      const targetId = String(conversationId || s.conversationId || "").trim();
+      return {
+        ...updatePreviewWorkbench(s, targetId || undefined, { previewVerification: value }),
+        ...(targetId === s.conversationId || !targetId ? { previewVerification: value } : {}),
+      };
+    }),
   setQuickOpenResults: (results) => set({ quickOpenResults: results, quickOpenLoading: false }),
   setQuickOpenLoading: (loading) => set({ quickOpenLoading: loading }),
   addFileChange: (change) =>

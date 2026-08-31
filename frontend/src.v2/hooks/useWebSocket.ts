@@ -1,7 +1,13 @@
 import { useEffect, useRef } from "react";
 import { useAppStore } from "../stores";
 import { wsProtocols, wsUrl } from "../protocol/api";
-import type { ClientCommand, ServerEvent } from "../protocol/events";
+import {
+  SERVER_EVENT_TYPES,
+  isReplayedEvent,
+  type ClientCommand,
+  type ServerEvent,
+  type ServerEventType,
+} from "../protocol/events";
 import { isUnknownServerEventType, normalizeInboundServerEvent } from "../protocol/server-event-validation";
 import {
   commandWithClientCommandId,
@@ -35,6 +41,9 @@ import { hasInterruptFence } from "../lib/interrupt-command";
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 const RECONNECT_BUDGET_MS = 600_000;
+// Session transport has a user-visible finite ladder. This is deliberately
+// separate from provider-request and MCP retry budgets.
+const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_JITTER_FACTOR = 0.25;
 const PING_INTERVAL_MS = 10_000;
 const PONG_TIMEOUT_MS = 60_000;
@@ -309,7 +318,7 @@ export const assertInboundReplayCursorContinuity = (event: ServerEvent): void =>
   if (!Number.isSafeInteger(seq) || seq <= lastReceivedServerSeq) {
     throw new Error("Durable event sequence does not advance the active cursor.");
   }
-  const replayed = (event as ServerEvent & { __replayed?: unknown }).__replayed === true;
+  const replayed = isReplayedEvent(event);
   const hasDurableLink = Object.prototype.hasOwnProperty.call(event, "previous_replay_seq");
   if (!replayed && !hasDurableLink) return;
   const previousReplaySeq = Number(event.previous_replay_seq);
@@ -391,8 +400,7 @@ export const commitProcessedInboundEvent = (event: ServerEvent): void => {
   } else if (shouldAdvanceReplayCursor(event) && Number.isSafeInteger(seq)) {
     assertInboundReplayCursorContinuity(event);
     failedReplaySeqs.delete(seq);
-    const replayed = (event as ServerEvent & { __replayed?: unknown }).__replayed === true;
-    if (replayed) {
+    if (isReplayedEvent(event)) {
       const previousReplaySeq = Number(event.previous_replay_seq);
       if (
         !Number.isSafeInteger(previousReplaySeq)
@@ -479,12 +487,12 @@ export const eventsFromSessionReplay = (event: ServerEvent): ServerEvent[] => {
       replayed.push({
         type: String(candidate.type ?? ""),
         seq: replayedSeq,
-        __replayed: true,
+        replayed: true,
         __undeliverable: true,
       } as unknown as ServerEvent);
       continue;
     }
-    replayed.push({ ...normalized, __replayed: true } as unknown as ServerEvent);
+    replayed.push({ ...normalized, replayed: true } as unknown as ServerEvent);
   }
   if (
     (events.length > 0 && expectedPreviousSeq !== currentSeq)
@@ -579,12 +587,18 @@ export const useWebSocketConnection = () => {
   const reconnectAttempt = useRef(0);
 
   useEffect(() => {
+    useAppStore.getState().setConnectionState("connecting", {
+      attempt: 0,
+      maxAttempts: null,
+      error: null,
+    });
     let alive = true;
     let timer: number | null = null;
     let heartbeatCleanup = () => {};
     const coalescedCommands = new Map<string, ClientCommand>();
     const coalescedMicrotasks = new Set<string>();
     let awaitingSessionRestore = false;
+    let recoverySnapshotPending = false;
     let recoveryReplayPending = false;
     let recoverySwitchPending = false;
     let recoverySwitchWillRefreshCatalog = false;
@@ -606,6 +620,7 @@ export const useWebSocketConnection = () => {
       coalescedMicrotasks.clear();
       coalescedCommands.clear();
       awaitingSessionRestore = false;
+      recoverySnapshotPending = false;
       recoveryReplayPending = false;
       recoverySwitchPending = false;
       recoverySwitchWillRefreshCatalog = false;
@@ -614,6 +629,11 @@ export const useWebSocketConnection = () => {
 
     const stopReconnecting = (reason: string, message: string) => {
       reconnectExhausted = true;
+      useAppStore.getState().setConnectionState("failed", {
+        attempt: reconnectAttempt.current,
+        maxAttempts: MAX_RECONNECT_ATTEMPTS,
+        error: message,
+      });
       clearUndeliverableCommands(reason);
       // No further transport means no further terminal event. `session.restore`
       // is what normally repairs streaming flags after a reconnect, and it can
@@ -752,6 +772,8 @@ export const useWebSocketConnection = () => {
       let pingInterval: number | null = null;
       let pongTimeout: number | null = null;
       let awaitingPong = false;
+      let connectionRecoveryCompleted = false;
+      let announceReconnectAfterRecovery = false;
 
       const clearHeartbeatTimers = () => {
         if (pingInterval !== null) {
@@ -766,16 +788,27 @@ export const useWebSocketConnection = () => {
       };
       heartbeatCleanup = clearHeartbeatTimers;
 
+      const completeConnectionRecovery = (): void => {
+        if (connectionRecoveryCompleted || !alive || ref.current !== ws) return;
+        connectionRecoveryCompleted = true;
+        reconnectAttempt.current = 0;
+        reconnectStartedAt = null;
+        resyncCloseSeen = false;
+        hasConnectedOnce = true;
+        useAppStore.getState().setConnectionState("connected", {
+          attempt: 0,
+          maxAttempts: null,
+          error: null,
+        });
+        if (announceReconnectAfterRecovery) {
+          pushToast("已重新连接", "success", 2000);
+        }
+      };
+
       ws.addEventListener("open", () => {
         if (!alive || ref.current !== ws) return;
         const wasReconnect = hasConnectedOnce || reconnectAttempt.current > 0;
-        reconnectAttempt.current = 0;
-        if (!resyncCloseSeen) reconnectStartedAt = null;
-        useAppStore.getState().setConnected(true);
-
-        if (wasReconnect && !resyncCloseSeen) {
-          pushToast("已重新连接", "success", 2000);
-        }
+        announceReconnectAfterRecovery = wasReconnect && !resyncCloseSeen;
 
         const state = useAppStore.getState();
         const restoreConversationId = conversationIdForSessionRestore(state);
@@ -783,6 +816,7 @@ export const useWebSocketConnection = () => {
           ? workspaceRootForConversationRestore({ ...state, conversationId: restoreConversationId })
           : "";
         awaitingSessionRestore = Boolean(hasConnectedOnce || restoreConversationId);
+        recoverySnapshotPending = awaitingSessionRestore;
         recoveryReplayPending = false;
         recoverySwitchPending = false;
         recoverySwitchWillRefreshCatalog = false;
@@ -815,7 +849,7 @@ export const useWebSocketConnection = () => {
         // both catalogs from the transport lifecycle, which is also what keeps
         // them current after a reconnect.
         sendOrCoalesceCommand({ type: "skills.list" });
-        hasConnectedOnce = true;
+        if (!awaitingSessionRestore) completeConnectionRecovery();
 
         pingInterval = window.setInterval(() => {
           if (ws.readyState !== WebSocket.OPEN) return;
@@ -834,12 +868,11 @@ export const useWebSocketConnection = () => {
         clearHeartbeatTimers();
         heartbeatCleanup = () => {};
         ref.current = null;
+        recoverySnapshotPending = false;
         recoveryReplayPending = false;
         recoverySwitchPending = false;
         recoverySwitchWillRefreshCatalog = false;
         bufferedRecoveryEvents = [];
-        useAppStore.getState().setConnected(false);
-
         const closeCode = Number((event as CloseEvent).code || 0);
         if (closeCode === CLIENT_RESYNC_CLOSE_CODE) resyncCloseSeen = true;
         if (PERMANENT_CLOSE_CODES.has(closeCode)) {
@@ -866,6 +899,13 @@ export const useWebSocketConnection = () => {
           return;
         }
         const now = Date.now();
+        if (reconnectAttempt.current >= MAX_RECONNECT_ATTEMPTS) {
+          stopReconnecting(
+            "无法重新连接，操作未完成",
+            `无法重新连接到 MiniCode（已重试 ${reconnectAttempt.current}/${MAX_RECONNECT_ATTEMPTS} 次）。请检查服务状态或网络后刷新重试。`,
+          );
+          return;
+        }
         if (reconnectStartedAt === null) reconnectStartedAt = now;
         const remainingBudget = RECONNECT_BUDGET_MS - (now - reconnectStartedAt);
         if (remainingBudget <= 0) {
@@ -882,6 +922,11 @@ export const useWebSocketConnection = () => {
         const jitter = base * ((Math.random() * 2 - 1) * RECONNECT_JITTER_FACTOR);
         const delay = Math.min(remainingBudget, Math.max(0, base + jitter));
         reconnectAttempt.current += 1;
+        useAppStore.getState().setConnectionState("reconnecting", {
+          attempt: reconnectAttempt.current,
+          maxAttempts: MAX_RECONNECT_ATTEMPTS,
+          error: null,
+        });
         timer = window.setTimeout(connect, delay);
       });
 
@@ -937,12 +982,12 @@ export const useWebSocketConnection = () => {
       };
 
       const finishSessionRecovery = (): void => {
-        if (!awaitingSessionRestore) return;
-        awaitingSessionRestore = false;
-        recoveryReplayPending = false;
-        recoverySwitchPending = false;
-        // The resync succeeded, so the next disconnect starts a fresh budget.
-        resyncCloseSeen = false;
+        if (
+          !awaitingSessionRestore
+          || recoverySnapshotPending
+          || recoveryReplayPending
+          || recoverySwitchPending
+        ) return;
 
         const buffered = bufferedRecoveryEvents;
         bufferedRecoveryEvents = [];
@@ -951,8 +996,10 @@ export const useWebSocketConnection = () => {
           if (!deliverInboundEvent(bufferedEvent)) return;
         }
 
+        awaitingSessionRestore = false;
         refreshAfterSessionProjection(recoverySwitchWillRefreshCatalog);
         recoverySwitchWillRefreshCatalog = false;
+        completeConnectionRecovery();
       };
 
       ws.addEventListener("message", (ev) => {
@@ -1002,13 +1049,13 @@ export const useWebSocketConnection = () => {
           discardBufferedCommandType("session.restore");
           discardBufferedCommandType("conversation.list");
           discardBufferedCommandType("commands.list");
+          recoverySnapshotPending = false;
           recoveryReplayPending = Number(parsed.replayed_events || 0) > 0;
           recoverySwitchPending = parsed.type === "session.restored"
             && parsed.conversation_switched_follows === true;
           recoverySwitchWillRefreshCatalog = recoverySwitchPending;
-          if (recoveryReplayPending || recoverySwitchPending) {
-            awaitingSessionRestore = true;
-          } else if (awaitingSessionRestore) {
+          if (recoveryReplayPending || recoverySwitchPending) awaitingSessionRestore = true;
+          if (awaitingSessionRestore) {
             finishSessionRecovery();
           } else {
             refreshAfterSessionProjection(false);
@@ -1017,7 +1064,7 @@ export const useWebSocketConnection = () => {
         }
         if (awaitingSessionRestore && parsed.type === "conversation.switched") {
           recoverySwitchPending = false;
-          if (!recoveryReplayPending) finishSessionRecovery();
+          finishSessionRecovery();
           return;
         }
         if (awaitingSessionRestore && parsed.type === "session.replay") {
@@ -1026,7 +1073,7 @@ export const useWebSocketConnection = () => {
             return;
           }
           recoveryReplayPending = false;
-          if (!recoverySwitchPending) finishSessionRecovery();
+          finishSessionRecovery();
         }
       });
     };
@@ -1116,6 +1163,7 @@ const RUNTIME_EVENT_TYPES = new Set<string>([
   "context_side_query_result", "turn.plan.updated", "task.update",
   "subagent.start", "subagent.event", "subagent.progress", "subagent.done",
   "budget_update", "budget.warning", "subagent.mailbox",
+  "parent.notifications",
   "subagent.plan_approval_requested", "permission.mode.updated",
   "runtime.capabilities", "mcp.lifecycle", "mcp.progress",
   // Handled inside runtimeEvents' default branch:
@@ -1185,6 +1233,13 @@ const EVENT_DISPATCHERS: ReadonlyArray<{
   { types: DIFF_EVENT_TYPES, dispatch: (e) => handleDiffEvent(e) },
 ];
 
+// Transport and replay envelopes are owned by the websocket layer itself.
+const TRANSPORT_EVENT_TYPES = new Set<string>([
+  "pong",
+  "client.command.ack",
+  "session.replay",
+]);
+
 // Assert disjoint ownership once at module load so a duplicate registration
 // fails loudly instead of silently ordering one reducer ahead of another.
 {
@@ -1196,6 +1251,17 @@ const EVENT_DISPATCHERS: ReadonlyArray<{
       }
       seen.add(type);
     }
+  }
+  for (const type of TRANSPORT_EVENT_TYPES) seen.add(type);
+  const missing = [...SERVER_EVENT_TYPES].filter((type) => !seen.has(type));
+  const unknown = [...seen].filter(
+    (type) => !SERVER_EVENT_TYPES.has(type as ServerEventType),
+  );
+  if (missing.length || unknown.length) {
+    throw new Error(
+      `[useWebSocket] Event ownership mismatch. Missing: ${missing.join(", ") || "none"}; `
+      + `unknown: ${unknown.join(", ") || "none"}.`,
+    );
   }
 }
 const EVENT_OWNER = new Map<string, ServerEventDispatcher>();
@@ -1209,8 +1275,6 @@ for (const group of EVENT_DISPATCHERS) {
 // (heartbeat pong, client.command.ack in acknowledgeClientCommand). They are
 // still reported to subscribers as handled events, but never enter a business
 // reducer.
-const TRANSPORT_EVENT_TYPES = new Set<string>(["pong", "client.command.ack"]);
-
 const handleServerEvent = (e: ServerEvent): boolean => {
   if (e.type === "session.replay") {
     for (const replayed of eventsFromSessionReplay(e)) {

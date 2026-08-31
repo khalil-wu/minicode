@@ -1,8 +1,17 @@
 import { ClipboardCopy, FileText, LoaderCircle, TriangleAlert } from "lucide-react";
-import { lazy, Suspense, type CSSProperties, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { MarkdownRenderer } from "../chat/messages/MarkdownRenderer";
 import { safeJsonParse } from "../lib/safe-parse";
 import { useAppStore } from "../stores";
+import { getWebSocket } from "../hooks/useWebSocket";
+import {
+  artifactImageResourceUrl,
+  inlineImageResourceUrl,
+  isDisplayableImageMediaType,
+  isInlineImageResourceUrl,
+  withPreviewCacheBust,
+} from "../lib/artifact-resource";
+import { selectPreviewSurface } from "../lib/preview-projection";
 
 const PdfAttachmentPreview = lazy(() =>
   import("./PdfAttachmentPreview").then((module) => ({ default: module.PdfAttachmentPreview })),
@@ -22,7 +31,7 @@ const prettyContent = (content: string): string => {
 
 const isSafePreviewImageUrl = (url: string): boolean => {
   const trimmed = url.trim();
-  if (/^data:image\/(?:png|jpe?g|gif|webp|avif);base64,[a-z0-9+/=\s]+$/i.test(trimmed)) return true;
+  if (inlineImageResourceUrl(trimmed)) return true;
   try {
     return ["http:", "https:", "blob:"].includes(new URL(trimmed).protocol);
   } catch {
@@ -38,13 +47,12 @@ const isSafePreviewDocumentUrl = (url: string): boolean => {
   }
 };
 
-const isSafePreviewImageArtifact = (mediaType?: string, url?: string): boolean =>
-  Boolean(
-    mediaType?.startsWith("image/")
-      && mediaType.toLowerCase() !== "image/svg+xml"
-      && url
-      && isSafePreviewImageUrl(url),
-  );
+const isSafePreviewImageArtifact = (
+  mediaType?: string,
+  url?: string,
+  source?: "artifact" | "attachment" | "workspace" | "local",
+): boolean => isDisplayableImageMediaType(mediaType)
+  && (source === "artifact" || source === "attachment" || isSafePreviewImageUrl(String(url || "")));
 
 export const PreviewPanel = () => (
   <div className="flex flex-col flex-1 min-h-0 min-w-0" data-preview-mode="artifact">
@@ -53,7 +61,9 @@ export const PreviewPanel = () => (
 );
 
 const ArtifactView = () => {
-  const previewArtifact = useAppStore((state) => state.previewArtifact);
+  const conversationId = useAppStore((state) => selectPreviewSurface(state).conversationId);
+  const previewArtifact = useAppStore((state) => selectPreviewSurface(state).previewArtifact);
+  const isConnected = useAppStore((state) => state.isConnected);
 
   if (!previewArtifact) {
     return <ArtifactState icon={<FileText size={18} />} label="在对话中打开文件后，可在这里查看完整内容。" />;
@@ -65,24 +75,41 @@ const ArtifactView = () => {
   const rawContent = String(previewArtifact.content || "");
   const warning = String(previewArtifact.warning || "").trim();
   const hasContent = rawContent.trim().length > 0;
+  const normalizedMediaType = String(previewArtifact.mediaType || "").split(";", 1)[0].trim().toLowerCase();
   const isBinary = previewArtifact.kind === "binary"
-    || String(previewArtifact.mediaType || "").toLowerCase() === "application/octet-stream";
+    || normalizedMediaType === "application/octet-stream";
   const contentIsDiagnostic = Boolean(warning && rawContent.trim() === warning);
+  const isOwnerScopedImage = isDisplayableImageMediaType(previewArtifact.mediaType)
+    && (previewArtifact.source === "artifact" || previewArtifact.source === "attachment");
+  const imageView = isSafePreviewImageArtifact(
+    previewArtifact.mediaType,
+    artifactUrl,
+    previewArtifact.source,
+  ) ? (
+    <ArtifactImageView
+      key={`${previewArtifact.artifactId}:${artifactUrl}`}
+      artifactId={previewArtifact.artifactId}
+      conversationId={conversationId || undefined}
+      name={previewArtifact.name || "生成图片"}
+      sizeLabel={sizeLabel || previewArtifact.mediaType || "图片"}
+      mediaType={previewArtifact.mediaType}
+      url={artifactUrl}
+      source={previewArtifact.source}
+      isConnected={isConnected}
+    />
+  ) : null;
 
+  // A failed attachment fetch is transport state, not the persisted image's
+  // terminal state. Let the owner-scoped resource rebuild itself after restore.
+  if (isOwnerScopedImage) return imageView;
   if (previewArtifact.loading) {
     return <ArtifactFrame name={name} sizeLabel="加载中"><ArtifactState icon={<LoaderCircle size={18} className="animate-spin" />} label="正在加载附件预览" /></ArtifactFrame>;
   }
   if (previewArtifact.error) {
     return <ArtifactFrame name={name} sizeLabel="无法预览"><ArtifactState icon={<TriangleAlert size={18} />} label={previewArtifact.error} danger /></ArtifactFrame>;
   }
-  if (isSafePreviewImageArtifact(previewArtifact.mediaType, artifactUrl)) {
-    return (
-      <ArtifactFrame name={previewArtifact.name || "生成图片"} sizeLabel={sizeLabel || previewArtifact.mediaType || "图片"}>
-        <div style={imageContentStyle}><img src={artifactUrl} alt={previewArtifact.name || "生成图片"} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} /></div>
-      </ArtifactFrame>
-    );
-  }
-  if (previewArtifact.url && previewArtifact.mediaType === "application/pdf" && isSafePreviewDocumentUrl(previewArtifact.url)) {
+  if (imageView) return imageView;
+  if (previewArtifact.url && normalizedMediaType === "application/pdf" && isSafePreviewDocumentUrl(previewArtifact.url)) {
     return (
       <ArtifactFrame name={previewArtifact.name || "生成的 PDF"} sizeLabel={sizeLabel ? `PDF · ${sizeLabel}` : "PDF"}>
         <Suspense fallback={<ArtifactState icon={<LoaderCircle size={18} className="animate-spin" />} label="正在准备 PDF 预览" />}>
@@ -93,7 +120,7 @@ const ArtifactView = () => {
   }
 
   const content = prettyContent(rawContent);
-  const richExtracted = isRichExtractedPreview(previewArtifact.mediaType);
+  const richExtracted = isRichExtractedPreview(normalizedMediaType);
   const canCopy = hasContent && !isBinary && !contentIsDiagnostic;
   const header = <ArtifactHeader artifactId={name} sizeLabel={previewTypeLabel(previewArtifact.mediaType, previewArtifact.kind, sizeLabel)} onCopy={canCopy ? () => void navigator.clipboard?.writeText(rawContent) : undefined} />;
 
@@ -110,6 +137,89 @@ const ArtifactView = () => {
       {previewArtifact.preview && previewArtifact.preview !== rawContent && <div style={artifactNoticeStyle}>{previewArtifact.preview}</div>}
       {previewArtifact.truncated && <div style={artifactNoticeStyle}>文件较大，仅显示前 {rawContent.length.toLocaleString()} 个字符。</div>}
       {richExtracted ? <div style={artifactRichContentStyle}><MarkdownRenderer content={content} /></div> : <pre style={textContentStyle}>{content}</pre>}
+    </ArtifactFrame>
+  );
+};
+
+const ArtifactImageView = ({
+  artifactId,
+  conversationId,
+  name,
+  sizeLabel,
+  mediaType,
+  url,
+  source,
+  isConnected,
+}: {
+  artifactId: string;
+  conversationId?: string;
+  name: string;
+  sizeLabel: string;
+  mediaType?: string;
+  url: string;
+  source?: "artifact" | "attachment" | "workspace" | "local";
+  isConnected: boolean;
+}) => {
+  const [retryNonce, setRetryNonce] = useState(0);
+  const [failed, setFailed] = useState(false);
+  const sessionId = getWebSocket()?.sessionId?.trim() || "";
+  const normalizedMediaType = String(mediaType || "").split(";", 1)[0].trim().toLowerCase();
+  const inlineUrl = isInlineImageResourceUrl(url);
+  const freshUrl = useMemo(() => artifactImageResourceUrl({
+    artifactId,
+    conversationId,
+    sessionId,
+    source,
+    originalUrl: url,
+    isConnected,
+  }), [artifactId, conversationId, isConnected, sessionId, source, url]);
+  const requiresConnection = !inlineUrl && (source === "artifact" || source === "attachment");
+  useEffect(() => {
+    setRetryNonce(0);
+    setFailed(false);
+  }, [artifactId, conversationId, isConnected, normalizedMediaType, sessionId, url]);
+  const imageUrl = withPreviewCacheBust(freshUrl, retryNonce);
+
+  if (!imageUrl || failed) {
+    return (
+      <ArtifactFrame name={name} sizeLabel="无法预览">
+        <ArtifactState
+          icon={<TriangleAlert size={18} />}
+          label={!conversationId && requiresConnection
+            ? "图片未关联到会话，暂时无法预览。"
+            : requiresConnection && (!isConnected || !sessionId)
+              ? "连接恢复后可预览图片。"
+              : "图片加载失败。"}
+          danger={!requiresConnection || Boolean(imageUrl) || Boolean(conversationId && isConnected && sessionId)}
+        />
+        {imageUrl && (
+          <button
+            type="button"
+            aria-label="重试图片预览"
+            onClick={() => {
+              setFailed(false);
+              setRetryNonce((value) => value + 1);
+            }}
+            style={previewRetryButtonStyle}
+          >
+            重试
+          </button>
+        )}
+      </ArtifactFrame>
+    );
+  }
+
+  return (
+    <ArtifactFrame name={name} sizeLabel={sizeLabel}>
+      <div style={imageContentStyle}>
+        <img
+          key={imageUrl}
+          src={imageUrl}
+          alt={name}
+          style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+          onError={() => setFailed(true)}
+        />
+      </div>
     </ArtifactFrame>
   );
 };
@@ -179,5 +289,6 @@ const stateStyle: CSSProperties = { flex: 1, minHeight: 0, display: "grid", plac
 const headerStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderBottom: "1px solid var(--border-subtle)", background: "var(--surface-page)", fontSize: "var(--text-xs)" };
 const headerNameStyle: CSSProperties = { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-mono)", color: "var(--text-secondary)" };
 const copyButtonStyle: CSSProperties = { width: 26, height: 24, border: 0, borderRadius: "var(--radius-sm, 4px)", background: "transparent", color: "var(--text-muted)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" };
+const previewRetryButtonStyle: CSSProperties = { alignSelf: "center", marginBottom: 16, padding: "5px 12px", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", background: "var(--surface-soft)", color: "var(--text-primary)", cursor: "pointer" };
 const artifactNoticeStyle: CSSProperties = { padding: "6px 10px", borderBottom: "1px solid var(--border-subtle)", background: "var(--surface-soft)", color: "var(--text-muted)", fontSize: "var(--text-xs)" };
 const artifactRichContentStyle: CSSProperties = { flex: 1, minHeight: 0, overflow: "auto", padding: "14px 16px", background: "var(--surface-base)", color: "var(--text-primary)" };

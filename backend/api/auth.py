@@ -100,16 +100,6 @@ def _workspace_raw_token_signature(path: str, workspace_root: str, expires_at: i
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
-def _build_workspace_raw_token(path: str, workspace_root: str = "", *, now: int | None = None) -> str:
-    secret = _runtime_token()
-    if not secret:
-        return ""
-    current_time = int(time.time() if now is None else now)
-    expires_at = current_time + WORKSPACE_RAW_TOKEN_TTL_SECONDS
-    signature = _workspace_raw_token_signature(path, workspace_root, expires_at, secret)
-    return f"{expires_at}.{signature}"
-
-
 def _is_workspace_raw_request(request: Request) -> bool:
     path = request.scope.get("path", "")
     return path in {"/api/workspace/raw", "/api/v1/workspace/raw"}
@@ -141,21 +131,6 @@ def _skill_asset_token_signature(skill_path: str, variant: str, expires_at: int,
     payload = f"skill_asset:v1:{skill_path}:{variant}:{expires_at}".encode("utf-8")
     digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-
-
-def _build_skill_asset_token(
-    skill_path: str,
-    variant: str,
-    *,
-    now: int | None = None,
-) -> str:
-    secret = _runtime_token()
-    if not secret:
-        return ""
-    current_time = int(time.time() if now is None else now)
-    expires_at = current_time + SKILL_ASSET_TOKEN_TTL_SECONDS
-    signature = _skill_asset_token_signature(skill_path, variant, expires_at, secret)
-    return f"{expires_at}.{signature}"
 
 
 def _is_skill_asset_request(request: Request) -> bool:
@@ -226,28 +201,6 @@ def _attachment_asset_token_signature(
     ).encode("utf-8")
     digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-
-
-def _build_attachment_asset_token(
-    artifact_id: str,
-    session_id: str,
-    conversation_id: str,
-    *,
-    now: int | None = None,
-) -> str:
-    secret = _runtime_token()
-    if not secret:
-        return ""
-    current_time = int(time.time() if now is None else now)
-    expires_at = current_time + ATTACHMENT_ASSET_TOKEN_TTL_SECONDS
-    signature = _attachment_asset_token_signature(
-        artifact_id,
-        session_id,
-        conversation_id,
-        expires_at,
-        secret,
-    )
-    return f"{expires_at}.{signature}"
 
 
 def _is_attachment_asset_token_authorized(request: Request) -> bool:

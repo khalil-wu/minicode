@@ -153,6 +153,8 @@ def main() -> int:
             f"loop.py exceeds byte budget: {loop_byte_count} > {LOOP_BYTE_BUDGET} bytes"
         )
     provider_stream_text = PROVIDER_STREAM_RUNTIME.read_text(encoding="utf-8")
+    provider_stream_failure_text = PROVIDER_STREAM_FAILURES.read_text(encoding="utf-8")
+    provider_stream_settlement_text = PROVIDER_STREAM_SETTLEMENT.read_text(encoding="utf-8")
     provider_stream_line_count = len(provider_stream_text.splitlines())
     if provider_stream_line_count > PROVIDER_STREAM_LINE_BUDGET:
         failures.append(
@@ -170,8 +172,8 @@ def main() -> int:
         failures.append("loop.py must not depend on ToolBatchRunner directly")
     if "backend.agent.tool_batch_runner" not in tool_transition_imports:
         failures.append("tool_transition.py must own ToolBatchRunner")
-    if "backend.agent.tool_execution" not in runner_imports:
-        failures.append("ToolBatchRunner must own the tool_execution dependency")
+    if "backend.agent.tool_batch_execution" not in runner_imports:
+        failures.append("ToolBatchRunner must own the tool_batch_execution dependency")
     if "execute_tool_batch as _execute_tool_batch" in loop_text:
         failures.append("loop.py must not call execute_tool_batch directly")
     if "backend.agent.loop" in runner_imports:
@@ -204,12 +206,17 @@ def main() -> int:
         failures.append("loop.py must not complete runtime records directly")
     if "save_run_checkpoint(" in loop_text or "clear_checkpoints(" in loop_text:
         failures.append("TurnKernel must own terminal checkpoint finalization")
+    provider_lifecycle_text = (
+        provider_stream_text
+        + provider_stream_failure_text
+        + provider_stream_settlement_text
+    )
     if (
         "start_provider_attempt(" not in provider_stream_text
-        or "close_provider_attempt(" not in provider_stream_text
+        or "close_provider_attempt(" not in provider_lifecycle_text
     ):
         failures.append(
-            "provider_stream_runtime.py must bracket provider attempts through TurnKernel"
+            "provider stream lifecycle must bracket attempts through TurnKernel"
         )
     if "start_provider_attempt(" in loop_text or "close_provider_attempt(" in loop_text:
         failures.append("provider attempt lifecycle must not leak back into loop.py")

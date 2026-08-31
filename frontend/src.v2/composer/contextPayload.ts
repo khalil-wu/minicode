@@ -6,6 +6,7 @@ import type { MessageAttachmentRef, MessageContextRef } from "../stores/types";
 import { MAX_IMAGE_SOURCE_BYTES, prepareNativeImageFile } from "./imagePreparation";
 import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
 import { mediaTypeForPath } from "../lib/media-types";
+import { formatBytes } from "../lib/format-bytes";
 
 // Match MiniCode's provider-facing media envelope. Anthropic's 5 MiB
 // encoded-image cap leaves 3.75 MiB for raw bytes after base64 expansion; PDFs
@@ -234,12 +235,6 @@ const basename = (path: string): string =>
 
 const normalizePathKey = (path: string, workspaceRoot = ""): string =>
   workspaceFilePathComparisonKey(path, workspaceRoot);
-
-const formatBytes = (bytes: number): string => {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-};
 
 const splitAnchor = (value: string): { path: string; anchor: string } => {
   const index = value.lastIndexOf("#");

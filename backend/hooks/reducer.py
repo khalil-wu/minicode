@@ -80,6 +80,10 @@ def reduce_hook_executions(
         stdout = execution.stdout.strip()
         stderr = execution.stderr.strip()
         exit_code = execution.exit_code
+        json_result = _parse_json_object(stdout)
+        suppress_output = bool(
+            json_result is not None and json_result.get("suppress_output") is True
+        )
         source_value = str(getattr(execution.entry, "source", "") or "").casefold()
         execution_blocking_allowed = not (
             event_key == "config_change"
@@ -92,7 +96,7 @@ def reduce_hook_executions(
                 "legacy_managed_config_mdm",
             }
         )
-        if stdout:
+        if stdout and not suppress_output:
             outputs.append(stdout)
         summaries.append(
             {
@@ -104,11 +108,20 @@ def reduce_hook_executions(
                 "completion_order": execution.completion_order,
                 "duration_ms": execution.duration_ms,
                 "exit_code": exit_code,
-                "status": "succeeded" if exit_code == 0 else "failed",
+                "status": (
+                    "backgrounded"
+                    if execution.backgrounded
+                    else "succeeded"
+                    if exit_code == 0
+                    else "failed"
+                ),
                 "status_message": execution.entry.status_message,
                 **({"runtime_error": True} if execution.execution_failed else {}),
             }
         )
+
+        if execution.backgrounded:
+            continue
 
         if execution.execution_failed:
             # A launcher/runtime failure is visible but does not silently block
@@ -120,7 +133,6 @@ def reduce_hook_executions(
                 failed = True
             continue
 
-        json_result = _parse_json_object(stdout)
         event_matches = True
         if json_result is not None:
             actual_event = str(json_result.get("event") or "")
@@ -288,6 +300,8 @@ def execution_succeeded_for_once(
     expected_event_name: str,
 ) -> bool:
     """Consume a once hook only after a semantically valid success."""
+    if execution.backgrounded:
+        return False
     if execution.exit_code != 0:
         return False
     payload = _parse_json_object(execution.stdout)

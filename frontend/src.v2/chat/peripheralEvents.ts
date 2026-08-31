@@ -10,6 +10,7 @@ import type {
   ServerEvent,
   WorkspaceImportedEvent,
 } from "../protocol/events";
+import { isReplayedEvent } from "../protocol/events";
 import type { McpServerStatus, TerminalSessionInfo } from "../stores/types";
 import { pushToast } from "../overlays/ToastContainer";
 import { sendClientCommand } from "../protocol/ws-outbox";
@@ -25,9 +26,6 @@ const terminalEventTargetsActiveConversation = (event: ServerEvent): boolean => 
   const owner = terminalEventConversationId(event);
   return Boolean(owner && owner === (useAppStore.getState().conversationId || ""));
 };
-
-const isReplayedEvent = (event: ServerEvent): boolean =>
-  (event as ServerEvent & { __replayed?: boolean }).__replayed === true;
 
 const eventTimestampMs = (event: ServerEvent): number => {
   const parsed = Date.parse(String(event.timestamp || ""));

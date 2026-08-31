@@ -286,7 +286,8 @@ const IPC_CAPABILITIES = new Set([
   "minicode:update:activity", "minicode:update:check", "minicode:update:download", "minicode:update:install",
   "minicode:update:preflight", "minicode:update:status:get",
   "minicode:window:close", "minicode:window:maximize", "minicode:window:minimize",
-  "minicode:workspace:trust",
+  "minicode:runtime:get",
+  "minicode:workspace:pickDirectory", "minicode:workspace:trust",
 ]);
 
 function assertIpcCapability(channel, { logger } = {}) {

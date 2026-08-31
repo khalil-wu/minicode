@@ -344,9 +344,11 @@ def _definition_from_handler(
 
     policy = event_policy(event)
     timeout = _positive_float(raw_handler.get("timeout"))
-    if timeout is None:
-        timeout = policy.default_timeout_seconds
-    if policy.max_timeout_seconds is not None and timeout > policy.max_timeout_seconds:
+    if (
+        timeout is not None
+        and policy.max_timeout_seconds is not None
+        and timeout > policy.max_timeout_seconds
+    ):
         warnings.append(
             f"Clamping {event} hook timeout to {policy.max_timeout_seconds:g}s in {source_path}"
         )
@@ -605,9 +607,3 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     if text in {"0", "false", "no", "off", "disabled"}:
         return False
     return default
-
-
-def _substitute_env(command: str, env: Mapping[str, str]) -> str:
-    for key, value in env.items():
-        command = command.replace(f"${{{key}}}", value)
-    return command

@@ -8,7 +8,6 @@ from typing import Any, Literal
 from backend.agent.loop_preflight import hook_manager_has_hooks
 from backend.agent.message import AgentEvent
 from backend.agent.response_utils import append_assistant_history
-from backend.hooks import get_hook_manager
 from backend.hooks.manager import HookEvent
 
 
@@ -31,15 +30,30 @@ async def apply_stop_hook_policy(
     provider_phase: str,
     provider_items: list[dict[str, Any]],
 ) -> AcceptanceResult:
-    hook_manager = get_hook_manager()
-    if not hook_manager or not hook_manager_has_hooks(hook_manager, HookEvent.STOP):
-        return AcceptanceResult("accept")
-    hook_result = await hook_manager.run_stop(
-        user_message,
-        candidate_text,
-        tool_results=state.tool_calls,
-        stop_hook_active=state.stop_hook_feedback_count > 0,
+    hook_manager = context_builder.hook_manager
+    prompt_context = (
+        state.prompt_context if isinstance(state.prompt_context, dict) else {}
     )
+    subagent_id = str(prompt_context.get("subagent_id") or "").strip()
+    agent_type = str(prompt_context.get("subagent") or "").strip()
+    hook_event = HookEvent.SUBAGENT_STOP if subagent_id else HookEvent.STOP
+    if not hook_manager or not hook_manager_has_hooks(hook_manager, hook_event):
+        return AcceptanceResult("accept")
+    if subagent_id:
+        prompt_context.pop("subagent_stop_prevented_continuation", None)
+        hook_result = await hook_manager.run_subagent_stop(
+            subagent_id=subagent_id,
+            agent_type=agent_type,
+            status="completed",
+            summary=candidate_text,
+        )
+    else:
+        hook_result = await hook_manager.run_stop(
+            user_message,
+            candidate_text,
+            tool_results=state.tool_calls,
+            stop_hook_active=state.stop_hook_feedback_count > 0,
+        )
     notice_events = (
         (AgentEvent(type="system_notice", data={"content": hook_result.system_message}),)
         if hook_result.system_message
@@ -49,8 +63,11 @@ async def apply_stop_hook_policy(
     # another model continuation. The candidate answer is accepted as the
     # terminal response; it is not fed back as another retry prompt.
     if hook_result.prevent_continuation:
+        if subagent_id:
+            prompt_context["subagent_stop_prevented_continuation"] = True
         return AcceptanceResult("accept", notice_events)
-    if not hook_result.has_feedback:
+    feedback = str(hook_result.feedback or hook_result.message or "").strip()
+    if not hook_result.blocked and not feedback:
         return AcceptanceResult("accept", notice_events)
 
     # A blocking Stop hook starts another model turn in Claude Code. It is not
@@ -69,6 +86,6 @@ async def apply_stop_hook_policy(
         phase=provider_phase or "final_answer",
         provider_items=provider_items,
     )
-    context_builder.append_user(hook_result.feedback)
+    context_builder.append_user(feedback)
     stream_text.reset_for_retry()
     return AcceptanceResult("retry", events)

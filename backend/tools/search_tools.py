@@ -14,7 +14,6 @@ import os
 import re
 import time
 from collections import deque
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -34,8 +33,10 @@ from backend.tools.base import (
     truncate_tool_result,
 )
 from backend.tools.contracts import ToolSpec
+from backend.tools.command_support import _as_bool
 from backend.tools.path_resolution import (
     PathTraversalError,
+    _is_bypass_mode,
     _is_declared_readable_path,
     denied_path_patterns,
 )
@@ -49,36 +50,6 @@ except ImportError:  # pragma: no cover - declared dependency, defensive fallbac
 # Default result budget for a grep. 250 keeps large-codebase searches useful
 # without flooding one tool result.
 GLOB_MAX_MATCHES = 100
-class RegexSafetyLimitError(RuntimeError):
-    """Raised when a model-supplied regex exceeds the per-operation budget."""
-
-
-class SearchResourceLimitError(RuntimeError):
-    """Raised when the Python fallback cannot complete within its bounds."""
-
-
-@dataclass
-class _FileGrepResult:
-    matches: list[str]
-    output_limit_reached: bool = False
-    lines_truncated: bool = False
-    context_truncated: bool = False
-
-
-@dataclass
-class _GrepBatchResult:
-    matches: list[str]
-    files_searched: int
-    output_limit_reached: bool = False
-    lines_truncated: bool = False
-    context_truncated: bool = False
-
-
-@dataclass
-class _GlobFallbackResult:
-    matches: list[str]
-    truncated: bool
-    output_limit_reached: bool = False
 
 
 _NESTED_QUANTIFIER_RE = re.compile(
@@ -88,8 +59,9 @@ _NESTED_QUANTIFIER_RE = re.compile(
 
 
 from backend.tools.search_support import (
+    RegexSafetyLimitError,
+    SearchResourceLimitError,
     _apply_pagination,
-    _as_bool,
     _bounded_search_output,
     _coerce_head_limit,
     _coerce_nonnegative_int,
@@ -98,7 +70,6 @@ from backend.tools.search_support import (
     _glob_with_python,
     _glob_with_ripgrep,
     _grep_candidates,
-    _is_bypass_mode,
     _iter_candidate_files,
     _normalize_file_extensions,
     _normalize_output_mode,

@@ -506,12 +506,6 @@ def provider_reasoning_effort_levels(
     )
 
 
-def provider_supports_reasoning_effort(provider: str, section: dict[str, Any] | None) -> bool:
-    """Return True when the selected model declares reasoning-effort support."""
-
-    return bool(provider_reasoning_effort_levels(provider, section))
-
-
 def active_provider_reasoning_effort_levels(
     payload: dict[str, Any] | None = None,
 ) -> tuple[str, ...]:
@@ -522,10 +516,6 @@ def active_provider_reasoning_effort_levels(
         provider,
         section if isinstance(section, dict) else None,
     )
-
-
-def active_provider_supports_reasoning_effort(payload: dict[str, Any] | None = None) -> bool:
-    return bool(active_provider_reasoning_effort_levels(payload))
 
 
 def _update_settings_json(mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]:

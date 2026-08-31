@@ -44,10 +44,8 @@ def build_subagent_status_event(
         if isinstance(raw_result, dict)
         else None
     )
-    result_content = ""
     result_error = ""
     if isinstance(result, dict):
-        result_content = str(result.get("content") or "").strip()
         result_error = str(result.get("error") or "").strip()
 
     if status in {"pending", "running", "blocked"}:

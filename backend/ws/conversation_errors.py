@@ -33,7 +33,7 @@ async def emit_conversation_not_found(
     *,
     sync_list: bool = True,
 ) -> None:
-    await session._send_event(conversation_not_found_event(conversation_id))
+    await session.send_event(conversation_not_found_event(conversation_id))
     if not sync_list:
         return
 
@@ -49,4 +49,4 @@ async def emit_conversation_not_found(
                 active_id,
             )
             raise
-    await session._send_conversation_list()
+    await session.send_conversation_list()

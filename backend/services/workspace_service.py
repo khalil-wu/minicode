@@ -69,6 +69,7 @@ def parse_workspace_import_request(data: dict[str, Any]) -> WorkspaceImportReque
 
 def parse_workspace_activation_request(path_str: str) -> WorkspaceActivationRequest:
     from backend.workspace.path_utils import normalize_project_import_path
+    from backend.workspace.trust import is_workspace_trusted
 
     clean_path = str(path_str or "").strip()
     project_path = normalize_project_import_path(clean_path)
@@ -83,6 +84,17 @@ def parse_workspace_activation_request(path_str: str) -> WorkspaceActivationRequ
                 error_code="workspace_missing",
             ),
         )
+    if not is_workspace_trusted(project_path):
+        return WorkspaceActivationRequest(
+            clean_path,
+            project_path,
+            AgentEvent.error(
+                f"Workspace is not trusted: {clean_path}",
+                recoverable=True,
+                error_type="workspace",
+                error_code="workspace_untrusted",
+            ),
+        )
     return WorkspaceActivationRequest(clean_path, project_path)
 
 
@@ -92,6 +104,7 @@ def parse_user_message_workspace_request(
     conversation_id: str = "",
 ) -> UserMessageWorkspaceRequest:
     from backend.workspace.path_utils import normalize_project_import_path
+    from backend.workspace.trust import is_workspace_trusted
 
     clean_path = str(requested_workspace_root or "").strip()
     try:
@@ -110,6 +123,21 @@ def parse_user_message_workspace_request(
         if conversation_id:
             error_event.data["conversation_id"] = conversation_id
         return UserMessageWorkspaceRequest(clean_path, requested_workspace_path, error_event)
+
+    if not is_workspace_trusted(requested_workspace_path):
+        error_event = AgentEvent.error(
+            f"Workspace is not trusted: {clean_path}",
+            recoverable=True,
+            error_type="workspace",
+            error_code="workspace_untrusted",
+        )
+        if conversation_id:
+            error_event.data["conversation_id"] = conversation_id
+        return UserMessageWorkspaceRequest(
+            clean_path,
+            requested_workspace_path,
+            error_event,
+        )
 
     return UserMessageWorkspaceRequest(clean_path, requested_workspace_path)
 
@@ -153,12 +181,6 @@ def create_workspace_context(project_path: Path) -> Any:
     from backend.workspace.context import WorkspaceContext
 
     return WorkspaceContext(project_path)
-
-
-def set_active_workspace(project_path: Path) -> None:
-    from backend.workspace.state import set_active_workspace_root
-
-    set_active_workspace_root(project_path)
 
 
 def record_recent_workspace_project(project_path: Path, metadata: Any) -> None:
@@ -295,7 +317,9 @@ def is_path_within(path: Path, parent: Path) -> bool:
         return False
 
 
-def resolve_workspace_cwd(workspace_root: Path, cwd: str | None = None) -> Path:
+def resolve_workspace_cwd(workspace_root: Path | None, cwd: str | None = None) -> Path:
+    if workspace_root is None:
+        raise ValueError("Open a workspace before selecting a working directory")
     root = workspace_root.resolve()
     candidate = Path(cwd).expanduser().resolve() if cwd else root
     if not is_path_within(candidate, root):
@@ -305,7 +329,12 @@ def resolve_workspace_cwd(workspace_root: Path, cwd: str | None = None) -> Path:
     return candidate
 
 
-def resolve_requested_workspace(workspace_root: Path, requested_workspace: str | None = None) -> Path:
+def resolve_requested_workspace(
+    workspace_root: Path | None,
+    requested_workspace: str | None = None,
+) -> Path:
+    if workspace_root is None:
+        raise ValueError("Open a workspace before running this command")
     root = workspace_root.resolve()
     if not requested_workspace:
         return root
@@ -380,7 +409,13 @@ def parse_gh_pr_status(output: str) -> tuple[dict[str, Any] | None, list[dict[st
 
 
 async def fetch_git_pr_status_payload(workspace_root: Any) -> dict[str, Any]:
-    automation = read_pr_automation(workspace_root)
+    raw_workspace_root = str(workspace_root or "").strip()
+    if not raw_workspace_root:
+        raise ValueError("Open a workspace before checking pull request status")
+    resolved_workspace_root = Path(raw_workspace_root).expanduser().resolve()
+    if not resolved_workspace_root.is_dir():
+        raise ValueError(f"Workspace does not exist or is not a directory: {resolved_workspace_root}")
+    automation = read_pr_automation(resolved_workspace_root)
     gh_path = shutil.which("gh")
     if not gh_path:
         payload = git_pr_status_payload(error="gh CLI not found")
@@ -388,7 +423,7 @@ async def fetch_git_pr_status_payload(workspace_root: Any) -> dict[str, Any]:
         return payload
 
     try:
-        code, out = await _run_gh_pr_view(gh_path, cwd=str(workspace_root))
+        code, out = await _run_gh_pr_view(gh_path, cwd=str(resolved_workspace_root))
         if code == 0 and out:
             pr_info, checks = parse_gh_pr_status(out)
             # cc ghPrStatus guards: skip PRs from the default branch (gh pr
@@ -410,8 +445,11 @@ async def fetch_git_pr_status_payload(workspace_root: Any) -> dict[str, Any]:
 
 
 def _pr_automation_path(workspace_root: Any) -> Path | None:
+    raw_workspace_root = str(workspace_root or "").strip()
+    if not raw_workspace_root:
+        return None
     try:
-        root = Path(str(workspace_root or "")).expanduser().resolve()
+        root = Path(raw_workspace_root).expanduser().resolve()
     except (OSError, ValueError):
         return None
     return root / ".minicode" / "pr_automation.json" if root.is_dir() else None

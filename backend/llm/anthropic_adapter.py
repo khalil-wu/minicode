@@ -17,7 +17,6 @@ import logging
 import os
 import re
 from collections.abc import Mapping
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
@@ -28,6 +27,7 @@ from backend.agent.lifecycle_errors import LifecycleStaleError as ExtensionStale
 from backend.llm.base import (
     emit_provider_lifecycle_request,
     LLMAdapter,
+    LLMSideCallContext,
     LLMMessage,
     ProviderActivityEvent,
     StreamEvent,
@@ -160,10 +160,6 @@ class AnthropicAdapter(LLMAdapter):
         self._cache_ttl_1h_latches: dict[str, bool] = {}
         self._http_client: httpx.AsyncClient | None = None
         self._tool_schema_cache = {}
-        self._simple_max_tokens: ContextVar[int | None] = ContextVar(
-            "anthropic_simple_max_tokens",
-            default=None,
-        )
 
     def supports_hosted_web_search(self) -> bool:
         # Hosted search is part of the Anthropic provider contract. A custom
@@ -275,10 +271,27 @@ class AnthropicAdapter(LLMAdapter):
         tools: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        async for event in self._stream_chat_with_context(
+            messages,
+            tools=tools,
+            metadata=metadata,
+            context=None,
+        ):
+            yield event
+
+    async def _stream_chat_with_context(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
+        *,
+        context: LLMSideCallContext | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[StreamEvent]:
         """流式调用 Claude Messages API。"""
         # 分离 system prompt + 消息交替保证
         system_text, api_messages = self._convert_messages(messages)
-        side_options = self.current_side_query_options()
+        side_options = context.options if context is not None else None
         prompt_cache_enabled = (
             side_options is None or side_options.enable_prompt_cache
         )
@@ -287,9 +300,13 @@ class AnthropicAdapter(LLMAdapter):
             if side_options is not None and side_options.use_small_fast_model
             else self._model
         )
-        requested_max_tokens = self._simple_max_tokens.get()
-        if requested_max_tokens is None and side_options is not None:
-            requested_max_tokens = side_options.max_tokens
+        requested_max_tokens = (
+            max_tokens
+            if max_tokens is not None
+            else side_options.max_tokens
+            if side_options is not None
+            else None
+        )
         max_output_tokens = (
             min(self._max_tokens, max(1, requested_max_tokens))
             if requested_max_tokens is not None
@@ -1399,49 +1416,79 @@ class AnthropicAdapter(LLMAdapter):
         max_tokens: int | None = None,
     ) -> str:
         """Consume the normal Messages stream and return its completed text."""
-        side_options = self.current_side_query_options()
+        return await self._simple_chat_with_context(
+            messages,
+            max_tokens=max_tokens,
+            context=None,
+        )
+
+    async def _side_query_chat(
+        self,
+        messages: list[LLMMessage],
+        *,
+        context: LLMSideCallContext,
+    ) -> str:
+        return await self._simple_chat_with_context(
+            messages,
+            max_tokens=context.options.max_tokens,
+            context=context,
+        )
+
+    async def _simple_chat_with_context(
+        self,
+        messages: list[LLMMessage],
+        *,
+        max_tokens: int | None,
+        context: LLMSideCallContext | None,
+    ) -> str:
+        side_options = context.options if context is not None else None
         model = (
             self.small_fast_model_id()
             if side_options is not None and side_options.use_small_fast_model
             else self._model
         )
-        self.annotate_side_call(provider=self._provider_id, model_id=model)
-        max_tokens_token = self._simple_max_tokens.set(max_tokens)
+        self.annotate_side_call(
+            context,
+            provider=self._provider_id,
+            model_id=model,
+        )
         text_parts: list[str] = []
         search_sources: list[tuple[str, str]] = []
         usage = UsageInfo()
         saw_done = False
-        try:
-            async for event in self.stream_chat(messages):
-                if event.type == StreamEventType.TEXT_CHUNK and event.content:
-                    text_parts.append(event.content)
-                elif event.type == StreamEventType.DONE:
-                    usage = event.usage
-                    saw_done = True
-                    raw_sources = event.raw.get("search_sources")
-                    if isinstance(raw_sources, list):
-                        for source in raw_sources:
-                            if not isinstance(source, Mapping):
-                                continue
-                            title = str(source.get("title") or "").strip()
-                            url = str(source.get("url") or "").strip()
-                            if url and (title, url) not in search_sources:
-                                search_sources.append((title, url))
-                elif event.type == StreamEventType.ERROR:
-                    failure = RuntimeError(event.content or "Claude stream failed")
-                    for key in (
-                        "status_code",
-                        "retry_after_seconds",
-                        "provider_error_type",
-                        "provider_error_code",
-                        "provider_error_schema_type",
-                    ):
-                        value = event.raw.get(key)
-                        if value is not None:
-                            setattr(failure, key, value)
-                    raise failure
-        finally:
-            self._simple_max_tokens.reset(max_tokens_token)
+        async for event in self._stream_chat_with_context(
+            messages,
+            metadata=context.request_metadata() if context is not None else None,
+            context=context,
+            max_tokens=max_tokens,
+        ):
+            if event.type == StreamEventType.TEXT_CHUNK and event.content:
+                text_parts.append(event.content)
+            elif event.type == StreamEventType.DONE:
+                usage = event.usage
+                saw_done = True
+                raw_sources = event.raw.get("search_sources")
+                if isinstance(raw_sources, list):
+                    for source in raw_sources:
+                        if not isinstance(source, Mapping):
+                            continue
+                        title = str(source.get("title") or "").strip()
+                        url = str(source.get("url") or "").strip()
+                        if url and (title, url) not in search_sources:
+                            search_sources.append((title, url))
+            elif event.type == StreamEventType.ERROR:
+                failure = RuntimeError(event.content or "Claude stream failed")
+                for key in (
+                    "status_code",
+                    "retry_after_seconds",
+                    "provider_error_type",
+                    "provider_error_code",
+                    "provider_error_schema_type",
+                ):
+                    value = event.raw.get(key)
+                    if value is not None:
+                        setattr(failure, key, value)
+                raise failure
 
         if not saw_done:
             raise RuntimeError("Claude stream ended before message_stop")
@@ -1459,6 +1506,7 @@ class AnthropicAdapter(LLMAdapter):
             model_id=model,
             input_includes_cache_read=False,
             input_includes_cache_write=False,
+            context=context,
         )
         if not text:
             raise RuntimeError("Claude 返回空内容")

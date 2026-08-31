@@ -59,6 +59,10 @@ class ConversationWriteConflict(RuntimeError):
         self.current = current
 
 
+class ConversationStorageCorruptError(RuntimeError):
+    """Raised when committed conversation metadata exists but is unreadable."""
+
+
 class ConversationRepository:
     _MAX_RECORD_CACHE = 64
 
@@ -394,6 +398,12 @@ class ConversationRepository:
                 conversations,
             )
 
+    def store_instance_id(self) -> str:
+        """Return the durable identity of this conversation store."""
+
+        with self._store_lock():
+            return self._read_or_create_store_instance_id_unlocked()
+
     def _list_conversations_unlocked(
         self,
         *,
@@ -652,6 +662,112 @@ class ConversationRepository:
             record.context_snapshot = copy.deepcopy(dict(context_snapshot or {}))
             if summary is not None:
                 record.summary = str(summary)
+            record.message_count = len(record.transcript)
+            record.updated_at = utc_now_iso()
+            self._commit_record(record)
+            self._cache_record(record)
+            return record
+
+    def commit_turn_admission(
+        self,
+        conversation_id: str,
+        *,
+        user_message: dict[str, Any],
+        context_snapshot: dict[str, Any],
+        expected_revision: int | None = None,
+    ) -> ConversationRecord | None:
+        """Atomically admit one canonical user item and its typed context."""
+
+        with self._store_lock():
+            record = self._load_record_for_mutation(conversation_id)
+            if record is None:
+                return None
+            next_message = project_public_transcript_message(user_message)
+            message_id = str(next_message.get("id") or "").strip()
+            current_revision = max(0, int(getattr(record, "revision", 0) or 0))
+            if expected_revision is not None and current_revision != expected_revision:
+                existing_message = next(
+                    (
+                        item
+                        for item in reversed(record.transcript)
+                        if message_id
+                        and str(item.get("id") or "").strip() == message_id
+                    ),
+                    None,
+                )
+                if (
+                    existing_message == next_message
+                    and record.context_snapshot == context_snapshot
+                ):
+                    return record
+                raise ConversationWriteConflict(
+                    conversation_id,
+                    expected=expected_revision,
+                    current=current_revision,
+                )
+
+            replace_index = next(
+                (
+                    index
+                    for index in range(len(record.transcript) - 1, -1, -1)
+                    if message_id
+                    and str(record.transcript[index].get("id") or "").strip()
+                    == message_id
+                ),
+                -1,
+            )
+            if replace_index >= 0:
+                record.transcript[replace_index] = next_message
+            else:
+                record.transcript.append(next_message)
+            record.context_snapshot = copy.deepcopy(dict(context_snapshot or {}))
+            record.message_count = len(record.transcript)
+            if record.title == "New chat":
+                record.title = _derive_title(str(next_message.get("content", "")))
+            record.updated_at = utc_now_iso()
+            self._commit_record(record)
+            self._cache_record(record)
+            return record
+
+    def commit_rewind_projection(
+        self,
+        conversation_id: str,
+        *,
+        transcript: list[dict[str, Any]],
+        context_snapshot: dict[str, Any],
+        summary: str,
+        memory_pollution_sources: list[str],
+        expected_revision: int | None = None,
+    ) -> ConversationRecord | None:
+        """Atomically publish a rewind across every conversation projection."""
+
+        normalized_sources = list(
+            dict.fromkeys(
+                str(source or "").strip().lower()
+                for source in memory_pollution_sources
+                if str(source or "").strip()
+            )
+        )
+        with self._store_lock():
+            record = self._load_record_for_mutation(conversation_id)
+            if record is None:
+                return None
+            current_revision = max(0, int(getattr(record, "revision", 0) or 0))
+            if expected_revision is not None and current_revision != expected_revision:
+                raise ConversationWriteConflict(
+                    conversation_id,
+                    expected=expected_revision,
+                    current=current_revision,
+                )
+            record.transcript = project_public_transcript(transcript)
+            record.context_snapshot = copy.deepcopy(dict(context_snapshot or {}))
+            record.summary = str(summary or "")
+            record.memory_polluted = bool(normalized_sources)
+            record.memory_pollution_sources = normalized_sources
+            if normalized_sources:
+                record.memory_mode = "polluted"
+            elif record.memory_mode == "polluted":
+                record.memory_mode = "enabled"
             record.message_count = len(record.transcript)
             record.updated_at = utc_now_iso()
             self._commit_record(record)
@@ -1108,7 +1224,9 @@ class ConversationRepository:
             self._manifest_cache.pop(conversation_id, None)
             if log_errors:
                 logger.error("Failed to read conversation manifest for %s: %s", conversation_id, exc)
-            return None
+            raise ConversationStorageCorruptError(
+                f"Conversation manifest for '{conversation_id}' is corrupt: {exc}"
+            ) from exc
 
     def _commit_record(self, record: ConversationRecord) -> None:
         """Commit meta, transcript, and snapshot behind one atomic marker.
@@ -1134,17 +1252,60 @@ class ConversationRepository:
         known_generations = list(self._manifest_generations(manifest or {}))
         current_generation = known_generations[0] if known_generations else 0
         expected_revision = max(0, int(getattr(record, "revision", 0) or 0))
-        if expected_revision != current_generation:
+        # Validate every referenced generation before choosing the fallback.
+        # A reader may have returned ``previous_generation`` because the
+        # manifest's current generation is damaged.  That is a recoverable
+        # storage state: publish a new generation from the readable record
+        # instead of treating the fallback as a stale detached writer.  Any
+        # other revision mismatch remains a real write conflict.
+        readable_generations: list[int] = []
+        generation_errors: list[tuple[int, ConversationStorageCorruptError]] = []
+        for generation in known_generations:
+            try:
+                self._read_generation(record.id, generation, log_errors=False)
+            except ConversationStorageCorruptError as exc:
+                generation_errors.append((generation, exc))
+                logger.warning(
+                    "Conversation %s generation %s is unreadable while committing: %s",
+                    record.id,
+                    generation,
+                    exc,
+                )
+            else:
+                readable_generations.append(generation)
+
+        if known_generations and not readable_generations:
+            detail = "; ".join(
+                f"generation {generation}: {error}"
+                for generation, error in generation_errors
+            )
+            raise ConversationStorageCorruptError(
+                f"Conversation '{record.id}' has no readable generation to commit from"
+                + (f": {detail}" if detail else "")
+            )
+
+        current_generation_corrupt = bool(
+            current_generation and current_generation not in readable_generations
+        )
+        if expected_revision != current_generation and not (
+            current_generation_corrupt and expected_revision in readable_generations
+        ):
             raise ConversationWriteConflict(
                 record.id,
                 expected=expected_revision,
                 current=current_generation,
             )
-        previous_generation: int | None = None
-        for generation in known_generations:
-            if self._read_generation(record.id, generation, log_errors=False) is not None:
-                previous_generation = generation
-                break
+
+        previous_generation: int | None = (
+            readable_generations[0] if readable_generations else None
+        )
+        if current_generation_corrupt:
+            logger.warning(
+                "Recovering conversation %s from generation %s after corrupt current generation %s",
+                record.id,
+                previous_generation,
+                current_generation,
+            )
 
         # On the first mutation of a split/legacy record, preserve its exact
         # pre-mutation state as the explicit fallback generation.
@@ -1197,7 +1358,15 @@ class ConversationRepository:
         self._delete_legacy_files(record.id)
         self._cleanup_generations(
             record.id,
-            keep={next_generation, *({previous_generation} if previous_generation is not None else set())},
+            keep={
+                next_generation,
+                *({previous_generation} if previous_generation is not None else set()),
+                # Keep damaged generation files as forensic evidence when a
+                # readable predecessor was used for recovery. They are no
+                # longer authoritative, but deleting them would hide the
+                # storage failure that triggered the recovery.
+                *(set(known_generations) if current_generation_corrupt else set()),
+            },
         )
 
     def _write_generation(self, record: ConversationRecord, generation: int) -> None:
@@ -1225,7 +1394,7 @@ class ConversationRepository:
         generation: int,
         *,
         log_errors: bool = True,
-    ) -> ConversationRecord | None:
+    ) -> ConversationRecord:
         meta_path, transcript_path, snapshot_path = self._generation_paths(conversation_id, generation)
         try:
             if not meta_path.exists() or not transcript_path.exists() or not snapshot_path.exists():
@@ -1258,7 +1427,9 @@ class ConversationRepository:
                     generation,
                     exc,
                 )
-            return None
+            raise ConversationStorageCorruptError(
+                f"Conversation '{conversation_id}' generation {generation} is corrupt: {exc}"
+            ) from exc
 
     def _cleanup_generations(self, conversation_id: str, *, keep: set[int]) -> None:
         safe_id = self._safe_id(conversation_id)
@@ -1373,6 +1544,7 @@ class ConversationRepository:
         # A reader can race two rapid commits without taking the writer lock.
         # Re-reading the atomic manifest once lets it move to the newly
         # published generation if the older one was cleaned up meanwhile.
+        generation_errors: list[str] = []
         for attempt in range(2):
             manifest = self._read_manifest(conversation_id, log_errors=attempt > 0)
             if manifest is None:
@@ -1380,12 +1552,14 @@ class ConversationRepository:
             if self._manifest_is_deleted(manifest):
                 return None
             for index, generation in enumerate(self._manifest_generations(manifest)):
-                record = self._read_generation(
-                    conversation_id,
-                    generation,
-                    log_errors=attempt > 0,
-                )
-                if record is None:
+                try:
+                    record = self._read_generation(
+                        conversation_id,
+                        generation,
+                        log_errors=attempt > 0,
+                    )
+                except ConversationStorageCorruptError as exc:
+                    generation_errors.append(str(exc))
                     continue
                 if index > 0:
                     logger.warning(
@@ -1394,8 +1568,16 @@ class ConversationRepository:
                         generation,
                     )
                 return record
-        logger.error("No committed generation could be loaded for conversation %s", conversation_id)
-        return None
+        detail = "; ".join(dict.fromkeys(generation_errors))
+        logger.error(
+            "No committed generation could be loaded for conversation %s: %s",
+            conversation_id,
+            detail or "no readable generation",
+        )
+        raise ConversationStorageCorruptError(
+            f"Conversation '{conversation_id}' has no readable committed generation"
+            + (f": {detail}" if detail else "")
+        )
 
     def _load_legacy_record(
         self,
@@ -1411,13 +1593,15 @@ class ConversationRepository:
                 )
                 if not isinstance(meta_payload, dict):
                     raise ValueError("legacy meta must be an object")
+                transcript_path = self._transcript_path_for(conversation_id)
+                snapshot_path = self._snapshot_path_for(conversation_id)
                 transcript = self._read_transcript_path(
-                    self._transcript_path_for(conversation_id),
-                    strict=False,
+                    transcript_path,
+                    strict=transcript_path.exists(),
                 )
                 snapshot = self._read_snapshot_path(
-                    self._snapshot_path_for(conversation_id),
-                    strict=False,
+                    snapshot_path,
+                    strict=snapshot_path.exists(),
                 )
 
                 if not transcript and snapshot.get("history"):
@@ -1450,7 +1634,9 @@ class ConversationRepository:
             except Exception as exc:
                 if log_errors:
                     logger.error("Failed to load split conversation %s: %s", conversation_id, exc)
-                return None
+                raise ConversationStorageCorruptError(
+                    f"Conversation '{conversation_id}' legacy split record is corrupt: {exc}"
+                ) from exc
 
         legacy_path = self._legacy_path_for(conversation_id)
         if not legacy_path.exists():
@@ -1468,7 +1654,9 @@ class ConversationRepository:
         except Exception as exc:
             if log_errors:
                 logger.error("Failed to load legacy record for %s: %s", conversation_id, exc)
-            return None
+            raise ConversationStorageCorruptError(
+                f"Conversation '{conversation_id}' legacy record is corrupt: {exc}"
+            ) from exc
 
     def _load_summary(self, conversation_id: str) -> ConversationSummary | None:
         if self._manifest_path_for(conversation_id).exists():
@@ -1481,7 +1669,9 @@ class ConversationRepository:
                 return ConversationSummary.from_dict(payload)
             except Exception as e:
                 logger.error("Failed to load summary for %s: %s", conversation_id, e)
-                return None
+                raise ConversationStorageCorruptError(
+                    f"Conversation summary for '{conversation_id}' is corrupt: {e}"
+                ) from e
 
         record = self._load_record(conversation_id)
         if record is None:
@@ -1634,7 +1824,18 @@ class ConversationRepository:
                 and self._summary_index_stamps.get(conversation_id) == stamp
             ):
                 continue
-            summary = self._load_summary(conversation_id)
+            try:
+                summary = self._load_summary(conversation_id)
+            except ConversationStorageCorruptError as exc:
+                # Listing is an inventory operation: one unreadable record
+                # must not hide healthy conversations. Direct get/read paths
+                # still propagate the same corruption error to the caller.
+                logger.warning(
+                    "Skipping corrupt conversation %s while building summary index: %s",
+                    conversation_id,
+                    exc,
+                )
+                summary = None
             if summary is not None:
                 self._summary_index[summary.id] = summary
                 self._summary_index_stamps[conversation_id] = stamp
@@ -1732,6 +1933,9 @@ def _is_legacy_raw_provider_reasoning_block(block: Any) -> bool:
     visibility = str(block.get("visibility") or "").strip().lower()
     if visibility in {"hidden", "internal", "redacted"}:
         return True
+    # The camelCase variant only exists to catch raw reasoning persisted by
+    # pre-alignment builds, whose block casing predates this repo's history;
+    # drop it once the oldest supported persisted format is snake_case-only.
     reasoning_type = str(
         block.get("provider_reasoning_type")
         or block.get("providerReasoningType")

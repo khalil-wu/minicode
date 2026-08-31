@@ -54,7 +54,8 @@ async def dispatch_provider_event(
     stream_iter: Any,
     stream_state: Any,
     stream_text: Any,
-    tool_executor: Any,
+    tool_tracker: Any,
+    tool_registry: Any,
     settings: Any,
     provider_completion: Any,
     prompt_cache_safe_params: dict[str, Any],
@@ -127,7 +128,7 @@ async def dispatch_provider_event(
             context_builder=context_builder,
             stream_text=stream_text,
             state=state,
-            tool_executor=tool_executor,
+            tool_tracker=tool_tracker,
             stream_iter=stream_iter,
             provider_attempt=provider_attempt,
         ):
@@ -168,7 +169,9 @@ async def dispatch_provider_event(
             stream_state=stream_state,
             stream_text=stream_text,
             live_text_streaming=settings.live_text_streaming,
-            tool_executor=tool_executor,
+            tool_tracker=tool_tracker,
+            tool_registry=tool_registry,
+            tool_context=tool_context,
             process_event_factory=model_process_text_event,
         ):
             if isinstance(projected, ProviderProjectionResult):
@@ -200,8 +203,13 @@ async def dispatch_provider_event(
         )
         for completion_event in completion.events:
             yield completion_event
+        # DONE is the provider protocol's terminal fence.  Continuing to poll
+        # the iterator lets a malformed/custom adapter project late text,
+        # retry, or tool frames after usage and the attempt have already been
+        # committed.  Stop acquisition here; closing the owned iterator drops
+        # any post-terminal frames without reopening the completed attempt.
         yield _result(
-            action="continue",
+            action="break",
             usage=completion.usage,
             finish_reason=completion.finish_reason,
             response_phase=completion.response_phase,

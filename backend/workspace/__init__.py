@@ -1,5 +1,5 @@
 from .api import create_workspace_router
-from .context import WorkspaceContext, ProjectMetadata, FileIndexEntry
+from .context import WorkspaceContext, ProjectMetadata
 from .file_state_cache import FileStateCache, get_global_file_cache
 from .fuzzy_search import FuzzySearchEngine, get_global_fuzzy_search
 from .worktree import WorktreeManager, get_global_worktree_manager
@@ -13,7 +13,6 @@ __all__ = [
     "create_workspace_router",
     "WorkspaceContext",
     "ProjectMetadata",
-    "FileIndexEntry",
     "FileStateCache",
     "get_global_file_cache",
     "FuzzySearchEngine",

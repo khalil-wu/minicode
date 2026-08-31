@@ -35,6 +35,24 @@ export const AGENT_PROGRESS_STATUSES = [
 
 export type AgentProgressStatus = (typeof AGENT_PROGRESS_STATUSES)[number];
 
+/** Explicit lifecycle of a provider request/retry ladder. */
+export const AGENT_PROGRESS_PROVIDER_STATES = [
+  "connecting",
+  "reconnecting",
+  "responding",
+  "completed",
+  "failed",
+  "interrupted",
+] as const;
+
+export type AgentProgressProviderState = (typeof AGENT_PROGRESS_PROVIDER_STATES)[number];
+
+export const isAgentProgressProviderState = (
+  value: unknown,
+): value is AgentProgressProviderState =>
+  typeof value === "string"
+  && (AGENT_PROGRESS_PROVIDER_STATES as readonly string[]).includes(value);
+
 export const AGENT_PROGRESS_PHASES = [
   "orienting",
   "planning",
@@ -239,6 +257,10 @@ export interface ToolResultEvent {
   id: string;
   summary: string;
   artifact_id?: string;
+  /** Metadata for a tool-owned artifact; the binary body stays off the WS. */
+  artifact_kind?: "file" | "diff" | "image" | "json" | "code" | "text" | string;
+  artifact_media_type?: string;
+  artifact_bytes?: number;
   is_error?: boolean;
   diff?: unknown;
   source_url?: string;
@@ -365,6 +387,15 @@ export interface AgentProgressEvent {
   count?: number;
   iteration_id?: string;
   ephemeral?: boolean;
+  /** Provider retry ordinal; zero denotes the initial request. */
+  retry_attempt?: number;
+  /** Maximum provider retries (the initial request is not included). */
+  max_retries?: number;
+  retry_after_ms?: number;
+  error_message?: string;
+  operation_id?: string;
+  /** Typed provider lifecycle; present on provider retry progress rows. */
+  provider_state?: AgentProgressProviderState;
 }
 
 export interface RuntimeSpanEvent {

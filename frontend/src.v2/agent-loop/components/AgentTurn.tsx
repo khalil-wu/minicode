@@ -5,6 +5,7 @@ import type { AgentLoopTurnProjection } from "../projection/project-turn";
 import { AgentProcessSummary } from "./AgentProcessSummary";
 import { AgentTimeline } from "./AgentTimeline";
 import { FinalAnswer } from "./FinalAnswer";
+import { isBrowserScreenshotRecord } from "../../lib/artifact-projection";
 
 export type RenderAgentCellArgs = {
   key?: React.Key;
@@ -29,9 +30,13 @@ export const AgentTurn = memo(function AgentTurn({
   // Incomplete, interrupted, failed, or answer-less turns are evidence, not a
   // disclosure preference. They stay visible until a complete final answer
   // establishes the only valid collapse boundary for the turn.
-  const initialProcessExpanded = turn.hasCompleteFinalAnswer
-    ? defaultProcessExpanded ?? turn.initialProcessExpanded
-    : true;
+  const hasBrowserScreenshot = turn.processCells.some((cell) => (
+    cell.kind === "activity"
+    && cell.toolCallRecords?.some((record) => Boolean(record.artifactId) && isBrowserScreenshotRecord(record))
+  ));
+  const initialProcessExpanded = hasBrowserScreenshot || !turn.hasCompleteFinalAnswer
+    ? true
+    : defaultProcessExpanded ?? turn.initialProcessExpanded;
   const [processExpanded, setProcessExpanded] = useState(initialProcessExpanded);
   const previousTurnId = useRef(turn.id);
   const previousDetailMode = useRef(turn.processDetailMode);
@@ -60,6 +65,7 @@ export const AgentTurn = memo(function AgentTurn({
       reachedCompleteAnswer
       && turn.processDetailMode === "normal"
       && defaultProcessExpanded !== true
+      && !hasBrowserScreenshot
       && !userToggled.current
     ) {
       setProcessExpanded(false);
@@ -84,6 +90,7 @@ export const AgentTurn = memo(function AgentTurn({
     turn.status,
     turn.hasCompleteFinalAnswer,
     defaultProcessExpanded,
+    hasBrowserScreenshot,
   ]);
 
   // A settled file mutation is an outcome, not another activity row. Keep it
@@ -97,6 +104,22 @@ export const AgentTurn = memo(function AgentTurn({
     turn.hasProcessContent &&
     (timelineCells.length > 0 || diffCells.length > 0) &&
     processExpanded;
+  const summaryPosition = turn.status === "running" ? "bottom" : "top";
+  const processSummary = (
+    <AgentProcessSummary
+      status={turn.status}
+      processExpanded={processExpanded}
+      hasTimelineItems={hasTimelineItems}
+      durationMs={turn.durationMs}
+      failureMessage={failureIsTimelineEvidence ? undefined : turn.failureMessage}
+      canCollapse={turn.hasCompleteFinalAnswer}
+      position={summaryPosition}
+      onToggle={() => {
+        userToggled.current = true;
+        setProcessExpanded((value) => !value);
+      }}
+    />
+  );
   return (
     <div
       className="chat-turn agent-loop-turn"
@@ -116,20 +139,7 @@ export const AgentTurn = memo(function AgentTurn({
           data-collapsed={!processExpanded ? "true" : "false"}
           aria-label="Agent 处理进度"
         >
-          {turn.hasProcessContent && (
-            <AgentProcessSummary
-              status={turn.status}
-              processExpanded={processExpanded}
-              hasTimelineItems={hasTimelineItems}
-              durationMs={turn.durationMs}
-              failureMessage={failureIsTimelineEvidence ? undefined : turn.failureMessage}
-              canCollapse={turn.hasCompleteFinalAnswer}
-              onToggle={() => {
-                userToggled.current = true;
-                setProcessExpanded((value) => !value);
-              }}
-            />
-          )}
+          {turn.status !== "running" && processSummary}
 
           {showProcessStack && (
             <AgentTimeline
@@ -138,6 +148,8 @@ export const AgentTurn = memo(function AgentTurn({
               showAllOpenWork={turn.status !== "running" && !turn.hasCompleteFinalAnswer}
             />
           )}
+
+          {turn.status === "running" && processSummary}
 
         </section>
       )}

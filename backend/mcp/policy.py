@@ -65,7 +65,7 @@ class MCPRequirement:
                 for matcher, argument in zip(self.args, config.args, strict=True)
             )
         return (
-            config.transport == "http"
+            config.transport in {"sse", "http", "ws"}
             and self.url is not None
             and self.url.matches(str(config.url or ""))
         )

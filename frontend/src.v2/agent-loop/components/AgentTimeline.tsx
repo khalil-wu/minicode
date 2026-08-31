@@ -5,7 +5,13 @@ import type { AgentLoopProcessCell } from "../projection/project-turn";
 import type { RenderAgentCell } from "./AgentTurn";
 import { withStableRenderKeys } from "./renderKeys";
 import { ToolGlyph } from "../../chat/toolUtils";
-import { readableTimelineTitle, recordInputTarget, shortCommand } from "../../chat/cells/activityCellHelpers";
+import {
+  isWebFetchActivity,
+  readableTimelineTitle,
+  recordInputTarget,
+  shortCommand,
+} from "../../chat/cells/activityCellHelpers";
+import { isBrowserScreenshotRecord } from "../../lib/artifact-projection";
 
 type TimelineGroupKind = "work" | "thinking" | "narration" | "context" | "notice";
 type TimelineGroup = {
@@ -54,7 +60,7 @@ const groupTimelineCells = (cells: AgentLoopProcessCell[]): TimelineGroup[] => {
   return groups;
 };
 
-type WorkLabel = "编辑了文件" | "运行了命令" | "读取了文件" | "列出了文件" | "搜索了内容" | "获取网页" | "搜索网页" | "协作任务" | "处理步骤";
+type WorkLabel = "编辑了文件" | "运行了命令" | "读取了文件" | "列出了文件" | "搜索了内容" | "获取网页" | "搜索网页" | "操作浏览器" | "协作任务" | "处理步骤";
 
 const workLabel = (cell: AgentLoopProcessCell): WorkLabel => {
   if (cell.kind === "exec") return "运行了命令";
@@ -62,11 +68,12 @@ const workLabel = (cell: AgentLoopProcessCell): WorkLabel => {
   if (cell.kind === "activity" && cell.activityKind === "workspaceList") return "列出了文件";
   if (cell.kind === "activity" && cell.activityKind === "workspaceSearch") return "搜索了内容";
   if (cell.kind === "activity" && cell.activityKind === "fileRead") return "读取了文件";
+  if (cell.kind === "activity" && isWebFetchActivity(cell)) return "获取网页";
   if (cell.kind === "activity" && cell.activityKind === "webSearch") {
     const names = (cell.toolCallRecords ?? []).map((record) => String(record.name || "").toLowerCase());
-    if (names.length > 0 && names.every((name) => /web_fetch|webfetch/.test(name))) return "获取网页";
     if (names.length > 0 && names.every((name) => /web_search|websearch/.test(name))) return "搜索网页";
   }
+  if (cell.kind === "activity" && cell.activityKind === "browser") return "操作浏览器";
   if (cell.kind === "collaboration") return "协作任务";
   return "处理步骤";
 };
@@ -110,13 +117,17 @@ const latestWorkGlyph = (cell: AgentLoopProcessCell | undefined): React.ReactNod
 };
 
 function ClosedWorkGroup({ group, groupIndex, renderCell }: { group: TimelineGroup; groupIndex: number; renderCell: RenderAgentCell }) {
-  const [expanded, setExpanded] = useState(false);
+  const containsScreenshot = group.cells.some((cell) => (
+    cell.kind === "activity"
+    && cell.toolCallRecords?.some((record) => Boolean(record.artifactId) && isBrowserScreenshotRecord(record))
+  ));
+  const [expanded, setExpanded] = useState(containsScreenshot);
   const previousGroupKey = useRef(`${group.segment ?? "none"}:${group.cells[0]?.id ?? groupIndex}`);
   const groupKey = `${group.segment ?? "none"}:${group.cells[0]?.id ?? groupIndex}`;
   useEffect(() => {
-    if (previousGroupKey.current !== groupKey) setExpanded(false);
+    if (previousGroupKey.current !== groupKey) setExpanded(containsScreenshot);
     previousGroupKey.current = groupKey;
-  }, [groupKey]);
+  }, [containsScreenshot, groupKey]);
   const title = timelineGroupTitle(group);
   const labels = group.cells.map(workLabel);
   const groupGlyph = labels.includes("编辑了文件")

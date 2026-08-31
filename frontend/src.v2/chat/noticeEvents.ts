@@ -5,6 +5,7 @@ import type {
   ServerEvent,
   SystemNoticeEvent,
 } from "../protocol/events";
+import { isReplayedEvent } from "../protocol/events";
 import { pushToast } from "../overlays/ToastContainer";
 import { isControlPlaneNotice } from "./controlPlaneNotices";
 import { addInspectorPayload } from "./inspectorEntries";
@@ -25,9 +26,6 @@ const eventTimestampMs = (event: ServerEvent): number => {
   const parsed = Date.parse(String(event.timestamp || ""));
   return Number.isFinite(parsed) ? parsed : Date.now();
 };
-
-const isReplayedEvent = (event: ServerEvent): boolean =>
-  (event as ServerEvent & { __replayed?: boolean }).__replayed === true;
 
 const stableTextHash = (value: string): string => {
   let hash = 0x811c9dc5;

@@ -202,9 +202,9 @@ class WritableRoot:
 
     def is_path_writable(self, path: str | Path) -> bool:
         candidate = _absolute_path(path)
-        if not _is_relative_to(candidate, self.root):
+        if not candidate.is_relative_to(self.root):
             return False
-        if any(_is_relative_to(candidate, readonly) for readonly in self.read_only_subpaths):
+        if any(candidate.is_relative_to(readonly) for readonly in self.read_only_subpaths):
             return False
         try:
             first = candidate.relative_to(self.root).parts[0]
@@ -844,7 +844,7 @@ def sandbox_policy_from_config_snapshot(
         if not _contains_glob(value)
     )
     for path in _expand_policy_paths(allow_read_rules, workspace, grant=False):
-        if any(_is_relative_to(path, denied) for denied in hard_path_denies):
+        if any(path.is_relative_to(denied) for denied in hard_path_denies):
             continue
         entries.append(
             FileSystemSandboxEntry(FileSystemPath.path(path), FileSystemAccessMode.READ)
@@ -977,7 +977,7 @@ def resolve_permission_profile(
     # specific matching filesystem entry rather than collapsing all children
     # under the first parent root.
     for root in write_paths:
-        read_only = [path for path in read_paths if path != root and _is_relative_to(path, root)]
+        read_only = [path for path in read_paths if path != root and path.is_relative_to(root)]
         protected_names = tuple(
             name
             for name in DEFAULT_PROTECTED_METADATA_NAMES
@@ -1242,14 +1242,6 @@ def _filesystem_root(path: Path) -> Path:
     return Path(path.anchor or os.sep)
 
 
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
 def _matches_workspace_root(path: Path, roots: set[Path]) -> bool:
     candidates = _path_candidates(path)
     return any(
@@ -1320,7 +1312,7 @@ def _resolve_concrete_access(
     matches = (
         (entry_path, access)
         for entry_path, access in entries
-        if _is_relative_to(candidate, entry_path)
+        if candidate.is_relative_to(entry_path)
     )
     return max(
         matches,
@@ -1343,16 +1335,6 @@ def _glob_matches_path(pattern: str, path: Path) -> bool:
     normalized_pattern = os.path.normcase(str(Path(pattern).expanduser().absolute()))
     normalized_path = os.path.normcase(str(path))
     return fnmatchcase(normalized_path, normalized_pattern)
-
-
-def _minimal_roots(paths: list[Path]) -> list[Path]:
-    ordered = sorted(_dedupe_paths(paths), key=lambda item: (len(item.parts), str(item)))
-    result: list[Path] = []
-    for path in ordered:
-        if any(_is_relative_to(path, root) for root in result):
-            continue
-        result.append(path)
-    return result
 
 
 def _ordered_paths(paths: object) -> list[Path]:

@@ -192,7 +192,6 @@ def schedule_memory_forgetting(
     llm: Any,
     workspace_root: Path | str | None,
     conversation_id: str,
-    watermark: int | None = None,
     token_budget: int | None = None,
 ) -> asyncio.Task[Any] | None:
     if llm is None or not workspace_root or not conversation_id or memory_reset_in_progress():
@@ -206,7 +205,6 @@ def schedule_memory_forgetting(
     task = asyncio.create_task(
         coordinator.forget_and_consolidate(
             conversation_id=conversation_id,
-            watermark=watermark,
         ),
         name=f"memory-forget:{conversation_id}",
         context=contextvars.Context(),
@@ -277,7 +275,7 @@ class MemoryGenerationCoordinator:
             and self._eligible_for_stage1(conversation, now=now)
         ]
         candidates.sort(
-            key=lambda item: self._source_watermark(item),
+            key=lambda item: self._source_updated_at(item),
             reverse=True,
         )
         await asyncio.gather(
@@ -289,12 +287,10 @@ class MemoryGenerationCoordinator:
         self,
         *,
         conversation_id: str,
-        watermark: int | None = None,
     ) -> None:
         await _to_thread_cancel_safe(
             self.store.remove_thread_output,
             conversation_id,
-            watermark=watermark,
         )
         await self._run_phase2()
 
@@ -329,7 +325,6 @@ class MemoryGenerationCoordinator:
             await _to_thread_cancel_safe(
                 self.store.remove_thread_output,
                 str(conversation.id),
-                watermark=self._source_watermark(conversation),
             )
 
     def _eligible_for_stage1(self, conversation: Any, *, now: int) -> bool:
@@ -341,7 +336,7 @@ class MemoryGenerationCoordinator:
             return False
         if not list(getattr(conversation, "transcript", []) or []):
             return False
-        updated_at = self._source_watermark(conversation)
+        updated_at = self._source_updated_at(conversation)
         return (
             now - MAX_ROLLOUT_AGE_DAYS * 86_400 <= updated_at
             and updated_at <= now - MIN_ROLLOUT_IDLE_SECONDS
@@ -359,24 +354,37 @@ class MemoryGenerationCoordinator:
         return "enabled"
 
     @staticmethod
-    def _source_watermark(conversation: Any) -> int:
+    def _source_revision(conversation: Any) -> int:
+        raw = getattr(conversation, "revision", None)
+        if isinstance(raw, bool) or raw is None:
+            raise MemoryGenerationError("Conversation has no durable revision")
+        revision = int(raw)
+        if revision < 0:
+            raise MemoryGenerationError("Conversation revision must be non-negative")
+        return revision
+
+    @staticmethod
+    def _source_updated_at(conversation: Any) -> int:
         raw = str(getattr(conversation, "updated_at", "") or "").strip()
-        if raw:
-            try:
-                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=UTC)
-                return int(parsed.timestamp())
-            except ValueError:
-                pass
-        return int(time.time())
+        if not raw:
+            raise MemoryGenerationError("Conversation has no updated_at timestamp")
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise MemoryGenerationError(
+                f"Conversation updated_at is invalid: {raw!r}"
+            ) from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return int(parsed.timestamp())
 
     async def _run_phase1(self, conversation: Any) -> None:
-        watermark = self._source_watermark(conversation)
+        source_revision = self._source_revision(conversation)
+        source_updated_at = self._source_updated_at(conversation)
         claim = await _to_thread_cancel_safe(
             self.store.claim_stage1,
             thread_id=str(conversation.id),
-            source_updated_at=watermark,
+            source_revision=source_revision,
             worker_id=self.worker_id,
             lease_seconds=STAGE1_LEASE_SECONDS,
             retry_limit=STAGE1_RETRY_LIMIT,
@@ -393,12 +401,16 @@ class MemoryGenerationCoordinator:
             )
             if current is None or self._generation_mode(current) != "enabled":
                 result = Phase1Result("", "", None)
+            elif self._source_revision(current) != source_revision:
+                await _to_thread_cancel_safe(self.store.abandon_stage1, claim)
+                return
             committed = await _to_thread_cancel_safe(
                 self.store.complete_stage1,
                 claim,
                 raw_memory=result.raw_memory,
                 rollout_summary=result.rollout_summary,
                 rollout_slug=result.rollout_slug,
+                source_updated_at=source_updated_at,
             )
             if not committed:
                 logger.info("Memory Phase 1 ownership changed for %s", conversation.id)
@@ -609,16 +621,12 @@ class MemoryGenerationCoordinator:
         for output in outputs:
             conversation = self.repository.get_conversation(output.thread_id)
             if conversation is None or self._generation_mode(conversation) != "enabled":
-                self.store.remove_thread_output(
-                    output.thread_id,
-                    watermark=self._source_watermark(conversation) if conversation else self._now(),
-                )
+                self.store.remove_thread_output(output.thread_id)
                 continue
             if bool(getattr(conversation, "archived", False)):
-                self.store.remove_thread_output(
-                    output.thread_id,
-                    watermark=self._source_watermark(conversation),
-                )
+                self.store.remove_thread_output(output.thread_id)
+                continue
+            if self._source_revision(conversation) != output.source_revision:
                 continue
             eligible.append(output)
         return eligible
@@ -631,6 +639,8 @@ class MemoryGenerationCoordinator:
             if self._generation_mode(conversation) != "enabled":
                 return False
             if bool(getattr(conversation, "archived", False)):
+                return False
+            if self._source_revision(conversation) != output.source_revision:
                 return False
         return True
 
@@ -819,10 +829,6 @@ class MemoryGenerationCoordinator:
                 return self.store.complete_phase2(
                     claim,
                     outputs,
-                    completion_watermark=max(
-                        [claim.input_watermark]
-                        + [output.source_updated_at for output in outputs]
-                    ),
                 )
         except FileLockTimeout as exc:
             raise MemoryGenerationError("Timed out waiting for the memory reset lock") from exc
@@ -840,10 +846,6 @@ class MemoryGenerationCoordinator:
                 return self.store.complete_phase2(
                     claim,
                     outputs,
-                    completion_watermark=max(
-                        [claim.input_watermark]
-                        + [output.source_updated_at for output in outputs]
-                    ),
                 )
         except FileLockTimeout as exc:
             raise MemoryGenerationError("Timed out waiting for the memory reset lock") from exc

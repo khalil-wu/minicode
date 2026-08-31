@@ -33,7 +33,7 @@ def _managed_permission_projection(mode: str, source: str) -> tuple[str, str, st
 
 
 class SessionPermissionRuntimeMixin:
-    def _permission_context_for_conversation(
+    def permission_context_for_conversation(
         self,
         conversation: Any | None,
         *,
@@ -144,10 +144,10 @@ class SessionPermissionRuntimeMixin:
         )
         return True
 
-    def _set_permission_context_mode(self, mode: str, *, source: str) -> bool:
+    def set_permission_context_mode(self, mode: str, *, source: str) -> bool:
         return self._set_permission_context(mode=mode, source=source)
 
-    def _set_permission_context_rules(
+    def set_permission_context_rules(
         self,
         *,
         session_overrides: dict[str, PermissionLevel],
@@ -184,16 +184,12 @@ class SessionPermissionRuntimeMixin:
             source=source,
         )
 
-    def _sync_permission_mode_with_active_conversation(self, *, source: str) -> str:
+    def sync_permission_mode_with_active_conversation(self, *, source: str) -> str:
         active = self.active_conversation
-        requested = (
-            normalize_permission_mode(str(getattr(active, "permission_mode", DEFAULT_CONVERSATION_PERMISSION_MODE)))
-            or DEFAULT_CONVERSATION_PERMISSION_MODE
-        )
-        self.permission_context = self._permission_context_for_conversation(active, source=source)
+        self.permission_context = self.permission_context_for_conversation(active, source=source)
         return self.permission_context.mode
 
-    def _build_permission_rules_payload(self, *, conversation: Any | None = None) -> dict[str, Any]:
+    def build_permission_rules_payload(self, *, conversation: Any | None = None) -> dict[str, Any]:
         mode = self.permission_context.mode
         context_source = self.permission_context.source
         deny_rules = list(self.permission_context.tool_deny_rules)
@@ -249,8 +245,8 @@ class SessionPermissionRuntimeMixin:
             ],
         }
 
-    async def _emit_permission_mode_updated(self) -> None:
-        await self._send_ws_payload(
+    async def emit_permission_mode_updated(self) -> None:
+        await self.send_payload(
             {
                 "type": "permission.mode.updated",
                 "session_id": self.session_id,
@@ -260,7 +256,7 @@ class SessionPermissionRuntimeMixin:
             log_context="permission.mode.updated",
         )
 
-    async def _emit_permission_rules_updated(
+    async def emit_permission_rules_updated(
         self,
         *,
         conversation_id: str | None = None,
@@ -268,18 +264,18 @@ class SessionPermissionRuntimeMixin:
     ) -> None:
         target_id = str(conversation_id or self.active_conversation_id or "").strip()
         target = self.conversation_repo.get_conversation(target_id) if target_id else None
-        await self._send_ws_payload(
+        await self.send_payload(
             {
                 "type": "permission.rules.updated",
                 "session_id": self.session_id,
                 "conversation_id": target_id,
                 "source": source,
-                "rules": self._build_permission_rules_payload(conversation=target),
+                "rules": self.build_permission_rules_payload(conversation=target),
             },
             log_context="permission.rules.updated",
         )
 
-    async def _emit_command_result(
+    async def emit_command_result(
         self,
         command: str,
         message: str,
@@ -288,7 +284,7 @@ class SessionPermissionRuntimeMixin:
         title: str | None = None,
         data: dict[str, Any] | None = None,
     ) -> None:
-        await self._send_event(
+        await self.send_event(
             AgentEvent.command_result(
                 command,
                 message,

@@ -5,7 +5,7 @@
 
 import type { ToolCallRecord } from "../../lib/tool-call-reducer";
 import type { TurnActivityKind } from "../../lib/turn-projection";
-import type { ArtifactPreview, Citation, MessageUsage, ProgressContentBlock } from "../../stores/types";
+import type { ArtifactPreview, ChatMessageSource, Citation, MessageUsage, ProgressContentBlock } from "../../stores/types";
 
 // ── Diff File Change ────────────────────────────────────────────────
 
@@ -26,6 +26,7 @@ export interface UserMessageCellState {
   kind: "user_message";
   id: string;
   content: string;
+  messageSource?: ChatMessageSource;
   attachments?: {
     id?: string;
     artifactId?: string;
@@ -64,6 +65,10 @@ export interface ActivityCellState {
     current?: number;
     total?: number;
     text?: string;
+    retryAttempt?: number;
+    maxRetries?: number;
+    retryAfterMs?: number;
+    providerState?: ProgressContentBlock["providerState"];
   };
   skill?: SkillProcessMetadata;
   startedAt: number;

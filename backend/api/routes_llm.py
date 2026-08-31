@@ -31,6 +31,7 @@ from backend.services.llm_settings_service import (
 )
 
 from . import _state
+from .routes_health import get_mcp_status
 from backend.services.llm_provider_helpers import (
     _fetch_anthropic_models,
     _check_openai_compatible_generation,
@@ -244,11 +245,3 @@ async def update_mcp_config_api(request: MCPConfigUpdateRequest, response: Respo
         **result,
         "mcp": get_mcp_status(),
     }
-
-
-# Local helper to avoid circular import with routes_health
-def get_mcp_status() -> list[dict[str, Any]]:
-    """Return MCP server status (local copy for MCP config response)."""
-    if _state.bootstrap is not None:
-        return _state.bootstrap.get_mcp_status()
-    return []

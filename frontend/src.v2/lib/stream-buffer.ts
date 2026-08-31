@@ -140,12 +140,7 @@ export function createStreamBuffer(onFlush: FlushFn): StreamBuffer {
     },
     flush,
     destroy() {
-      generation += 1;
-      if (rafId !== null) cancelAnimationFrame(rafId);
-      if (timeoutId !== null) clearTimeout(timeoutId);
-      rafId = null;
-      timeoutId = null;
-      clearBuffer();
+      flush();
       activeStreamKey = "";
       projectedFirstChunk = false;
     },

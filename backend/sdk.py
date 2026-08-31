@@ -17,7 +17,7 @@ from backend.agent.message import AgentEvent
 from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
 from backend.agent.execution_journal import ExecutionJournal, execution_journal_owner
 from backend.agent.state import AgentState
-from backend.agent.tool_execution import execute_tool_batch
+from backend.agent.tool_batch_execution import execute_tool_batch
 from backend.artifact.store import ArtifactStore
 from backend.config import AgentSettings, AppConfig, PermissionSettings, TokenBudget, load_config
 from backend.feature_flags import feature_enabled
@@ -132,6 +132,10 @@ class SDKSession:
         self.context_builder = context_builder or ContextBuilder()
         self.metadata = dict(metadata or {"source": "sdk"})
         self._query_kwargs = dict(query_kwargs)
+        configured_workspace = self._query_kwargs.get("workspace_root")
+        self._query_kwargs["workspace_root"] = Path(
+            configured_workspace if configured_workspace is not None else Path.cwd()
+        ).expanduser().resolve()
         self._active_query = False
 
     async def query(self, message: str, **overrides: Any) -> AsyncIterator[AgentEvent]:
@@ -242,12 +246,29 @@ async def query(
     state: AgentState | None = None,
     context_builder: ContextBuilder | None = None,
     session_id: str = "sdk",
+    workspace_root: str | Path | None = None,
     max_iterations: int | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Run one SDK turn under MiniCode's process-wide conversation fence."""
     effective_metadata = dict(metadata or {"source": "sdk"})
-    conversation_id = str(effective_metadata.get("conversation_id") or "").strip()
+    metadata_conversation_id = str(
+        effective_metadata.get("conversation_id") or ""
+    ).strip()
+    state_conversation_id = str(
+        state.conversation_id if state is not None else ""
+    ).strip()
+    if (
+        metadata_conversation_id
+        and state_conversation_id
+        and metadata_conversation_id != state_conversation_id
+    ):
+        raise ValueError(
+            "SDK metadata conversation_id conflicts with the supplied AgentState"
+        )
+    conversation_id = metadata_conversation_id or state_conversation_id
+    if conversation_id:
+        effective_metadata["conversation_id"] = conversation_id
     owner_session_id = str(effective_metadata.get("session_id") or session_id or "sdk").strip()
     claim = conversation_query_guards().try_start(
         conversation_id,
@@ -283,6 +304,7 @@ async def query(
             state=state,
             context_builder=context_builder,
             session_id=session_id,
+            workspace_root=workspace_root,
             max_iterations=max_iterations,
             metadata=effective_metadata,
         ):
@@ -311,6 +333,7 @@ async def _query_unclaimed(
     state: AgentState | None = None,
     context_builder: ContextBuilder | None = None,
     session_id: str = "sdk",
+    workspace_root: str | Path | None = None,
     max_iterations: int | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> AsyncIterator[AgentEvent]:
@@ -323,7 +346,29 @@ async def _query_unclaimed(
     if not feature_enabled("sdk_query", True):
         raise RuntimeError("MiniCode SDK query is disabled by the sdk_query feature flag.")
 
-    config = config or load_config()
+    state_workspace = state.workspace_root if state is not None else None
+    requested_workspace_root = (
+        Path(workspace_root).expanduser().resolve()
+        if workspace_root is not None
+        else None
+    )
+    state_workspace_root = (
+        Path(state_workspace).expanduser().resolve()
+        if state_workspace is not None
+        else None
+    )
+    if (
+        requested_workspace_root is not None
+        and state_workspace_root is not None
+        and requested_workspace_root != state_workspace_root
+    ):
+        raise ValueError(
+            "SDK workspace_root conflicts with the supplied AgentState"
+        )
+    resolved_workspace_root = (
+        requested_workspace_root or state_workspace_root or Path.cwd().resolve()
+    )
+    config = config or load_config(cwd=resolved_workspace_root)
     artifact_store = artifact_store or ArtifactStore()
     if llm is None:
         from backend.llm.model_registry import create_session_llm
@@ -332,18 +377,40 @@ async def _query_unclaimed(
     if tool_registry is None:
         from backend.services.tool_registry_factory import build_tool_registry
 
-        tool_registry = build_tool_registry(artifact_store)
+        tool_registry = build_tool_registry(
+            artifact_store,
+            workspace_root=resolved_workspace_root,
+            config=config,
+        )
     for sdk_tool in tools or ():
         tool_registry.register(sdk_tool)
-    permission_checker = permission_checker or PermissionChecker(config.permissions)
+    permission_checker = permission_checker or PermissionChecker(
+        config.permissions,
+        resolved_workspace_root,
+    )
     agent_settings = agent_settings or config.agent
     token_budget = token_budget or config.token_budget
     if max_iterations is not None:
         agent_settings = replace(agent_settings, max_iterations=max_iterations)
-    state = state or AgentState(user_message=message, max_iterations=agent_settings.max_iterations)
-    state.conversation_id = str(
-        (metadata or {}).get("conversation_id") or state.conversation_id or ""
+    conversation_id = str(
+        (metadata or {}).get("conversation_id")
+        or (state.conversation_id if state is not None else "")
+        or ""
     ).strip()
+    state = state or AgentState(
+        user_message=message,
+        max_iterations=agent_settings.max_iterations,
+        conversation_id=conversation_id,
+        workspace_root=resolved_workspace_root,
+    )
+    state.conversation_id = str(
+        conversation_id or state.conversation_id or ""
+    ).strip()
+    state.workspace_root = resolved_workspace_root
+    effective_metadata = dict(metadata or {"source": "sdk"})
+    if state.conversation_id:
+        effective_metadata["conversation_id"] = state.conversation_id
+    effective_metadata["workspace_root"] = str(resolved_workspace_root)
     context_builder = context_builder or ContextBuilder(
         token_budget=token_budget,
         agent_settings=agent_settings,
@@ -367,8 +434,9 @@ async def _query_unclaimed(
         state=state,
         runtime=AgentLoopSessionContext(
             permission_context=permission_context,
+            workspace_root=resolved_workspace_root,
             session_id=session_id,
-            metadata=metadata or {"source": "sdk"},
+            metadata=effective_metadata,
         ),
     )
     async for event in QueryEngine().submit(submission):

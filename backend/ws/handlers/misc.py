@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from backend.agent.message import AgentEvent
@@ -12,32 +13,6 @@ if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
 
 logger = logging.getLogger(__name__)
-
-
-async def _emit_command_result_safe(
-    session: "WebSocketSession",
-    command: str,
-    message: str,
-    *,
-    level: str = "info",
-    title: str | None = None,
-    data: dict[str, Any] | None = None,
-) -> None:
-    emit = getattr(session, "_emit_command_result", None)
-    kwargs: dict[str, Any] = {}
-    if level != "info":
-        kwargs["level"] = level
-    if title is not None:
-        kwargs["title"] = title
-    if data is not None:
-        kwargs["data"] = data
-    if callable(emit):
-        await emit(command, message, **kwargs)
-        return
-    if level == "error":
-        await emit_command_error(session, command, message)
-    else:
-        await session._send_event(AgentEvent(type="system_notice", data={"content": message, **({"data": data} if data else {})}))
 
 
 async def handle_checkpoint_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
@@ -55,7 +30,7 @@ async def handle_checkpoint_list(session: "WebSocketSession", data: dict[str, An
     except (CheckpointServiceError, ValueError) as exc:
         await emit_command_error(session, "checkpoint.list", exc)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         scope.apply({"type": "checkpoint.list", "checkpoints": result.checkpoints}),
         log_context="checkpoint.list",
     )
@@ -67,7 +42,7 @@ async def handle_checkpoint_rewind(session: "WebSocketSession", data: dict[str, 
 
     try:
         scope = resolve_command_scope(session, data)
-        running_task = session._running_agent_task_for(scope.conversation_id)
+        running_task = session.running_agent_task_for(scope.conversation_id)
         if running_task is not None and not running_task.done():
             raise CheckpointServiceError(
                 "Cannot rewind a checkpoint while the conversation has an active agent turn. "
@@ -83,7 +58,7 @@ async def handle_checkpoint_rewind(session: "WebSocketSession", data: dict[str, 
     except (CheckpointServiceError, ValueError) as exc:
         await emit_command_error(session, "checkpoint.rewind", exc)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         scope.apply({"type": "checkpoint.rewound", "checkpoint": result.checkpoint}),
         log_context="checkpoint.rewound",
     )
@@ -102,7 +77,7 @@ async def handle_run_checkpoint_list(session: "WebSocketSession", data: dict[str
     except (CheckpointServiceError, ValueError) as exc:
         await emit_command_error(session, "checkpoint.run.list", exc)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         scope.apply({
             "type": "checkpoint.run.list",
             "session_id": result.session_id,
@@ -136,10 +111,10 @@ async def handle_subagent_cancel(session: "WebSocketSession", data: dict[str, An
         return True
     runtime_cancel_status = runtime.cancel_subagent_task(subagent_id)
     if runtime_cancel_status == "cancelled":
-        await session._send_event(
+        await session.send_event(
             build_subagent_cancelling_event(subagent_id, conversation_id=conversation_id)
         )
-        await session._emit_command_result(
+        await session.emit_command_result(
             "subagent.cancel",
             "Subagent cancellation accepted.",
             data={"subagent_id": subagent_id, "conversation_id": conversation_id},
@@ -148,14 +123,14 @@ async def handle_subagent_cancel(session: "WebSocketSession", data: dict[str, An
     if runtime_cancel_status == "done":
         snapshot = runtime.get_subagent_snapshot(subagent_id, include_result=True)
         if snapshot is not None:
-            await session._send_event(
+            await session.send_event(
                 build_subagent_status_event(
                     subagent_id,
                     snapshot,
                     conversation_id=conversation_id,
                 )
             )
-        await session._emit_command_result(
+        await session.emit_command_result(
             "subagent.cancel",
             "Subagent already finished.",
             data={"subagent_id": subagent_id, "conversation_id": conversation_id},
@@ -166,7 +141,7 @@ async def handle_subagent_cancel(session: "WebSocketSession", data: dict[str, An
     # runtime must publish the actual terminal event after its cleanup has
     # completed; publishing `subagent.done(cancelled)` here would make the UI
     # ignore that later authoritative result.
-    await session._emit_command_result(
+    await session.emit_command_result(
         "subagent.cancel",
         f"No running subagent found for {subagent_id}.",
         level="warning",
@@ -200,7 +175,7 @@ async def handle_subagent_status(session: "WebSocketSession", data: dict[str, An
 
     snapshot = runtime.get_subagent_snapshot(subagent_id, include_result=include_result)
     if snapshot is None:
-        await session._emit_command_result(
+        await session.emit_command_result(
             "subagent.status",
             f"No subagent found for {subagent_id}.",
             level="warning",
@@ -209,14 +184,14 @@ async def handle_subagent_status(session: "WebSocketSession", data: dict[str, An
         return True
 
     status = str(snapshot.get("status") or "running")
-    await session._send_event(
+    await session.send_event(
         build_subagent_status_event(
             subagent_id,
             snapshot,
             conversation_id=conversation_id,
         )
     )
-    await session._emit_command_result(
+    await session.emit_command_result(
         "subagent.status",
         f"{subagent_id}: {status}",
         data={"subagent_id": subagent_id, "snapshot": snapshot},
@@ -235,11 +210,11 @@ async def handle_agent_resume(session: "WebSocketSession", data: dict[str, Any])
             active_conversation_id=scope.conversation_id,
         )
     except (CheckpointServiceError, ValueError) as exc:
-        await session._emit_command_result("agent.resume", str(exc), level="error")
+        await session.emit_command_result("agent.resume", str(exc), level="error")
         return True
 
     if resume is None:
-        await session._send_ws_payload(
+        await session.send_payload(
             scope.apply({
                 "type": "checkpoint.run.resume",
                 "resumed": False,
@@ -249,8 +224,8 @@ async def handle_agent_resume(session: "WebSocketSession", data: dict[str, Any])
         )
         return True
 
-    await session._send_ws_payload(scope.apply(resume.to_payload()), log_context="checkpoint.run.resume")
-    await session._start_agent_run(
+    await session.send_payload(scope.apply(resume.to_payload()), log_context="checkpoint.run.resume")
+    await session.start_agent_run(
         resume.user_message,
         conversation_id=resume.conversation_id,
         metadata={
@@ -270,7 +245,7 @@ async def handle_inspector_focus(session: "WebSocketSession", data: dict[str, An
         return True
     target_kind = str(data.get("target_kind", "")).strip() or "message"
     target_id = str(data.get("target_id", "")).strip()
-    stored = session._diagnostic_store.get(target_kind, target_id) if target_id else None
+    stored = session.diagnostic_store.get(target_kind, target_id) if target_id else None
     if stored is not None:
         owners = set(stored.conversation_ids)
         if stored.conversation_id:
@@ -300,7 +275,7 @@ async def handle_inspector_focus(session: "WebSocketSession", data: dict[str, An
     event.data["conversation_id"] = scope.conversation_id
     if scope.request_id:
         event.data["request_id"] = scope.request_id
-    await session._send_event(event)
+    await session.send_event(event)
     return True
 
 
@@ -311,12 +286,12 @@ async def handle_model_command(session: "WebSocketSession", data: dict[str, Any]
     if request.error_event is not None:
         await emit_command_error(session, "model.set", request.error_event)
         return True
-    await session._set_selected_model(request.model, manual_override=True)
+    await session.set_selected_model(request.model, manual_override=True)
     # A rejected selection must still restore the client from the session's
     # authoritative model state. This is an explicit command response, not a
     # duplicate background runtime projection.
-    await session._send_llm_state(force=True)
-    await session._send_runtime_capabilities(source="llm.model.set")
+    await session.send_llm_state(force=True)
+    await session.session_lifecycle.send_runtime_capabilities(source="llm.model.set")
     return True
 
 
@@ -341,7 +316,9 @@ async def handle_read_artifact_command(session: "WebSocketSession", data: dict[s
             raise ValueError("The conversation that owns this file no longer exists")
         if getattr(conversation, "archived", False):
             raise ValueError("Files from an archived conversation cannot be opened")
-        workspace_root = str(session._workspace_root_for_conversation(conversation) or "")
+        workspace_root = str(
+            session.session_lifecycle.workspace_root_for_conversation(conversation) or ""
+        )
         result = read_artifact_content(
             session.artifact_store,
             session.attachment_store,
@@ -354,8 +331,8 @@ async def handle_read_artifact_command(session: "WebSocketSession", data: dict[s
     except ValueError as exc:
         await emit_command_error(session, "read_artifact", exc)
         return True
-    await session._send_event(result.to_event())
-    await session._emit_command_result(
+    await session.send_event(result.to_event())
+    await session.emit_command_result(
         "read_artifact",
         "",
         data={
@@ -396,7 +373,7 @@ async def handle_subagent_transcript(session: "WebSocketSession", data: dict[str
         snapshot = runtime.get_subagent_snapshot(subagent_id, include_result=False)
         status = str((snapshot or {}).get("status") or "").strip().lower()
         if status in {"pending", "running", "blocked"}:
-            await session._emit_command_result(
+            await session.emit_command_result(
                 "subagent.transcript",
                 f"Subagent {subagent_id} is starting; its durable transcript is not available yet.",
                 data={
@@ -408,7 +385,7 @@ async def handle_subagent_transcript(session: "WebSocketSession", data: dict[str
                 },
             )
             return True
-        await session._emit_command_result(
+        await session.emit_command_result(
             "subagent.transcript",
             f"Terminal subagent {subagent_id} has no durable transcript.",
             level="warning",
@@ -432,7 +409,7 @@ async def handle_subagent_transcript(session: "WebSocketSession", data: dict[str
         ),
         default=0,
     )
-    await session._emit_command_result(
+    await session.emit_command_result(
         "subagent.transcript",
         f"Loaded transcript for {subagent_id}.",
         data={
@@ -449,12 +426,12 @@ async def handle_approval_file_diff_command(session: "WebSocketSession", data: d
     from backend.services.approval_diff_service import get_approval_file_diff
 
     tool_call_id = str(data.get("tool_call_id") or "").strip()
-    owner_error = session._approval_response_owner_error(tool_call_id, data)
+    owner_error = session.approval_response_owner_error(tool_call_id, data)
     if owner_error:
         await emit_command_error(session, "approval.file_diff", owner_error)
         return True
     try:
-        pending = getattr(session, "_pending_approval_payloads", {}).get(tool_call_id)
+        pending = session.turn_wait_state.pending_approval_payloads.get(tool_call_id)
         pending_turn_id = str(pending.get("turn_id") or "").strip() if isinstance(pending, dict) else ""
         conversation_id = str(
             data.get("conversation_id")
@@ -464,7 +441,7 @@ async def handle_approval_file_diff_command(session: "WebSocketSession", data: d
         ).strip()
         turn_id = str(data.get("turn_id") or pending_turn_id).strip()
         result = get_approval_file_diff(
-            session._approval_diff_cache,
+            session.approval_diff_cache,
             tool_call_id=tool_call_id,
             path=str(data.get("path", "")),
             conversation_id=conversation_id,
@@ -474,7 +451,7 @@ async def handle_approval_file_diff_command(session: "WebSocketSession", data: d
         await emit_command_error(session, "approval.file_diff", exc)
         return True
 
-    await session._send_ws_payload(result.to_payload(), log_context="approval.file_diff")
+    await session.send_payload(result.to_payload(), log_context="approval.file_diff")
     return True
 
 
@@ -492,7 +469,7 @@ async def handle_interrupt_command(session: "WebSocketSession", data: dict[str, 
     current_turn_id = str(stream_state.get("turn_id") or "").strip()
     current_message_id = str(stream_state.get("message_id") or "").strip()
     current_task_id = str(
-        getattr(session, "_conversation_run_task_ids", {}).get(target_conversation_id) or ""
+        session.run_manager.run_task_ids.get(target_conversation_id) or ""
     ).strip()
     # Scope interruption to a concrete turn. A durable interrupt replayed
     # after reconnect must become a no-op once that turn has completed or a new
@@ -513,7 +490,7 @@ async def handle_interrupt_command(session: "WebSocketSession", data: dict[str, 
     # ``_cancel_agent_runs`` is the one cancellation entry: it stops the run
     # task, its child subagents and its pending approvals, then drains them and
     # retains ownership of whatever refused to stop.
-    await session._cancel_agent_runs(
+    await session.cancel_agent_runs(
         conversation_id=target_conversation_id or None,
         reason="user_interrupted",
     )
@@ -527,13 +504,14 @@ async def handle_interrupt_command(session: "WebSocketSession", data: dict[str, 
 async def handle_send_message(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.agent.message import AgentEvent
     from backend.agent.runtime import default_runtime
+    from backend.agent.run_context import RunContext
     from backend.permissions.context import ToolExecutionContext
 
     recipient = str(data.get("recipient") or data.get("recipient_id") or "").strip()
     content = str(data.get("message") or data.get("content") or "").strip()
     message_id = str(data.get("message_id") or "").strip()
     if not recipient or not content:
-        await session._emit_command_result(
+        await session.emit_command_result(
             "send_message",
             "recipient and message are required.",
             level="error",
@@ -544,7 +522,7 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
     runtime = default_runtime()
     subagent = _load_subagent_record(runtime, recipient)
     if subagent is None:
-        await session._emit_command_result(
+        await session.emit_command_result(
             "send_message",
             f"No subagent found for {recipient}.",
             level="error",
@@ -560,7 +538,7 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
             scope=scope,
         )
     except ValueError as exc:
-        await session._emit_command_result(
+        await session.emit_command_result(
             "send_message",
             str(exc),
             level="error",
@@ -573,7 +551,7 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
         task_tool = session.tool_registry.get_tool("task")
         resume = getattr(task_tool, "resume_background_subtask", None)
         if not callable(resume):
-            await session._emit_command_result(
+            await session.emit_command_result(
                 "send_message",
                 "The stopped subagent cannot be resumed because TaskTool is unavailable.",
                 level="error",
@@ -586,7 +564,7 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
             return True
 
         async def emit_subagent_event(event_type: str, payload: dict[str, Any]) -> None:
-            await session._send_event(AgentEvent(type=event_type, data=payload))
+            await session.send_event(AgentEvent(type=event_type, data=payload))
 
         try:
             await resume(
@@ -594,20 +572,22 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
                 prompt=content,
                 context=ToolExecutionContext(
                     permission=session.permission_context,
-                    workspace_root=session._current_workspace_root(),
+                    workspace_root=(
+                        Path(scope.workspace_root)
+                        if scope.workspace_root
+                        else None
+                    ),
                     session_id=session.session_id,
                     task_id=parent_run_id or session.session_id,
                     conversation_id=target_conversation_id,
                     emit_event=emit_subagent_event,
-                    metadata={
-                        "agent_runtime": runtime,
-                        "run_id": parent_run_id or session.session_id,
-                        "_tool_registry": session.tool_registry,
-                    },
+                    metadata={"run_id": parent_run_id or session.session_id},
+                    run_context=RunContext(agent_runtime=runtime),
+                    tool_registry=session.tool_registry,
                 ),
             )
         except Exception as exc:
-            await session._emit_command_result(
+            await session.emit_command_result(
                 "send_message",
                 f"Stopped subagent resume failed: {exc}",
                 level="error",
@@ -618,7 +598,7 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
                 },
             )
             return True
-        await session._emit_command_result(
+        await session.emit_command_result(
             "send_message",
             "Stopped subagent resumed with the message.",
             data={
@@ -639,7 +619,7 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
         message_id=message_id,
     )
     message_event_type = "message"
-    await session._send_ws_payload(
+    await session.send_payload(
         {
             "type": "subagent.event",
             "subagent_id": recipient,
@@ -651,7 +631,7 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
         },
         log_context="subagent.message",
     )
-    await session._emit_command_result(
+    await session.emit_command_result(
         "send_message",
         "Message sent to subagent.",
         data={"recipient": recipient, "message_id": record.message_id},
@@ -671,8 +651,8 @@ async def handle_user_message_queue_cancel(session: "WebSocketSession", data: di
             "conversation_id and message_id are required",
         )
         return True
-    if session._run_manager.remove_queued_user_message(conversation_id, message_id):
-        await session._send_event(
+    if session.run_manager.remove_queued_user_message(conversation_id, message_id):
+        await session.send_event(
             AgentEvent.user_message_queue_updated(
                 status="cancelled",
                 conversation_id=conversation_id,
@@ -681,13 +661,13 @@ async def handle_user_message_queue_cancel(session: "WebSocketSession", data: di
                 reason="user_cancelled",
             )
         )
-        await session._emit_command_result(
+        await session.emit_command_result(
             "user_message.queue.cancel",
             "Queued message cancelled.",
             data={"conversation_id": conversation_id, "message_id": message_id},
         )
     else:
-        await session._emit_command_result(
+        await session.emit_command_result(
             "user_message.queue.cancel",
             "Queued message is no longer available.",
             level="warning",
@@ -708,10 +688,10 @@ async def handle_user_message_queue_steer(session: "WebSocketSession", data: dic
             "conversation_id and message_id are required",
         )
         return True
-    if not session._run_manager.begin_queue_steering(conversation_id):
+    if not session.run_manager.begin_queue_steering(conversation_id):
         # Another steer already owns this conversation's queue; saying nothing
         # made the steer button look dead on a double click.
-        await session._emit_command_result(
+        await session.emit_command_result(
             "user_message.queue.steer",
             "Another queued message is already being steered.",
             level="warning",
@@ -724,9 +704,9 @@ async def handle_user_message_queue_steer(session: "WebSocketSession", data: dic
         )
         return True
     try:
-        selected_command = session._run_manager.pop_queued_user_message(conversation_id, message_id)
+        selected_command = session.run_manager.pop_queued_user_message(conversation_id, message_id)
         if selected_command is None:
-            await session._emit_command_result(
+            await session.emit_command_result(
                 "user_message.queue.steer",
                 "Queued message is no longer available.",
                 level="warning",
@@ -734,11 +714,11 @@ async def handle_user_message_queue_steer(session: "WebSocketSession", data: dic
             )
             return True
 
-        running = session._running_agent_task_for(conversation_id)
+        running = session.running_agent_task_for(conversation_id)
         stream_state = getattr(session, "_conversation_streams", {}).get(conversation_id) or {}
         target_message_id = str(stream_state.get("message_id") or "").strip()
         steered = (
-            session._run_manager.enqueue_turn_steer(
+            session.run_manager.enqueue_turn_steer(
                 conversation_id,
                 selected_command,
                 target_message_id=target_message_id,
@@ -747,7 +727,7 @@ async def handle_user_message_queue_steer(session: "WebSocketSession", data: dic
             else None
         )
         if steered is not None:
-            await session._send_event(
+            await session.send_event(
                 AgentEvent.user_message_queue_updated(
                     status="dequeued",
                     conversation_id=conversation_id,
@@ -765,9 +745,9 @@ async def handle_user_message_queue_steer(session: "WebSocketSession", data: dic
                     guidance="The user redirected the current task; this pending action was superseded.",
                     conversation_id=conversation_id,
                 )
-            for position, command in enumerate(session._run_manager.queued_user_messages(conversation_id), 1):
+            for position, command in enumerate(session.run_manager.queued_user_messages(conversation_id), 1):
                 command_data = getattr(command, "data", {})
-                await session._send_event(
+                await session.send_event(
                     AgentEvent.user_message_queue_updated(
                         status="queued",
                         conversation_id=conversation_id,
@@ -782,13 +762,13 @@ async def handle_user_message_queue_steer(session: "WebSocketSession", data: dic
         # Compatibility fallback for the narrow race before the active run has
         # installed its turn-local queue. Rebuild the normal queue with the
         # selected prompt first, then interrupt as older clients expect.
-        queue = session._run_manager.restore_turn_input_as_follow_up(
+        queue = session.run_manager.restore_turn_input_as_follow_up(
             conversation_id,
             selected_command,
         )
         for position, command in enumerate(queue, 1):
             command_data = getattr(command, "data", {})
-            await session._send_event(
+            await session.send_event(
                 AgentEvent.user_message_queue_updated(
                     status="queued",
                     conversation_id=conversation_id,
@@ -798,11 +778,11 @@ async def handle_user_message_queue_steer(session: "WebSocketSession", data: dic
                     reason="user_steered" if position == 1 else "queue_reordered",
                 )
             )
-        await session._cancel_agent_runs(conversation_id=conversation_id, reason="user_steered")
+        await session.cancel_agent_runs(conversation_id=conversation_id, reason="user_steered")
     finally:
-        session._run_manager.finish_queue_steering(conversation_id)
-    if session._running_agent_task_for(conversation_id) is None:
-        session._schedule_next_queued_user_message(conversation_id)
+        session.run_manager.finish_queue_steering(conversation_id)
+    if session.running_agent_task_for(conversation_id) is None:
+        session.schedule_next_queued_user_message(conversation_id)
     return True
 
 
@@ -810,8 +790,8 @@ async def handle_skills_list(session: "WebSocketSession", data: dict[str, Any]) 
     from backend.services.skills_service import list_skills
 
     skills = list_skills(session.skill_manager)
-    await session._send_ws_payload({"type": "skills.list", "skills": skills}, log_context="skills.list")
-    await session._send_event(
+    await session.send_payload({"type": "skills.list", "skills": skills}, log_context="skills.list")
+    await session.send_event(
         AgentEvent.command_result("skills.list", "", data={"count": len(skills)})
     )
     return True
@@ -962,7 +942,7 @@ async def handle_subagent_plan_review(session: "WebSocketSession", data: dict[st
             request_id,
         )
     decision = "approved" if approved else "rejected"
-    await session._emit_command_result(
+    await session.emit_command_result(
         "subagent.plan_review",
         f"Plan request from teammate '{getattr(sender, 'teammate_name', '') or subagent_id}' {decision}.",
         data={
@@ -1041,10 +1021,10 @@ async def handle_skills_install(session: "WebSocketSession", data: dict[str, Any
     except Exception as exc:
         await emit_command_error(session, "skills.install", f"Failed to install skill '{data.get('name', '')}': {exc}")
         return True
-    await session._send_event(AgentEvent(type="system_notice", data={"content": result.notice}))
+    await session.send_event(AgentEvent(type="system_notice", data={"content": result.notice}))
     if result.installed:
-        await session._send_ws_payload({"type": "skills.list", "skills": result.skills}, log_context="skills.list")
-    await session._send_event(
+        await session.send_payload({"type": "skills.list", "skills": result.skills}, log_context="skills.list")
+    await session.send_event(
         AgentEvent.command_result(
             "skills.install",
             result.notice,
@@ -1063,7 +1043,7 @@ async def handle_skills_marketplace_list(session: "WebSocketSession", data: dict
 
     payload = await list_extensions_marketplace(installed_names=installed_skill_names(session.skill_manager))
     marketplace_skills = payload["skills"]
-    await session._send_ws_payload({"type": "skills.marketplace.list", "skills": marketplace_skills}, log_context="skills.marketplace.list")
+    await session.send_payload({"type": "skills.marketplace.list", "skills": marketplace_skills}, log_context="skills.marketplace.list")
     return True
 
 
@@ -1080,7 +1060,7 @@ async def handle_commands_list(session: "WebSocketSession", data: dict[str, Any]
         else None
     )
     workspace_root = (
-        session._workspace_root_for_conversation(conversation)
+        session.session_lifecycle.workspace_root_for_conversation(conversation)
         if conversation is not None
         else None
     )
@@ -1100,9 +1080,8 @@ async def handle_commands_list(session: "WebSocketSession", data: dict[str, Any]
             resolve_active_workspace=False,
         ),
     ]
-    command_context = getattr(session, "_client_command_context", None)
-    request_id = str(command_context.get() if command_context is not None else "").strip()
-    await session._send_ws_payload(
+    request_id = session.event_outbox.client_command_id
+    await session.send_payload(
         {
             "type": "commands.list",
             # None is an explicit session catalog owner. The renderer applies
@@ -1136,8 +1115,7 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
     saved_payload = update.saved_payload
     reasoning_effort = update.reasoning_effort
     if update.notice is not None:
-        await _emit_command_result_safe(
-            session,
+        await session.emit_command_result(
             update.notice.command,
             update.notice.message,
             level=update.notice.level,
@@ -1151,8 +1129,7 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
     session.available_models = list(section.get("available_models") or get_available_models(session.provider))
     session.models_source = str(section.get("models_source") or get_models_source(session.provider)).strip()
     session.selected_model = str(saved_payload.get("active_model") or section.get("model") or "").strip()
-    session._model_override_active = False
-    session._provider_override_active = False
+    session.reset_model_selection_overrides()
     model_runtime_resolver = getattr(session, "_model_runtime_for_conversation", None)
     model_runtime = (
         model_runtime_resolver(getattr(session, "active_conversation_id", None))
@@ -1201,8 +1178,7 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
     session.context_builder._budget = session.config.token_budget
 
     if reasoning_effort and not from_slash_command:
-        await _emit_command_result_safe(
-            session,
+        await session.emit_command_result(
             "effort",
             f"Reasoning effort set to '{reasoning_effort}'.",
             data={
@@ -1210,10 +1186,8 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
                 "applied": True,
             },
         )
-    await session._send_llm_state()
-    send_runtime_capabilities = getattr(session, "_send_runtime_capabilities", None)
-    if callable(send_runtime_capabilities):
-        await send_runtime_capabilities(source="llm.config.set")
+    await session.send_llm_state()
+    await session.session_lifecycle.send_runtime_capabilities(source="llm.config.set")
     return True
 
 

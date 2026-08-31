@@ -9,7 +9,7 @@ dedicated image models, not coding models with function-calling tools.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from typing import Any
 from backend.config import LLMSettings, normalize_custom_wire_api
 from backend.llm.reasoning_effort import normalize_reasoning_effort, reasoning_effort_levels
@@ -205,8 +205,6 @@ def capabilities_from_openai_settings(
         ),
         limitations=tuple(limitations),
     )
-
-
 def capabilities_from_anthropic_adapter(adapter: Any) -> ProviderCapabilities:
     model = str(getattr(adapter, "_model", "") or "").strip()
     base_url = str(getattr(adapter, "_base_url", "") or "").strip()
@@ -339,11 +337,3 @@ def require_tool_calling(adapter: Any, *, tool_count: int) -> CapabilityCheck:
         reason=f"Provider/model does not support tool calling: {detail}",
         capabilities=capabilities,
     )
-
-
-def with_limitation(
-    capabilities: ProviderCapabilities, limitation: str
-) -> ProviderCapabilities:
-    if limitation in capabilities.limitations:
-        return capabilities
-    return replace(capabilities, limitations=(*capabilities.limitations, limitation))

@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 _STARTUP_STEP_TIMEOUT_SECONDS = 8.0
 _STARTUP_TIMED_OUT = object()
+_WORKSPACE_ROOT_UNSET = object()
 
 
 async def _with_startup_timeout(label: str, awaitable: Awaitable[Any], timeout: float = _STARTUP_STEP_TIMEOUT_SECONDS) -> Any:
@@ -173,10 +174,10 @@ class AppBootstrap:
             return
         sessions = list(getattr(self.ws_manager, "_sessions", {}).values())
         for session in sessions:
-            if not getattr(session, "_is_connected", False):
+            if not session.is_connected:
                 continue
             try:
-                workspace_root = str(session._current_workspace_root() or "")
+                workspace_root = str(session.session_lifecycle.current_workspace_root() or "")
                 payload = {
                     "type": "scheduler.list",
                     "tasks": self.task_scheduler.list_tasks(workspace_root=workspace_root),
@@ -184,7 +185,7 @@ class AppBootstrap:
                     "conversation_id": str(getattr(session, "active_conversation_id", "") or ""),
                     "workspace_root": workspace_root,
                 }
-                await session._send_ws_payload(payload, log_context="scheduler.list")
+                await session.send_payload(payload, log_context="scheduler.list")
             except Exception:
                 logger.debug("Failed to broadcast scheduler update", exc_info=True)
 
@@ -207,22 +208,24 @@ class AppBootstrap:
 
         sessions_by_workspace: dict[str, Any] = {}
         for session in list(getattr(self.ws_manager, "_sessions", {}).values()):
-            if not getattr(session, "_is_connected", False):
+            if not session.is_connected:
                 continue
             try:
-                raw_root = session._current_workspace_root()
-                if not raw_root:
+                raw_root = session.session_lifecycle.current_workspace_root()
+                if raw_root is None:
                     continue
                 workspace_key = os.path.normcase(
                     str(Path(raw_root).expanduser().resolve(strict=False))
                 )
                 sessions_by_workspace.setdefault(workspace_key, session)
-            except (OSError, RuntimeError, ValueError):
+            except (OSError, ValueError):
                 logger.debug("PR automation ignored an invalid workspace", exc_info=True)
 
         for session in sessions_by_workspace.values():
             try:
-                workspace_root = session._current_workspace_root()
+                workspace_root = session.session_lifecycle.current_workspace_root()
+                if workspace_root is None:
+                    continue
                 if not read_pr_automation(workspace_root).get("auto_fix"):
                     continue
                 await handle_git_pr_status(session, {})
@@ -310,12 +313,24 @@ class AppBootstrap:
         self,
         artifact_store: Any,
         *,
+        workspace_root: str | Path | None | object = _WORKSPACE_ROOT_UNSET,
         config: AppConfig | None = None,
         mcp_manager: Any | None = None,
     ) -> ToolRegistry:
+        from backend.workspace.state import get_active_workspace_root
+
+        if workspace_root is _WORKSPACE_ROOT_UNSET:
+            resolved_workspace_root = get_active_workspace_root()
+        elif workspace_root is None:
+            resolved_workspace_root = None
+        else:
+            resolved_workspace_root = Path(workspace_root).expanduser().resolve()
+        effective_config = config or load_config(cwd=resolved_workspace_root)
         return self._build_tool_registry(
             artifact_store,
-            llm_provider=lambda: self.create_llm(config=config),
+            workspace_root=resolved_workspace_root,
+            config=effective_config,
+            llm_provider=lambda: self.create_llm(config=effective_config),
             mcp_manager=(
                 mcp_manager if mcp_manager is not None else self.mcp_manager
             ),
@@ -509,9 +524,25 @@ class AppBootstrap:
                 return_exceptions=False,
             )
 
-    def create_permission_checker(self, *, config: AppConfig | None = None) -> PermissionChecker:
-        effective_config = config or self.config or self.refresh_config()
-        return PermissionChecker(effective_config.permissions)
+    def create_permission_checker(
+        self,
+        *,
+        config: AppConfig | None = None,
+        workspace_root: str | Path | None | object = _WORKSPACE_ROOT_UNSET,
+    ) -> PermissionChecker:
+        from backend.workspace.state import get_active_workspace_root
+
+        if workspace_root is _WORKSPACE_ROOT_UNSET:
+            resolved_workspace_root = get_active_workspace_root()
+        elif workspace_root is None:
+            resolved_workspace_root = None
+        else:
+            resolved_workspace_root = Path(workspace_root).expanduser().resolve()
+        effective_config = config or load_config(cwd=resolved_workspace_root)
+        return PermissionChecker(
+            effective_config.permissions,
+            resolved_workspace_root,
+        )
 
     def create_llm(
         self,
@@ -589,7 +620,7 @@ class AppBootstrap:
         for session in sessions:
             if (
                 str(getattr(session, "session_id", "") or "") == session_id
-                and bool(getattr(session, "_is_connected", False))
+                and session.is_connected
             ):
                 repository = getattr(session, "conversation_repo", None)
                 get_conversation = getattr(repository, "get_conversation", None)
@@ -598,24 +629,12 @@ class AppBootstrap:
                     if callable(get_conversation)
                     else None
                 )
-                workspace_for_conversation = getattr(
-                    session,
-                    "_workspace_root_for_conversation",
-                    None,
-                )
-                manager_for_workspace = getattr(
-                    session,
-                    "_mcp_manager_for_workspace",
-                    None,
-                )
-                if (
-                    conversation is None
-                    or not callable(workspace_for_conversation)
-                    or not callable(manager_for_workspace)
-                ):
+                if conversation is None:
                     return None, owner
-                workspace_root = workspace_for_conversation(conversation)
-                if manager_for_workspace(workspace_root) is not owner_manager:
+                workspace_root = session.session_lifecycle.workspace_root_for_conversation(
+                    conversation
+                )
+                if self.get_mcp_manager_for_workspace(workspace_root) is not owner_manager:
                     return None, owner
 
                 from backend.agent.conversation_query_guard import (
@@ -681,7 +700,7 @@ class AppBootstrap:
         """Handle elicitation/create request from MCP server."""
         import uuid
 
-        from backend.hooks.manager import HookEvent, get_hook_manager
+        from backend.hooks.manager import HookEvent
 
         session, owner = self._resolve_mcp_request_session(params)
         if not session:
@@ -697,7 +716,7 @@ class AppBootstrap:
 
         # cc runs Elicitation hooks and validates the requested schema
         # before prompting (elicitationHandler.ts); a blocked hook cancels.
-        hook_mgr = get_hook_manager()
+        hook_mgr = owner.get("hook_manager")
         if hook_mgr is not None and hook_mgr.has_hooks(HookEvent.ELICITATION):
             hook_result = await hook_mgr.run_elicitation(
                 prompt,
@@ -727,18 +746,23 @@ class AppBootstrap:
             }
         }
 
-        # Register future for async wait-response
+        # Register the future in the owning session's typed wait lane.  The
+        # shared approval payload index remains the replay/ownership source so
+        # existing clients see MCP prompts exactly like other control requests.
         future = asyncio.get_running_loop().create_future()
-        session._pending_approvals[request_id] = future
-        session._pending_approval_payloads[request_id] = payload
+        from backend.ws.turn_wait_state import TurnWaitState
+
+        wait_state = TurnWaitState.for_session(session)
+        wait_state.register_waiter(request_id, future, kind="elicitation")
+        wait_state.pending_approval_payloads[request_id] = payload
 
         try:
             # Send event to client. A disconnected owner must fail immediately
             # instead of leaving an unreachable prompt registered for five
             # minutes, and every exit path below shares the same cleanup.
-            sent = await session._send_ws_payload(payload, log_context="mcp:elicitation")
+            sent = await session.send_payload(payload, log_context="mcp:elicitation")
             if not sent:
-                await session._emit_approval_cancelled_once(
+                await session.emit_approval_cancelled_once(
                     [request_id],
                     reason="mcp_elicitation_delivery_failed",
                     conversation_id=conversation_id,
@@ -759,14 +783,14 @@ class AppBootstrap:
                 "deny",
                 "reject",
             }:
-                await session._emit_approval_cancelled_once(
+                await session.emit_approval_cancelled_once(
                     [request_id],
                     reason="mcp_elicitation_rejected",
                     conversation_id=conversation_id,
                 )
                 return {"action": "cancel", "error": "User cancelled the elicitation"}
             answer = result.get("answer") or result.get("content") or ""
-            await session._emit_approval_cancelled_once(
+            await session.emit_approval_cancelled_once(
                 [request_id],
                 reason="mcp_elicitation_resolved",
                 conversation_id=conversation_id,
@@ -778,33 +802,33 @@ class AppBootstrap:
                 }
             }
         except TimeoutError:
-            await session._emit_approval_cancelled_once(
+            await session.emit_approval_cancelled_once(
                 [request_id],
                 reason="mcp_elicitation_timeout",
                 conversation_id=conversation_id,
             )
             return {"action": "cancel", "error": "User response timed out"}
         except PermissionError as exc:
-            await session._emit_approval_cancelled_once(
+            await session.emit_approval_cancelled_once(
                 [request_id],
                 reason="mcp_elicitation_owner_cancelled",
                 conversation_id=conversation_id,
             )
             return {"action": "cancel", "error": str(exc)}
         except asyncio.CancelledError:
-            await session._emit_approval_cancelled_once(
+            await session.emit_approval_cancelled_once(
                 [request_id],
                 reason="mcp_elicitation_cancelled",
                 conversation_id=conversation_id,
             )
             return {"action": "cancel", "error": "Interaction cancelled"}
         except Exception as exc:
-            await session._emit_approval_cancelled_once(
+            await session.emit_approval_cancelled_once(
                 [request_id],
                 reason="mcp_elicitation_failed",
                 conversation_id=conversation_id,
             )
             return {"action": "cancel", "error": str(exc) or "MCP elicitation failed"}
         finally:
-            session._pending_approvals.pop(request_id, None)
-            session._pending_approval_payloads.pop(request_id, None)
+            wait_state.remove_waiter(request_id)
+            wait_state.pending_approval_payloads.pop(request_id, None)

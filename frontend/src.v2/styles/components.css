@@ -512,6 +512,16 @@
   background: color-mix(in oklch, var(--surface-soft) 92%, var(--state-info));
 }
 
+.mc-connection-banner[data-kind="reconnecting"] {
+  color: color-mix(in oklch, var(--state-info) 78%, var(--text-primary));
+  background: color-mix(in oklch, var(--surface-soft) 88%, var(--state-info));
+}
+
+.mc-connection-banner[data-kind="failed"] {
+  color: color-mix(in oklch, var(--state-danger) 78%, var(--text-primary));
+  background: color-mix(in oklch, var(--surface-base) 88%, var(--state-danger));
+}
+
 .mc-connection-banner-dot {
   width: 7px;
   height: 7px;
@@ -522,6 +532,26 @@
 
 .mc-connection-banner[data-kind="warning"] .mc-connection-banner-dot {
   background: color-mix(in oklch, var(--state-warning) 78%, var(--text-muted));
+}
+
+.mc-connection-banner[data-kind="reconnecting"] .mc-connection-banner-dot {
+  background: var(--state-info);
+  animation: mc-connection-pulse 1.2s ease-in-out infinite;
+}
+
+.mc-connection-banner[data-kind="failed"] .mc-connection-banner-dot {
+  background: var(--state-danger);
+}
+
+@keyframes mc-connection-pulse {
+  0%, 100% { opacity: 0.45; transform: scale(0.82); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mc-connection-banner[data-kind="reconnecting"] .mc-connection-banner-dot {
+    animation: none;
+  }
 }
 
 body:has(.mc-sidebar-right[data-open="true"]:not([data-embedded="true"])) .toast-container {
@@ -717,7 +747,12 @@ body:has(.settings-workspace.settings-center) .toast-container {
   color: var(--state-info);
 }
 
-.mc-connection-status[data-kind="warning"] > svg {
+.mc-connection-status[data-kind="reconnecting"] > svg {
+  color: var(--state-info);
+}
+
+.mc-connection-status[data-kind="warning"] > svg,
+.mc-connection-status[data-kind="failed"] > svg {
   color: var(--state-danger);
 }
 

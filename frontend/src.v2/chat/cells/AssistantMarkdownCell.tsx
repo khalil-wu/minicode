@@ -16,22 +16,37 @@ import { openArtifactPreview, openWorkspaceFilePreview } from "../openAttachment
 import { sendChatMessage } from "../sendChatMessage";
 import { isWindowsLikeWorkspacePath, normalizeWorkspacePath } from "../../lib/workspace-path";
 import { pushToast } from "../../overlays/ToastContainer";
-import { artifactRawResourceUrlWithToken } from "../../protocol/api";
 import { getWebSocket } from "../../hooks/useWebSocket";
+import {
+  artifactMediaTypeForProjection,
+  canonicalArtifactKind,
+  normalizeArtifactPreview,
+} from "../../lib/artifact-projection";
+import {
+  artifactImageResourceUrl,
+  inlineImageResourceUrl,
+  withPreviewCacheBust,
+} from "../../lib/artifact-resource";
 import "./cells.css";
 
 export function AssistantMarkdownCell({
   cell,
   isTranscriptMode = false,
+  conversationId: ownerConversationId,
+  workspaceRoot: ownerWorkspaceRoot,
 }: {
   cell: AssistantMarkdownCellState;
   isTranscriptMode?: boolean;
+  /** Owner of this transcript; child/history views may differ from active chat. */
+  conversationId?: string;
+  /** Workspace that owns paths emitted in this transcript. */
+  workspaceRoot?: string;
 }) {
   const [copied, setCopied] = useState(false);
   const [sourcesExpanded, setSourcesExpanded] = useState(false);
   const setQuotedMessage = useAppStore((s) => s.setQuotedMessage);
-  const workingDirectory = useAppStore((s) => s.workingDirectory);
-  const conversationId = useAppStore((s) => s.conversationId);
+  const conversationId = String(ownerConversationId || "").trim();
+  const workspaceRoot = String(ownerWorkspaceRoot || "").trim();
   const rawMarkdown = cell.markdownSource;
   const displayMarkdown = normalizeCitationText(rawMarkdown, cell.citations);
   const sources = uniqueCitationSources(rawMarkdown, cell.citations);
@@ -45,7 +60,7 @@ export function AssistantMarkdownCell({
     const normalizedMarkdown = rawMarkdown.replace(/\\/g, "/");
     return (cell.attachments ?? []).filter((attachment) => {
       const normalizedPath = normalizeWorkspacePath(attachment.path);
-      const caseInsensitive = isWindowsLikeWorkspacePath(workingDirectory)
+      const caseInsensitive = isWindowsLikeWorkspacePath(workspaceRoot)
         || isWindowsLikeWorkspacePath(attachment.path);
       const markdownKey = caseInsensitive ? normalizedMarkdown.toLowerCase() : normalizedMarkdown;
       const pathKey = caseInsensitive
@@ -53,14 +68,18 @@ export function AssistantMarkdownCell({
         : normalizedPath;
       return !pathKey || !markdownKey.includes(pathKey);
     });
-  }, [cell.attachments, rawMarkdown, workingDirectory]);
-  const imageArtifacts = useMemo(
-    () => (cell.artifacts ?? []).filter((artifact) => artifact.kind === "image"),
+  }, [cell.attachments, rawMarkdown, workspaceRoot]);
+  const normalizedArtifacts = useMemo(
+    () => (cell.artifacts ?? []).map(normalizeArtifactPreview),
     [cell.artifacts],
   );
+  const imageArtifacts = useMemo(
+    () => normalizedArtifacts.filter((artifact) => artifact.kind === "image"),
+    [normalizedArtifacts],
+  );
   const otherArtifacts = useMemo(
-    () => (cell.artifacts ?? []).filter((artifact) => artifact.kind !== "image"),
-    [cell.artifacts],
+    () => normalizedArtifacts.filter((artifact) => artifact.kind !== "image"),
+    [normalizedArtifacts],
   );
   const visibleImageProgress = useMemo(() => {
     const progress = cell.imageProgress ?? [];
@@ -228,7 +247,12 @@ export function AssistantMarkdownCell({
             <div className="assistant-cell-sources-title">附件</div>
             <div className="assistant-cell-attachments-list">
               {visibleAttachments.map((attachment) => (
-                <AttachmentChip key={attachment.path} attachment={attachment} />
+                <AttachmentChip
+                  key={attachment.path}
+                  attachment={attachment}
+                  conversationId={conversationId || undefined}
+                  workspaceRoot={workspaceRoot}
+                />
               ))}
             </div>
           </div>
@@ -346,12 +370,8 @@ export function AssistantMarkdownCell({
   );
 }
 
-const SAFE_INLINE_IMAGE_DATA_URL = /^data:image\/(?:png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=\s]+$/i;
-
 function safeInlineImageUrl(artifact: ArtifactPreview): string {
-  const value = String(artifact.url || "").trim();
-  if (!value || value.length > 16 * 1024 * 1024) return "";
-  return SAFE_INLINE_IMAGE_DATA_URL.test(value) ? value : "";
+  return inlineImageResourceUrl(artifact.url);
 }
 
 function ImageGenerationProgress({
@@ -417,37 +437,34 @@ function GeneratedArtifactCard({
   const [failedImageUrl, setFailedImageUrl] = useState("");
   const [imageReloadNonce, setImageReloadNonce] = useState(0);
   const isConnected = useAppStore((state) => state.isConnected);
-  const inlineUrl = artifact.kind === "image" ? safeInlineImageUrl(artifact) : "";
-  const mediaType = String(artifact.mediaType || "").split(";", 1)[0].trim().toLowerCase();
+  const kind = canonicalArtifactKind(artifact.kind, artifact.mediaType);
+  const mediaType = artifactMediaTypeForProjection(artifact.mediaType, kind) || "";
+  const inlineUrl = kind === "image" ? safeInlineImageUrl(artifact) : "";
   const sessionId = isConnected ? String(getWebSocket()?.sessionId || "").trim() : "";
   const persistedImageUrl = useMemo(() => {
-    if (
-      artifact.kind !== "image"
-      || inlineUrl
-      || !conversationId
-      || !sessionId
-      || !/^image\/(?:png|jpeg|jpg|gif|webp)$/i.test(mediaType)
-    ) {
-      return "";
-    }
-    const value = artifactRawResourceUrlWithToken(artifact.artifactId, sessionId, conversationId);
-    if (!value || imageReloadNonce === 0) return value;
-    try {
-      const url = new URL(value);
-      url.searchParams.set("reload", String(imageReloadNonce));
-      return url.toString();
-    } catch {
-      return `${value}${value.includes("?") ? "&" : "?"}reload=${imageReloadNonce}`;
-    }
-  }, [artifact.artifactId, artifact.kind, conversationId, imageReloadNonce, inlineUrl, mediaType, sessionId]);
-  const imageUrl = inlineUrl || persistedImageUrl;
+    if (kind !== "image" || !/^image\/(?:png|jpeg|jpg|gif|webp)$/i.test(mediaType)) return "";
+    return withPreviewCacheBust(artifactImageResourceUrl({
+      artifactId: artifact.artifactId,
+      conversationId,
+      sessionId,
+      source: "artifact",
+      originalUrl: inlineUrl,
+      isConnected,
+    }), imageReloadNonce);
+  }, [artifact.artifactId, conversationId, imageReloadNonce, inlineUrl, isConnected, kind, mediaType, sessionId]);
+  const imageUrl = persistedImageUrl;
   const imageLoaded = Boolean(imageUrl && loadedImageUrl === imageUrl);
   const imageFailed = Boolean(imageUrl && failedImageUrl === imageUrl);
 
   const freshImageUrl = () => {
-    if (inlineUrl) return inlineUrl;
-    if (!conversationId || !sessionId) return imageUrl;
-    return artifactRawResourceUrlWithToken(artifact.artifactId, sessionId, conversationId) || imageUrl;
+    return artifactImageResourceUrl({
+      artifactId: artifact.artifactId,
+      conversationId,
+      sessionId,
+      source: "artifact",
+      originalUrl: inlineUrl,
+      isConnected,
+    }) || imageUrl;
   };
 
   const openImageLightbox = () => {
@@ -461,12 +478,13 @@ function GeneratedArtifactCard({
   };
 
   const openPreview = () => {
+    if (!conversationId) return;
     openArtifactPreview({
       artifactId: artifact.artifactId,
-      name: artifact.summary || (artifact.kind === "image" ? "生成图片" : "生成文件"),
+      name: artifact.summary || (kind === "image" ? "生成图片" : "生成文件"),
       summary: artifact.summary,
       mediaType,
-      kind: artifact.kind,
+      kind,
       conversationId,
     });
   };
@@ -525,11 +543,12 @@ function GeneratedArtifactCard({
     }
   };
 
-  if (artifact.kind === "image") {
+  if (kind === "image") {
     return (
       <div
         className="assistant-cell-image-card"
         data-artifact-id={artifact.artifactId}
+        data-artifact-conversation-id={conversationId || undefined}
       >
         {imageUrl && !imageFailed ? (
           <button
@@ -565,13 +584,15 @@ function GeneratedArtifactCard({
             type="button"
             className="assistant-cell-image-unavailable"
             onClick={() => {
-              if (isConnected) setImageReloadNonce(Date.now());
+              if (isConnected && conversationId) setImageReloadNonce((value) => value + 1);
             }}
-            disabled={!isConnected}
+            disabled={!isConnected || !conversationId}
           >
             <ImageIcon size={24} aria-hidden="true" />
             <span>
-              {isConnected
+              {!conversationId
+                ? "图片未关联到会话"
+                : isConnected
                 ? imageFailed
                   ? "图片载入失败，点击重试"
                   : "正在准备生成图片"
@@ -656,21 +677,27 @@ function citationHref(citation: Citation | undefined): string {
   return /^https?:\/\//i.test(candidate) ? candidate : "";
 }
 
-function AttachmentChip({ attachment }: { attachment: AssistantReplyAttachment }) {
-  const workingDirectory = useAppStore((state) => state.workingDirectory);
-  const conversationId = useAppStore((state) => state.conversationId);
+function AttachmentChip({
+  attachment,
+  conversationId,
+  workspaceRoot,
+}: {
+  attachment: AssistantReplyAttachment;
+  conversationId?: string;
+  workspaceRoot: string;
+}) {
+  const fileName = attachment.path.split(/[/\\]/).filter(Boolean).pop() || attachment.path;
   const openAttachment = () => {
     openWorkspaceFilePreview({
       path: attachment.path,
       name: fileName,
       mediaType: attachment.isImage ? "image/*" : undefined,
       kind: attachment.isImage ? "image" : "file",
-      workspaceRoot: workingDirectory,
-      conversationId: conversationId || undefined,
+      workspaceRoot,
+      conversationId,
     });
   };
 
-  const fileName = attachment.path.split(/[/\\]/).filter(Boolean).pop() || attachment.path;
   const sizeLabel = formatFileSize(attachment.size);
   const { onContextMenu, menu } = useContextMenu(() => [
     // OS shell actions have no meaning in browser mode; offering them there

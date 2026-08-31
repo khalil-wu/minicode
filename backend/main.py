@@ -113,7 +113,7 @@ async def _broadcast_mcp_status_change(
         session
         for session in all_sessions
         if getattr(session, "mcp_manager", None) is manager
-        and bool(getattr(session, "_is_connected", False))
+        and session.is_connected
     ]
     get_all_status = getattr(manager, "get_all_status", None)
     if callable(get_all_status):
@@ -122,7 +122,7 @@ async def _broadcast_mcp_status_change(
         get_mcp_status = getattr(_state.bootstrap, "get_mcp_status", None)
         servers = get_mcp_status() if callable(get_mcp_status) else []
     for session in sessions:
-        await session._send_event(
+        await session.send_event(
             AgentEvent(
                 type="mcp_status",
                 data={"servers": servers},
@@ -131,11 +131,11 @@ async def _broadcast_mcp_status_change(
     lifecycle = manager.get_server_lifecycle(server_name)
     if lifecycle is not None:
         for session in sessions:
-            await session._send_event(AgentEvent(type="mcp.lifecycle", data=lifecycle))
+            await session.send_event(AgentEvent(type="mcp.lifecycle", data=lifecycle))
     progress = manager.get_server_progress(server_name)
     if progress is not None:
         for session in sessions:
-            await session._send_event(AgentEvent(type="mcp.progress", data=progress))
+            await session.send_event(AgentEvent(type="mcp.progress", data=progress))
 
     # Compatibility for pre-session manager doubles and integrations.  The
     # production WebSocketManager exposes concrete sessions above, where
@@ -459,11 +459,14 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         await websocket.close(code=1008)
         return
 
-    config = _state.bootstrap.config or load_config()
+    from backend.workspace.state import get_active_workspace_root
+
+    workspace_root = get_active_workspace_root(PROJECT_ROOT)
+    config = load_config(cwd=workspace_root)
 
     # Create LLM adapter
     try:
-        llm = _state.bootstrap.create_llm()
+        llm = _state.bootstrap.create_llm(config=config)
     except Exception as exc:
         await websocket.accept(subprotocol=_websocket_accept_subprotocol(websocket))
         await websocket.send_json(
@@ -478,8 +481,15 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     # Create session-level resources
     artifact_store = ArtifactStore()
-    tool_registry = _state.bootstrap.create_tool_registry(artifact_store)
-    permission_checker = _state.bootstrap.create_permission_checker()
+    tool_registry = _state.bootstrap.create_tool_registry(
+        artifact_store,
+        workspace_root=workspace_root,
+        config=config,
+    )
+    permission_checker = _state.bootstrap.create_permission_checker(
+        workspace_root=workspace_root,
+        config=config,
+    )
 
     session, connection_generation = await _state.ws_manager.connect(
         websocket=websocket,
@@ -495,7 +505,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     )
 
     try:
-        await session.handle(connection_generation=connection_generation)
+        await session.session_lifecycle.handle(connection_generation=connection_generation)
     finally:
         _state.ws_manager.disconnect(
             session.session_id,

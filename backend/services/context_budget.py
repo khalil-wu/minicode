@@ -5,18 +5,18 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from backend.agent.context import ContextBuilder
-from backend.agent.context_ledger import ContextLedger, empty_context_ledger
+from backend.agent.context_ledger import ContextLedger
 from backend.agent.message import AgentEvent
 from backend.agent.state import AgentState
 from backend.config import TokenBudget
-from backend.hooks.manager import HookEvent, get_hook_manager
+from backend.hooks.manager import HookEvent
 
 logger = logging.getLogger(__name__)
 
 
 def build_context_budget_snapshot(session: Any, builder: ContextBuilder) -> dict[str, Any]:
     """Build the same authoritative budget projection for every compact path."""
-    state = getattr(session, "_last_agent_state", None)
+    state = session.last_agent_state
     if state is None:
         state = AgentState(user_message="")
     tool_schemas = None
@@ -64,11 +64,11 @@ async def manage_context_budget(
 
     # Consecutive-failure circuit breaker: three failed attempts open it.
     MAX_CONSECUTIVE_FAILURES = 3
-    if state.consecutive_autocompact_failures >= MAX_CONSECUTIVE_FAILURES:
+    if ctx.consecutive_autocompact_failures >= MAX_CONSECUTIVE_FAILURES:
         logger.warning(
             "Auto-compact circuit breaker: %d consecutive failures; "
             "stopping auto-compaction. Use /clear to reset.",
-            state.consecutive_autocompact_failures,
+            ctx.consecutive_autocompact_failures,
         )
         state.stopped_reason = "budget_exceeded"
         yield AgentEvent.error(
@@ -135,7 +135,7 @@ async def _run_normal_compaction(
     tool_schemas: list[dict[str, Any]],
 ) -> AsyncIterator[AgentEvent]:
     before_ledger = context_ledger_snapshot(ctx)
-    hook_mgr = get_hook_manager()
+    hook_mgr = ctx.hook_manager
     pre_compact_result = None
     if hook_mgr and _hook_manager_has_hooks(hook_mgr, HookEvent.PRE_COMPACT):
         try:
@@ -173,7 +173,7 @@ async def _run_normal_compaction(
     except Exception as exc:
         logger.warning("Compaction failed: %s", exc)
         # Feed the circuit breaker in manage_context_budget.
-        state.consecutive_autocompact_failures += 1
+        ctx.record_autocompact_failure()
         state.stopped_reason = "budget_exceeded"
         yield AgentEvent.error(
             message="上下文压缩失败。请重试或使用 /clear。",
@@ -182,10 +182,13 @@ async def _run_normal_compaction(
         )
         return
     # Successful compaction resets the breaker.
-    state.consecutive_autocompact_failures = 0
+    ctx.reset_autocompact_failures()
     logger.info("Compaction done: %s", summary[:80] if summary else "(empty)")
     yield build_context_compacted_event(summary, before_ledger, context_ledger_snapshot(ctx))
-    post_compact_result = await _run_post_compact_hook(summary)
+    post_compact_result = await _run_post_compact_hook(
+        summary,
+        hook_manager=ctx.hook_manager,
+    )
     if post_compact_result is not None:
         # PostCompact is non-blocking, but its context/system fields are part
         # of the next model request.  Inject them into the same ContextBuilder
@@ -213,8 +216,12 @@ async def _run_normal_compaction(
         state.stopped_reason = "budget_exceeded"
 
 
-async def _run_post_compact_hook(summary: str) -> Any | None:
-    hook_mgr = get_hook_manager()
+async def _run_post_compact_hook(
+    summary: str,
+    *,
+    hook_manager: Any | None,
+) -> Any | None:
+    hook_mgr = hook_manager
     if not hook_mgr or not _hook_manager_has_hooks(hook_mgr, HookEvent.POST_COMPACT):
         return None
     try:
@@ -225,16 +232,7 @@ async def _run_post_compact_hook(summary: str) -> Any | None:
 
 
 def context_ledger_snapshot(ctx: ContextBuilder) -> ContextLedger:
-    builder = getattr(ctx, "context_ledger", None)
-    if callable(builder):
-        try:
-            ledger = builder()
-            if isinstance(ledger, dict):
-                return ledger  # type: ignore[return-value]
-        except Exception as exc:
-            logger.debug("context_ledger failed around compaction: %s", exc)
-    usage = max(0, int(getattr(ctx, "token_usage", 0) or 0))
-    return empty_context_ledger(estimated_tokens=usage, actual_tokens=usage)
+    return ctx.context_ledger()
 
 
 def build_context_compacted_event(

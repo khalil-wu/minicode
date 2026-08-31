@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from backend.agent.runtime_records import epoch_ms
 
 from backend.agent.message import (
     AgentEvent,
@@ -39,8 +40,6 @@ _TOOL_RUNTIME_SPAN_EVENTS = frozenset(
 )
 
 
-def epoch_ms() -> int:
-    return int(time.time() * 1000)
 
 
 def runtime_span(

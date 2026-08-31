@@ -4,6 +4,8 @@ import {
   isFinalAnswerBlock,
 } from "./content-blocks";
 import type { ToolCallRecord } from "./tool-call-reducer";
+import { isBrowserScreenshotRecord } from "./artifact-projection";
+import { providerProgressLabel } from "./provider-progress";
 
 export type TurnActivityKind =
   | "reasoning"
@@ -18,6 +20,7 @@ export type TurnActivityKind =
   | "commandExecution"
   | "fileChange"
   | "mcpToolCall"
+  | "browser"
   | "genericTool"
   | "skill"
   | "progress";
@@ -93,6 +96,7 @@ const ACTIVITY_KINDS = new Set<TurnActivityKind>([
   "commandExecution",
   "fileChange",
   "mcpToolCall",
+  "browser",
   "genericTool",
   "skill",
   "progress",
@@ -124,6 +128,13 @@ export const activityStatusFromToolRecords = (records: ToolCallRecord[]): TurnAc
 export const activityKindFromToolRecord = (record: ToolCallRecord): TurnActivityKind => {
   const declared = String(record.activityKind || "").trim();
   const name = String(record.name || "").trim().toLowerCase();
+  // A screenshot is a first-class browser result.  Persisted records from
+  // before the browser lane was introduced can retain an unrelated activity
+  // declaration (for example `fileRead`) even though the result carries
+  // browser screenshot evidence.  Let the evidence repair that stale label
+  // before honoring the old declaration; otherwise the image may be visible
+  // while the timeline still presents it as the wrong operation.
+  if (isBrowserScreenshotRecord(record)) return "browser";
   // list_files historically arrived with the broad workspaceSearch metadata.
   // The operation name is the canonical discriminator for this one built-in,
   // so it must win before the broad declaration is accepted.
@@ -145,6 +156,7 @@ export const activityKindFromToolRecord = (record: ToolCallRecord): TurnActivity
   if (resultKind === "edit") return "fileChange";
   if (resultKind === "command") return "commandExecution";
   if (resultKind === "web" || resultKind === "search") return "webSearch";
+  if (resultKind === "browser" || resultKind === "preview") return "browser";
 
   // These are MiniCode's canonical built-in tool names. Older event streams
   // may omit both projection fields, but the exact name still identifies the
@@ -152,6 +164,7 @@ export const activityKindFromToolRecord = (record: ToolCallRecord): TurnActivity
   if (["read_file", "read_artifact"].includes(name)) return "fileRead";
   if (["grep_files", "glob_files", "search_files"].includes(name)) return "workspaceSearch";
   if (["web_fetch", "webfetch", "web_search", "websearch"].includes(name)) return "webSearch";
+  if (["browser_control", "browser", "computer"].includes(name)) return "browser";
   if (["run_command", "shell_command", "bash"].includes(name)) return "commandExecution";
   if (["write_file", "edit_file", "apply_patch"].includes(name)) return "fileChange";
   return "genericTool";
@@ -202,7 +215,7 @@ const progressItem = (
         : block.status === "completed"
           ? "completed"
           : "info",
-  title: block.label || block.message,
+  title: providerProgressLabel(block) || block.label || block.message,
   summary: block.summary,
   hasFailure: block.status === "failed",
   hasPendingUserAction: block.stage === "approval" && block.status === "running",

@@ -28,7 +28,6 @@ async def activate_turn_skills(
         for detection in detections:
             name = detection.name
             trigger_mode = getattr(detection, "trigger_mode", "implicit")
-            reason = getattr(detection, "reason", "Matches the current request")
             source_path = getattr(detection, "source_path", "")
             payload = skill_manager.load_skill_payload(name, source_path=source_path or None)
             if payload is not None:

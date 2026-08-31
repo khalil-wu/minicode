@@ -94,7 +94,7 @@ class TurnIterationRuntime:
         )
         if active_registry is not None:
             self.tool_registry = active_registry
-            self.tool_context.metadata["_tool_registry"] = active_registry
+            self.tool_context.tool_registry = active_registry
         return self.llm
 
     async def prepare(
@@ -114,7 +114,8 @@ class TurnIterationRuntime:
             tool_registry=self.tool_registry,
             disabled_tools=self.state.disabled_tools,
             requires_explicit_workspace=bool(
-                self.metadata.get("requires_explicit_workspace")
+                self.tool_context.run_context
+                and self.tool_context.run_context.requires_explicit_workspace
             ),
             workspace_root=self.workspace_root,
             permission_mode=str(self.tool_context.permission.mode or ""),
@@ -181,6 +182,7 @@ class TurnIterationRuntime:
             metadata=self.metadata,
             workspace_root=self.workspace_root,
             permission_context=self.tool_context.permission,
+            run_context=self.tool_context.run_context,
         )
 
         tool_schemas = schema_state.tool_schemas
@@ -195,20 +197,37 @@ class TurnIterationRuntime:
         )
 
         if boundary_input.should_start_turn:
-            if self.skill_manager is not None:
-                async for skill_event in activate_turn_skills(
-                    self.skill_manager,
-                    boundary_input.content,
-                    self.state,
-                ):
-                    events.append(skill_event)
-            original_attachments = self.state.attachments
-            if boundary_input.attachments is not None:
-                self.state.attachments = [dict(item) for item in boundary_input.attachments]
+            history_start = self.context.history_length
+            admission_snapshot = self.context.export_snapshot()
             try:
-                await self.context.start_turn(boundary_input.content, self.state)
-            finally:
-                self.state.attachments = original_attachments
+                if self.skill_manager is not None:
+                    async for skill_event in activate_turn_skills(
+                        self.skill_manager,
+                        boundary_input.content,
+                        self.state,
+                    ):
+                        events.append(skill_event)
+                original_attachments = self.state.attachments
+                if boundary_input.attachments is not None:
+                    self.state.attachments = [
+                        dict(item) for item in boundary_input.attachments
+                    ]
+                try:
+                    await self.context.start_turn(boundary_input.content, self.state)
+                finally:
+                    self.state.attachments = original_attachments
+                commit_turn_admission = self.metadata.get("commit_turn_admission")
+                if callable(commit_turn_admission):
+                    committed = commit_turn_admission(
+                        boundary_input=boundary_input,
+                        history_start=history_start,
+                        history_end=self.context.history_length,
+                    )
+                    if hasattr(committed, "__await__"):
+                        await committed
+            except BaseException:
+                self.context.load_snapshot(admission_snapshot)
+                raise
             await self.turn_kernel.acknowledge_boundary_input(boundary_input)
             for content in pending_turn_context:
                 self.context.append_user_context(content)
@@ -219,9 +238,7 @@ class TurnIterationRuntime:
         # conversation-owned manager at this same iteration boundary so a
         # hook that finishes while tools are running can affect the next
         # provider call without leaking into another conversation.
-        from backend.hooks.manager import get_hook_manager
-
-        hook_manager = get_hook_manager()
+        hook_manager = self.context.hook_manager
         take_async_context = getattr(hook_manager, "take_async_context", None)
         if callable(take_async_context):
             for content in take_async_context():

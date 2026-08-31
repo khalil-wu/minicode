@@ -52,17 +52,6 @@ class ToolSpec:
 
 
 @dataclass(frozen=True)
-class SearchPlan:
-    raw_query: str
-    normalized_query: str
-    required_date: str | None = None
-    timezone: str = ""
-    freshness_window: str = "stable"
-    preferred_source_categories: tuple[str, ...] = ()
-    reject_before: str | None = None
-
-
-@dataclass(frozen=True)
 class EvidenceRecord:
     source_url: str = ""
     source_name: str = ""

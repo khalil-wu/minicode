@@ -7,7 +7,9 @@ from contextlib import suppress
 from fnmatch import fnmatchcase
 import json
 import locale
+import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -36,6 +38,8 @@ from backend.tools.base import (
     MAX_TOOL_RESULT_LINES,
     truncate_text_tail,
 )
+
+logger = logging.getLogger(__name__)
 
 # Compatibility alias for callers that imported the former runner-local cap.
 # The actual contract is Pi's shared 2000-line/50-KiB tool-output boundary.
@@ -1151,7 +1155,7 @@ class SandboxRunner:
         *,
         cwd: str | Path | None,
         resolved: ResolvedSandboxPolicy,
-    ) -> str:
+    ) -> list[str]:
         _runtime, image, reason = _container_runtime()
         if not image:
             raise SandboxUnavailableError(reason or "MiniCode sandbox image is not configured")
@@ -1344,9 +1348,11 @@ class SandboxRunner:
             )
         else:
             args.extend((image, "/bin/sh", "-lc", container_command))
-        if os.name == "nt":
-            return subprocess.list2cmdline(args)
-        return " ".join(_shell_quote(part) for part in args)
+        # The container CLI is an executable with a structured argv contract.
+        # Keeping that structure makes spawn_exec launch it directly, so the
+        # host shell never interprets command text, mount paths, or env values.
+        # The final pwsh/sh argument is still interpreted inside the container.
+        return args
 
     async def _cleanup_container(self, *, force: bool = False) -> None:
         cidfile = self._container_cidfile
@@ -1401,7 +1407,7 @@ def _container_policy_masks(
         ancestors = [
             ancestor_access
             for ancestor, ancestor_access in events
-            if path != ancestor and _path_is_within(path, ancestor)
+            if path != ancestor and path.is_relative_to(ancestor)
         ]
         if access is FileSystemAccessMode.WRITE and not any(
             ancestor_access is not FileSystemAccessMode.WRITE
@@ -1647,9 +1653,81 @@ def _seatbelt_profile(
         rules.append(
             f"(deny file-read* file-read-metadata file-write* {filters_for(root)})"
         )
+    for pattern in resolved.unreadable_globs:
+        patterns = {pattern}
+        canonical = _canonicalized_glob_static_prefix(pattern)
+        if canonical:
+            patterns.add(canonical)
+        for candidate in sorted(patterns):
+            regex = _seatbelt_regex_for_unreadable_glob(candidate).replace('"', '\\"')
+            rules.append(f'(deny file-read* (regex #"{regex}"))')
+            rules.append(f'(deny file-write-unlink (regex #"{regex}"))')
     if resolved.allow_network:
         rules.append("(allow network*)")
     return "\n".join(rules)
+
+
+def _canonicalized_glob_static_prefix(pattern: str) -> str | None:
+    wildcard_at = min(
+        (pattern.find(token) for token in ("*", "?", "[", "]") if token in pattern),
+        default=-1,
+    )
+    if wildcard_at < 0:
+        return None
+    static_prefix = pattern[:wildcard_at]
+    prefix_end = len(static_prefix) - 1 if static_prefix.endswith("/") else static_prefix.rfind("/")
+    if prefix_end <= 0:
+        return None
+    root = Path(pattern[:prefix_end]).resolve(strict=False)
+    normalized = f"{root}{pattern[prefix_end:]}"
+    return normalized if normalized != pattern else None
+
+
+def _seatbelt_regex_for_unreadable_glob(pattern: str) -> str:
+    regex = "^"
+    saw_glob = False
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "*":
+            saw_glob = True
+            if index + 1 < len(pattern) and pattern[index + 1] == "*":
+                index += 2
+                if index < len(pattern) and pattern[index] == "/":
+                    regex += "(.*/)?"
+                    index += 1
+                else:
+                    regex += ".*"
+                continue
+            regex += "[^/]*"
+        elif char == "?":
+            saw_glob = True
+            regex += "[^/]"
+        elif char == "[":
+            saw_glob = True
+            class_end = pattern.find("]", index + 1)
+            if class_end < 0:
+                regex += r"\["
+            else:
+                class_content = pattern[index + 1 : class_end]
+                regex += "["
+                if class_content.startswith("!"):
+                    regex += "^"
+                    class_content = class_content[1:]
+                elif class_content.startswith("^"):
+                    regex += r"\^"
+                    class_content = class_content[1:]
+                regex += class_content.replace("\\", r"\\") + "]"
+                index = class_end
+        elif char == "]":
+            saw_glob = True
+            regex += r"\]"
+        else:
+            regex += re.escape(char)
+        index += 1
+    if not saw_glob:
+        regex += "(/.*)?"
+    return regex + "$"
 
 
 def _resolved_policy(
@@ -1783,9 +1861,9 @@ def _first_writable_symlink_component(
         except OSError:
             break
         if is_symlink and any(
-            _path_is_within(current, writable.root)
+            current.is_relative_to(writable.root)
             and not any(
-                _path_is_within(current, readonly)
+                current.is_relative_to(readonly)
                 for readonly in writable.read_only_subpaths
             )
             for writable in resolved.writable_roots
@@ -1794,22 +1872,6 @@ def _first_writable_symlink_component(
         if not current.exists() and not is_symlink:
             break
     return None
-
-
-def _glob_static_prefix(pattern: str) -> Path:
-    expanded = str(Path(pattern).expanduser())
-    wildcard_at = min(
-        (expanded.find(token) for token in ("*", "?", "[") if token in expanded),
-        default=-1,
-    )
-    if wildcard_at < 0:
-        return Path(expanded).absolute()
-    prefix = expanded[:wildcard_at]
-    separator = max(prefix.rfind("/"), prefix.rfind("\\"))
-    if separator < 0:
-        return Path.cwd().absolute()
-    static = prefix[:separator] or Path(expanded).anchor or os.sep
-    return Path(static).absolute()
 
 
 def _expand_unreadable_glob(pattern: str, max_depth: int | None) -> tuple[Path, ...]:
@@ -2026,8 +2088,8 @@ def _append_bwrap_path_event(
         if candidate.exists():
             masking_anchor = None
             for denied in denied_roots or ():
-                if denied != candidate and _path_is_within(candidate, denied):
-                    if masking_anchor is None or _path_is_within(denied, masking_anchor):
+                if denied != candidate and candidate.is_relative_to(denied):
+                    if masking_anchor is None or denied.is_relative_to(masking_anchor):
                         masking_anchor = denied
             if masking_anchor is not None:
                 _append_bwrap_mount_target_dir_args(args, candidate, masking_anchor)
@@ -2053,12 +2115,9 @@ def _append_bwrap_path_event(
 def _seatbelt_policy_supported(resolved: ResolvedSandboxPolicy) -> bool:
     """Seatbelt deny rules cannot reopen a more-specific nested allow."""
 
-    if resolved.unreadable_globs:
-        return False
-
     for denied in resolved.unreadable_roots:
         if any(
-            path != denied and _path_is_within(path, denied)
+            path != denied and path.is_relative_to(denied)
             for path in (
                 *resolved.readable_roots,
                 *(root.root for root in resolved.writable_roots),
@@ -2067,17 +2126,9 @@ def _seatbelt_policy_supported(resolved: ResolvedSandboxPolicy) -> bool:
             return False
     for writable in resolved.writable_roots:
         if any(
-            other.root != writable.root and _path_is_within(other.root, readonly)
+            other.root != writable.root and other.root.is_relative_to(readonly)
             for readonly in writable.read_only_subpaths
             for other in resolved.writable_roots
         ):
             return False
     return True
-
-
-def _path_is_within(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False

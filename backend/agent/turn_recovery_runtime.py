@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from functools import partial
 from typing import Any
 
 from backend.agent.context import ContextBuilder
@@ -65,7 +66,10 @@ async def degrade_and_finish(
         dependencies=RecoveryDependencies(
             scrub_thinking_tags=scrub_thinking_tags,
             usage_terminal_projection=usage_terminal_projection,
-            run_stop_failure_hook=run_stop_failure_hook,
+            run_stop_failure_hook=partial(
+                run_stop_failure_hook,
+                hook_manager=ctx.hook_manager,
+            ),
         ),
     ):
         yield event

@@ -15,7 +15,24 @@ from backend.tools.contracts import ToolSpec
 logger = logging.getLogger(__name__)
 
 
-class ListMcpResourcesTool(BaseTool):
+class _McpBridgeTool(BaseTool):
+    mcp_capability = ""
+    mcp_required_args: tuple[str, ...] = ()
+    # Bridge tools stay in the default toolset and are activated by name through
+    # tool_search. The mcp toolset is admitted wholesale by background agents.
+    toolset = "default"
+
+    def get_spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            capability=self.mcp_capability,
+            toolset=self.toolset,
+            exposure="deferred",
+            required_args=self.mcp_required_args,
+        )
+
+
+class ListMcpResourcesTool(_McpBridgeTool):
     """
     Discover available MCP (Model Context Protocol) resources from connected servers.
 
@@ -31,6 +48,7 @@ class ListMcpResourcesTool(BaseTool):
     display_label = "List MCP resources"
     should_defer = True
     search_hint = "mcp resources server catalog external context database schema api docs"
+    mcp_capability = "mcp.discover"
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "list_mcp_resources"
@@ -44,14 +62,6 @@ class ListMcpResourcesTool(BaseTool):
             "After listing, use read_mcp_resource with a specific URI to fetch the actual content."
         )
         self._mcp_manager = mcp_manager
-
-    def get_spec(self) -> ToolSpec:
-        return ToolSpec(
-            name=self.name,
-            capability="mcp.discover",
-            toolset="mcp",
-            exposure="deferred",
-        )
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -84,7 +94,7 @@ class ListMcpResourcesTool(BaseTool):
         return self._success_result("Available MCP Resources:\n" + "\n".join(all_resources))
 
 
-class ReadMcpResourceTool(BaseTool):
+class ReadMcpResourceTool(_McpBridgeTool):
     """
     Fetch the contents of a specific MCP resource by its URI.
 
@@ -100,6 +110,8 @@ class ReadMcpResourceTool(BaseTool):
     display_label = "Read MCP resource"
     should_defer = True
     search_hint = "mcp resource read uri external context database schema api docs"
+    mcp_capability = "mcp.read"
+    mcp_required_args = ("uri",)
 
     def __init__(self, mcp_manager: Any | None, artifact_store: Any | None = None) -> None:
         self.name = "read_mcp_resource"
@@ -116,15 +128,6 @@ class ReadMcpResourceTool(BaseTool):
         )
         self._mcp_manager = mcp_manager
         self._artifact_store = artifact_store
-
-    def get_spec(self) -> ToolSpec:
-        return ToolSpec(
-            name=self.name,
-            capability="mcp.read",
-            toolset="mcp",
-            exposure="deferred",
-            required_args=("uri",),
-        )
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -207,7 +210,7 @@ class ReadMcpResourceTool(BaseTool):
         return self._success_result(found_content)
 
 
-class ListMcpResourceTemplatesTool(BaseTool):
+class ListMcpResourceTemplatesTool(_McpBridgeTool):
     """Discover parameterized MCP resource templates."""
 
     read_only = True
@@ -215,6 +218,7 @@ class ListMcpResourceTemplatesTool(BaseTool):
     activity_kind = "genericTool"
     display_label = "List MCP resource templates"
     should_defer = True
+    mcp_capability = "mcp.discover"
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "list_mcp_resource_templates"
@@ -259,7 +263,7 @@ class ListMcpResourceTemplatesTool(BaseTool):
         return self._success_result("Available MCP Resource Templates:\n" + "\n".join(lines))
 
 
-class SubscribeMcpResourceTool(BaseTool):
+class SubscribeMcpResourceTool(_McpBridgeTool):
     """Subscribe to updates for one MCP resource URI."""
 
     read_only = False
@@ -269,6 +273,8 @@ class SubscribeMcpResourceTool(BaseTool):
     activity_kind = "genericTool"
     display_label = "MCP resource subscription"
     should_defer = True
+    mcp_capability = "mcp.subscribe"
+    mcp_required_args = ("server", "uri")
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "subscribe_mcp_resource"
@@ -357,7 +363,7 @@ class UnsubscribeMcpResourceTool(SubscribeMcpResourceTool):
         return self._success_result(f"Unsubscribed from MCP resource updates: {server_name} {uri}")
 
 
-class ListMcpResourceNotificationsTool(BaseTool):
+class ListMcpResourceNotificationsTool(_McpBridgeTool):
     """Read pending resource update notifications from connected MCP servers."""
 
     # consume_resource_notifications() drains each client's pending queue.
@@ -368,6 +374,7 @@ class ListMcpResourceNotificationsTool(BaseTool):
     activity_kind = "genericTool"
     display_label = "List MCP resource notifications"
     should_defer = True
+    mcp_capability = "mcp.read"
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "list_mcp_resource_notifications"
@@ -412,7 +419,7 @@ class ListMcpResourceNotificationsTool(BaseTool):
         return self._success_result("MCP Resource Subscription State:\n" + "\n".join(lines))
 
 
-class ListMcpPromptsTool(BaseTool):
+class ListMcpPromptsTool(_McpBridgeTool):
     """Discover prompt templates exposed by connected MCP servers."""
 
     read_only = True
@@ -420,6 +427,7 @@ class ListMcpPromptsTool(BaseTool):
     activity_kind = "genericTool"
     display_label = "List MCP prompts"
     should_defer = True
+    mcp_capability = "mcp.discover"
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "list_mcp_prompts"
@@ -469,7 +477,7 @@ class ListMcpPromptsTool(BaseTool):
         return self._success_result("Available MCP Prompts:\n" + "\n".join(lines))
 
 
-class GetMcpPromptTool(BaseTool):
+class GetMcpPromptTool(_McpBridgeTool):
     """Render a prompt template from a connected MCP server."""
 
     read_only = True
@@ -477,6 +485,8 @@ class GetMcpPromptTool(BaseTool):
     activity_kind = "genericTool"
     display_label = "Get MCP prompt"
     should_defer = True
+    mcp_capability = "mcp.read"
+    mcp_required_args = ("server", "name")
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "get_mcp_prompt"

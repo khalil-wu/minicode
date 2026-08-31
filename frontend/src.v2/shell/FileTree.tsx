@@ -133,11 +133,13 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   }, [gitChanges, workingDirectory]);
 
   const refresh = useCallback(async () => {
-    const epoch = ++refreshEpochRef.current;
     const directory = workingDirectory;
+    if (!workspaceRootsEqual(directory, useAppStore.getState().workingDirectory)) return;
+    const epoch = ++refreshEpochRef.current;
     const isCurrent = () =>
       epoch === refreshEpochRef.current
       && workspaceRootsEqual(directory, useAppStore.getState().workingDirectory);
+    setLoadingPaths(new Set());
     if (!workingDirectory) {
       setTree(null);
       setError("");
@@ -226,16 +228,27 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   }, [loading]);
 
   const loadDirectory = useCallback(async (path: string) => {
+    const directory = workingDirectory;
+    const epoch = refreshEpochRef.current;
+    const isCurrent = () =>
+      epoch === refreshEpochRef.current
+      && workspaceRootsEqual(directory, useAppStore.getState().workingDirectory);
+    if (!directory || !isCurrent()) return;
     setLoadingPaths((current) => new Set(current).add(path));
     try {
       const children = isDesktop()
         ? nodesFromEntries(await fsListTree(path))
-        : visibleChildren(await listWorkspaceTree(workingDirectory, path) ?? { name: path, path, is_dir: true, children: [] });
-      setTree((current) => current ? replaceNodeChildren(current, path, sortNodes(children)) : current);
+        : visibleChildren(await listWorkspaceTree(directory, path) ?? { name: path, path, is_dir: true, children: [] });
+      setTree((current) => (
+        isCurrent() && current
+          ? replaceNodeChildren(current, path, sortNodes(children))
+          : current
+      ));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "无法加载文件列表");
+      if (isCurrent()) setError(err instanceof Error ? err.message : "无法加载文件列表");
     } finally {
       setLoadingPaths((current) => {
+        if (!isCurrent()) return current;
         const next = new Set(current);
         next.delete(path);
         return next;

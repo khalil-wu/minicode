@@ -7,10 +7,12 @@ transport and path filtering helpers are independent of the tool classes.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from backend.subprocesses import (
     SubprocessOutputLimitError,
     communicate_bounded,
+    decode_process_output,
     spawn_exec,
 )
 from backend.tools.base import (
@@ -38,6 +40,38 @@ import time
 
 
 logger = logging.getLogger(__name__)
+
+
+class RegexSafetyLimitError(RuntimeError):
+    """Raised when a model-supplied regex exceeds the per-operation budget."""
+
+
+class SearchResourceLimitError(RuntimeError):
+    """Raised when the Python fallback cannot complete within its bounds."""
+
+
+@dataclass
+class _FileGrepResult:
+    matches: list[str]
+    output_limit_reached: bool = False
+    lines_truncated: bool = False
+    context_truncated: bool = False
+
+
+@dataclass
+class _GrepBatchResult:
+    matches: list[str]
+    files_searched: int
+    output_limit_reached: bool = False
+    lines_truncated: bool = False
+    context_truncated: bool = False
+
+
+@dataclass
+class _GlobFallbackResult:
+    matches: list[str]
+    truncated: bool
+    output_limit_reached: bool = False
 
 
 GREP_MAX_MATCHES = 250
@@ -140,10 +174,6 @@ def _stdlib_regex_pattern_is_unsafe(pattern: str) -> bool:
     return bool(re.search(r"\\(?:[1-9]|g<|k<)", pattern))
 
 
-def _decode_process_output(data: bytes | None) -> str:
-    return (data or b"").decode("utf-8", errors="replace")
-
-
 def _check_ripgrep() -> bool:
     """Check if ripgrep (rg) is available on the system PATH."""
     try:
@@ -154,10 +184,6 @@ def _check_ripgrep() -> bool:
 
 
 _HAS_RIPGREP = _check_ripgrep()
-
-def _is_bypass_mode(context: Any = None) -> bool:
-    permission = getattr(context, "permission", None)
-    return getattr(permission, "mode", None) == "bypass"
 
 
 def _resolve_search_path(
@@ -174,13 +200,14 @@ def _resolve_search_path(
     Resolution priority:
       1. context.workspace_root (from execution context)
       2. fallback_workspace_root (from tool constructor)
-      3. Path.cwd()
+      3. Path.cwd() for standalone calls without an execution context
 
     Raises:
         PathTraversalError: if the resolved path escapes workspace root.
     """
+    workspace_bound_context = context is not None and hasattr(context, "workspace_root")
     workspace_root: Path | None = None
-    if context and hasattr(context, "workspace_root") and context.workspace_root:
+    if workspace_bound_context and context.workspace_root:
         workspace_root = Path(context.workspace_root).resolve()
     elif fallback_workspace_root is not None:
         workspace_root = Path(fallback_workspace_root).resolve()
@@ -205,6 +232,10 @@ def _resolve_search_path(
     elif not workspace_root and not allow_workspace_escape:
         if _is_declared_readable_path(resolved, context):
             return resolved
+        if workspace_bound_context:
+            raise PathTraversalError(
+                "Search operations require an open workspace for this conversation"
+            )
         cwd = Path.cwd().resolve()
         try:
             resolved.relative_to(cwd)
@@ -229,16 +260,6 @@ def _should_ignore_parts(parts: tuple[str, ...]) -> bool:
     # ignored set is deliberately limited to high-noise metadata trees, while
     # sensitive-file filtering below remains an independent security boundary.
     return any(p.casefold() in _IGNORED_PATH_PARTS for p in parts) or is_windows_reserved_path(Path(*parts))
-
-
-def _as_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"true", "1", "yes", "y", "on"}
-    return bool(value)
 
 
 def _coerce_nonnegative_int(value: Any, default: int = 0) -> int:
@@ -1003,10 +1024,10 @@ async def _grep_with_ripgrep(
         )
 
     if proc.returncode not in (0, 1):  # 1 = no matches
-        error = _decode_process_output(stderr)
+        error = decode_process_output(stderr)
         return f"ripgrep error: {error}", True
 
-    output = _decode_process_output(stdout)
+    output = decode_process_output(stdout)
     if not output:
         output = "(no matches)"
     else:
@@ -1080,12 +1101,12 @@ async def _glob_with_ripgrep(
         )
 
     if proc.returncode not in (0, 1):
-        error = _decode_process_output(stderr).strip()
+        error = decode_process_output(stderr).strip()
         return [], False, f"ripgrep file search error: {error or proc.returncode}"
 
     all_matches = [
         _relativize_prefixed_line(line, search_root)
-        for line in _decode_process_output(stdout).splitlines()
+        for line in decode_process_output(stdout).splitlines()
         if line.strip()
     ]
     # ``rg --sort=modified`` emits oldest-first, which is exactly Claude

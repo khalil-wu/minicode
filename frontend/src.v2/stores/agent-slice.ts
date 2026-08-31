@@ -3,6 +3,7 @@ import type { AgentSlice } from "./types";
 import { progressConversationKey } from "./shared-helpers";
 import type { AgentProgressEntry, AppStore, ConversationAgentState, ProgressContentBlock } from "./types";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
+import { providerProgressLifecycleRegressed } from "../lib/provider-progress";
 
 const SERIAL_MAIN_PROGRESS_STAGES = new Set<ProgressContentBlock["stage"]>([
   "planning",
@@ -10,13 +11,7 @@ const SERIAL_MAIN_PROGRESS_STAGES = new Set<ProgressContentBlock["stage"]>([
   "status",
 ]);
 
-const PROVIDER_PROGRESS_STATUS_RANK: Record<string, number> = {
-  info: 0,
-  running: 1,
-  partial: 1,
-  completed: 2,
-  failed: 3,
-};
+const PROVIDER_PROGRESS_TERMINAL_STATUSES = new Set(["partial", "completed", "failed"]);
 
 function mergeProgressDetail(previous?: string, incoming?: string): string | undefined {
   const parts: string[] = [];
@@ -32,6 +27,26 @@ function mergeProgressDetail(previous?: string, incoming?: string): string | und
   return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
+const maxProgressNumber = (left: number | undefined, right: number | undefined): number | undefined => {
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  return Math.max(left, right);
+};
+
+const isProviderProgressId = (id: string): boolean => id.startsWith("provider:");
+
+const isProviderRetryProgress = (
+  progress: Pick<ProgressContentBlock, "id" | "retryAttempt" | "maxRetries" | "providerState">,
+  previous?: Pick<ProgressContentBlock, "retryAttempt" | "maxRetries" | "providerState">,
+): boolean => isProviderProgressId(progress.id) && (
+  typeof progress.retryAttempt === "number"
+  || typeof progress.maxRetries === "number"
+  || Boolean(progress.providerState)
+  || typeof previous?.retryAttempt === "number"
+  || typeof previous?.maxRetries === "number"
+  || Boolean(previous?.providerState)
+);
+
 function mergeProgressEntry(
   previous: AgentProgressEntry | undefined,
   progress: Omit<ProgressContentBlock, "type" | "timestamp">,
@@ -41,32 +56,72 @@ function mergeProgressEntry(
   const incoming = Object.fromEntries(
     Object.entries(progress).filter(([, value]) => value !== undefined),
   ) as Omit<ProgressContentBlock, "type" | "timestamp">;
-  const entry: AgentProgressEntry = {
-    ...previous,
-    ...incoming,
-    type: "progress",
-    timestamp,
-    conversationId,
-  };
-  const detail = mergeProgressDetail(previous?.detail, progress.detail);
-  if (detail) entry.detail = detail;
+  const isProviderProgress = isProviderProgressId(progress.id);
+  const isRetryProgress = isProviderRetryProgress(progress, previous);
+  if (!previous || !isProviderProgress) {
+    const entry: AgentProgressEntry = {
+      ...previous,
+      ...incoming,
+      type: "progress",
+      timestamp,
+      conversationId,
+    };
+    const detail = mergeProgressDetail(previous?.detail, progress.detail);
+    if (detail) entry.detail = detail;
+    if (entry.status !== "running") delete entry.ephemeral;
+    return entry;
+  }
 
-  if (previous && progress.id.startsWith("provider:")) {
-    const previousRank = PROVIDER_PROGRESS_STATUS_RANK[previous.status] ?? 0;
-    const incomingRank = PROVIDER_PROGRESS_STATUS_RANK[progress.status] ?? 0;
-    if (previousRank > incomingRank) {
-      entry.status = previous.status;
-      entry.message = previous.message;
-      entry.summary = previous.summary;
-      entry.ephemeral = previous.ephemeral;
+  const lifecycleRegressed = providerProgressLifecycleRegressed(previous, progress);
+
+  // A provider row is a single logical retry ladder. Once it reaches a
+  // stronger lifecycle state, a delayed frame from an older attempt must not
+  // reopen it or replace its terminal message. Higher retry counters remain
+  // visible even when the frame carrying them arrived out of order.
+  const entry: AgentProgressEntry = lifecycleRegressed
+    ? { ...previous, type: "progress", timestamp: previous.timestamp, conversationId }
+    : {
+        ...previous,
+        ...incoming,
+        type: "progress",
+        // A provider retry is one logical timeline row. Keep its first-seen
+        // timestamp as the row's start even as later attempts update status
+        // and counters; otherwise the row jumps forward on every retry.
+        timestamp: previous.timestamp,
+        conversationId,
+      };
+
+  // Once a terminal provider state is visible, a delayed non-terminal frame
+  // is a fenced diagnostic. Do not let its counters rewrite the terminal row.
+  const terminalFence = lifecycleRegressed
+    && PROVIDER_PROGRESS_TERMINAL_STATUSES.has(previous.status);
+  if (!terminalFence) {
+    const retryAttempt = maxProgressNumber(previous.retryAttempt, progress.retryAttempt);
+    const maxRetries = maxProgressNumber(previous.maxRetries, progress.maxRetries);
+    const count = maxProgressNumber(previous.count, progress.count);
+    if (retryAttempt !== undefined) entry.retryAttempt = retryAttempt;
+    if (maxRetries !== undefined) entry.maxRetries = maxRetries;
+    if (count !== undefined) entry.count = count;
+  }
+
+  if (!lifecycleRegressed) {
+    const detail = String(progress.detail ?? "").trim();
+    if (isRetryProgress) {
+      if (detail) entry.detail = detail;
+      else delete entry.detail;
+    } else {
+      const mergedDetail = mergeProgressDetail(previous.detail, progress.detail);
+      if (mergedDetail) entry.detail = mergedDetail;
     }
   }
+
   if (entry.status !== "running") delete entry.ephemeral;
   return entry;
 }
 
 function shouldSerializeMainAgentProgress(progress: Omit<ProgressContentBlock, "type" | "timestamp">): boolean {
   return (
+    !isProviderProgressId(progress.id) &&
     progress.status === "running" &&
     SERIAL_MAIN_PROGRESS_STAGES.has(progress.stage) &&
     progress.stage !== "tool" &&
@@ -84,6 +139,7 @@ function completePreviousMainAgentProgress(
   return items.map((item) => {
     if (item.conversationId !== key) return item;
     if (item.id === next.id) return item;
+    if (isProviderProgressId(item.id)) return item;
     if (item.status !== "running") return item;
     if (!SERIAL_MAIN_PROGRESS_STAGES.has(item.stage)) return item;
     if (item.stage === "tool" || item.stage === "approval") return item;

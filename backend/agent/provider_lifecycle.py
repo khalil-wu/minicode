@@ -6,6 +6,9 @@ from collections.abc import Mapping
 from typing import Any, Protocol
 
 
+LIFECYCLE_RUNTIME_METADATA_KEY = "_lifecycle_runtime"
+
+
 class ProviderLifecycleRuntime(Protocol):
     """Optional hooks around one concrete provider request/response boundary."""
 
@@ -23,4 +26,4 @@ class ProviderLifecycleRuntime(Protocol):
     ) -> Any: ...
 
 
-__all__ = ["ProviderLifecycleRuntime"]
+__all__ = ["LIFECYCLE_RUNTIME_METADATA_KEY", "ProviderLifecycleRuntime"]

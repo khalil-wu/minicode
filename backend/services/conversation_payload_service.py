@@ -321,14 +321,30 @@ def choose_conversation_activation_target(conversation_repo: Any, preferred_id: 
 def create_isolated_worktree_binding(
     conversation: Any,
     *,
-    current_workspace_root: Path,
+    current_workspace_root: Path | None,
     main_worktree_root: Any,
     worktree_manager_factory: Any | None = None,
 ) -> IsolatedWorktreeCreationResult:
     from backend.workspace.worktree import WorktreeManager, isolated_worktree_root
 
     conversation_id = str(getattr(conversation, "id", "") or "")
-    base_source = Path(str(getattr(conversation, "workspace_root", "") or current_workspace_root))
+    raw_base_source = str(getattr(conversation, "workspace_root", "") or "").strip()
+    base_source = (
+        Path(raw_base_source).expanduser().resolve()
+        if raw_base_source
+        else current_workspace_root
+    )
+    if base_source is None:
+        return IsolatedWorktreeCreationResult(
+            created=False,
+            conversation_id=conversation_id,
+            error_event=AgentEvent.error(
+                "Open a workspace folder before creating an isolated Git session.",
+                recoverable=True,
+                error_type="workspace",
+                error_code="workspace_required",
+            ),
+        )
     base_root = main_worktree_root(base_source)
     try:
         manager_factory = worktree_manager_factory or WorktreeManager
@@ -390,7 +406,7 @@ def cleanup_isolated_worktree(
     conversation: Any,
     *,
     force: bool = False,
-    current_workspace_root: Path,
+    current_workspace_root: Path | None,
     main_worktree_root: Any,
     is_path_within: Any,
     worktree_has_local_changes: Any,
@@ -432,7 +448,7 @@ def cleanup_isolated_worktree(
             "workspace_root": str(fallback_base_root),
             "message": "Isolated worktree already removed",
         }
-    if worktree_path == current_workspace_root:
+    if current_workspace_root is not None and worktree_path == current_workspace_root:
         return {
             "removed": False,
             "conversation_id": conversation_id,

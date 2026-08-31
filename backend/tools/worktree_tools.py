@@ -5,7 +5,6 @@ Git Worktree 工具（参考 Claude Code 的 worktree 支持）。
 from __future__ import annotations
 
 import asyncio
-import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -13,8 +12,6 @@ from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 
 if TYPE_CHECKING:
     from backend.permissions.context import ToolExecutionContext
-
-logger = logging.getLogger(__name__)
 
 # WorktreeCreate hooks can provide a VCS-backed directory outside Git.  Keep a
 # process-local ownership ledger so RemoveWorktreeTool can route those paths
@@ -46,18 +43,8 @@ def _owned_git_worktree_path(manager: Any, requested_path: Path) -> Path:
     return candidate
 
 
-def _hook_has_event(hook_mgr: Any, event_name: str) -> bool:
-    try:
-        from backend.hooks.manager import HookEvent
-
-        event = getattr(HookEvent, event_name)
-        has_hooks = getattr(hook_mgr, "has_hooks", None)
-        return bool(callable(has_hooks) and has_hooks(event))
-    except Exception:
-        return False
-
-
 async def _run_worktree_hook(
+    hook_manager: Any | None,
     event: str,
     *,
     path: str,
@@ -65,46 +52,22 @@ async def _run_worktree_hook(
     base: str = "",
     reason: str = "",
 ) -> Any | None:
-    from backend.hooks import get_hook_manager
+    from backend.hooks.manager import HookEvent
 
-    hook_mgr = get_hook_manager()
-    if not hook_mgr or not _hook_has_event(
-        hook_mgr,
-        "WORKTREE_CREATE" if event == "create" else "WORKTREE_REMOVE",
-    ):
+    hook_event = (
+        HookEvent.WORKTREE_CREATE
+        if event == "create"
+        else HookEvent.WORKTREE_REMOVE
+    )
+    if hook_manager is None or not hook_manager.has_hooks(hook_event):
         return None
-    try:
-        if event == "create":
-            result = await hook_mgr.run_worktree_create(path=path, branch=branch, base=base)
-        elif event == "remove":
-            result = await hook_mgr.run_worktree_remove(path=path, reason=reason)
-        else:
-            return None
-        # A configured hook that returns no structured result still owns the
-        # backend.  Treat the missing result as a failed hook rather than
-        # silently falling back to Git and executing a different VCS workflow.
-        if result is None:
-            from types import SimpleNamespace
-
-            return SimpleNamespace(
-                failed=True,
-                blocked=False,
-                message=f"Worktree{event.title()} hook returned no result",
-                feedback="",
-                errors=(),
-            )
-        return result
-    except Exception as exc:
-        logger.warning("Worktree%s hook failed: %s", event, exc)
-        from types import SimpleNamespace
-
-        return SimpleNamespace(
-            failed=True,
-            blocked=False,
-            message=str(exc),
-            feedback="",
-            errors=(str(exc),),
+    if event == "create":
+        return await hook_manager.run_worktree_create(
+            path=path,
+            branch=branch,
+            base=base,
         )
+    return await hook_manager.run_worktree_remove(path=path, reason=reason)
 
 
 def _hook_result_error(result: Any, *, event: str) -> str:
@@ -253,12 +216,18 @@ class CreateWorktreeTool(BaseTool):
             return self._error_result("缺少 path 参数")
 
         requested_path = Path(path_str)
+        hook_manager = (
+            context.run_context.hook_manager
+            if context is not None and context.run_context is not None
+            else None
+        )
 
         # Claude delegates WorktreeCreate to the configured hook as the VCS
         # backend.  Check this before resolving a Git manager: hook-only
         # projects are valid even when the current directory is not a Git
         # repository.
         hook_result = await _run_worktree_hook(
+            hook_manager,
             "create",
             path=str(requested_path),
             branch=str(branch or ""),
@@ -361,9 +330,15 @@ class RemoveWorktreeTool(BaseTool):
 
         requested_path = Path(path_str)
         normalized_path = str(requested_path.expanduser().resolve())
+        hook_manager = (
+            context.run_context.hook_manager
+            if context is not None and context.run_context is not None
+            else None
+        )
         hook_mgr_result = None
         if normalized_path in _HOOK_CREATED_WORKTREES:
             hook_mgr_result = await _run_worktree_hook(
+                hook_manager,
                 "remove",
                 path=normalized_path,
                 reason="force" if force else "remove",
@@ -386,6 +361,7 @@ class RemoveWorktreeTool(BaseTool):
             # only valid cleanup backend, so route it there rather than
             # reporting a misleading Git-repository error.
             hook_result = await _run_worktree_hook(
+                hook_manager,
                 "remove",
                 path=normalized_path,
                 reason="force" if force else "remove",

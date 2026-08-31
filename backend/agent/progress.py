@@ -10,14 +10,6 @@ def short_text(value: Any, limit: int = 72) -> str:
     return text if len(text) <= limit else f"{text[:limit - 1]}..."
 
 
-def _arg(args: dict[str, Any], *keys: str, limit: int = 72) -> str:
-    for key in keys:
-        value = args.get(key)
-        if isinstance(value, str) and value.strip():
-            return short_text(value.strip(), limit)
-    return ""
-
-
 def agent_progress(
     message: str,
     *,

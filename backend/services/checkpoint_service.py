@@ -142,8 +142,14 @@ def list_run_checkpoints(
         for path in sorted(checkpoint_dir.glob("*.json"), reverse=True)[:50]:
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as exc:
+                raise CheckpointServiceError(
+                    f"Checkpoint file '{path.name}' is unreadable: {exc}"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise CheckpointServiceError(
+                    f"Checkpoint file '{path.name}' is invalid: expected an object"
+                )
             if clean_conversation_id and str(payload.get("conversation_id") or "").strip() != clean_conversation_id:
                 continue
             iterations = int(payload.get("iterations") or 0)

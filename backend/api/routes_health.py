@@ -38,6 +38,25 @@ async def health_check() -> dict[str, Any]:
     return build_health_payload(bootstrap=_state.bootstrap, active_sessions=_state.ws_manager.active_count)
 
 
+@router.get("/readyz")
+async def readiness_check(response: Response) -> dict[str, Any]:
+    """Report whether the backend composition root can accept sessions."""
+    ready = bool(
+        _state.bootstrap is not None
+        and getattr(_state.bootstrap, "config", None) is not None
+    )
+    response.status_code = 200 if ready else 503
+    response.headers["Cache-Control"] = "no-store"
+    return {"status": "ok" if ready else "starting", "ready": ready}
+
+
+@router.get("/healthz")
+async def liveness_check(response: Response) -> dict[str, str]:
+    """Report that the HTTP process is alive independently of optional services."""
+    response.headers["Cache-Control"] = "no-store"
+    return {"status": "ok"}
+
+
 @router.get("/api/status")
 async def system_status(response: Response) -> dict[str, Any]:
     """Return runtime status for the desktop sidebar."""

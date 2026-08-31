@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field
 
@@ -20,11 +20,15 @@ class ChatRequest(BaseModel):
 
 
 class ToolCallRecord(BaseModel):
-    """Tool call record payload."""
+    """Tool call record payload (REST projection of backend.agent.state.ToolCallRecord)."""
+
     tool_name: str
     tool_input: dict[str, Any] = Field(default_factory=dict)
     tool_output: str | None = None
     artifact_id: str | None = None
+    artifact_kind: str | None = None
+    artifact_media_type: str | None = None
+    artifact_bytes: int | None = None
     status: str = "success"
     error_kind: str | None = None
     user_summary: str | None = None
@@ -32,6 +36,40 @@ class ToolCallRecord(BaseModel):
     recoverable: bool = True
     projection: str | None = None
     model_observation: str | None = None
+
+    # Internal evidence/diagnostics that stay out of the REST surface. The
+    # drift-guard test pins this set against the internal dataclass fields.
+    NOT_PROJECTED_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "source_url",
+        "extraction_status",
+        "content_preview",
+        "evidence_type",
+        "provider",
+        "provider_error_type",
+        "turn_id",
+        "iteration_id",
+        "request_digest",
+        "cleanup_receipt",
+    })
+
+    @classmethod
+    def from_internal(cls, record: Any) -> "ToolCallRecord":
+        return cls(
+            tool_name=record.tool_name,
+            tool_input=record.tool_input,
+            tool_output=record.tool_output,
+            artifact_id=record.artifact_id,
+            artifact_kind=record.artifact_kind,
+            artifact_media_type=record.artifact_media_type,
+            artifact_bytes=record.artifact_bytes,
+            status=str(record.status),
+            error_kind=record.error_kind,
+            user_summary=record.user_summary,
+            developer_detail=record.developer_detail,
+            recoverable=record.recoverable,
+            projection=record.projection,
+            model_observation=record.model_observation,
+        )
 
 
 class ChatResponse(BaseModel):

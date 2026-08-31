@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.atomic_io import atomic_write_text, file_mutation_locks
+from backend.config_requirements import normalize_string_array
 from backend.mcp.registry import normalize_name_for_mcp
 from backend.workspace.trust import is_workspace_trusted
 
@@ -42,7 +43,17 @@ def read_project_local_settings(workspace_root: Path) -> dict[str, Any]:
         raise ValueError(f"Failed to read project local settings at {path}: {exc}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"Project local settings at {path} must be a JSON object")
-    return dict(payload)
+    settings = dict(payload)
+    for field_name in ("enabled_servers", "disabled_servers"):
+        if field_name not in settings:
+            continue
+        settings[field_name] = normalize_string_array(
+            settings[field_name],
+            field_name=field_name,
+            source=path,
+            reject_empty=True,
+        )
+    return settings
 
 
 def project_mcp_server_status(server_name: str, workspace_root: Path) -> str:
@@ -68,14 +79,24 @@ def approve_project_mcp_server(
     path = project_local_settings_path(workspace_root)
     with _PROJECT_SETTINGS_LOCK, file_mutation_locks([path]):
         settings = _trusted_project_settings(workspace_root)
-        enabled = _string_list(settings.get("enabled_servers"))
+        enabled = normalize_string_array(
+            settings.get("enabled_servers"),
+            field_name="enabled_servers",
+            source=path,
+            reject_empty=True,
+        )
         normalized = normalize_name_for_mcp(server_name)
         if normalized not in {normalize_name_for_mcp(item) for item in enabled}:
             enabled.append(server_name)
         settings["enabled_servers"] = enabled
         disabled = [
             item
-            for item in _string_list(settings.get("disabled_servers"))
+            for item in normalize_string_array(
+                settings.get("disabled_servers"),
+                field_name="disabled_servers",
+                source=path,
+                reject_empty=True,
+            )
             if normalize_name_for_mcp(item) != normalized
         ]
         if disabled:
@@ -91,14 +112,24 @@ def reject_project_mcp_server(server_name: str, workspace_root: Path) -> Path:
     path = project_local_settings_path(workspace_root)
     with _PROJECT_SETTINGS_LOCK, file_mutation_locks([path]):
         settings = _trusted_project_settings(workspace_root)
-        disabled = _string_list(settings.get("disabled_servers"))
+        disabled = normalize_string_array(
+            settings.get("disabled_servers"),
+            field_name="disabled_servers",
+            source=path,
+            reject_empty=True,
+        )
         normalized = normalize_name_for_mcp(server_name)
         if normalized not in {normalize_name_for_mcp(item) for item in disabled}:
             disabled.append(server_name)
         settings["disabled_servers"] = disabled
         enabled = [
             item
-            for item in _string_list(settings.get("enabled_servers"))
+            for item in normalize_string_array(
+                settings.get("enabled_servers"),
+                field_name="enabled_servers",
+                source=path,
+                reject_empty=True,
+            )
             if normalize_name_for_mcp(item) != normalized
         ]
         if enabled:
@@ -120,11 +151,13 @@ def _write_project_local_settings(workspace_root: Path, settings: dict[str, Any]
     return path
 
 
-def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, str)]
-
-
 def _normalized_name_set(value: Any) -> set[str]:
-    return {normalize_name_for_mcp(item) for item in _string_list(value)}
+    if value is None:
+        return set()
+    values = normalize_string_array(
+        value,
+        field_name="mcp server names",
+        source="project local settings",
+        reject_empty=True,
+    )
+    return {normalize_name_for_mcp(item) for item in values}

@@ -12,7 +12,6 @@ import logging
 import os
 import shutil
 import threading
-import time
 from collections.abc import Mapping
 from copy import deepcopy
 from contextlib import contextmanager, suppress
@@ -22,6 +21,7 @@ from typing import Any, Iterable
 from uuid import uuid4
 
 from backend.agent.checkpoint import validate_storage_id
+from backend.agent.runtime_records import epoch_ms
 from backend.atomic_io import canonical_file_path_key
 from backend.config import DATA_ROOT
 from filelock import FileLock
@@ -96,6 +96,9 @@ _TOOL_USE_OPTIONAL_FIELDS = (
 
 _TOOL_RESULT_OPTIONAL_FIELDS = (
     "artifact_id",
+    "artifact_kind",
+    "artifact_media_type",
+    "artifact_bytes",
     "is_error",
     "diff",
     "source_url",
@@ -233,10 +236,6 @@ def execution_journal_owner(owner_kind: str, *identity_parts: object) -> str:
     return f"{kind}_{digest}"
 
 
-def _epoch_ms() -> int:
-    return int(time.time() * 1000)
-
-
 def _lock_for(path: Path) -> threading.Lock:
     key = canonical_file_path_key(path)
     with _WRITE_LOCKS_GUARD:
@@ -296,7 +295,7 @@ class JournalEvent:
     payload: dict[str, Any] = field(default_factory=dict)
     event_id: str = field(default_factory=lambda: uuid4().hex)
     seq: int = 0
-    ts_ms: int = field(default_factory=_epoch_ms)
+    ts_ms: int = field(default_factory=epoch_ms)
     parent_event_id: str = ""
     schema_version: int = _JOURNAL_SCHEMA_VERSION
 
@@ -314,7 +313,7 @@ class JournalEvent:
             payload=dict(data.get("payload") or {}),
             event_id=str(data.get("event_id") or uuid4().hex),
             seq=int(data.get("seq") or 0),
-            ts_ms=int(data.get("ts_ms") or _epoch_ms()),
+            ts_ms=int(data.get("ts_ms") or epoch_ms()),
             parent_event_id=str(data.get("parent_event_id") or ""),
             schema_version=int(data.get("schema_version") or _JOURNAL_SCHEMA_VERSION),
         )
@@ -331,8 +330,10 @@ class ExecutionJournal:
         self._event_cache: list[JournalEvent] | None = None
         self._event_cache_signature: tuple[int, int, int] | None = None
         self.unacknowledged_tail_records = 0
+        self.unacknowledged_tail_path: Path | None = None
         key = canonical_file_path_key(self.path)
         with self._locked():
+            self._isolate_incomplete_tail_unlocked()
             current = _WRITE_SEQUENCES.get(key)
             if current is None:
                 current = self._load_last_seq()
@@ -345,6 +346,58 @@ class ExecutionJournal:
             with self._process_lock:
                 yield
 
+    def _isolate_incomplete_tail_unlocked(self) -> None:
+        """Move a crash-truncated final JSONL fragment out of the live chain."""
+
+        if not self.path.exists():
+            return
+        with self.path.open("r+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            if size == 0:
+                return
+            handle.seek(size - 1)
+            if handle.read(1) == b"\n":
+                return
+
+            offset = size
+            boundary = 0
+            while offset > 0:
+                step = min(4096, offset)
+                offset -= step
+                handle.seek(offset)
+                chunk = handle.read(step)
+                newline = chunk.rfind(b"\n")
+                if newline >= 0:
+                    boundary = offset + newline + 1
+                    break
+
+            handle.seek(boundary)
+            fragment = handle.read(size - boundary)
+            digest = hashlib.sha256(fragment).hexdigest()[:20]
+            quarantine = self.path.with_name(
+                f"{self.path.stem}.incomplete-{digest}.jsonl"
+            )
+            if not quarantine.exists():
+                with quarantine.open("xb") as partial:
+                    partial.write(fragment)
+                    partial.flush()
+                    os.fsync(partial.fileno())
+            handle.seek(boundary)
+            handle.truncate()
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        self.unacknowledged_tail_records = 1
+        self.unacknowledged_tail_path = quarantine
+        logger.error(
+            "Execution journal for %s ended in an incomplete JSONL fragment; "
+            "isolated %d bytes at %s before resuming the valid prefix.",
+            self.agent_id,
+            len(fragment),
+            quarantine,
+        )
+
     def _load_last_seq(self) -> int:
         """Read the durable tail's sequence without re-validating the journal.
 
@@ -354,13 +407,9 @@ class ExecutionJournal:
         validation still happens in ``read_events()``, which is what recovery
         and reconstruction read.
 
-        A trailing line that does not parse is an unacknowledged partial append
-        (the process died between the write and the fsync), not evidence that
-        the journal is unusable. This runs from ``__init__`` on every turn and
-        no backend caller handles ExecutionJournalCorruptionError, so raising
-        here bricked the conversation permanently. Skip back to the newest
-        record that does parse and record the skipped tail so the loss stays
-        visible; ``read_events()`` still refuses a genuinely corrupt journal.
+        An unterminated crash fragment is isolated before this method runs.
+        Every newline-terminated record is committed evidence, so malformed
+        complete records fail closed instead of being skipped.
         """
         if not self.path.exists():
             return 0
@@ -370,37 +419,21 @@ class ExecutionJournal:
             raise ExecutionJournalError(
                 f"Failed reading execution journal for {self.agent_id}"
             ) from exc
-        skipped = 0
         for line in reversed(lines):
             text = line.strip()
             if not text:
                 continue
             try:
                 seq = int(json.loads(text)["seq"])
-            except (json.JSONDecodeError, TypeError, ValueError, KeyError):
-                skipped += 1
-                continue
+            except (json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
+                raise ExecutionJournalCorruptionError(
+                    f"Execution journal for {self.agent_id} has an invalid final record"
+                ) from exc
             if seq < 1:
-                skipped += 1
-                continue
-            if skipped:
-                self.unacknowledged_tail_records = skipped
-                logger.error(
-                    "Execution journal for %s ends in %d unreadable record(s); "
-                    "resuming from seq %d. The partial tail is left on disk.",
-                    self.agent_id,
-                    skipped,
-                    seq,
+                raise ExecutionJournalCorruptionError(
+                    f"Execution journal for {self.agent_id} has an invalid final sequence"
                 )
             return seq
-        if skipped:
-            self.unacknowledged_tail_records = skipped
-            logger.error(
-                "Execution journal for %s has no readable record in its tail "
-                "(%d unreadable line(s)); allocating from 0.",
-                self.agent_id,
-                skipped,
-            )
         return 0
 
 
@@ -502,6 +535,44 @@ class ExecutionJournal:
                 ts_ms=ts_ms,
             )
 
+    def append_once(
+        self,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        event_id: str,
+        parent_event_id: str = "",
+        ts_ms: int | None = None,
+    ) -> JournalEvent:
+        """Append a stable fact once, returning the durable copy on replay."""
+
+        stable_id = str(event_id or "").strip()
+        if not stable_id:
+            raise ValueError("event_id is required for append_once")
+        clean_type = str(event_type or "system").strip() or "system"
+        if clean_type not in EVENT_TYPES:
+            clean_type = "system"
+        clean_payload = deepcopy(dict(payload or {}))
+        with self._locked():
+            for event in self._validated_events_unlocked():
+                if event.event_id == stable_id:
+                    if event.event_type != clean_type:
+                        raise ExecutionJournalError(
+                            f"Execution journal event id {stable_id!r} changed type"
+                        )
+                    if event.payload != clean_payload:
+                        raise ExecutionJournalError(
+                            f"Execution journal event id {stable_id!r} changed payload"
+                        )
+                    return event
+            return self._append_unlocked(
+                clean_type,
+                clean_payload,
+                parent_event_id=parent_event_id,
+                event_id=stable_id,
+                ts_ms=ts_ms,
+            )
+
     def _append_unlocked(
         self,
         event_type: str,
@@ -533,7 +604,7 @@ class ExecutionJournal:
             payload=dict(payload or {}),
             event_id=str(event_id or uuid4().hex),
             seq=self._seq,
-            ts_ms=int(ts_ms or _epoch_ms()),
+            ts_ms=int(ts_ms or epoch_ms()),
             parent_event_id=str(parent_event_id or ""),
         )
         line = json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":"))
@@ -1077,48 +1148,6 @@ class ExecutionJournal:
             )
             covered_ids.add(message_id)
         return projections
-
-
-def record_sidechain_events(
-    agent_id: str,
-    events: Iterable[dict[str, Any] | JournalEvent],
-    *,
-    base_dir: Path | None = None,
-) -> list[JournalEvent]:
-    journal = ExecutionJournal(agent_id, base_dir=base_dir)
-    recorded: list[JournalEvent] = []
-    for item in events:
-        if isinstance(item, JournalEvent):
-            recorded.append(
-                journal.append(
-                    item.event_type,
-                    item.payload,
-                    parent_event_id=item.parent_event_id,
-                    event_id=item.event_id,
-                    ts_ms=item.ts_ms,
-                )
-            )
-            continue
-        if not isinstance(item, dict):
-            continue
-        event_type = str(item.get("event_type") or item.get("type") or "system")
-        payload = item.get("payload")
-        if not isinstance(payload, dict):
-            payload = {
-                key: value
-                for key, value in item.items()
-                if key not in {"event_type", "type", "parent_event_id", "event_id", "ts_ms"}
-            }
-        recorded.append(
-            journal.append(
-                event_type,
-                payload,
-                parent_event_id=str(item.get("parent_event_id") or ""),
-                event_id=str(item.get("event_id") or "") or None,
-                ts_ms=item.get("ts_ms"),
-            )
-        )
-    return recorded
 
 
 def load_agent_transcript(agent_id: str, *, base_dir: Path | None = None) -> dict[str, Any]:

@@ -30,6 +30,7 @@ import { recordInputTarget, recordOutcomeMeta } from "./cells/activityCellHelper
 import { readableToolLabel } from "./toolDisplayName";
 import { purifyToolErrorText } from "./errorMessages";
 import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
+import { canonicalArtifactKind, isBrowserScreenshotRecord } from "../lib/artifact-projection";
 
 type CommittedCellState = Exclude<
   HistoryCellState,
@@ -219,10 +220,19 @@ const activityCell = (item: TurnActivityItem, message: ChatMessage): ActivityCel
   title: activityTitle(item),
   subtitle: activitySubtitle(item) || undefined,
   status: statusForActivity(item),
-  collapsed: true,
+  // A browser screenshot is the result itself, not incidental tool output.
+  // Keep that cell open on first projection so the captured page is visible
+  // without making the user hunt through a collapsed activity row.
+  collapsed: !item.records?.some((record) => Boolean(record.artifactId) && isBrowserScreenshotRecord(record)),
   toolCallRecords: item.records,
   progress: item.progress?.length
-    ? { text: item.progress.at(-1)?.summary || item.progress.at(-1)?.message }
+    ? {
+        text: item.progress.at(-1)?.summary || item.progress.at(-1)?.message,
+        retryAttempt: item.progress.at(-1)?.retryAttempt,
+        maxRetries: item.progress.at(-1)?.maxRetries,
+        retryAfterMs: item.progress.at(-1)?.retryAfterMs,
+        providerState: item.progress.at(-1)?.providerState,
+      }
     : undefined,
   skill: item.kind === "skill"
     ? {
@@ -492,6 +502,7 @@ const userCell = (message: ChatMessage | null): UserMessageCellState | null => m
       kind: "user_message",
       id: message.id,
       content: message.content,
+      messageSource: message.messageSource,
       attachments: message.attachmentRefs?.map((attachment) => ({
         id: attachment.id,
         artifactId: attachment.artifactId,
@@ -663,7 +674,7 @@ function splitAnswerAroundImageArtifact(
   artifacts: ChatMessage["artifacts"],
 ): { before: string; after: string } {
   const anchoredOffset = artifacts
-    .filter((artifact) => artifact.kind === "image")
+    .filter((artifact) => canonicalArtifactKind(artifact.kind, artifact.mediaType) === "image")
     .map((artifact) => artifact.textOffset)
     .filter((offset): offset is number => typeof offset === "number" && Number.isFinite(offset))
     .sort((left, right) => left - right)[0];
@@ -702,7 +713,7 @@ function splitAnswerAroundImageArtifact(
   // artifact after the completion sentence. The Images adapter owns this
   // fixed completion copy, which makes it a safe compatibility anchor for
   // artifacts written before durable textOffset support existed.
-  if (artifacts.some((artifact) => artifact.kind === "image")) {
+  if (artifacts.some((artifact) => canonicalArtifactKind(artifact.kind, artifact.mediaType) === "image")) {
     const legacyCompletion = "图像已经为你生成好了。";
     const legacyCompletionOffset = fullAnswer.lastIndexOf(legacyCompletion);
     if (legacyCompletionOffset > 0) {

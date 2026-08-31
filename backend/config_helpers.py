@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import (
     Any,
     Mapping,
+    TYPE_CHECKING,
 )
 from urllib.parse import (
     urlsplit,
@@ -31,7 +32,9 @@ import threading
 
 
 # ── Runtime paths and settings file ─────────────────────────────
-from backend.atomic_io import file_mutation_locks
+
+if TYPE_CHECKING:
+    from backend.config_layers import ConfigLayerStack
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATE_ROOT = Path(os.environ.get("MINICODE_STATE_ROOT") or PROJECT_ROOT).expanduser().resolve()

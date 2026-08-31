@@ -134,7 +134,3 @@ class SandboxValidator:
             return False, reason
 
         return True, ""
-
-
-def create_default_sandbox(workspace_root: Path | None = None) -> SandboxValidator:
-    return SandboxValidator(workspace_root or Path.cwd())

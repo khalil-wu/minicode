@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from backend.agent.context import ContextBuilder
 from backend.agent.message import AgentEvent
 from backend.agent.checkpoint import (
     MAX_CHECKPOINT_HISTORY_MESSAGES,
@@ -26,6 +27,7 @@ from backend.agent.runtime import (
     TerminalCommitError,
 )
 from backend.agent.runtime_records import AgentRunRecord, AgentRunStatus
+from backend.agent.run_context import RunContext
 from backend.agent.runtime_spans import epoch_ms, runtime_span
 from backend.agent.state import AgentState, TerminalReason, TerminalStatus
 from backend.agent.turn_input import TurnInput, TurnInputQueue
@@ -116,21 +118,23 @@ class TurnKernel:
         emit_event: Any | None,
         initial_user_message: str,
         state: AgentState,
+        run_context: RunContext | None = None,
     ) -> None:
         self.runtime = runtime
         self.run_record = run_record
         self.metadata = metadata
         self.emit_event = emit_event
         self.state = state
+        self.run_context = run_context or RunContext()
         self._run_started_emitted = False
         self._run_completed_emitted = False
         self._completion_event: AgentEvent | None = None
         self._terminal_commit_failure_event: AgentEvent | None = None
         self._tool_context: ToolExecutionContext | None = None
-        self._turn_input_queue = metadata.get("turn_input_queue")
-        if self._turn_input_queue is None:
-            self._turn_input_queue = TurnInputQueue()
-            metadata["turn_input_queue"] = self._turn_input_queue
+        turn_input_queue = self.run_context.turn_input_queue
+        self._turn_input_queue = (
+            turn_input_queue if isinstance(turn_input_queue, TurnInputQueue) else TurnInputQueue()
+        )
         self._turn_input_queue.begin_turn(run_record.run_id)
         self._next_user_message = initial_user_message
         self._next_user_attachments: tuple[dict[str, Any], ...] | None = None
@@ -148,11 +152,13 @@ class TurnKernel:
         session_id: str,
         emit_event: Any | None,
         initial_user_message: str,
+        run_context: RunContext | None = None,
     ) -> "TurnKernel":
-        runtime_value = metadata.get("agent_runtime")
+        owner_context = run_context or RunContext()
+        runtime_value = owner_context.agent_runtime
         if not isinstance(runtime_value, AgentRuntime):
             raise RuntimeError(
-                "Turn metadata does not own an AgentRuntime"
+                "RunContext does not own an AgentRuntime"
             )
         runtime = runtime_value
         run_record = runtime.start_run(
@@ -178,7 +184,6 @@ class TurnKernel:
             "turn_id",
             str(metadata.get("assistant_message_id") or run_record.run_id),
         )
-        metadata.setdefault("agent_runtime", runtime)
         if session_id:
             metadata.setdefault("session_id", session_id)
             metadata.setdefault("minicode_session_id", session_id)
@@ -192,8 +197,9 @@ class TurnKernel:
                 emit_event=emit_event,
                 initial_user_message=initial_user_message,
                 state=state,
+                run_context=owner_context,
             )
-        except Exception as exc:
+        except Exception:
             # ``start_run`` has already crossed the durable running boundary.
             # If turn construction fails, close that run before propagating the
             # setup error; otherwise recovery sees an unexplained permanent
@@ -318,7 +324,7 @@ class TurnKernel:
     def interrupt(
         self,
         *,
-        context_builder: Any,
+        context_builder: ContextBuilder,
         stream_text: Any,
         scrub_text: Callable[[str], str],
     ) -> tuple[AgentEvent, ...]:
@@ -351,52 +357,48 @@ class TurnKernel:
             )
             if interrupted_item is not None:
                 events.append(interrupted_item)
-        reconcile = getattr(context_builder, "reconcile_dangling_tool_calls", None)
-        if callable(reconcile):
-            try:
-                reconcile()
-            except Exception as exc:
-                # The cancelled trajectory is the resumption contract for the
-                # next turn; a failed repair must be visible evidence, not a
-                # debug-only footnote.
-                logger.warning("Cancel-path tool trajectory reconcile failed: %s", exc)
-                events.append(
-                    AgentEvent(
-                        type="system_notice",
-                        data={
-                            "title": "Interrupt recovery incomplete",
-                            "message": (
-                                "Dangling tool calls could not be reconciled while "
-                                "cancelling; the next request may be rejected by the "
-                                "provider until the history is repaired."
-                            ),
-                            "severity": "error",
-                            "cancel_recovery_failure": "tool_call_reconcile_failed",
-                            "detail": str(exc),
-                        },
-                    )
+        try:
+            context_builder.reconcile_dangling_tool_calls()
+        except Exception as exc:
+            # The cancelled trajectory is the resumption contract for the
+            # next turn; a failed repair must be visible evidence, not a
+            # debug-only footnote.
+            logger.warning("Cancel-path tool trajectory reconcile failed: %s", exc)
+            events.append(
+                AgentEvent(
+                    type="system_notice",
+                    data={
+                        "title": "Interrupt recovery incomplete",
+                        "message": (
+                            "Dangling tool calls could not be reconciled while "
+                            "cancelling; the next request may be rejected by the "
+                            "provider until the history is repaired."
+                        ),
+                        "severity": "error",
+                        "cancel_recovery_failure": "tool_call_reconcile_failed",
+                        "detail": str(exc),
+                    },
                 )
-        append_user = getattr(context_builder, "append_user", None)
-        if callable(append_user):
-            try:
-                append_user("[Request interrupted by user]")
-            except Exception as exc:
-                logger.warning("Cancel-path interruption marker append failed: %s", exc)
-                events.append(
-                    AgentEvent(
-                        type="system_notice",
-                        data={
-                            "title": "Interrupt marker not recorded",
-                            "message": (
-                                "The interruption marker could not be appended to "
-                                "the conversation history."
-                            ),
-                            "severity": "error",
-                            "cancel_recovery_failure": "interrupt_marker_append_failed",
-                            "detail": str(exc),
-                        },
-                    )
+            )
+        try:
+            context_builder.append_user("[Request interrupted by user]")
+        except Exception as exc:
+            logger.warning("Cancel-path interruption marker append failed: %s", exc)
+            events.append(
+                AgentEvent(
+                    type="system_notice",
+                    data={
+                        "title": "Interrupt marker not recorded",
+                        "message": (
+                            "The interruption marker could not be appended to "
+                            "the conversation history."
+                        ),
+                        "severity": "error",
+                        "cancel_recovery_failure": "interrupt_marker_append_failed",
+                        "detail": str(exc),
+                    },
                 )
+            )
         return tuple(events)
 
     @property
@@ -412,12 +414,14 @@ class TurnKernel:
 
     def bind_tool_context(self, tool_context: ToolExecutionContext) -> None:
         self._tool_context = tool_context
+        if tool_context.run_context is not None:
+            self.run_context = tool_context.run_context
 
     def refresh_live_permission_context(self) -> bool:
         tool_context = self._tool_context
         if tool_context is None:
             return False
-        provider = tool_context.metadata.get("permission_context_provider")
+        provider = self.run_context.permission_context_provider
         if not callable(provider):
             return False
         try:
@@ -425,32 +429,21 @@ class TurnKernel:
         except Exception as exc:
             logger.debug("Live permission context refresh failed: %s", exc)
             return False
-        normalizer = tool_context.metadata.get("_permission_context_normalizer")
-        if isinstance(current, PermissionContext) and callable(normalizer):
-            try:
-                current = normalizer(current)
-            except Exception as exc:
-                logger.warning("Managed permission context refresh failed closed: %s", exc)
-                return False
         if not isinstance(current, PermissionContext) or current == tool_context.permission:
             return False
-        # Derived capabilities must change atomically with the permission mode.
-        # Otherwise bypass -> default/plan leaves the old network grant cached
-        # on the live tool context.
-        sandbox_factory = tool_context.metadata.get("_sandbox_policy_factory")
-        if callable(sandbox_factory):
-            try:
-                refreshed_sandbox_policy = sandbox_factory(current)
-            except Exception as exc:
-                logger.warning("Sandbox policy refresh failed closed: %s", exc)
-                return False
-            tool_context.sandbox_policy = refreshed_sandbox_policy
-        tool_context.permission = current
-        tool_context.allow_network = bool(
-            tool_context.sandbox_policy.allow_network
-            if tool_context.sandbox_policy is not None
-            else current.mode == "bypass"
-        )
+        committer = tool_context.permission_context_committer
+        if not callable(committer):
+            # Subagent tool contexts carry a provider without a committer;
+            # fail closed the same way as a committer that raises.
+            logger.warning(
+                "Managed permission context refresh failed closed: no turn-owned committer"
+            )
+            return False
+        try:
+            committer(current)
+        except Exception as exc:
+            logger.warning("Managed permission context refresh failed closed: %s", exc)
+            return False
         return True
 
     async def emit_runtime_span(
@@ -501,11 +494,17 @@ class TurnKernel:
         message: str,
         *,
         iteration_id: str,
+        progress_id: str = "",
         status: str = "running",
         phase: str = "model",
         detail: str = "",
         count: int | None = None,
         summary: str = "",
+        retry_attempt: int | None = None,
+        max_retries: int | None = None,
+        retry_after_ms: int | None = None,
+        error_message: str = "",
+        provider_state: str | None = None,
     ) -> None:
         """Project provider liveness through the single typed UI event path."""
         if self.emit_event is None:
@@ -514,13 +513,19 @@ class TurnKernel:
             message,
             stage="status",
             status=status,
-            id=provider_progress_id(iteration_id),
+            id=progress_id or provider_progress_id(iteration_id),
             phase=phase,
             label="provider",
             summary=summary or message,
             detail=detail,
             visibility="timeline",
             count=count,
+            retry_attempt=retry_attempt,
+            max_retries=max_retries,
+            retry_after_ms=retry_after_ms,
+            error_message=error_message,
+            provider_state=provider_state,
+            operation_id=progress_id,
         )
         await self.emit_event(event.type, dict(event.data))
 
@@ -531,25 +536,55 @@ class TurnKernel:
         retry_index: int,
         started_at: int | None = None,
         total_attempts: int = 0,
+        max_retries: int | None = None,
+        progress_id: str = "",
     ) -> ProviderAttempt:
+        resolved_max_retries = max(
+            0,
+            int(
+                total_attempts
+                if max_retries is None
+                else max_retries
+            ),
+        )
+        resolved_progress_id = progress_id or provider_progress_id(iteration_id)
+        span_owner = str(self.run_record.run_id or "").strip()
+        resolved_span_id = (
+            f"provider:{span_owner}:{iteration_id}:{retry_index + 1}"
+            if span_owner
+            else f"provider:{iteration_id}:{retry_index + 1}"
+        )
         attempt = ProviderAttempt(
             iteration_id=iteration_id,
             retry_index=retry_index,
-            span_id=f"provider:{iteration_id}:{retry_index + 1}",
+            span_id=resolved_span_id,
             started_at=started_at if started_at is not None else epoch_ms(),
+            progress_id=resolved_progress_id,
+            max_retries=resolved_max_retries,
         )
-        self.metadata["provider_total_attempts"] = max(0, int(total_attempts))
-        attempt_label = (
-            f"第 {attempt.attempt_number}/{total_attempts} 次"
-            if total_attempts > 0
-            else f"第 {attempt.attempt_number} 次"
-        )
+        self.metadata["provider_max_retries"] = resolved_max_retries
+        # The initial request is not a retry.  It has no user-facing counter;
+        # retry attempts are rendered by their retry ordinal (1/N … N/N).
+        if attempt.retry_attempt > 0 and resolved_max_retries > 0:
+            attempt_message = (
+                f"正在重连（第 {attempt.retry_attempt}/{resolved_max_retries} 次）"
+            )
+            attempt_count: int | None = attempt.retry_attempt
+        else:
+            attempt_message = "正在连接提供商"
+            attempt_count = None
         await self.emit_provider_progress(
-            f"正在连接提供商（{attempt_label}）",
+            attempt_message,
             iteration_id=iteration_id,
+            progress_id=resolved_progress_id,
+            provider_state=(
+                "reconnecting" if attempt.retry_attempt > 0 else "connecting"
+            ),
             phase="model",
-            count=attempt.attempt_number,
+            count=attempt_count,
             detail="等待提供商首个响应事件",
+            retry_attempt=attempt.retry_attempt,
+            max_retries=resolved_max_retries,
         )
         await self.emit_runtime_span(
             "provider.request.started",
@@ -561,7 +596,11 @@ class TurnKernel:
             summary="Provider request started",
             started_at=attempt.started_at,
             ui_visible=False,
-            data={"stream_attempt": attempt.attempt_number},
+            data={
+                "stream_attempt": attempt.attempt_number,
+                "retry_attempt": attempt.retry_attempt,
+                "max_retries": resolved_max_retries,
+            },
         )
         return attempt
 
@@ -579,13 +618,21 @@ class TurnKernel:
         attempt.first_event_reported = True
         wait_ms = max(0, attempt.first_byte_at - progress_origin_ms)
         await self.emit_provider_progress(
-            "已连接，模型正在响应",
+            (
+                "已连接，模型正在响应"
+                if attempt.retry_attempt == 0
+                else f"已连接，模型正在响应（重试 {attempt.retry_attempt}/{attempt.max_retries}）"
+            ),
             iteration_id=attempt.iteration_id,
+            progress_id=attempt.progress_id,
+            provider_state="responding",
             status="running",
             phase="model",
-            count=attempt.attempt_number,
+            count=attempt.retry_attempt or None,
             detail=f"首个响应事件等待 {wait_ms}ms",
             summary="Provider connection established",
+            retry_attempt=attempt.retry_attempt,
+            max_retries=attempt.max_retries,
         )
         await self.emit_runtime_span(
             "provider.first_event",
@@ -599,7 +646,11 @@ class TurnKernel:
             ended_at=attempt.first_byte_at,
             duration_ms=max(0, attempt.first_byte_at - attempt.started_at),
             ui_visible=False,
-            data={"stream_attempt": attempt.attempt_number},
+            data={
+                "stream_attempt": attempt.attempt_number,
+                "retry_attempt": attempt.retry_attempt,
+                "max_retries": attempt.max_retries,
+            },
         )
         return wait_ms
 
@@ -625,7 +676,12 @@ class TurnKernel:
             if status in {"cancelled", "superseded"}
             else "provider.request.failed"
         )
-        payload = {"stream_attempt": attempt.attempt_number, **dict(data or {})}
+        payload = {
+            "stream_attempt": attempt.attempt_number,
+            "retry_attempt": attempt.retry_attempt,
+            "max_retries": attempt.max_retries,
+            **dict(data or {}),
+        }
         await self.emit_runtime_span(
             resolved_event,
             span_id=attempt.span_id,
@@ -641,15 +697,15 @@ class TurnKernel:
             data=payload,
         )
         if project_progress:
-            total_attempts = max(
+            max_retries = max(
                 0,
-                int(self.metadata.get("provider_total_attempts") or 0),
+                int(
+                    attempt.max_retries
+                    or self.metadata.get("provider_max_retries")
+                    or 0
+                ),
             )
-            attempt_label = (
-                f"第 {attempt.attempt_number}/{total_attempts} 次"
-                if total_attempts > 0
-                else f"第 {attempt.attempt_number} 次"
-            )
+            retry_attempt = min(attempt.retry_attempt, max_retries)
             detail_parts: list[str] = []
             for key, label in (
                 ("status_code", "HTTP"),
@@ -663,21 +719,36 @@ class TurnKernel:
                     detail_parts.append(f"{label}={value}")
             if status == "completed":
                 progress_status = "completed"
-                progress_message = f"提供商响应完成（{attempt_label}）"
-            elif status in {"cancelled", "superseded"}:
+                provider_state = "completed"
+                progress_message = (
+                    "提供商响应完成"
+                    if retry_attempt == 0
+                    else f"提供商响应完成（重试 {retry_attempt}/{max_retries}）"
+                )
+            elif status in {"cancelled", "superseded", "interrupted"}:
                 progress_status = "partial"
-                progress_message = f"提供商请求已取消（{attempt_label}）"
+                provider_state = "interrupted"
+                progress_message = "提供商请求已取消"
             else:
                 progress_status = "failed"
-                progress_message = f"提供商请求失败（{attempt_label}）"
+                provider_state = "failed"
+                progress_message = (
+                    "提供商请求失败"
+                    if retry_attempt == 0
+                    else f"提供商请求失败（重试 {retry_attempt}/{max_retries} 后）"
+                )
             await self.emit_provider_progress(
                 progress_message,
                 iteration_id=attempt.iteration_id,
+                progress_id=attempt.progress_id,
                 status=progress_status,
                 phase="model",
-                count=attempt.attempt_number,
+                count=retry_attempt or None,
                 detail=" · ".join(detail_parts),
                 summary=summary,
+                retry_attempt=retry_attempt,
+                max_retries=max_retries,
+                provider_state=provider_state,
             )
         return True
 
@@ -717,7 +788,7 @@ class TurnKernel:
 
             resolved = resolve_enabled_plugin_mentions(
                 item.selected_plugins,
-                connected_mcp_servers=self.metadata.get("connected_mcp_servers") or (),
+                connected_mcp_servers=self.run_context.connected_mcp_servers,
             )
             if resolved:
                 existing_plugins = self.state.prompt_context.get("plugin_injections")
@@ -729,7 +800,7 @@ class TurnKernel:
                 for plugin in resolved:
                     merged_plugins[str(plugin.get("config_name") or "").casefold()] = dict(plugin)
                 self.state.prompt_context["plugin_injections"] = list(merged_plugins.values())
-        persist = self.metadata.get("persist_consumed_turn_input")
+        persist = self.run_context.persist_consumed_turn_input
         if callable(persist):
             try:
                 result = persist(item)
@@ -772,7 +843,7 @@ class TurnKernel:
         item = boundary_input.consumed_steer
         if item is None:
             return
-        acknowledge = self.metadata.get("acknowledge_consumed_turn_input")
+        acknowledge = self.run_context.acknowledge_consumed_turn_input
         if not callable(acknowledge):
             return
         try:
@@ -790,7 +861,7 @@ class TurnKernel:
         session_id: str,
         user_message: str,
         state: AgentState,
-        context_builder: Any,
+        context_builder: ContextBuilder,
         defer_completed_clear: bool = False,
     ) -> str:
         if not session_id:
@@ -854,7 +925,7 @@ class TurnKernel:
         session_id: str,
         user_message: str,
         state: AgentState,
-        context_builder: Any,
+        context_builder: ContextBuilder,
         reason: str,
     ) -> str:
         """Persist one resumable checkpoint and report the durable outcome."""
@@ -863,25 +934,10 @@ class TurnKernel:
         self.metadata.pop("checkpoint_sequence", None)
         self.metadata.pop("checkpoint_schema_version", None)
         try:
-            snapshot_exporter = getattr(context_builder, "export_snapshot", None)
-            snapshot: dict[str, Any] = {}
-            if callable(snapshot_exporter):
-                parameters = inspect.signature(snapshot_exporter).parameters
-                accepts_bounds = (
-                    "max_messages" in parameters
-                    or any(
-                        parameter.kind is inspect.Parameter.VAR_KEYWORD
-                        for parameter in parameters.values()
-                    )
-                )
-                snapshot = (
-                    snapshot_exporter(
-                        max_messages=MAX_CHECKPOINT_HISTORY_MESSAGES,
-                        max_chars=MAX_CHECKPOINT_TEXT_CHARS * 4,
-                    )
-                    if accepts_bounds
-                    else snapshot_exporter()
-                )
+            snapshot = context_builder.export_snapshot(
+                max_messages=MAX_CHECKPOINT_HISTORY_MESSAGES,
+                max_chars=MAX_CHECKPOINT_TEXT_CHARS * 4,
+            )
             receipt: dict[str, Any] = {}
             context_revision = context_snapshot_revision(snapshot)
             checkpoint_origin = self.metadata.get("checkpoint_origin")

@@ -29,11 +29,13 @@ class ControlToolRouter:
         state: AgentState,
         approval_handler: Callable | None,
         skill_manager: Any | None,
+        hook_manager: Any | None = None,
         await_response: Callable[[ToolCallEvent], Any] | None = None,
     ) -> None:
         self.state = state
         self.approval_handler = approval_handler
         self.skill_manager = skill_manager
+        self.hook_manager = hook_manager
         # Optional deadline-aware waiter supplied by the executor. ask_user is
         # unbounded work owned by the turn, so it must honour the same
         # wall-clock boundary as tool execution when the caller provides one.
@@ -65,9 +67,7 @@ class ControlToolRouter:
         answer = str(
             answer_data.get("answer", answer_data.get("guidance", "")) or ""
         ).strip()
-        from backend.hooks import get_hook_manager
-
-        hook_mgr = get_hook_manager()
+        hook_mgr = self.hook_manager
         if hook_mgr:
             try:
                 await hook_mgr.run_elicitation_result(

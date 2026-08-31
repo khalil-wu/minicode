@@ -189,11 +189,3 @@ class GitStatus(BaseModel):
     modified: list[str] = Field(default_factory=list)
     untracked: list[str] = Field(default_factory=list)
     deleted: list[str] = Field(default_factory=list)
-
-
-class WorkspaceSnapshot(BaseModel):
-    """工作区快照（用于 WebSocket 推送）"""
-    metadata: WorkspaceMetadata
-    git_status: GitStatus | None = None
-    file_count: int = 0
-    total_size: int = 0

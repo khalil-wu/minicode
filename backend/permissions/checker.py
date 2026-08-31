@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 _ACCEPTS_TOOL_CACHE: WeakKeyDictionary[Any, dict[str, tuple[Any, bool]]] = WeakKeyDictionary()
 
 logger = logging.getLogger(__name__)
+_WORKSPACE_ROOT_UNSET = object()
 
 # Windows and macOS resolve paths case-insensitively, so a denylist entry must
 # match regardless of the casing the model happens to use.
@@ -796,11 +797,28 @@ class PermissionChecker:
     2. 根据路径参数 → 检查白名单/黑名单
     """
 
-    def __init__(self, settings: PermissionSettings, workspace_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        settings: PermissionSettings,
+        workspace_root: Path | str | None | object = _WORKSPACE_ROOT_UNSET,
+    ) -> None:
         self._settings = settings
-        self._workspace_root = (workspace_root or Path.cwd()).resolve()
-        self._sandbox = SandboxValidator(self._workspace_root)
-        self._rule_matcher = PermissionRuleMatcher(self._workspace_root)
+        if workspace_root is _WORKSPACE_ROOT_UNSET:
+            self._workspace_root: Path | None = Path.cwd().resolve()
+        elif workspace_root is None:
+            self._workspace_root = None
+        else:
+            self._workspace_root = Path(workspace_root).expanduser().resolve()
+        self._sandbox = (
+            SandboxValidator(self._workspace_root)
+            if self._workspace_root is not None
+            else None
+        )
+        self._rule_matcher = (
+            PermissionRuleMatcher(self._workspace_root)
+            if self._workspace_root is not None
+            else None
+        )
         # Pre-parse content rules (Tool(content) syntax) once.
         from backend.permissions.content_rules import parse_content_rules
 
@@ -808,10 +826,16 @@ class PermissionChecker:
         self._content_ask = parse_content_rules(list(getattr(settings, "content_ask_rules", [])))
         self._content_deny = parse_content_rules(list(getattr(settings, "content_deny_rules", [])))
 
-    def with_workspace_root(self, workspace_root: Path | str | None) -> "PermissionChecker":
-        if workspace_root is None:
+    def with_workspace_root(
+        self,
+        workspace_root: Path | str | None | object = _WORKSPACE_ROOT_UNSET,
+    ) -> "PermissionChecker":
+        if workspace_root is _WORKSPACE_ROOT_UNSET:
             return self
-        return PermissionChecker(self._settings, Path(workspace_root))
+        return PermissionChecker(
+            self._settings,
+            None if workspace_root is None else Path(workspace_root),
+        )
 
     def capability_available(
         self,
@@ -1211,8 +1235,32 @@ class PermissionChecker:
         for floor in static_floor:
             raise_floor(*floor)
 
+        # A user-authored static floor that only TIES with the routing decision
+        # below must still win the attribution: a pre-tool hook allow may skip
+        # ordinary mode/tool prompts, but it must never skip an explicit
+        # settings ask rule (cc's resolveHookPermissionDecision invariant).
+        static_ask_floor = (
+            max(static_floor, key=lambda floor: _PERMISSION_RESTRICTIVENESS[floor[0]])
+            if static_floor
+            else None
+        )
+
+        def apply_static_tie(
+            level: PermissionLevel,
+            source: str,
+            rule: str,
+        ) -> tuple[PermissionLevel, str, str]:
+            if (
+                static_ask_floor is not None
+                and source not in {"static_policy", "injection_risk", "content_rule"}
+                and _PERMISSION_RESTRICTIVENESS[level]
+                == _PERMISSION_RESTRICTIVENESS[static_ask_floor[0]]
+            ):
+                return static_ask_floor
+            return level, source, rule
+
         if static_auto is not None:
-            return apply_floor(*static_auto)
+            return apply_static_tie(*apply_floor(*static_auto))
 
         if context is not None:
             mode_level: PermissionLevel | None = None
@@ -1222,12 +1270,16 @@ class PermissionChecker:
                 mode_level = tool_level or PermissionLevel.CONFIRM
 
             if mode_level is not None:
-                return apply_floor(mode_level, "mode", f"{context.mode}:{mode_level.value}")
+                return apply_static_tie(
+                    *apply_floor(mode_level, "mode", f"{context.mode}:{mode_level.value}")
+                )
 
         if tool_level is not None:
-            return apply_floor(tool_level, "tool", f"{tool_name}.permission")
+            return apply_static_tie(*apply_floor(tool_level, "tool", f"{tool_name}.permission"))
 
-        return apply_floor(PermissionLevel.CONFIRM, "default", "confirm")
+        return apply_static_tie(
+            *apply_floor(PermissionLevel.CONFIRM, "default", "confirm")
+        )
 
     def _is_owner_allowed_tool_result_path(
         self,
@@ -1254,9 +1306,15 @@ class PermissionChecker:
     ) -> tuple[bool, str]:
         if operation not in {"read", "write", "execute"}:
             return False, f"Unsupported file operation: {operation}"
+        effective_root = (
+            getattr(context, "workspace_root", None)
+            if context is not None and getattr(context, "workspace_root", None) is not None
+            else self._workspace_root
+        )
         path = Path(file_path).expanduser()
-        if not path.is_absolute():
-            path = self._workspace_root / path
+        if not path.is_absolute() and effective_root is not None:
+            effective_root = Path(effective_root).expanduser().resolve()
+            path = effective_root / path
         if context is not None:
             from backend.agent.plans import is_current_plan_file
 
@@ -1272,7 +1330,15 @@ class PermissionChecker:
                     return True, ""
                 except (OSError, ValueError):
                     continue
-        return self._sandbox.validate_file_operation(str(path), operation, content)
+        if effective_root is None:
+            return False, "This operation requires an open workspace."
+        effective_root = Path(effective_root).expanduser().resolve()
+        sandbox = (
+            self._sandbox
+            if self._workspace_root == effective_root and self._sandbox is not None
+            else SandboxValidator(effective_root)
+        )
+        return sandbox.validate_file_operation(str(path), operation, content)
 
     def evaluate(
         self,
@@ -1343,10 +1409,18 @@ class PermissionChecker:
         *,
         context: PermissionContext | None = None,
     ) -> bool:
+        effective_root = (
+            getattr(context, "workspace_root", None)
+            if context is not None and getattr(context, "workspace_root", None) is not None
+            else self._workspace_root
+        )
+        if effective_root is None:
+            return False
+        effective_root = Path(effective_root).expanduser().resolve()
         path_obj = Path(file_path).expanduser()
-        resolved_path = path_obj if path_obj.is_absolute() else self._workspace_root / path_obj
+        resolved_path = path_obj if path_obj.is_absolute() else effective_root / path_obj
         try:
-            normalized_path = resolved_path.resolve().relative_to(self._workspace_root).as_posix()
+            normalized_path = resolved_path.resolve().relative_to(effective_root).as_posix()
         except ValueError:
             return False
         denylist = list(self._settings.path_denylist)
@@ -1377,14 +1451,48 @@ class PermissionChecker:
         # 检查黑名单
         if windows_path_safety_reason(file_path):
             return False
+        effective_root = (
+            getattr(context, "workspace_root", None)
+            if context is not None and getattr(context, "workspace_root", None) is not None
+            else self._workspace_root
+        )
+        resolved_root = (
+            Path(effective_root).expanduser().resolve()
+            if effective_root is not None
+            else None
+        )
         path_denylist = list(self._settings.path_denylist)
         path_allowlist = list(self._settings.path_allowlist)
         path_obj = Path(file_path).expanduser()
-        resolved_path = path_obj if path_obj.is_absolute() else self._workspace_root / path_obj
-        try:
-            normalized_path = resolved_path.resolve().relative_to(self._workspace_root).as_posix()
-        except ValueError:
-            normalized_path = str(file_path).replace("\\", "/").strip()
+        resolved_path = (
+            path_obj
+            if path_obj.is_absolute()
+            else resolved_root / path_obj
+            if resolved_root is not None
+            else path_obj.resolve()
+        )
+        declared_readable = False
+        if context is not None:
+            for raw_root in context.filesystem_constraints.get("readable_roots", []):
+                try:
+                    resolved_path.resolve().relative_to(
+                        Path(str(raw_root)).expanduser().resolve()
+                    )
+                    declared_readable = True
+                    break
+                except (OSError, ValueError):
+                    continue
+        if resolved_root is None and not declared_readable:
+            return False
+        if resolved_root is not None:
+            try:
+                normalized_path = resolved_path.resolve().relative_to(
+                    resolved_root
+                ).as_posix()
+            except ValueError:
+                normalized_path = str(file_path).replace("\\", "/").strip()
+        else:
+            normalized_path = resolved_path.resolve().as_posix()
         if normalized_path == ".":
             normalized_path = ""
         raw_path = str(file_path).replace("\\", "/").strip()
@@ -1426,6 +1534,9 @@ class PermissionChecker:
 
         # 检查白名单（空白名单 = 不限制）
         if context is not None and context.mode == "bypass":
+            return True
+
+        if declared_readable:
             return True
 
         if not path_allowlist:

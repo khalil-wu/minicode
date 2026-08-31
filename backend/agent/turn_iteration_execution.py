@@ -134,9 +134,7 @@ class TurnIterationExecutor:
         )
         raw_ids = prompt_context.get("delivered_parent_notification_ids", [])
         notification_ids = [
-            str(value or "").strip()
-            for value in raw_ids
-            if str(value or "").strip()
+            str(value or "").strip() for value in raw_ids if str(value or "").strip()
         ]
         ack = getattr(self.runtime, "ack_parent_notification", None)
         if not notification_ids or not callable(ack):
@@ -279,7 +277,7 @@ class TurnIterationExecutor:
             state=self.agent_state,
             stream_state=stream_state,
             stream_text=stream_text,
-            tool_executor=provider_stream_result.tool_executor,
+            tool_tracker=provider_stream_result.tool_tracker,
             context_builder=self.context_builder,
             budget_runtime=self.budget_runtime,
             turn_usage=execution_state.turn_usage,
@@ -341,9 +339,7 @@ class TurnIterationExecutor:
             execution_state.degraded_reason = final_answer_outcome.degraded_reason
             yield IterationExecutionResult(
                 action=(
-                    "retry"
-                    if final_answer_outcome.action == "retry"
-                    else "terminate"
+                    "retry" if final_answer_outcome.action == "retry" else "terminate"
                 ),
                 state=execution_state,
                 stream_text=stream_text,
@@ -361,7 +357,7 @@ class TurnIterationExecutor:
             context_builder=self.context_builder,
             stream_state=stream_state,
             stream_text=stream_text,
-            tool_executor=provider_stream_result.tool_executor,
+            tool_tracker=provider_stream_result.tool_tracker,
             tool_registry=self.tool_registry,
             permission_checker=self.permission_checker,
             approval_handler=self.approval_handler,
@@ -382,11 +378,7 @@ class TurnIterationExecutor:
             raise RuntimeError("tool turn runtime returned without a result")
         execution_state.tool_batch_count = tool_turn_result.tool_batch_count
         yield IterationExecutionResult(
-            action=(
-                "terminate"
-                if tool_turn_result.action == "terminate"
-                else "retry"
-            ),
+            action=("terminate" if tool_turn_result.action == "terminate" else "retry"),
             state=execution_state,
             stream_text=stream_text,
         )

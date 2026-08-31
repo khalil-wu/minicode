@@ -24,6 +24,7 @@ from backend.async_cleanup import (
 )
 from backend.conversations.repository import CONVERSATION_DATA_DIR
 from backend.ws.durable_user_queue import DurableUserMessageQueue
+from backend.ws.turn_wait_state import TurnWaitState
 
 logger = logging.getLogger(__name__)
 
@@ -31,27 +32,20 @@ logger = logging.getLogger(__name__)
 class SessionRunManager:
     """Owns per-session agent run bookkeeping.
 
-    WebSocketSession keeps the legacy attributes for compatibility with older
-    handlers/tests, but all mutation should flow through this manager. That gives
-    us one place to evolve run-tree cancellation and durable event correlation.
+    Run handles, cancellation signals, queue state, and delivery fences belong
+    to this manager.  The websocket session only exposes the composition owner
+    and never stores a second copy of the run registries.
     """
 
     def __init__(self, session: Any) -> None:
         self._session = session
-        # Normalize legacy session doubles once at the composition boundary.
-        # Runtime access below uses the explicit session properties only.
-        if not hasattr(session, "conversation_run_tasks"):
-            session.conversation_run_tasks = getattr(
-                session, "_conversation_run_tasks", {}
-            )
-        if not hasattr(session, "conversation_run_task_ids"):
-            session.conversation_run_task_ids = getattr(
-                session, "_conversation_run_task_ids", {}
-            )
-        if not hasattr(session, "conversation_run_cancel_events"):
-            session.conversation_run_cancel_events = getattr(
-                session, "_conversation_run_cancel_events", {}
-            )
+        wait_state = TurnWaitState.for_session(session)
+        self._run_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._run_task_ids: dict[str, str] = {}
+        self._cancel_events: dict[str, asyncio.Event] = {}
+        self._active_run_task: asyncio.Task[Any] | None = None
+        self._active_task_id: str | None = None
+        self._active_run_cancel_event: asyncio.Event | None = None
         session_id = str(getattr(session, "session_id", "") or "").strip()
         # The session repository owns the active conversation storage root.
         # Derive the durable queue beside that repository so a session cannot
@@ -74,8 +68,13 @@ class SessionRunManager:
         self._inflight_user_messages: dict[str, Any] = dict(loaded_inflight)
         self._durable_turn_inputs: dict[str, list[Any]] = {}
         self._queue_dispatching: set[str] = set()
+        self._queue_owned_runs: dict[str, str] = {}
+        self._queue_owned_run_releases: dict[str, asyncio.Future[bool]] = {}
         self._queue_steering: set[str] = set()
-        self._turn_input_queues: dict[str, TurnInputQueue] = {}
+        # TurnWaitState is the owner of turn-local interaction state.  The
+        # manager provides durable queue operations, but it must not create a
+        # second queue registry beside the session's wait state.
+        self._turn_input_queues: dict[str, TurnInputQueue] = wait_state.turn_input_queues
         self._terminal_statuses: dict[str, str] = {}
         self._delivery_complete: set[tuple[str, str]] = set()
         self._watched_notification_conversations: set[str] = set()
@@ -536,6 +535,53 @@ class SessionRunManager:
     def is_queue_dispatching(self, conversation_id: str) -> bool:
         return conversation_id in self._queue_dispatching
 
+    def has_inflight_user_message(self, conversation_id: str) -> bool:
+        return conversation_id in self._inflight_user_messages
+
+    def mark_queue_owned_run(self, conversation_id: str, task_id: str) -> None:
+        owner = str(conversation_id or "").strip()
+        run_id = str(task_id or "").strip()
+        if not owner or not run_id:
+            raise ValueError("queue-owned runs require conversation_id and task_id")
+        existing = self._queue_owned_runs.get(owner)
+        if existing and existing != run_id:
+            raise RuntimeError(
+                f"Conversation {owner} already has queue-owned run {existing}"
+            )
+        if existing == run_id:
+            return
+        self._queue_owned_runs[owner] = run_id
+        self._queue_owned_run_releases[run_id] = (
+            asyncio.get_running_loop().create_future()
+        )
+
+    def is_queue_owned_run(self, task_id: str) -> bool:
+        return str(task_id or "").strip() in self._queue_owned_run_releases
+
+    def finish_queue_owned_run(self, task_id: str, *, succeeded: bool) -> None:
+        run_id = str(task_id or "").strip()
+        release = self._queue_owned_run_releases.get(run_id)
+        if release is None:
+            return
+        if not release.done():
+            release.set_result(bool(succeeded))
+
+    async def wait_for_queue_owned_run(self, conversation_id: str) -> bool:
+        owner = str(conversation_id or "").strip()
+        run_id = self._queue_owned_runs.get(owner)
+        if not run_id:
+            return True
+        release = self._queue_owned_run_releases.get(run_id)
+        if release is None:
+            raise RuntimeError(
+                f"Queue-owned run {run_id} has no release signal"
+            )
+        succeeded = await asyncio.shield(release)
+        if self._queue_owned_runs.get(owner) == run_id:
+            self._queue_owned_runs.pop(owner, None)
+        self._queue_owned_run_releases.pop(run_id, None)
+        return bool(succeeded)
+
     def begin_queue_dispatch(self, conversation_id: str) -> bool:
         if conversation_id in self._queue_dispatching:
             return False
@@ -547,20 +593,29 @@ class SessionRunManager:
 
     @property
     def run_tasks(self) -> dict[str, asyncio.Task[Any]]:
-        return self._session.conversation_run_tasks
+        return self._run_tasks
 
     @property
     def run_task_ids(self) -> dict[str, str]:
-        return self._session.conversation_run_task_ids
+        return self._run_task_ids
 
     @property
     def cancel_events(self) -> dict[str, asyncio.Event]:
-        return self._session.conversation_run_cancel_events
+        return self._cancel_events
+
+    @property
+    def active_run_task(self) -> asyncio.Task[Any] | None:
+        return self._active_run_task
+
+    @property
+    def active_task_id(self) -> str | None:
+        return self._active_task_id
+
+    @property
+    def active_run_cancel_event(self) -> asyncio.Event | None:
+        return self._active_run_cancel_event
 
     def has_active_run(self) -> bool:
-        active = getattr(self._session, "_active_run_task", None)
-        if active is not None and not active.done():
-            return True
         return bool(self.run_tasks)
 
     def running_task_for(self, conversation_id: str) -> asyncio.Task[Any] | None:
@@ -609,10 +664,10 @@ class SessionRunManager:
             self.run_task_ids[conversation_id] = task_id
             self.cancel_events[conversation_id] = cancel_event
         if conversation_id == active_conversation_id:
-            self._session._active_run_task = task
-            self._session._active_task_id = task_id
-            self._session._active_run_cancel_event = cancel_event
-        self._session._schedule_task_runtime_update()
+            self._active_run_task = task
+            self._active_task_id = task_id
+            self._active_run_cancel_event = cancel_event
+        self._session.session_lifecycle.schedule_task_runtime_update()
 
     def watch_conversation_notifications(self, conversation_id: str) -> None:
         """Bind one conversation to this session's CC-style queue subscriber."""
@@ -705,20 +760,17 @@ class SessionRunManager:
         notification_session_id: str,
     ) -> bool:
         owner_session_id = str(notification_session_id or "").strip()
-        current_session_id = str(getattr(self._session, "session_id", "") or "").strip()
+        current_session_id = str(self._session.session_id or "").strip()
         if not owner_session_id or owner_session_id == current_session_id:
             return False
-        ws_manager = getattr(self._session, "_ws_manager", None)
-        get_session = getattr(ws_manager, "get_session", None)
-        owner_session = get_session(owner_session_id) if callable(get_session) else None
+        ws_manager = self._session.ws_manager
+        if ws_manager is None:
+            return False
+        owner_session = ws_manager.get_session(owner_session_id)
         return bool(
             owner_session is not None
             and owner_session is not self._session
-            and not getattr(
-                getattr(owner_session, "_run_manager", None),
-                "_notification_wakes_closed",
-                True,
-            )
+            and not owner_session.run_manager._notification_wakes_closed
         )
 
     def _request_parent_notification_wake_on_loop(
@@ -792,9 +844,7 @@ class SessionRunManager:
         # Match CC's queue processor: yield once so already-enqueued human input
         # can take its higher-priority path before a later task notification.
         await asyncio.sleep(0)
-        lifecycle_lock = getattr(self._session, "_conversation_lifecycle_lock", None)
-        if not isinstance(lifecycle_lock, asyncio.Lock):
-            return
+        lifecycle_lock = self._session.conversation_lifecycle_lock()
         async with lifecycle_lock:
             requested = self._notification_request_generation.get(
                 conversation_id,
@@ -852,16 +902,8 @@ class SessionRunManager:
                     self._notification_wake_owner_token,
                 )
                 return
-            starter = getattr(self._session, "_start_agent_run", None)
-            if not callable(starter):
-                self._notification_attempt_generation[conversation_id] = requested
-                release_parent_notification_wake(
-                    conversation_id,
-                    self._notification_wake_owner_token,
-                )
-                return
             try:
-                task_id = await starter(
+                task_id = await self._session.start_agent_run(
                     "",
                     attachments=[],
                     conversation_id=conversation_id,
@@ -938,19 +980,19 @@ class SessionRunManager:
             self.run_task_ids.pop(conversation_id, None)
         if conversation_id and self.cancel_events.get(conversation_id) is cancel_event:
             self.cancel_events.pop(conversation_id, None)
-        if getattr(self._session, "_active_run_task", None) is task:
-            self._session._active_run_task = None
-        if getattr(self._session, "_active_task_id", None) == task_id:
-            self._session._active_task_id = None
-        if getattr(self._session, "_active_run_cancel_event", None) is cancel_event:
-            self._session._active_run_cancel_event = None
+        if self._active_run_task is task:
+            self._active_run_task = None
+        if self._active_task_id == task_id:
+            self._active_task_id = None
+        if self._active_run_cancel_event is cancel_event:
+            self._active_run_cancel_event = None
         if not newer_run_registered:
             self._seal_turn_input_queue(conversation_id)
             self._terminal_statuses.pop(conversation_id, "")
         # The canonical agent.run.completed event is emitted by the agent loop.
         # Cleanup only releases manager bookkeeping; recording another terminal
         # event here produced a second, run-id-less completion after DONE.
-        self._session._schedule_task_runtime_update()
+        self._session.session_lifecycle.schedule_task_runtime_update()
 
     async def cancel(
         self,
@@ -983,9 +1025,9 @@ class SessionRunManager:
                 if not task.done():
                     task.cancel()
 
-        active_task = getattr(self._session, "_active_run_task", None)
-        active_task_id = getattr(self._session, "_active_task_id", None)
-        active_cancel_event = getattr(self._session, "_active_run_cancel_event", None)
+        active_task = self._active_run_task
+        active_task_id = self._active_task_id
+        active_cancel_event = self._active_run_cancel_event
 
         if not target_conversation_id:
             if isinstance(active_cancel_event, asyncio.Event):
@@ -998,13 +1040,13 @@ class SessionRunManager:
                 await self._cancel_run_tree(str(active_task_id), reason=reason)
 
         await await_with_deadline(
-            self._session._cancel_pending_approvals(
+            self._session.cancel_pending_approvals(
                 reason=reason,
                 conversation_id=target_conversation_id or None,
             ),
             timeout=0.25,
             label="pending approval cancellation",
-            owner=getattr(self._session, "_cleanup_tasks", None),
+            owner=self._session.cleanup_tasks,
         )
         current = asyncio.current_task()
         waitable = [task for task in tasks_to_wait if task is not current and not task.done()]
@@ -1014,7 +1056,7 @@ class SessionRunManager:
                 timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
                 label="agent run cancellation",
             )
-        self._session._schedule_task_runtime_update()
+        self._session.session_lifecycle.schedule_task_runtime_update()
         return cancelled_any
 
     async def _cancel_run_tree(self, task_id: str, *, reason: str) -> None:

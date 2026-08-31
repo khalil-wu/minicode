@@ -24,14 +24,6 @@ def _canonical(path: Path) -> Path:
     return path.expanduser().resolve(strict=False)
 
 
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
 def _case_key(path: Path) -> str:
     # Match the host filesystem: Windows folds case, POSIX does not. Folding
     # unconditionally merges two executable roots that are distinct on Linux.
@@ -151,7 +143,7 @@ class ExtensionTrustPolicy:
         return False
 
     def _under_any(self, path: Path, roots: tuple[Path, ...]) -> bool:
-        return any(_is_relative_to(path, root) for root in roots)
+        return any(path.is_relative_to(root) for root in roots)
 
     def classify(
         self, path: Path | str, *, source_scope: ExtensionScope | None = None
@@ -167,9 +159,7 @@ class ExtensionTrustPolicy:
             return "user"
         if self._under_any(candidate, self._temporary):
             return "temporary"
-        if _is_relative_to(candidate, self._project_root) or _is_relative_to(
-            candidate, self._cwd
-        ):
+        if candidate.is_relative_to(self._project_root) or candidate.is_relative_to(self._cwd):
             return "project"
         if self._under_any(candidate, tuple(self._allowed)):
             # Explicit allowed roots are user-style roots unless a more
@@ -227,8 +217,8 @@ class ExtensionTrustPolicy:
                     resolved,
                 )
         if source_scope == "project" and not (
-            _is_relative_to(resolved, self._project_root)
-            or _is_relative_to(resolved, self._cwd)
+            resolved.is_relative_to(self._project_root)
+            or resolved.is_relative_to(self._cwd)
         ):
             return TrustDecision(
                 False,

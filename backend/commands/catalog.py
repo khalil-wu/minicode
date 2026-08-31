@@ -653,21 +653,6 @@ def get_builtin_command_names() -> list[str]:
 _COMMAND_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 
 
-def _project_command_dirs(workspace_root: Path | None) -> list[Path]:
-    if workspace_root is None:
-        return []
-    return [
-        scope.path
-        for scope in get_markdown_directories(
-            "commands",
-            workspace_root,
-            managed_root=_get_managed_minicode_dir(),
-            session_project_root=get_explicit_active_workspace_root(),
-        )
-        if scope.source == "project"
-    ]
-
-
 def _file_command_dirs(workspace_root: Path | None) -> list[tuple[Path, str]]:
     return [
         (scope.path, scope.source)
@@ -678,8 +663,6 @@ def _file_command_dirs(workspace_root: Path | None) -> list[tuple[Path, str]]:
             session_project_root=get_explicit_active_workspace_root(),
         )
     ]
-
-
 def _parse_file_command(path: Path, source: str) -> dict[str, Any] | None:
     try:
         raw = path.read_text(encoding="utf-8")
@@ -849,29 +832,3 @@ def get_enabled_composer_command_catalog(
         )
         if bool(entry.get("enabled", True))
     ]
-
-
-def get_local_composer_command_catalog() -> list[dict[str, Any]]:
-    return [
-        entry
-        for entry in get_enabled_composer_command_catalog()
-        if str(entry.get("type", "")).strip().lower() == "local"
-    ]
-
-
-def get_template_composer_command_catalog() -> list[dict[str, Any]]:
-    return [
-        entry
-        for entry in get_enabled_composer_command_catalog()
-        if str(entry.get("type", "")).strip().lower() == "template"
-    ]
-
-
-def get_composer_command_definition(command: str) -> dict[str, Any] | None:
-    normalized = str(command or "").strip().lower().lstrip("/")
-    if not normalized:
-        return None
-    for entry in get_composer_command_catalog():
-        if str(entry.get("command", "")).strip().lower() == normalized:
-            return entry
-    return None

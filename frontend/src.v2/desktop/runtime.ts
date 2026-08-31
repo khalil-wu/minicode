@@ -221,6 +221,7 @@ interface MiniCodeDesktop {
     onStatus(callback: (payload: UpdateStatus) => void): (() => void) | void;
   };
   pickDirectory(): Promise<string | null>;
+  pickWorkspaceDirectory(): Promise<string | null>;
   trustWorkspace(path: string): Promise<string | null>;
   openExternal(target: string): Promise<boolean>;
   openPath(target: string): Promise<boolean>;
@@ -308,6 +309,14 @@ export const isDesktop = (): boolean =>
 export const pickDirectory = async (): Promise<string | null> => {
   try {
     return (await desktop()?.pickDirectory()) ?? null;
+  } catch {
+    return null;
+  }
+};
+
+export const pickWorkspaceDirectory = async (): Promise<string | null> => {
+  try {
+    return (await desktop()?.pickWorkspaceDirectory()) ?? null;
   } catch {
     return null;
   }

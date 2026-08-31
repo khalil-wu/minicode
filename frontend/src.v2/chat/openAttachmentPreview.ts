@@ -1,6 +1,7 @@
 import { getWebSocket } from "../hooks/useWebSocket";
 import { pushToast } from "../overlays/ToastContainer";
 import {
+  artifactRawResourceUrlWithToken,
   attachmentRawResourceUrlWithToken,
   fetchAttachmentPreview,
   workspaceRawResourceUrlWithToken,
@@ -19,6 +20,10 @@ import {
   kindForMediaType,
   mediaTypeForPath,
 } from "../lib/media-types";
+import {
+  artifactMediaTypeForProjection,
+  canonicalArtifactKind,
+} from "../lib/artifact-projection";
 import {
   beginPreviewRequest,
   isPreviewRequestCurrent,
@@ -74,13 +79,17 @@ const attachmentNativeUrl = (
   return attachmentRawResourceUrlWithToken(artifactId, sessionId, conversationId) || undefined;
 };
 
-const previewConversationId = (explicit?: string): string => {
+const activePreviewConversationId = (explicit?: string): string => {
   const store = useAppStore.getState();
   return String(explicit || store.conversationId || "").trim();
 };
 
-const openPreviewSurface = (id: string, name: string): void => {
+const scopedPreviewConversationId = (explicit?: string): string =>
+  String(explicit || "").trim();
+
+const openPreviewSurface = (id: string, name: string, conversationId: string): void => {
   const store = useAppStore.getState();
+  store.setPreviewOwnerConversationId(conversationId || null);
   store.addPanel({
     id: `artifact-${id}`,
     kind: "preview",
@@ -125,7 +134,7 @@ export const openAttachmentPreview = (target: AttachmentPreviewTarget): boolean 
   const sessionId = socket?.sessionId?.trim() || "";
   // Message attachments belong to the conversation that rendered them. Do
   // not fall back to a mutable runtime active-conversation snapshot.
-  const conversationId = previewConversationId(target.conversationId);
+  const conversationId = scopedPreviewConversationId(target.conversationId);
   const name = String(target.name || "附件");
   const base = {
     artifactId,
@@ -141,7 +150,7 @@ export const openAttachmentPreview = (target: AttachmentPreviewTarget): boolean 
   }
 
   const lease = beginPreviewRequest(conversationId, { abortable: true });
-  openPreviewSurface(artifactId, name);
+  openPreviewSurface(artifactId, name, conversationId);
   publishPreview(lease, conversationId, {
     ...base,
     content: "",
@@ -197,13 +206,18 @@ export const openAttachmentPreview = (target: AttachmentPreviewTarget): boolean 
 export const openArtifactPreview = (target: ArtifactPreviewTarget): boolean => {
   const artifactId = String(target.artifactId || "").trim();
   if (!artifactId) return false;
-  const conversationId = previewConversationId(target.conversationId);
+  const socket = getWebSocket();
+  const sessionId = socket?.sessionId?.trim() || "";
+  const conversationId = scopedPreviewConversationId(target.conversationId);
   const name = String(target.name || target.summary || "生成文件");
+  const kind = canonicalArtifactKind(target.kind, target.mediaType);
+  const mediaType = artifactMediaTypeForProjection(target.mediaType, kind)
+    || normalizedMediaType(target.mediaType);
   const base = {
     artifactId,
     name,
-    mediaType: target.mediaType,
-    kind: target.kind,
+    mediaType: mediaType || target.mediaType,
+    kind: target.kind || kind,
     source: "artifact" as const,
   };
 
@@ -215,14 +229,31 @@ export const openArtifactPreview = (target: ArtifactPreviewTarget): boolean => {
   const lease = beginPreviewRequest(conversationId);
   const requestId = createClientCommandId();
   setPreviewRequestId(lease, requestId);
-  openPreviewSurface(artifactId, name);
+  openPreviewSurface(artifactId, name, conversationId);
   publishPreview(lease, conversationId, {
     ...base,
     content: "",
     loading: true,
     loadedAt: Date.now(),
   });
-  if (!getWebSocket()) {
+  // Native image artifacts are already owner-scoped in ArtifactStore. Fetch
+  // them through the signed raw endpoint instead of sending megabytes of
+  // base64 through the WebSocket read_artifact response.
+  const nativeUrl = mediaType && supportsNativePreview(mediaType) && sessionId
+    ? artifactRawResourceUrlWithToken(artifactId, sessionId, conversationId)
+    : "";
+  if (nativeUrl) {
+    publishPreview(lease, conversationId, {
+      ...base,
+      mediaType,
+      url: nativeUrl,
+      content: "",
+      loading: false,
+      loadedAt: Date.now(),
+    });
+    return true;
+  }
+  if (!socket) {
     failPreview(lease, conversationId, base, "连接已断开，重连后可预览文件。");
     return false;
   }
@@ -251,7 +282,7 @@ export const openWorkspaceFilePreview = (target: WorkspaceFilePreviewTarget): bo
   if (!path) return false;
   const state = useAppStore.getState();
   const workspaceRoot = String(target.workspaceRoot || state.workingDirectory || "").trim();
-  const conversationId = previewConversationId(target.conversationId);
+  const conversationId = activePreviewConversationId(target.conversationId);
   const name = String(target.name || basename(path) || "文件");
   const artifactId = `workspace:${path}`;
   const base = {
@@ -263,7 +294,7 @@ export const openWorkspaceFilePreview = (target: WorkspaceFilePreviewTarget): bo
   };
 
   const lease = beginPreviewRequest(conversationId, { abortable: true });
-  openPreviewSurface(artifactId, name);
+  openPreviewSurface(artifactId, name, conversationId);
   publishPreview(lease, conversationId, {
     ...base,
     content: "",
@@ -317,7 +348,7 @@ export const openLocalFilePreview = (target: LocalFilePreviewTarget): boolean =>
   const id = String(target.id || "").trim();
   const name = String(target.name || "附件");
   if (!id) return false;
-  const conversationId = previewConversationId(target.conversationId);
+  const conversationId = activePreviewConversationId(target.conversationId);
   const mediaType = normalizedMediaType(target.mediaType || target.file?.type)
     || mediaTypeForPath(name);
   const kind = target.kind || kindForMediaType(mediaType);
@@ -336,7 +367,7 @@ export const openLocalFilePreview = (target: LocalFilePreviewTarget): boolean =>
     kind,
     source: "local" as const,
   };
-  openPreviewSurface(`local-${id}`, name);
+  openPreviewSurface(`local-${id}`, name, conversationId);
 
   const isText = isTextMediaType(mediaType, name);
   publishPreview(lease, conversationId, {

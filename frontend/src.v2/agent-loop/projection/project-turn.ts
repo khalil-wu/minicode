@@ -9,19 +9,6 @@ export type AgentLoopProcessCell = ChatTurnState["committedCells"][number];
 export type AgentLoopAnswerCell = AssistantMarkdownCellState;
 export type AgentTurnStatus = "running" | "completed" | "partial" | "failed" | "stopped";
 
-export interface AgentProcessMetrics {
-  toolCallCount: number;
-  commandCount: number;
-  fileCount: number;
-  additions: number;
-  deletions: number;
-  subagentCount: number;
-  failureCount: number;
-  inputTokens: number;
-  outputTokens: number;
-  reasoningTokens: number;
-}
-
 export interface AgentLoopTurnProjection {
   id: string;
   status: AgentTurnStatus;
@@ -32,7 +19,6 @@ export interface AgentLoopTurnProjection {
   answerIsStreaming: boolean;
   hasCompleteFinalAnswer: boolean;
   hasProcessContent: boolean;
-  processSummary: AgentProcessMetrics;
   durationMs: number | null;
   failureMessage?: string;
   processDetailMode: ViewMode;
@@ -65,8 +51,6 @@ export function projectChatTurnToAgentLoop(
   // cell intact so live work stays immediate and only a closed semantic
   // segment is folded.
   const projectedProcessCells = processCells;
-  const processSummary = summarizeProcess(turn, projectedProcessCells);
-  const hasSummaryFacts = hasProcessSummaryFacts(processSummary);
   const durationMs = turnDurationMs(turn);
   const hasCompleteFinalAnswer = Boolean(
     turn.status === "completed"
@@ -87,9 +71,7 @@ export function projectChatTurnToAgentLoop(
     hasCompleteFinalAnswer,
     hasProcessContent:
       projectedProcessCells.length > 0
-      || hasSummaryFacts
       || (turn.status === "streaming" && !answerCell),
-    processSummary,
     durationMs,
     failureMessage: turn.finalAnswerCell?.failureMessage
       || turn.committedCells.find((cell) => cell.kind === "error")?.message,
@@ -118,92 +100,6 @@ function turnDurationMs(turn: ChatTurnState): number | null {
     return Math.max(0, turn.completedAt - turn.startedAt);
   }
   return null;
-}
-
-function summarizeProcess(
-  turn: ChatTurnState,
-  cells: AgentLoopProcessCell[],
-): AgentProcessMetrics {
-  let toolCallCount = 0;
-  let commandCount = 0;
-  let additions = 0;
-  let deletions = 0;
-  let failureCount = 0;
-  const files = new Set<string>();
-  const subagents = new Set<string>();
-
-  for (const cell of cells) {
-    if (cell.kind === "activity") {
-      const records = cell.toolCallRecords ?? [];
-      toolCallCount += records.length;
-      const recordFailures = records.filter((record) =>
-        ["failed", "blocked", "timeout", "cancelled"].includes(String(record.status)),
-      ).length;
-      failureCount += recordFailures || (
-        cell.status === "failed" || cell.status === "interrupted" ? 1 : 0
-      );
-      continue;
-    }
-    if (cell.kind === "exec") {
-      toolCallCount += 1;
-      commandCount += 1;
-      if (cell.status === "failed" || cell.status === "cancelled") failureCount += 1;
-      continue;
-    }
-    if (cell.kind === "diff") {
-      toolCallCount += Math.max(0, cell.toolCallCount ?? 0);
-      additions += Math.max(0, cell.summary.added);
-      deletions += Math.max(0, cell.summary.deleted);
-      for (const file of cell.files) {
-        const path = file.path.trim();
-        if (path) files.add(path);
-      }
-      continue;
-    }
-    if (cell.kind === "collaboration") {
-      // A collaboration cell is projected from one authoritative control tool
-      // record; its entries may represent several children in a parallel task.
-      toolCallCount += 1;
-      for (const entry of cell.entries) {
-        const id = entry.agentId.trim();
-        if (id) subagents.add(id);
-      }
-      continue;
-    }
-    if (cell.kind === "error") failureCount += 1;
-  }
-
-  return {
-    toolCallCount,
-    commandCount,
-    fileCount: files.size,
-    additions,
-    deletions,
-    subagentCount: subagents.size,
-    failureCount,
-    inputTokens: nonnegativeMetric(turn.usage?.input),
-    outputTokens: nonnegativeMetric(turn.usage?.output),
-    reasoningTokens: nonnegativeMetric(turn.usage?.reasoning),
-  };
-}
-
-function nonnegativeMetric(value: number | undefined): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
-}
-
-function hasProcessSummaryFacts(summary: AgentProcessMetrics): boolean {
-  return Boolean(
-    summary.toolCallCount
-    || summary.commandCount
-    || summary.fileCount
-    || summary.additions
-    || summary.deletions
-    || summary.subagentCount
-    || summary.failureCount
-    || summary.inputTokens
-    || summary.outputTokens
-    || summary.reasoningTokens,
-  );
 }
 
 function activeTailToAssistantMarkdownCell(

@@ -10,7 +10,7 @@ import logging
 from typing import Any
 
 from backend.bootstrap.app import AppBootstrap
-from backend.ws.handler import WebSocketManager
+from backend.ws.manager import WebSocketManager
 
 logger = logging.getLogger(__name__)
 

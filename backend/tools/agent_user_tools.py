@@ -88,9 +88,11 @@ class AskUserTool(BaseTool):
         question = args.get("question", "")
         if not question:
             return self._error_result("Missing question argument")
-        from backend.hooks import get_hook_manager
-
-        hook_mgr = get_hook_manager()
+        hook_mgr = (
+            context.run_context.hook_manager
+            if context is not None and context.run_context is not None
+            else None
+        )
         if hook_mgr:
             hook_result = await hook_mgr.run_elicitation(str(question), elicitation_id=self.name)
             if hook_result.blocked:
@@ -174,7 +176,7 @@ class BriefTool(BaseTool):
 
         emit_event = context.emit_event if context else None
         if emit_event is not None:
-            tool_call_id = str(context.metadata.get("_current_tool_call_id") or "").strip()
+            tool_call_id = str(context.tool_call_id or "").strip()
             item_id = f"agent-message:{tool_call_id}" if tool_call_id else "agent-message"
             await emit_event("item.started", {
                 "item": {

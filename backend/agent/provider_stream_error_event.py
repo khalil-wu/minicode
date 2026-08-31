@@ -58,8 +58,11 @@ async def handle_provider_error_event(
     degrade_and_finish: Degrade,
     recover_withheld_error: ErrorRecovery,
     total_attempts: int = 0,
+    max_retries: int | None = None,
     query_source: str | None = None,
     retry_state: Any | None = None,
+    progress_id: str = "",
+    close_stream: Callable[[], Awaitable[None]] | None = None,
 ) -> AsyncIterator[AgentEvent | TurnTerminalProjection | ProviderErrorEventResult]:
     """Resolve a provider-declared stream error through the bounded ladder."""
 
@@ -122,22 +125,6 @@ async def handle_provider_error_event(
                 provider_retry_after = 0.0
             if provider_retry_after > 0:
                 retry_delay = max(retry_delay, provider_retry_after)
-            retry_boundary = budget_runtime.consume_retry("stream_error")
-            if retry_boundary is not None:
-                logger.warning("%s", retry_boundary.detail)
-                await turn_kernel.close_provider_attempt(
-                    provider_attempt,
-                    status="failed",
-                    summary="Provider retry budget exhausted",
-                    data=provider_failure_data,
-                )
-                yield ProviderErrorEventResult(
-                    action="finish",
-                    stream_attempt=stream_attempt,
-                    retry_budget_boundary=retry_boundary,
-                    stream_recovery_attempted=stream_recovery_attempted,
-                )
-                return
             await turn_kernel.close_provider_attempt(
                 provider_attempt,
                 status="failed",
@@ -145,36 +132,65 @@ async def handle_provider_error_event(
                 data=provider_failure_data,
                 project_progress=False,
             )
-            await turn_kernel.emit_runtime_span(
-                "recovery.retry.started",
-                span_id=f"recovery:{iteration_id_value}:{new_attempt}",
-                iteration_id=iteration_id_value,
-                phase="recovery",
-                status="running",
-                label="recovery",
-                summary="Model stream interrupted; retrying",
-                data={
-                    "stream_attempt": new_attempt,
-                    "provider_error_type": classification.provider_error_type,
-                    "error_type": classification.error_type,
-                },
+            span_data = {
+                "stream_attempt": new_attempt,
+                "retry_attempt": new_attempt,
+                "max_retries": max(
+                    0,
+                    int(
+                        max_retries
+                        if max_retries is not None
+                        else total_attempts
+                    ),
+                ),
+                "provider_error_type": classification.provider_error_type,
+                "error_type": classification.error_type,
+            }
+            emit_runtime_span = getattr(turn_kernel, "emit_runtime_span", None)
+            if emit_runtime_span is not None:
+                await emit_runtime_span(
+                    "recovery.retry.started",
+                    span_id=(
+                        f"recovery:{provider_attempt.span_id}:{new_attempt}"
+                        if getattr(provider_attempt, "span_id", "")
+                        else f"recovery:{iteration_id_value}:{new_attempt}"
+                    ),
+                    iteration_id=iteration_id_value,
+                    phase="recovery",
+                    status="running",
+                    label="recovery",
+                    summary="Model stream interrupted; retrying",
+                    data=span_data,
+                )
+            effective_max_retries = max(
+                0,
+                int(
+                    max_retries
+                    if max_retries is not None
+                    else total_attempts
+                ),
             )
-            next_attempt_number = new_attempt + 1
             attempt_label = (
-                f"第 {next_attempt_number}/{total_attempts} 次"
-                if total_attempts > 0
-                else f"第 {next_attempt_number} 次"
+                f"第 {new_attempt}/{effective_max_retries} 次"
+                if effective_max_retries > 0
+                else f"第 {new_attempt} 次"
             )
             yield AgentEvent.progress(
-                f"连接失败，正在重试（{attempt_label}）",
+                f"连接失败，正在重连（{attempt_label}）",
                 stage="status",
                 status="running",
-                id=provider_progress_id(iteration_id_value),
+                id=progress_id or provider_progress_id(iteration_id_value),
                 phase="recover",
                 label="provider",
-                count=next_attempt_number,
+                count=new_attempt,
                 detail=f"{classification_input[:320]} · {retry_delay:.1f} 秒后重试",
                 summary="Provider stream interrupted; retrying",
+                retry_attempt=new_attempt,
+                max_retries=effective_max_retries,
+                retry_after_ms=max(0, int(round(retry_delay * 1000))),
+                error_message=classification_input[:320],
+                operation_id=progress_id,
+                provider_state="reconnecting",
             )
             if classification.provider_error_type == "rate_limit":
                 yield AgentEvent.rate_limit(
@@ -182,6 +198,8 @@ async def handle_provider_error_event(
                     retry_after_seconds=retry_delay,
                     message="Provider rate limit reached; retrying after the requested delay.",
                 )
+            if close_stream is not None:
+                await close_stream()
             # The retry policy/provider owns the delay. Do not add a local
             # random jitter layer: it makes the advertised Retry-After value
             # false and stacks a MiniCode-specific policy on top of provider
@@ -233,11 +251,19 @@ async def handle_provider_error_event(
                 "正在调整请求上下文后重试",
                 stage="status",
                 status="running",
-                id=provider_progress_id(iteration_id_value),
+                id=progress_id or provider_progress_id(iteration_id_value),
                 phase="recover",
                 label="provider",
                 detail=classification_input[:400],
                 summary="Provider error recovery is rebuilding model context",
+                retry_attempt=max(0, int(stream_attempt)),
+                max_retries=max(
+                    0,
+                    int(max_retries if max_retries is not None else total_attempts),
+                ),
+                error_message=classification_input[:400],
+                operation_id=progress_id,
+                provider_state="reconnecting",
             )
             yield ProviderErrorEventResult(
                 action="rebuild_context",

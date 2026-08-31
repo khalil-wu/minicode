@@ -347,7 +347,8 @@ def _peak_runtime_parallelism(records: list[dict[str, object]], *, now_ms: int |
 
 def _runtime_subagent_metrics(runtime: AgentLoopSessionContext) -> dict[str, object] | None:
     metadata = runtime.metadata if isinstance(runtime.metadata, dict) else {}
-    agent_runtime = metadata.get("agent_runtime")
+    run_context = runtime.run_context
+    agent_runtime = run_context.agent_runtime if run_context is not None else None
     parent_run_id = str(metadata.get("run_id") or "").strip()
     if agent_runtime is None or not parent_run_id:
         return None
@@ -497,7 +498,11 @@ async def _run(prompt: str) -> int:
         provider_id="custom",
     )
     artifacts = ArtifactStore()
-    registry = build_tool_registry(artifacts, llm_provider=lambda: llm)
+    registry = build_tool_registry(
+        artifacts,
+        workspace_root=workspace,
+        llm_provider=lambda: llm,
+    )
     # Repository evaluation is an autonomous host boundary: there is no
     # interactive approval channel. Grant only the concrete workspace mutation
     # capabilities required by this isolated task; the normal permission

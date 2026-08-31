@@ -6,6 +6,7 @@ from backend.agent.message import AgentEvent
 from backend.agent.state import AgentState
 from backend.agent.tool_projection import projection_for_tool
 from backend.agent.tool_runtime import tool_is_idempotent, tool_side_effect_kind
+from backend.agent.tool_stream_tracker import StreamingToolStatus, StreamingToolTracker
 from backend.agent.final_tool_request import canonical_tool_request_digest
 from backend.llm.base import ToolCallEvent, ToolCallStartEvent
 from backend.tools.base import ToolResult
@@ -13,9 +14,23 @@ from backend.tools.registry import ToolRegistry
 
 
 def status_for_result(result: ToolResult, requested_status: str | None = None) -> str:
-    if requested_status in {"success", "failed", "blocked", "partial", "timeout", "cancelled"}:
+    if requested_status in {
+        "success",
+        "failed",
+        "blocked",
+        "partial",
+        "timeout",
+        "cancelled",
+    }:
         return requested_status
-    if result.status in {"success", "failed", "blocked", "partial", "timeout", "cancelled"}:
+    if result.status in {
+        "success",
+        "failed",
+        "blocked",
+        "partial",
+        "timeout",
+        "cancelled",
+    }:
         return str(result.status)
     return "failed" if result.is_error else "success"
 
@@ -96,7 +111,7 @@ def abandoned_tool_announcement_events(
 
 def cancelled_pending_tool_events(
     stream_state: Any,
-    tool_executor: Any,
+    tool_tracker: StreamingToolTracker,
     *,
     iteration_id: str = "",
 ) -> list[AgentEvent]:
@@ -108,16 +123,15 @@ def cancelled_pending_tool_events(
     arguments are complete, so settle the executor's queued records here.
     """
 
-    tracked_tools = getattr(tool_executor, "tracked_tools", {})
+    tracked_tools = tool_tracker.tracked_tools
     events: list[AgentEvent] = []
     settled_ids: set[str] = set()
     for tool_call in list(getattr(stream_state, "tool_calls", ())):
         call_id = str(getattr(tool_call, "id", "") or "").strip()
         if not call_id or call_id in settled_ids:
             continue
-        record = tracked_tools.get(call_id) if isinstance(tracked_tools, dict) else None
-        status = getattr(getattr(record, "status", None), "value", None)
-        if status and status not in {"queued", "executing"}:
+        record = tracked_tools.get(call_id)
+        if record is not None and record.status is not StreamingToolStatus.QUEUED:
             continue
         settled_ids.add(call_id)
         tool_name = str(getattr(tool_call, "name", "") or "").strip()
@@ -157,8 +171,16 @@ def tool_call_start_event(
     turn_id: str = "",
 ) -> AgentEvent:
     projection = projection_for_tool(tc.name, tool_registry)
-    side_effect_kind = tool_side_effect_kind(tc.name, tool_registry, tc.arguments) if tool_registry is not None else ""
-    idempotent = tool_is_idempotent(tc.name, tool_registry, tc.arguments) if tool_registry is not None else None
+    side_effect_kind = (
+        tool_side_effect_kind(tc.name, tool_registry, tc.arguments)
+        if tool_registry is not None
+        else ""
+    )
+    idempotent = (
+        tool_is_idempotent(tc.name, tool_registry, tc.arguments)
+        if tool_registry is not None
+        else None
+    )
     idempotency_key = ""
     if tool_registry is not None:
         tool = tool_registry.get_tool(tc.name)

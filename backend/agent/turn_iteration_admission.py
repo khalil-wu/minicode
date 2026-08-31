@@ -219,12 +219,14 @@ class TurnIterationAdmission:
             metadata=self.metadata,
             conversation_id=self.run_record.conversation_id,
             emit_event=self.emit_event,
+            run_context=self.tool_context.run_context,
         )
         await inject_parent_notifications(
             ctx=self.context,
             state=self.state,
             metadata=self.metadata,
             runtime=self.runtime,
+            run_context=self.tool_context.run_context,
             parent_run_id=self.run_record.run_id,
             conversation_id=(
                 self.run_record.conversation_id

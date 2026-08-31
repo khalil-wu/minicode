@@ -67,18 +67,22 @@ async def handle_terminal_create(session: "WebSocketSession", data: dict[str, An
     if not cwd:
         cwd = scope.workspace_root
     try:
-        cwd_path = session._resolve_workspace_cwd(cwd)
+        cwd_path = session.resolve_workspace_cwd(cwd)
         terminal_session = await session.terminal_manager.create_session(
             cwd=str(cwd_path),
-            on_output=lambda sid, chunk: session._on_terminal_output(sid, chunk, conversation_id),
-            on_exit=lambda sid, code: session._on_terminal_exit(sid, code, conversation_id),
+            on_output=lambda sid, chunk: session.session_lifecycle.on_terminal_output(
+                sid, chunk, conversation_id
+            ),
+            on_exit=lambda sid, code: session.session_lifecycle.on_terminal_exit(
+                sid, code, conversation_id
+            ),
             conversation_id=conversation_id,
         )
         session.active_terminal_session_id = terminal_session.session_id
         payload = terminal_created_payload(terminal_session)
         scope.apply(payload)
-        await session._send_ws_payload(payload, log_context="terminal.created")
-        await session._emit_command_result(
+        await session.send_payload(payload, log_context="terminal.created")
+        await session.emit_command_result(
             "terminal.create",
             "",
             data={
@@ -127,7 +131,7 @@ async def handle_terminal_resize(session: "WebSocketSession", data: dict[str, An
 
     resized = apply_terminal_resize(terminal_session, cols=cols, rows=rows)
 
-    await session._send_ws_payload(
+    await session.send_payload(
         terminal_resized_payload(
             session_id=session_id,
             cols=cols,
@@ -159,11 +163,11 @@ async def handle_terminal_kill(session: "WebSocketSession", data: dict[str, Any]
         if getattr(session, "active_terminal_session_id", None) == session_id:
             session.active_terminal_session_id = None
         conversation_id = _active_conversation_id(session)
-        await session._send_ws_payload(
+        await session.send_payload(
             terminal_killed_payload(session_id, conversation_id=conversation_id),
             log_context="terminal.killed",
         )
-        await session._emit_command_result(
+        await session.emit_command_result(
             "terminal.kill",
             "Terminal stopped",
             data={"session_id": session_id, "conversation_id": conversation_id},
@@ -196,23 +200,27 @@ async def handle_terminal_restart(session: "WebSocketSession", data: dict[str, A
 
         if getattr(session, "active_terminal_session_id", None) == session_id:
             session.active_terminal_session_id = None
-        await session._send_ws_payload(
+        await session.send_payload(
             terminal_killed_payload(session_id, conversation_id=conversation_id),
             log_context="terminal.killed",
         )
 
         replacement = await session.terminal_manager.create_session(
             cwd=cwd,
-            on_output=lambda sid, chunk: session._on_terminal_output(sid, chunk, conversation_id),
-            on_exit=lambda sid, code: session._on_terminal_exit(sid, code, conversation_id),
+            on_output=lambda sid, chunk: session.session_lifecycle.on_terminal_output(
+                sid, chunk, conversation_id
+            ),
+            on_exit=lambda sid, code: session.session_lifecycle.on_terminal_exit(
+                sid, code, conversation_id
+            ),
             conversation_id=conversation_id,
         )
         session.active_terminal_session_id = replacement.session_id
-        await session._send_ws_payload(
+        await session.send_payload(
             terminal_created_payload(replacement),
             log_context="terminal.created",
         )
-        await session._send_event(
+        await session.send_event(
             AgentEvent.command_result(
                 "terminal.restart",
                 "Terminal restarted",
@@ -244,11 +252,11 @@ async def handle_terminal_list(session: "WebSocketSession", data: dict[str, Any]
     sessions = session.terminal_manager.list_sessions_for_conversation(scope.conversation_id)
     payload = terminal_list_payload(sessions, conversation_id=scope.conversation_id)
     scope.apply(payload)
-    await session._send_ws_payload(
+    await session.send_payload(
         payload,
         log_context="terminal.list",
     )
-    await session._emit_command_result(
+    await session.emit_command_result(
         "terminal.list",
         "",
         data={
@@ -284,7 +292,7 @@ async def handle_terminal_snapshot_request(session: "WebSocketSession", data: di
                 conversation_id=conversation_id,
             )
             scope.apply(payload)
-            await session._send_ws_payload(payload, log_context="terminal.snapshot")
+            await session.send_payload(payload, log_context="terminal.snapshot")
             return True
         session_id = ""
     if not session_id:
@@ -293,7 +301,7 @@ async def handle_terminal_snapshot_request(session: "WebSocketSession", data: di
     if not session_id:
         payload = terminal_snapshot_payload(None, conversation_id=conversation_id)
         scope.apply(payload)
-        await session._send_ws_payload(payload, log_context="terminal.snapshot")
+        await session.send_payload(payload, log_context="terminal.snapshot")
         return True
 
     max_chars = normalize_snapshot_max_chars(data)
@@ -304,7 +312,7 @@ async def handle_terminal_snapshot_request(session: "WebSocketSession", data: di
                 conversation_id=conversation_id,
             )
         scope.apply(payload)
-        await session._send_ws_payload(payload, log_context="terminal.snapshot")
+        await session.send_payload(payload, log_context="terminal.snapshot")
         return True
     snapshot = session.terminal_manager.snapshot(
         session_id,
@@ -318,12 +326,12 @@ async def handle_terminal_snapshot_request(session: "WebSocketSession", data: di
                 conversation_id=conversation_id,
             )
         scope.apply(payload)
-        await session._send_ws_payload(payload, log_context="terminal.snapshot")
+        await session.send_payload(payload, log_context="terminal.snapshot")
         return True
     session.active_terminal_session_id = session_id
     payload = terminal_snapshot_payload(snapshot)
     scope.apply(payload)
-    await session._send_ws_payload(payload, log_context="terminal.snapshot")
+    await session.send_payload(payload, log_context="terminal.snapshot")
     return True
 
 
@@ -357,8 +365,8 @@ async def handle_terminal_clear(session: "WebSocketSession", data: dict[str, Any
     )
     payload = terminal_snapshot_payload(snapshot)
     scope.apply(payload)
-    await session._send_ws_payload(payload, log_context="terminal.snapshot")
-    await session._emit_command_result(
+    await session.send_payload(payload, log_context="terminal.snapshot")
+    await session.emit_command_result(
         "terminal.clear",
         "Terminal scrollback cleared",
         data={
@@ -499,7 +507,7 @@ async def handle_terminal_exec(session: "WebSocketSession", data: dict[str, Any]
     from dataclasses import replace
 
     target_permission = replace(
-        session._permission_context_for_conversation(
+        session.permission_context_for_conversation(
             target_conversation,
             source="terminal.exec",
         ),
@@ -512,7 +520,7 @@ async def handle_terminal_exec(session: "WebSocketSession", data: dict[str, Any]
     )
     tool = session.tool_registry.get_tool("run_command")
     if tool is None:
-        await session._send_ws_payload(
+        await session.send_payload(
             terminal_output_payload(
                 command,
                 "run_command is unavailable in this session.",
@@ -526,10 +534,10 @@ async def handle_terminal_exec(session: "WebSocketSession", data: dict[str, Any]
         if event.type != "approval_request":
             return
         event.data["conversation_id"] = conversation_id
-        payload = session._build_approval_request_payload(event)
-        await session._send_ws_payload(payload, log_context="terminal.approval_request")
+        payload = session.build_approval_request_payload(event)
+        await session.send_payload(payload, log_context="terminal.approval_request")
 
-    await session._send_ws_payload(
+    await session.send_payload(
         await run_terminal_exec_command(
             command,
             cwd,
@@ -547,7 +555,7 @@ async def handle_terminal_exec(session: "WebSocketSession", data: dict[str, Any]
                 terminal_manager=session.terminal_manager,
             ),
             conversation_id=conversation_id,
-            approval_handler=session._approval_handler,
+            approval_handler=session.approval_handler,
             event_handler=emit_tool_event,
         ),
         log_context="terminal.output",

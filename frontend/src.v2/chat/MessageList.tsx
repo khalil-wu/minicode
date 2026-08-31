@@ -411,7 +411,7 @@ export const MessageList = () => {
                         width: "100%",
                       }}
                     >
-                      <ChatTurn turn={turn} />
+                      <ChatTurn turn={turn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} />
                     </div>
                   );
                 })}
@@ -431,7 +431,7 @@ export const MessageList = () => {
                     containIntrinsicSize: isVeryOld ? "auto 200px" : "auto 120px",
                   }}
                 >
-                <ChatTurn turn={turn} />
+                <ChatTurn turn={turn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} />
                 </div>
               );
             })}
@@ -440,7 +440,7 @@ export const MessageList = () => {
                 data-testid={liveTurn ? "streaming-turn-tail" : "latest-turn-tail"}
                 style={{ flex: "0 0 auto" }}
               >
-                <ChatTurn turn={tailTurn} />
+                <ChatTurn turn={tailTurn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} />
               </div>
             )}
             </>
@@ -495,11 +495,21 @@ const applyAuthoritativeTurnDiff = (
   turns: ChatTurnState[],
   turnDiff: ReturnType<typeof useAppStore.getState>["turnDiffs"][string] | undefined,
 ): ChatTurnState[] => {
-  const summary = summarizeTurnDiff(turnDiff);
-  if (!summary || !turnDiff?.turnId) return turns;
+  // Presence of a turn-diff state is authoritative, including an empty diff:
+  // the backend uses diff="" to retract an earlier tool-aggregated preview.
+  // Only an absent state means that the fallback projection is still allowed.
+  if (!turnDiff?.turnId) return turns;
   const index = turns.findIndex((turn) => turn.turnId === turnDiff.turnId);
   if (index < 0) return turns;
   const turn = turns[index];
+  const summary = summarizeTurnDiff(turnDiff);
+  if (!summary) {
+    const withoutFallback = turn.committedCells.filter((cell) => cell.kind !== "diff");
+    if (withoutFallback.length === turn.committedCells.length) return turns;
+    const next = turns.slice();
+    next[index] = { ...turn, committedCells: withoutFallback };
+    return next;
+  }
   const fallback = turn.committedCells.find((cell): cell is DiffCellState => cell.kind === "diff");
   const authoritative: DiffCellState = {
     kind: "diff",

@@ -61,6 +61,16 @@ _AGENT_PROGRESS_STAGES = frozenset(
 _AGENT_PROGRESS_STATUSES = frozenset(
     {"running", "completed", "partial", "failed", "info"}
 )
+_AGENT_PROGRESS_PROVIDER_STATES = frozenset(
+    {
+        "connecting",
+        "reconnecting",
+        "responding",
+        "completed",
+        "failed",
+        "interrupted",
+    }
+)
 _AGENT_PROGRESS_PHASES = frozenset(
     {
         "orienting",
@@ -82,6 +92,7 @@ _AGENT_PROGRESS_PHASES = frozenset(
 # keep one backend source of truth for validation and persisted UI state.
 AGENT_PROGRESS_STAGES = _AGENT_PROGRESS_STAGES
 AGENT_PROGRESS_STATUSES = _AGENT_PROGRESS_STATUSES
+AGENT_PROGRESS_PROVIDER_STATES = _AGENT_PROGRESS_PROVIDER_STATES
 AGENT_PROGRESS_PHASES = _AGENT_PROGRESS_PHASES
 _DONE_STATUSES = frozenset({"completed", "partial", "cancelled", "failed"})
 
@@ -659,6 +670,9 @@ class AgentEvent:
         removed_file_paths: list[str] | None = None,
         request_digest: str = "",
         tool_name: str = "",
+        artifact_kind: str = "",
+        artifact_media_type: str = "",
+        artifact_bytes: int | None = None,
     ) -> AgentEvent:
         result: dict[str, Any] = {
             "id": id,
@@ -668,6 +682,20 @@ class AgentEvent:
         }
         if artifact_id:
             result["artifact_id"] = artifact_id
+        if artifact_kind:
+            result["artifact_kind"] = _optional_event_text(
+                artifact_kind,
+                field_name="artifact_kind",
+                maximum=64,
+            )
+        if artifact_media_type:
+            result["artifact_media_type"] = _optional_event_text(
+                artifact_media_type,
+                field_name="artifact_media_type",
+                maximum=128,
+            )
+        if artifact_bytes is not None:
+            result["artifact_bytes"] = max(0, int(artifact_bytes))
         if diff is not None:
             result["diff"] = diff
         if source_url:
@@ -937,6 +965,12 @@ class AgentEvent:
         step_id: str = "",
         iteration_id: str = "",
         ephemeral: bool = False,
+        retry_attempt: int | None = None,
+        max_retries: int | None = None,
+        retry_after_ms: int | None = None,
+        error_message: str = "",
+        operation_id: str = "",
+        provider_state: str | None = None,
     ) -> AgentEvent:
         clean_message = _required_event_text(
             message,
@@ -977,6 +1011,15 @@ class AgentEvent:
         ).lower()
         if clean_visibility not in _AGENT_ITEM_VISIBILITIES:
             raise ValueError(f"Unsupported agent-progress visibility: {clean_visibility}")
+        clean_provider_state = _optional_event_text(
+            provider_state,
+            field_name="provider_state",
+            maximum=32,
+        ).lower()
+        if clean_provider_state and clean_provider_state not in _AGENT_PROGRESS_PROVIDER_STATES:
+            raise ValueError(
+                f"Unsupported provider progress state: {clean_provider_state}"
+            )
         clean_summary = _optional_event_text(
             summary or clean_message,
             field_name="summary",
@@ -1004,11 +1047,13 @@ class AgentEvent:
             payload["ephemeral"] = True
         optional_text_fields = (
             ("detail", detail, _MAX_EVENT_SUMMARY_CHARS),
+            ("error_message", error_message, _MAX_EVENT_SUMMARY_CHARS),
             ("tool_call_id", tool_call_id, _MAX_EVENT_ID_CHARS),
             ("tool_name", tool_name, 1_024),
             ("group_id", group_id, _MAX_EVENT_ID_CHARS),
             ("step_id", step_id, _MAX_EVENT_ID_CHARS),
             ("iteration_id", iteration_id, _MAX_EVENT_ID_CHARS),
+            ("operation_id", operation_id, _MAX_EVENT_ID_CHARS),
         )
         for field_name, value, maximum in optional_text_fields:
             clean_value = _optional_event_text(
@@ -1022,6 +1067,23 @@ class AgentEvent:
             raise ValueError("tool-owned agent.progress requires tool_name")
         if count is not None:
             payload["count"] = _non_negative_event_int(count, field_name="count")
+        if retry_attempt is not None:
+            payload["retry_attempt"] = _non_negative_event_int(
+                retry_attempt,
+                field_name="retry_attempt",
+            )
+        if max_retries is not None:
+            payload["max_retries"] = _non_negative_event_int(
+                max_retries,
+                field_name="max_retries",
+            )
+        if retry_after_ms is not None:
+            payload["retry_after_ms"] = _non_negative_event_int(
+                retry_after_ms,
+                field_name="retry_after_ms",
+            )
+        if clean_provider_state:
+            payload["provider_state"] = clean_provider_state
         return cls(type="agent.progress", data=payload)
 
     @classmethod
@@ -1959,8 +2021,10 @@ class UserCommand:
     data: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_ws_message(cls, msg: dict[str, Any]) -> UserCommand:
+    def from_ws_message(cls, msg: Any) -> UserCommand:
         """Deserialize a WebSocket JSON message."""
+        if not isinstance(msg, dict):
+            raise ValueError("WebSocket message must be a JSON object")
         msg_type = str(msg.get("type", "user_message"))
         data = {k: v for k, v in msg.items() if k != "type"}
 

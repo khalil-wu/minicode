@@ -6,10 +6,11 @@ from typing import Any
 
 from backend.agent.provider_activity import (
     merge_provider_activity_detail,
-    provider_activity_status_rank,
+    provider_progress_lifecycle_regressed,
 )
 from backend.agent.turn_state import (
     COMMAND_OUTPUT_PREVIEW_LIMIT,
+    _append_bounded_output,
     append_agent_message_delta,
     append_thinking_block,
     complete_agent_message_block,
@@ -35,16 +36,6 @@ def _int_or(value: Any, fallback: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return fallback
-
-
-def _append_bounded_output(current: str, chunk: str) -> str:
-    next_output = current + chunk
-    if len(next_output) <= COMMAND_OUTPUT_PREVIEW_LIMIT:
-        return next_output
-    return (
-        f"[output truncated: showing latest {COMMAND_OUTPUT_PREVIEW_LIMIT} chars]\n"
-        + next_output[-COMMAND_OUTPUT_PREVIEW_LIMIT:]
-    )
 
 
 def _tool_status(payload: dict[str, Any], fallback: str = "running") -> str:
@@ -173,6 +164,9 @@ def _tool_record(
         ("step_id", "stepId"),
         ("group_id", "groupId"),
         ("artifact_id", "artifactId"),
+        ("artifact_kind", "artifactKind"),
+        ("artifact_media_type", "artifactMediaType"),
+        ("artifact_bytes", "artifactBytes"),
         ("source_url", "sourceUrl"),
         ("extraction_status", "extractionStatus"),
         ("content_preview", "contentPreview"),
@@ -290,16 +284,77 @@ def _upsert_activity_block(
     blocks = _stream_content_blocks(state)
     for index, existing in enumerate(blocks):
         if existing.get("type") == block.get("type") and existing.get("id") == block_id:
+            provider_progress = (
+                block.get("type") == "progress"
+                and str(block_id).startswith("provider:")
+            )
+            if provider_progress:
+                previous_retry_attempt = existing.get("retryAttempt")
+                incoming_retry_attempt = block.get("retryAttempt")
+                if provider_progress_lifecycle_regressed(
+                    previous_status=existing.get("status"),
+                    incoming_status=block.get("status"),
+                    previous_retry_attempt=(
+                        previous_retry_attempt
+                        if isinstance(previous_retry_attempt, int)
+                        and not isinstance(previous_retry_attempt, bool)
+                        else None
+                    ),
+                    incoming_retry_attempt=(
+                        incoming_retry_attempt
+                        if isinstance(incoming_retry_attempt, int)
+                        and not isinstance(incoming_retry_attempt, bool)
+                        else None
+                    ),
+                    previous_provider_state=existing.get("providerState"),
+                    incoming_provider_state=block.get("providerState"),
+                ):
+                    # A delayed provider frame cannot reopen or downgrade the
+                    # reconnect row once a newer lifecycle snapshot won.
+                    return
+
+                merged = {**existing, **block}
+                merged["timestamp"] = existing.get("timestamp", block.get("timestamp"))
+                for key in ("retryAttempt", "maxRetries", "count"):
+                    previous_value = existing.get(key)
+                    incoming_value = block.get(key)
+                    if (
+                        isinstance(previous_value, int)
+                        and not isinstance(previous_value, bool)
+                        and isinstance(incoming_value, int)
+                        and not isinstance(incoming_value, bool)
+                    ):
+                        merged[key] = max(previous_value, incoming_value)
+                retry_progress = (
+                    "retryAttempt" in existing
+                    or "maxRetries" in existing
+                    or "providerState" in existing
+                    or "retryAttempt" in block
+                    or "maxRetries" in block
+                    or "providerState" in block
+                )
+                if retry_progress:
+                    # Retry detail describes the current attempt. Retaining
+                    # every previous transport error makes the row grow and
+                    # hides the retry that is currently pending.
+                    if block.get("detail"):
+                        merged["detail"] = block.get("detail")
+                    else:
+                        merged.pop("detail", None)
+                else:
+                    detail = merge_provider_activity_detail(
+                        existing.get("detail"),
+                        block.get("detail"),
+                    )
+                    if detail:
+                        merged["detail"] = detail
+                if str(merged.get("status") or "").strip().lower() != "running":
+                    merged.pop("ephemeral", None)
+                blocks[index] = merged
+                return
+
             merged = {**existing, **block}
             if block.get("type") == "progress":
-                if (
-                    str(block_id).startswith("provider:")
-                    and provider_activity_status_rank(existing.get("status"))
-                    > provider_activity_status_rank(block.get("status"))
-                ):
-                    for key in ("status", "message", "summary"):
-                        if key in existing:
-                            merged[key] = existing[key]
                 detail = merge_provider_activity_detail(
                     existing.get("detail"),
                     block.get("detail"),
@@ -348,6 +403,10 @@ def create_stream_state(
         "event_seq": 0,
         "last_event_type": "",
         "last_event_at": 0,
+        # Retryable errors must say ``recoverable=True`` explicitly. A final
+        # error marks the resume snapshot failed, while the canonical ``done``
+        # event remains the delivery fence for the live turn.
+        "terminal_fenced": False,
         "tool_calls": {},
     }
 
@@ -369,6 +428,29 @@ def apply_stream_event(
     state = streams.get(str(conversation_id))
     if state is None:
         return None
+
+    # A stream slot is owned by one assistant message/turn.  Late events from
+    # an older run can arrive after a new turn has reused the conversation key;
+    # accepting them would append stale text or reopen old tool cards.
+    payload_message_id = str(
+        payload.get("message_id") or payload.get("messageId") or ""
+    ).strip()
+    state_message_id = str(state.get("message_id") or "").strip()
+    if payload_message_id and state_message_id and payload_message_id != state_message_id:
+        return state
+    payload_turn_id = str(
+        payload.get("turn_id") or payload.get("turnId") or ""
+    ).strip()
+    state_turn_id = str(state.get("turn_id") or "").strip()
+    if payload_turn_id and state_turn_id and payload_turn_id != state_turn_id:
+        return state
+
+    # ``done`` is the sole stream terminal fence.  Recoverable ``error``
+    # evidence must continue through the retry ladder, while every event after
+    # the durable terminal boundary is stale by definition.
+    if bool(state.get("terminal_fenced")):
+        return state
+
     state["event_seq"] = int(state.get("event_seq") or 0) + 1
     state["last_event_type"] = str(event_type or "")
     state["last_event_at"] = int(time.time() * 1000)
@@ -392,6 +474,11 @@ def apply_stream_event(
             start_agent_message_block(
                 _stream_content_blocks(state),
                 str(item.get("id") or "agent-message"),
+                {
+                    key: item[key]
+                    for key in ("phase", "visibility")
+                    if item.get(key) is not None
+                },
             )
             state["phase"] = "model"
     elif event_type == "agent_message.delta":
@@ -399,6 +486,11 @@ def apply_stream_event(
             _stream_content_blocks(state),
             str(payload.get("item_id") or "agent-message"),
             str(payload.get("delta") or ""),
+            {
+                key: payload[key]
+                for key in ("phase", "visibility")
+                if payload.get(key) is not None
+            },
         )
         state["phase"] = "model"
     elif event_type == "item.completed":
@@ -575,6 +667,12 @@ def apply_stream_event(
                 ("iteration_id", "iterationId"),
                 ("ephemeral", "ephemeral"),
                 ("count", "count"),
+                ("retry_attempt", "retryAttempt"),
+                ("max_retries", "maxRetries"),
+                ("retry_after_ms", "retryAfterMs"),
+                ("error_message", "errorMessage"),
+                ("operation_id", "operationId"),
+                ("provider_state", "providerState"),
             ):
                 if payload.get(source_key) is not None:
                     block[target_key] = payload[source_key]
@@ -582,8 +680,13 @@ def apply_stream_event(
     elif event_type == "done":
         state["status"] = str(payload.get("status") or "completed")
         state["terminal_reason"] = str(payload.get("reason") or "")
+        state["terminal_fenced"] = True
     elif event_type == "error":
-        state["status"] = "failed"
+        # Errors may be provider retry evidence only when that is explicit.
+        # Defaulting a missing field to recoverable leaves reconnect snapshots
+        # running forever after a terminal provider failure.
+        if payload.get("recoverable") is not True:
+            state["status"] = "failed"
     return state
 
 

@@ -49,8 +49,6 @@ async def install_skill(skill_manager: Any | None, name: str) -> SkillInstallRes
         skills=list_skills(skill_manager),
         installed=True,
     )
-
-
 def list_commands(
     workspace_root: str | Path | None = None,
     *,
@@ -64,17 +62,3 @@ def list_commands(
             resolve_active_workspace=resolve_active_workspace,
         )
     )
-
-
-def _installed_skill_names(skill_manager: Any | None) -> set[str]:
-    if not skill_manager:
-        return set()
-    loader = getattr(skill_manager, "_loader", None)
-    list_skill_names = getattr(loader, "list_skill_names", None)
-    if callable(list_skill_names):
-        return {str(name) for name in list_skill_names()}
-    return {
-        str(skill.get("name"))
-        for skill in list_skills(skill_manager)
-        if isinstance(skill, dict) and skill.get("name")
-    }

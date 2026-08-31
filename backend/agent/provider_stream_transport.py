@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -55,7 +55,7 @@ async def handle_provider_transport_failure(
     iteration_id_value: str,
     stream_iter: Any,
     cancel_event: Any,
-    tool_executor: Any,
+    tool_tracker: Any,
     state: Any,
     context_builder: Any,
     turn_usage: UsageInfo,
@@ -63,6 +63,9 @@ async def handle_provider_transport_failure(
     degrade_and_finish: Callable[..., AsyncIterator[AgentEvent]],
     query_source: str | None = None,
     retry_state: Any | None = None,
+    progress_id: str = "",
+    max_retries: int | None = None,
+    close_stream: Callable[[], Awaitable[None]] | None = None,
 ) -> AsyncIterator[AgentEvent | ProviderTransportFailureResult]:
     """Retry a replay-safe transport failure or finish through typed recovery."""
 
@@ -75,9 +78,7 @@ async def handle_provider_transport_failure(
         else str(cause)
     ]
     if classification.provider_error_type != "unknown":
-        error_parts.append(
-            f"provider_error_type={classification.provider_error_type}"
-        )
+        error_parts.append(f"provider_error_type={classification.provider_error_type}")
     status_code = llm_error_status_code(cause)
     if status_code is not None:
         error_parts.append(f"status={status_code}")
@@ -107,28 +108,10 @@ async def handle_provider_transport_failure(
         provider_error_type = (
             "network" if is_timeout else classification.provider_error_type
         )
-        retry_boundary = budget_runtime.consume_retry(
-            "stream_timeout" if is_timeout else "stream_transport"
-        )
-        if retry_boundary is not None:
-            logger.warning("%s", retry_boundary.detail)
-            await turn_kernel.close_provider_attempt(
-                provider_attempt,
-                status="failed",
-                summary=retry_boundary.detail,
-                data={
-                    "error_type": error_type,
-                    "provider_error_type": provider_error_type,
-                    **({"status_code": status_code} if status_code is not None else {}),
-                },
-            )
-            yield ProviderTransportFailureResult(
-                action="finish",
-                stream_attempt=stream_attempt,
-                retry_budget_boundary=retry_boundary,
-                usage=usage,
-            )
-            return
+        # Provider retries are owned exclusively by StreamRetryPolicy.  The
+        # turn recovery fuse handles context/loop repairs, so it must not
+        # impose a second, smaller provider budget that would make the UI's
+        # advertised N inaccurate.
         await turn_kernel.close_provider_attempt(
             provider_attempt,
             status="failed",
@@ -144,53 +127,80 @@ async def handle_provider_transport_failure(
             },
             project_progress=False,
         )
-        await turn_kernel.emit_runtime_span(
-            "recovery.retry.started",
-            span_id=f"recovery:{iteration_id_value}:{new_attempt}",
-            iteration_id=iteration_id_value,
-            phase="recovery",
-            status="running",
-            label="recovery",
-            summary=(
-                "Model stream timed out; reconnecting"
-                if is_timeout
-                else "Model stream disconnected; reconnecting"
-            ),
-            data={
-                "stream_attempt": new_attempt,
-                "provider_error_type": provider_error_type,
-                "error_type": error_type,
-            },
-        )
-        total_attempts = max(
+        emit_runtime_span = getattr(turn_kernel, "emit_runtime_span", None)
+        if emit_runtime_span is not None:
+            await emit_runtime_span(
+                "recovery.retry.started",
+                span_id=(
+                    f"recovery:{provider_attempt.span_id}:{new_attempt}"
+                    if getattr(provider_attempt, "span_id", "")
+                    else f"recovery:{iteration_id_value}:{new_attempt}"
+                ),
+                iteration_id=iteration_id_value,
+                phase="recovery",
+                status="running",
+                label="recovery",
+                summary=(
+                    "Model stream timed out; reconnecting"
+                    if is_timeout
+                    else "Model stream disconnected; reconnecting"
+                ),
+                data={
+                    "stream_attempt": new_attempt,
+                    "retry_attempt": new_attempt,
+                    "max_retries": max(
+                        0,
+                        int(
+                            max_retries
+                            if max_retries is not None
+                            else getattr(settings, "stream_max_attempts", 0) or 0
+                        ),
+                    ),
+                    "provider_error_type": provider_error_type,
+                    "error_type": error_type,
+                },
+            )
+        effective_max_retries = max(
             0,
-            int(getattr(settings, "stream_max_attempts", 0) or 0) + 1,
+            int(
+                max_retries
+                if max_retries is not None
+                else getattr(settings, "stream_max_attempts", 0) or 0
+            ),
         )
-        next_attempt_number = new_attempt + 1
-        attempt_label = (
-            f"第 {next_attempt_number}/{total_attempts} 次"
-            if total_attempts > 0
-            else f"第 {next_attempt_number} 次"
+        retry_label = (
+            f"第 {new_attempt}/{effective_max_retries} 次"
+            if effective_max_retries > 0
+            else f"第 {new_attempt} 次"
         )
         yield AgentEvent.progress(
-            f"连接中断，正在重试（{attempt_label}）",
+            f"连接中断，正在重连（{retry_label}）",
             stage="status",
             status="running",
-            id=provider_progress_id(iteration_id_value),
+            id=progress_id or provider_progress_id(iteration_id_value),
             phase="recover",
             label="provider",
-            count=next_attempt_number,
+            count=new_attempt,
             detail=f"{error_message[:320]} · {retry_delay:.1f} 秒后重试",
             summary=(
                 "Model stream timed out; reconnecting"
                 if is_timeout
                 else "Model stream disconnected; reconnecting"
             ),
+            retry_attempt=new_attempt,
+            max_retries=effective_max_retries,
+            retry_after_ms=max(0, int(round(retry_delay * 1000))),
+            error_message=error_message[:320],
+            operation_id=progress_id,
+            provider_state="reconnecting",
         )
-        close_stream = getattr(stream_iter, "aclose", None)
-        if callable(close_stream):
-            with suppress(Exception):
-                await close_stream()
+        if close_stream is not None:
+            await close_stream()
+        else:
+            close_iterator = getattr(stream_iter, "aclose", None)
+            if callable(close_iterator):
+                with suppress(Exception):
+                    await close_iterator()
         if classification.provider_error_type == "rate_limit":
             yield AgentEvent.rate_limit(
                 retry_after_seconds=retry_delay,
@@ -201,7 +211,7 @@ async def handle_provider_transport_failure(
         async for reset_update in reset_for_provider_retry(
             stream_text=stream_text,
             stream_state=stream_state,
-            tool_executor=tool_executor,
+            tool_tracker=tool_tracker,
         ):
             if isinstance(reset_update, ProviderRetryReset):
                 retry_reset = reset_update

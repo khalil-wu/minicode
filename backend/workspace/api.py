@@ -49,12 +49,16 @@ def create_workspace_router() -> APIRouter:
     router = APIRouter(prefix="/api/workspace", tags=["workspace"])
 
     def _service(workspace_root: str) -> WorkspaceService:
+        from backend.workspace.trust import is_workspace_trusted
+
         value = str(workspace_root or "").strip()
         if not value:
             raise HTTPException(status_code=422, detail="workspace_root is required")
         root = Path(value).expanduser().resolve()
         if not root.is_dir():
             raise HTTPException(status_code=409, detail="Workspace folder does not exist.")
+        if not is_workspace_trusted(root):
+            raise HTTPException(status_code=403, detail="Workspace folder is not trusted.")
         return WorkspaceService(get_workspace_root=lambda: root)
 
     def _resolve_git_root(path: str, workspace_root: str) -> Path:

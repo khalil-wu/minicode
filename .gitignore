@@ -51,19 +51,8 @@ frontend/test-results/
 .coverage
 htmlcov/
 
-# Test source (kept locally, excluded from GitHub)
-/conftest.py
-/tests/
-/backend/tests/
-/frontend/tests/
+# Local reference checkouts used by audits
 /cc/
-/frontend/playwright.config.ts
-**/*.test.js
-**/*.test.ts
-**/*.test.tsx
-**/*.spec.js
-**/*.spec.ts
-**/*.spec.tsx
 
 # Local runtime, logs, and tool state
 settings.json

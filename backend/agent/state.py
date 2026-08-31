@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 
@@ -54,6 +55,9 @@ class ToolCallRecord:
     status: ToolCallStatus = "success"
     request_digest: str = ""
     cleanup_receipt: dict[str, Any] = field(default_factory=dict)
+    artifact_kind: str | None = None
+    artifact_media_type: str | None = None
+    artifact_bytes: int | None = None
 
 
 # Terminal-reason vocabulary for run termination.
@@ -106,6 +110,8 @@ class AgentState:
 
     user_message: str
     max_iterations: int = 0  # 展示用；0 = 不限制（终止判定在 TurnBudgetController）
+    conversation_id: str = ""
+    workspace_root: Path | None = None
 
     # ── 执行状态 ──
     iterations: int = 0
@@ -158,7 +164,6 @@ class AgentState:
     # Consecutive auto-compaction failures. Once this reaches
     # MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES the loop stops attempting doomed
     # compactions instead of hammering the API every turn. Reset on success.
-    consecutive_autocompact_failures: int = 0
     # Whether the approaching-compaction notice was already sent, so the
     # boundary announces once per band instead of on every turn.
     budget_warning_emitted: bool = False
@@ -270,6 +275,9 @@ class AgentState:
         iteration_id: str = "",
         request_digest: str = "",
         cleanup_receipt: dict[str, Any] | None = None,
+        artifact_kind: str | None = None,
+        artifact_media_type: str | None = None,
+        artifact_bytes: int | None = None,
     ) -> None:
         """记录一次工具调用。"""
         resolved_status: ToolCallStatus
@@ -301,6 +309,9 @@ class AgentState:
                 status=resolved_status,
                 request_digest=str(request_digest or "").strip(),
                 cleanup_receipt=deepcopy(cleanup_receipt or {}),
+                artifact_kind=str(artifact_kind or "").strip() or None,
+                artifact_media_type=str(artifact_media_type or "").strip() or None,
+                artifact_bytes=(max(0, int(artifact_bytes)) if artifact_bytes is not None else None),
             )
         )
         if artifact_id:

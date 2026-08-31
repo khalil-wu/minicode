@@ -20,6 +20,7 @@ dependencies = [
   "keyring>=25,<26",
   "filelock>=3.16,<4.0",
   "regex>=2024.11,<2027",
+  "watchdog>=6.0,<7.0",
 ]
 
 

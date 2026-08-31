@@ -1,6 +1,15 @@
 import { extractInlineCitationIndexes } from "../chat/citationProjection";
 import { getContentBlocks, getToolCallsFromMessage } from "../lib/content-blocks";
 import { planStepProgressStatus, shouldSurfacePlanProgress } from "../lib/planVisibility";
+import { providerProgressLabel } from "../lib/provider-progress";
+import {
+  artifactFallbackLabel as projectionArtifactFallbackLabel,
+  artifactMediaTypeForProjection,
+  artifactSummaryForRecord,
+  canonicalArtifactKind,
+  cleanArtifactLabel,
+  normalizeArtifactPreview,
+} from "../lib/artifact-projection";
 import type {
   AgentProgressEntry,
   ArtifactContentState,
@@ -33,6 +42,9 @@ export interface ActivityProgressItem {
   label: string;
   detail?: string;
   status: ActivityProgressStatus;
+  retryAttempt?: number;
+  maxRetries?: number;
+  providerState?: AgentProgressEntry["providerState"];
 }
 
 export interface ActivityOutputItem {
@@ -328,13 +340,22 @@ function buildProgress(input: ActivitySidebarStateInput): ActivityProgressItem[]
   ).slice(-4);
 
   for (const entry of compactProgress) {
-    const label = entry.summary || entry.message || entry.label || "";
+    // Provider retry rows have typed terminal states as well as the running
+    // reconnect ladder. Keep this label identical to the transcript timeline.
+    const label = providerProgressLabel(entry) || (
+      entry.id.startsWith("provider:")
+        ? entry.message || entry.summary || entry.label || ""
+        : entry.summary || entry.message || entry.label || ""
+    );
     if (!label.trim()) continue;
     progress.push({
       id: entry.id,
       label,
       detail: formatProgressDetail(entry.detail),
       status: progressStatus(entry.status, Boolean(input.isStreaming)),
+      ...(typeof entry.retryAttempt === "number" ? { retryAttempt: entry.retryAttempt } : {}),
+      ...(typeof entry.maxRetries === "number" ? { maxRetries: entry.maxRetries } : {}),
+      ...(entry.providerState ? { providerState: entry.providerState } : {}),
     });
   }
 
@@ -361,39 +382,59 @@ function formatDuration(durationMs: number): string {
 function serializeMainAgentProgress(entries: AgentProgressEntry[]): AgentProgressEntry[] {
   let lastRunningIndex = -1;
   entries.forEach((entry, index) => {
-    if (entry.status === "running") lastRunningIndex = index;
+    if (entry.status === "running" && !entry.id.startsWith("provider:")) lastRunningIndex = index;
   });
   if (lastRunningIndex < 0) return entries;
   return entries.map((entry, index) =>
-    index < lastRunningIndex && entry.status === "running"
+    index < lastRunningIndex && entry.status === "running" && !entry.id.startsWith("provider:")
       ? { ...entry, status: "completed" }
       : entry,
   );
 }
 
-function buildOutput(messages: ChatMessage[], previewArtifact: ArtifactContentState | null): ActivityOutputItem[] {
+export function buildOutput(messages: ChatMessage[], previewArtifact: ArtifactContentState | null): ActivityOutputItem[] {
   const items: ActivityOutputItem[] = [];
-  const seen = new Set<string>();
+  const indexes = new Map<string, number>();
+
+  const upsert = (item: ActivityOutputItem): void => {
+    const artifactId = String(item.artifactId || item.id || "").trim();
+    if (!artifactId) return;
+    const existingIndex = indexes.get(artifactId);
+    if (existingIndex === undefined) {
+      indexes.set(artifactId, items.length);
+      items.push({ ...item, id: artifactId, artifactId });
+      return;
+    }
+    items[existingIndex] = mergeOutputItems(items[existingIndex], { ...item, id: artifactId, artifactId });
+  };
 
   for (const message of messages) {
     for (const artifact of message.artifacts ?? []) {
-      if (!artifact.artifactId || seen.has(artifact.artifactId)) continue;
-      seen.add(artifact.artifactId);
-      items.push(outputFromArtifact(artifact));
+      upsert(outputFromArtifact(artifact));
+    }
+    // Tool-owned artifacts (notably browser screenshots) are kept on the
+    // tool record rather than assistant message.artifacts. Project metadata
+    // through the same canonical path as persisted message artifacts.
+    for (const record of getToolCallsFromMessage(message)) {
+      const item = outputFromToolRecord(record);
+      if (item) upsert(item);
     }
   }
 
-  if (previewArtifact?.artifactId && !seen.has(previewArtifact.artifactId)) {
-    seen.add(previewArtifact.artifactId);
-    items.unshift({
-      id: previewArtifact.artifactId,
-      label: previewArtifact.name || artifactFallbackLabel(undefined, previewArtifact.mediaType),
-      kind: kindFromMediaType(previewArtifact.mediaType) || "artifact",
-      detail: previewArtifact.mediaType,
-      artifactId: previewArtifact.artifactId,
-      url: previewArtifact.url,
-      mediaType: previewArtifact.mediaType,
-    });
+  const previewId = String(previewArtifact?.artifactId || "").trim();
+  if (previewArtifact && previewId) {
+    const previewItem = outputFromPreviewArtifact(previewArtifact, previewId);
+    const existingIndex = indexes.get(previewId);
+    if (existingIndex === undefined) {
+      indexes.set(previewId, items.length);
+      items.push(previewItem);
+    } else {
+      const merged = mergeOutputItems(items[existingIndex], previewItem);
+      items.splice(existingIndex, 1);
+      // The preview is the most recent user-visible output. It must be moved
+      // before the cap is applied, otherwise slice(-12) can discard it.
+      items.push(merged);
+    }
   }
 
   return items.slice(-12).reverse();
@@ -726,26 +767,78 @@ function basename(path: string): string {
 }
 
 function outputFromArtifact(artifact: ArtifactPreview): ActivityOutputItem {
-  const label = cleanDisplayText(artifact.summary) || artifactFallbackLabel(artifact.kind, artifact.mediaType);
-  const path = artifact.kind === "file" ? pathArg(artifact.summary) : "";
+  const normalized = normalizeArtifactPreview(artifact);
+  const artifactId = normalized.artifactId.trim();
+  const kind = canonicalArtifactKind(normalized.kind, normalized.mediaType);
+  const mediaType = artifactMediaTypeForProjection(normalized.mediaType, kind);
+  const label = cleanDisplayText(normalized.summary) || projectionArtifactFallbackLabel(kind, mediaType);
+  const path = kind === "file" ? pathArg(cleanDisplayText(normalized.summary)) : "";
   return {
-    id: artifact.artifactId,
+    id: artifactId,
     label,
-    kind: artifact.kind,
-    detail: artifact.mediaType || sizeLabel(artifact.bytes),
-    artifactId: artifact.artifactId,
-    url: artifact.url,
-    mediaType: artifact.mediaType,
+    kind,
+    detail: mediaType || sizeLabel(normalized.bytes),
+    artifactId,
+    url: normalized.url,
+    mediaType,
     path: path || undefined,
   };
 }
 
-function artifactFallbackLabel(kind?: string, mediaType?: string): string {
-  const normalized = `${kind || ""} ${mediaType || ""}`.toLowerCase();
-  if (normalized.includes("image")) return "生成图片";
-  if (normalized.includes("pdf")) return "生成的 PDF";
-  if (normalized.includes("file") || normalized.includes("text")) return "生成文件";
-  return "未命名产物";
+function outputFromToolRecord(record: ReturnType<typeof getToolCallsFromMessage>[number]): ActivityOutputItem | null {
+  const artifactId = String(record.artifactId || "").trim();
+  if (!artifactId) return null;
+  const kind = canonicalArtifactKind(record.artifactKind, record.artifactMediaType, record);
+  const mediaType = artifactMediaTypeForProjection(record.artifactMediaType, kind);
+  const label = cleanDisplayText(artifactSummaryForRecord(record)) || projectionArtifactFallbackLabel(kind, mediaType);
+  return {
+    id: artifactId,
+    label,
+    kind,
+    detail: mediaType || sizeLabel(record.artifactBytes),
+    artifactId,
+    mediaType,
+  };
+}
+
+function outputFromPreviewArtifact(artifact: ArtifactContentState, artifactId: string): ActivityOutputItem {
+  const kind = canonicalArtifactKind(artifact.kind, artifact.mediaType);
+  const mediaType = artifactMediaTypeForProjection(artifact.mediaType, kind);
+  return {
+    id: artifactId,
+    label: cleanDisplayText(artifact.name) || projectionArtifactFallbackLabel(kind, mediaType),
+    kind,
+    detail: mediaType,
+    artifactId,
+    url: artifact.url,
+    mediaType,
+  };
+}
+
+function mergeOutputItems(existing: ActivityOutputItem, incoming: ActivityOutputItem): ActivityOutputItem {
+  const kind = existing.kind === "image" || incoming.kind === "image"
+    ? "image"
+    : existing.kind === "file" && incoming.kind !== "file"
+      ? incoming.kind
+      : existing.kind;
+  return {
+    ...existing,
+    id: existing.id || incoming.id,
+    artifactId: existing.artifactId || incoming.artifactId,
+    label: isPlaceholderOutputLabel(existing.label) ? incoming.label : existing.label,
+    kind,
+    detail: incoming.detail || existing.detail,
+    url: incoming.url || existing.url,
+    path: existing.path || incoming.path,
+    mediaType: incoming.kind === "image"
+      ? incoming.mediaType || existing.mediaType
+      : existing.mediaType || incoming.mediaType,
+  };
+}
+
+function isPlaceholderOutputLabel(value: string): boolean {
+  const label = cleanDisplayText(value);
+  return !label || label === "未命名产物" || label === "生成文件" || label === "生成图片";
 }
 
 function cleanDisplayText(value: unknown): string {
@@ -786,15 +879,6 @@ function hostLabel(url: string): string {
 
 function sameHost(left: string, right: string): boolean {
   return hostLabel(left) === hostLabel(right);
-}
-
-function kindFromMediaType(mediaType?: string): string {
-  if (!mediaType) return "";
-  if (mediaType.startsWith("image/")) return "image";
-  if (mediaType === "application/pdf") return "pdf";
-  if (mediaType.includes("json")) return "json";
-  if (mediaType.startsWith("text/")) return "text";
-  return mediaType;
 }
 
 function sizeLabel(bytes?: number): string | undefined {

@@ -18,6 +18,7 @@ from typing import Any, Literal
 import yaml
 
 from backend.agent.instruction_discovery import _get_managed_minicode_dir
+from backend.config_requirements import normalize_string_array
 from backend.agent.markdown_scopes import (
     file_identity,
     get_minicode_config_home_dir,
@@ -41,12 +42,12 @@ logger = logging.getLogger(__name__)
 
 
 def _string_list(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, str):
-        separator = "," if "," in value else None
-        return [item.strip() for item in value.split(separator) if item.strip()]
-    return []
+    return normalize_string_array(
+        value,
+        field_name="agent tools",
+        source="agent frontmatter",
+        reject_empty=False,
+    )
 
 
 def _agent_effort(value: Any) -> str:
@@ -83,22 +84,6 @@ class AgentDefinition:
     permission_mode: str = ""
     background: bool | None = None
     has_output_schema: bool = False
-
-
-def _project_agent_dirs(workspace_root: Path | None) -> list[Path]:
-    """Return MiniCode project agent directories, closest scope first."""
-    if workspace_root is None:
-        return []
-    return [
-        scope.path
-        for scope in get_markdown_directories(
-            "agents",
-            workspace_root,
-            managed_root=_get_managed_minicode_dir(),
-            session_project_root=get_explicit_active_workspace_root(),
-        )
-        if scope.source == "project"
-    ]
 
 
 def _agent_search_dirs(workspace_root: Path | None = None) -> list[Path]:
@@ -236,10 +221,12 @@ def _parse_agent_file(
         name = str(fm.get("name") or name).strip()
         description = str(fm.get("description") or "").strip()
         model = str(fm.get("model") or "").strip()
-        tools = _string_list(fm.get("tools"))
-        disallowed = _string_list(
-            fm.get("disallowed_tools") or []
-        )
+        try:
+            tools = _string_list(fm.get("tools"))
+            disallowed = _string_list(fm.get("disallowed_tools"))
+        except ValueError as exc:
+            logger.warning("Skipping agent %s with invalid tool lists: %s", path, exc)
+            return None
         effort = _agent_effort(fm.get("effort"))
         permission_mode = str(fm.get("permission_mode") or "").strip()
         raw_background = fm.get("background")

@@ -37,6 +37,20 @@ def _short_sha256(value: str, length: int = 12) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
 
 
+def _json_fingerprint(value: Any, length: int = 12) -> str:
+    try:
+        raw = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+    except TypeError:
+        raw = repr(value)
+    return _short_sha256(raw, length=length)
+
+
 def summarize_prompt_sections(sections: list[PromptSection]) -> dict[str, Any]:
     """Return a hash-only, layer-aware digest of ordered prompt sections."""
     layer_totals: dict[PromptLayer, dict[str, int]] = {
@@ -276,31 +290,6 @@ def build_tool_runtime_guidance(
     # instructions. Recompute it instead of maintaining a second process-wide
     # cache whose invalidation would be weaker than the registry lifecycle.
     return _build_tool_runtime_guidance_uncached(tool_schemas, mcp_instructions)
-
-
-def _tool_runtime_guidance_cache_key(
-    tool_schemas: list[Any],
-    mcp_instructions: dict[str, str] | None,
-) -> str:
-    names_set = _tool_names(tool_schemas)
-    names = "\n".join(sorted(names_set))
-    instruction_parts: list[str] = []
-    if mcp_instructions:
-        exposed_servers = {
-            parts[1] for tool in names_set if len(parts := tool.split("__")) >= 2 and parts[0] == "mcp"
-        }
-        instruction_parts = [
-            f"{server}\0{_compact_mcp_instruction_text(text)}"
-            for server, text in sorted(
-                (str(server), str(text or ""))
-                for server, text in mcp_instructions.items()
-            )
-            if server in exposed_servers
-        ]
-    digest = hashlib.sha256(
-        (names + "\n\n" + "\n".join(instruction_parts)).encode("utf-8")
-    ).hexdigest()
-    return digest
 
 
 def _build_tool_runtime_guidance_uncached(

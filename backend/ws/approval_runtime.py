@@ -11,6 +11,7 @@ from typing import Any
 from backend.agent.message import AgentEvent
 from backend.tools.base import PermissionLevel
 from backend.ws.stream_state import get_stream_content_blocks
+from backend.ws.turn_wait_state import TurnWaitState
 
 APPROVAL_INLINE_PATCH_LIMIT_BYTES = 100_000
 APPROVAL_INLINE_FILE_LIMIT = 10
@@ -24,6 +25,18 @@ logger = logging.getLogger(__name__)
 
 class SessionApprovalRuntimeMixin:
     """Mixin providing approval request lifecycle + session-level approval caching."""
+
+    @property
+    def turn_wait_state(self) -> TurnWaitState:
+        state = self.__dict__.get("_turn_wait_state")
+        if state is None:
+            state = TurnWaitState()
+            self.__dict__["_turn_wait_state"] = state
+        return state
+
+    @turn_wait_state.setter
+    def turn_wait_state(self, value: TurnWaitState) -> None:
+        self.__dict__["_turn_wait_state"] = value
 
     @staticmethod
     def _pending_request_digest(payload: dict[str, Any] | None) -> str:
@@ -57,7 +70,7 @@ class SessionApprovalRuntimeMixin:
             self._session_approval_cache: OrderedDict[str, None] = OrderedDict()
             self._approval_cache_max = 500
 
-    async def _emit_approval_cancelled_once(
+    async def emit_approval_cancelled_once(
         self,
         request_ids: list[str],
         *,
@@ -86,7 +99,7 @@ class SessionApprovalRuntimeMixin:
         if owner:
             grouped[owner] = list(fresh)
         else:
-            pending_payloads = getattr(self, "_pending_approval_payloads", {})
+            pending_payloads = self.turn_wait_state.pending_approval_payloads
             for request_id in fresh:
                 payload = pending_payloads.get(request_id)
                 payload_owner = str((payload or {}).get("conversation_id") or "").strip()
@@ -110,7 +123,7 @@ class SessionApprovalRuntimeMixin:
                 conversation_id=payload_owner,
             )
             try:
-                await self._send_event(event)
+                await self.send_event(event)
             except Exception as exc:
                 logger.debug("approval cancellation emit failed: %s", exc)
             emitted.extend(payload_request_ids)
@@ -191,7 +204,7 @@ class SessionApprovalRuntimeMixin:
         request_key = str(request_id or "").strip()
         if not request_key:
             return False
-        pending_payload = self._pending_approval_payloads.get(request_key, {})
+        pending_payload = self.turn_wait_state.pending_approval_payloads.get(request_key, {})
         pending_request = pending_payload.get("request") if isinstance(pending_payload, dict) else None
         tool_name = str(
             (pending_request.get("tool_name") if isinstance(pending_request, dict) else "") or ""
@@ -232,23 +245,19 @@ class SessionApprovalRuntimeMixin:
             if supplied_digest and supplied_digest != expected_digest:
                 return False
             payload["request_digest"] = expected_digest
-        self._approval_diff_cache.pop(request_key, None)
-        future = self._pending_approvals.pop(request_key, None)
+        self.approval_diff_cache.pop(request_key, None)
+        future = self.turn_wait_state.remove_waiter(request_key)
         if future and not future.done():
             future.set_result(payload)
             return True
         # The request is emitted before the waiter is registered. Keep a valid
         # response that races with that hand-off instead of dropping it.
-        if request_key in self._pending_approval_payloads:
-            queued_responses = getattr(self, "_pending_approval_responses", None)
-            if not isinstance(queued_responses, dict):
-                queued_responses = {}
-                self._pending_approval_responses = queued_responses
-            queued_responses[request_key] = payload
+        if request_key in self.turn_wait_state.pending_approval_payloads:
+            self.turn_wait_state.pending_approval_responses[request_key] = payload
             return True
         return False
 
-    def _approval_response_owner_error(
+    def approval_response_owner_error(
         self,
         request_id: str,
         response: dict[str, Any],
@@ -256,7 +265,7 @@ class SessionApprovalRuntimeMixin:
         """Validate the response against the pending thread/turn/item owner."""
 
         request_key = str(request_id or "").strip()
-        pending = getattr(self, "_pending_approval_payloads", {}).get(request_key)
+        pending = self.turn_wait_state.pending_approval_payloads.get(request_key)
         if not isinstance(pending, dict):
             return f"Approval request '{request_key}' is stale or no longer pending"
 
@@ -285,14 +294,14 @@ class SessionApprovalRuntimeMixin:
             return "Approval response does not match the pending tool request"
         return ""
 
-    async def _auto_approve_pending_tool_approvals(
+    async def auto_approve_pending_tool_approvals(
         self,
         *,
         reason: str,
         conversation_id: str | None = None,
         only_auto_allowed: bool = False,
     ) -> list[str]:
-        pending_payloads = getattr(self, "_pending_approval_payloads", {})
+        pending_payloads = self.turn_wait_state.pending_approval_payloads
         target_conversation_id = str(conversation_id or "").strip()
         approved_ids: list[str] = []
 
@@ -328,7 +337,7 @@ class SessionApprovalRuntimeMixin:
                 approved_ids.append(request_id)
 
         if approved_ids:
-            await self._emit_approval_cancelled_once(
+            await self.emit_approval_cancelled_once(
                 approved_ids,
                 reason=reason,
                 conversation_id=target_conversation_id,
@@ -420,9 +429,9 @@ class SessionApprovalRuntimeMixin:
 
         return request_id, payload
 
-    async def _approval_handler(self, tool_call_id: str) -> dict[str, Any]:
+    async def approval_handler(self, tool_call_id: str) -> dict[str, Any]:
         # Check session cache first
-        payload = self._pending_approval_payloads.get(tool_call_id, {})
+        payload = self.turn_wait_state.pending_approval_payloads.get(tool_call_id, {})
         request = payload.get("request")
         request = request if isinstance(request, dict) else {}
         tool_name = str(request.get("tool_name") or "").strip()
@@ -435,17 +444,25 @@ class SessionApprovalRuntimeMixin:
                 "request_digest": self._pending_request_digest(payload),
             }
 
-        queued_response = getattr(self, "_pending_approval_responses", {}).pop(tool_call_id, None)
+        queued_response = self.turn_wait_state.pending_approval_responses.pop(tool_call_id, None)
         if queued_response is not None:
             return queued_response
 
         future: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._pending_approvals[tool_call_id] = future
+        self.turn_wait_state.register_waiter(
+            tool_call_id,
+            future,
+            kind=(
+                "elicitation"
+                if str(request.get("subtype") or "").strip() == "elicitation"
+                else "approval"
+            ),
+        )
         # The request payload is emitted before this waiter registers, so a
         # fast client response can land in the hand-off queue between the
         # entry check above and the registration here. Re-check once after
         # registering; otherwise the queued response is never consumed.
-        queued_after_register = getattr(self, "_pending_approval_responses", {}).pop(tool_call_id, None)
+        queued_after_register = self.turn_wait_state.pending_approval_responses.pop(tool_call_id, None)
         if queued_after_register is not None:
             future.set_result(queued_after_register)
         try:
@@ -460,7 +477,7 @@ class SessionApprovalRuntimeMixin:
             if not future.done():
                 future.cancel()
             conversation_id = str(payload.get("conversation_id") or "").strip()
-            await self._emit_approval_cancelled_once(
+            await self.emit_approval_cancelled_once(
                 [tool_call_id],
                 reason="approval_timeout",
                 conversation_id=conversation_id,
@@ -472,17 +489,17 @@ class SessionApprovalRuntimeMixin:
         except asyncio.CancelledError:
             if not future.done():
                 future.cancel()
-            await self._emit_approval_cancelled_once(
+            await self.emit_approval_cancelled_once(
                 [tool_call_id],
                 reason="approval_wait_cancelled",
                 conversation_id=str(payload.get("conversation_id") or "").strip(),
             )
             raise
         finally:
-            self._pending_approvals.pop(tool_call_id, None)
-            self._pending_approval_payloads.pop(tool_call_id, None)
-            getattr(self, "_pending_approval_responses", {}).pop(tool_call_id, None)
-            self._approval_diff_cache.pop(tool_call_id, None)
+            self.turn_wait_state.remove_waiter(tool_call_id)
+            self.turn_wait_state.pending_approval_payloads.pop(tool_call_id, None)
+            self.turn_wait_state.pending_approval_responses.pop(tool_call_id, None)
+            self.approval_diff_cache.pop(tool_call_id, None)
 
     async def _cancel_pending_approvals(
         self,
@@ -490,7 +507,7 @@ class SessionApprovalRuntimeMixin:
         reason: str = "run_cancelled",
         conversation_id: str | None = None,
     ) -> list[str]:
-        pending_payloads = getattr(self, "_pending_approval_payloads", {})
+        pending_payloads = self.turn_wait_state.pending_approval_payloads
         target_conversation_id = str(conversation_id or "").strip()
         if target_conversation_id:
             request_ids = [
@@ -499,12 +516,16 @@ class SessionApprovalRuntimeMixin:
             ]
         else:
             request_ids = list(dict.fromkeys([
-                *getattr(self, "_pending_approvals", {}).keys(),
-                *pending_payloads.keys(),
-                *getattr(self, "_pending_approval_responses", {}).keys(),
+            *self.turn_wait_state.waiter_ids(),
             ]))
         for request_id in request_ids:
-            future = getattr(self, "_pending_approvals", {}).get(request_id)
+            future = self.turn_wait_state.pending_approvals.get(request_id)
+            if future is None:
+                future = self.turn_wait_state.pending_user_input.get(request_id)
+            if future is None:
+                future = self.turn_wait_state.pending_elicitations.get(request_id)
+            if future is None:
+                future = self.turn_wait_state.provider_oauth_pending.get(request_id)
             if future and not future.done():
                 future.cancel()
         try:
@@ -513,7 +534,7 @@ class SessionApprovalRuntimeMixin:
                 # conversation owner map.  Emit while that map still exists;
                 # clearing it first turns valid owned cancellations into
                 # "unowned" events and leaves the frontend prompt stuck.
-                await self._emit_approval_cancelled_once(
+                await self.emit_approval_cancelled_once(
                     request_ids,
                     reason=reason,
                     conversation_id=target_conversation_id,
@@ -523,10 +544,10 @@ class SessionApprovalRuntimeMixin:
             # the notification is being sent.  Always release waiters and all
             # associated payload/diff state.
             for request_id in request_ids:
-                getattr(self, "_pending_approvals", {}).pop(request_id, None)
-                self._pending_approval_payloads.pop(request_id, None)
-                getattr(self, "_pending_approval_responses", {}).pop(request_id, None)
-                self._approval_diff_cache.pop(request_id, None)
+                self.turn_wait_state.remove_waiter(request_id)
+                self.turn_wait_state.pending_approval_payloads.pop(request_id, None)
+                self.turn_wait_state.pending_approval_responses.pop(request_id, None)
+                self.approval_diff_cache.pop(request_id, None)
         return request_ids
 
     async def _reject_pending_approvals(
@@ -544,7 +565,7 @@ class SessionApprovalRuntimeMixin:
         current batch can finish and the turn-local input is consumed at the
         normal tool boundary.
         """
-        pending_payloads = getattr(self, "_pending_approval_payloads", {})
+        pending_payloads = self.turn_wait_state.pending_approval_payloads
         target_conversation_id = str(conversation_id or "").strip()
         request_ids: list[str] = []
         for request_id, payload in list(pending_payloads.items()):
@@ -563,14 +584,14 @@ class SessionApprovalRuntimeMixin:
                 request_ids.append(request_id)
 
         if request_ids:
-            await self._emit_approval_cancelled_once(
+            await self.emit_approval_cancelled_once(
                 request_ids,
                 reason=reason,
                 conversation_id=target_conversation_id,
             )
         return request_ids
 
-    async def _reemit_pending_state(
+    async def reemit_pending_state(
         self,
         conversation_id: str | None = None,
         *,
@@ -578,19 +599,19 @@ class SessionApprovalRuntimeMixin:
     ) -> None:
         target_conversation_id = str(conversation_id or "").strip()
         skip_stream_conversation_ids = skip_stream_conversation_ids or set()
-        for payload in list(self._pending_approval_payloads.values()):
+        for payload in list(self.turn_wait_state.pending_approval_payloads.values()):
             if target_conversation_id:
                 payload_conversation_id = str(payload.get("conversation_id") or "").strip()
                 if payload_conversation_id != target_conversation_id:
                     continue
             try:
-                await self._send_ws_payload(payload, log_context="reemit:approval")
+                await self.send_payload(payload, log_context="reemit:approval")
             except Exception as exc:
                 logger.debug("reemit approval failed: %s", exc)
 
         emitted_conversations: set[str] = set()
         stream_states = getattr(self, "_conversation_streams", {})
-        for stream_conversation_id, task in list(getattr(self, "_conversation_run_tasks", {}).items()):
+        for stream_conversation_id, task in list(self.run_manager.run_tasks.items()):
             if not stream_conversation_id or task is None or task.done():
                 continue
             if stream_conversation_id in skip_stream_conversation_ids:
@@ -608,7 +629,7 @@ class SessionApprovalRuntimeMixin:
                 if str(item.get("status") or "running").lower()
                 not in {"success", "completed", "failed", "error", "blocked", "cancelled", "timeout"}
             ]
-            await self._send_event(
+            await self.send_event(
                 AgentEvent.stream_resume(
                     stream_conversation_id,
                     stream_state.get("message_id") or None,
@@ -795,7 +816,7 @@ class SessionApprovalRuntimeMixin:
             "turn_id": str(turn_id or "").strip(),
             "workspace_root": str(workspace_root or "").strip(),
         }
-        self._approval_diff_cache[tool_call_id] = cached_diff
+        self.approval_diff_cache[tool_call_id] = cached_diff
         total_patch_bytes = sum(
             len(item.get("patch", ""))
             for item in files
@@ -816,7 +837,7 @@ class SessionApprovalRuntimeMixin:
 
         return client_diff
 
-    def _build_approval_request_payload(self, event: AgentEvent) -> dict[str, Any]:
+    def build_approval_request_payload(self, event: AgentEvent) -> dict[str, Any]:
         request_id = str(event.data.get("tool_call_id", "")).strip()
         conversation_id = str(event.data.get("conversation_id") or "").strip()
         # Scratch space for the fields the control request is assembled from;
@@ -907,5 +928,5 @@ class SessionApprovalRuntimeMixin:
         for key in ("turn_id", "message_id", "workspace_root", "permission_mode", "workspace_scope"):
             if key in payload:
                 control_payload[key] = payload[key]
-        self._pending_approval_payloads[request_id] = control_payload
+        self.turn_wait_state.pending_approval_payloads[request_id] = control_payload
         return control_payload

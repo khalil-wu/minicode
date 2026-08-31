@@ -37,6 +37,7 @@ _RECENT_LINE_COUNT = 1_000
 _INLINE_TAIL_LINE_COUNT = 5
 _MAX_PARTIAL_LINE_CHARS = 4_096
 _STREAM_CHUNK_BYTES = 64 * 1024
+_MAX_PROTOCOL_FIRST_LINE_BYTES = 64 * 1024
 _DISK_CAP_NOTICE = (
     f"\n[output truncated: exceeded {MAX_HOOK_OUTPUT_BYTES_DISPLAY} disk cap]\n"
 ).encode("utf-8")
@@ -270,11 +271,16 @@ async def drain_hook_process_output(
     input_data: bytes,
     *,
     capture: HookTaskOutput,
+    first_stdout_line: asyncio.Future[bytes] | None = None,
 ) -> None:
     """Drain stdin/stdout/stderr concurrently with backpressure."""
 
     stdout_task = asyncio.create_task(
-        _drain_stream(proc.stdout, capture.write_stdout),
+        _drain_stream(
+            proc.stdout,
+            capture.write_stdout,
+            first_line=first_stdout_line,
+        ),
         name=f"hook-output:{capture.task_id}:stdout",
     )
     stderr_task = asyncio.create_task(
@@ -302,13 +308,29 @@ async def drain_hook_process_output(
 async def _drain_stream(
     stream: asyncio.StreamReader | None,
     sink: Callable[[bytes], Awaitable[None]],
+    *,
+    first_line: asyncio.Future[bytes] | None = None,
 ) -> None:
     if stream is None:
+        if first_line is not None and not first_line.done():
+            first_line.set_result(b"")
         return
+    line_prefix = bytearray()
     while True:
         chunk = await stream.read(_STREAM_CHUNK_BYTES)
         if not chunk:
+            if first_line is not None and not first_line.done():
+                first_line.set_result(bytes(line_prefix))
             return
+        if first_line is not None and not first_line.done():
+            newline = chunk.find(b"\n")
+            if newline >= 0:
+                line_prefix.extend(chunk[: newline + 1])
+                first_line.set_result(bytes(line_prefix))
+            elif len(line_prefix) + len(chunk) > _MAX_PROTOCOL_FIRST_LINE_BYTES:
+                first_line.set_result(b"")
+            else:
+                line_prefix.extend(chunk)
         await sink(chunk)
 
 

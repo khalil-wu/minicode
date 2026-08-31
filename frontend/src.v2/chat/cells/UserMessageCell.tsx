@@ -20,23 +20,25 @@ const COLLAPSE_LINE_THRESHOLD = 14;
 export function UserMessageCell({
   cell,
   isTranscriptMode = false,
+  conversationId,
 }: {
   cell: UserMessageCellState;
   isTranscriptMode?: boolean;
+  conversationId?: string;
 }) {
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [cancelPending, setCancelPending] = useState(false);
   const recallMessage = useAppStore((s) => s.recallMessage);
+  const ownerConversationId = String(conversationId || "").trim();
 
   const cancelQueuedMessage = useCallback(async () => {
-    const conversationId = useAppStore.getState().conversationId;
-    if (!conversationId || !cell.queueMessageId || cancelPending) return;
+    if (!ownerConversationId || !cell.queueMessageId || cancelPending) return;
     setCancelPending(true);
     try {
       const result = await sendClientCommandAwaitResult({
         type: "user_message.queue.cancel",
-        conversation_id: conversationId,
+        conversation_id: ownerConversationId,
         message_id: cell.queueMessageId,
         user_message_id: cell.id,
       }, "user_message.queue.cancel");
@@ -50,7 +52,7 @@ export function UserMessageCell({
     } finally {
       setCancelPending(false);
     }
-  }, [cancelPending, cell.id, cell.queueMessageId]);
+  }, [cancelPending, cell.id, cell.queueMessageId, ownerConversationId]);
 
   const copy = useCallback(() => {
     navigator.clipboard.writeText(cell.content).then(() => {
@@ -92,6 +94,7 @@ export function UserMessageCell({
         name: attachment.name,
         mediaType: attachment.type,
         kind: attachment.type.startsWith("image/") ? "image" : "document",
+        conversationId: ownerConversationId || undefined,
       });
       return;
     }
@@ -102,8 +105,9 @@ export function UserMessageCell({
       mediaType: attachment.type,
       kind: attachment.type.startsWith("image/") ? "image" : "document",
       url: attachment.dataUrl,
+      conversationId: ownerConversationId || undefined,
     });
-  }, [cell.id]);
+  }, [cell.id, ownerConversationId]);
 
   const visibleContent = cell.content.trim();
   const collapsible = Boolean(visibleContent) && (
@@ -117,6 +121,19 @@ export function UserMessageCell({
 
   return (
     <div className="user-cell-wrap">
+      {cell.messageSource?.kind === "scheduled_task" ? (
+        <div
+          className="user-cell-source"
+          data-message-source="scheduled_task"
+          title={sourceTitle(cell.messageSource)}
+        >
+          <Clock3 size={13} aria-hidden="true" />
+          <span>定时任务</span>
+          {cell.messageSource.runId ? (
+            <span className="user-cell-source-id">运行 {compactSourceId(cell.messageSource.runId)}</span>
+          ) : null}
+        </div>
+      ) : null}
       <div className="edit-bubble-wrap">
         <div className="user-cell-bubble md-prose">
           {visibleContent ? (
@@ -211,4 +228,17 @@ function attachmentKey(
     attachment.name,
     index,
   ].filter(Boolean).join(":");
+}
+
+function compactSourceId(value: string): string {
+  const id = value.trim();
+  return id.length > 16 ? `${id.slice(0, 8)}...${id.slice(-5)}` : id;
+}
+
+function sourceTitle(source: NonNullable<UserMessageCellState["messageSource"]>): string {
+  const details = [
+    source.taskId ? `任务 ${source.taskId}` : "",
+    source.runId ? `运行 ${source.runId}` : "",
+  ].filter(Boolean);
+  return details.length ? `定时任务 · ${details.join(" · ")}` : "定时任务";
 }

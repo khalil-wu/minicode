@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from backend.agent.context import ContextBuilder
+from backend.agent.run_context import RunContext
 from backend.agent.runtime import AgentRuntime
 from backend.agent.state import AgentState
 from backend.tools.base import truncate_tool_result
@@ -51,6 +52,7 @@ async def _handle_teammate_plan_approval_responses(
     agent_path: str,
     conversation_id: str,
     metadata: dict[str, Any],
+    run_context: RunContext,
 ) -> int:
     record = runtime.get_subagent(participant_id)
     if (
@@ -89,7 +91,7 @@ async def _handle_teammate_plan_approval_responses(
             target_mode = normalize_permission_mode_token(
                 response.get("permission_mode")
             )
-            setter = metadata.get("permission_mode_setter")
+            setter = run_context.permission_mode_setter
             if callable(setter):
                 result = setter(target_mode, source="teammate.plan_approved")
                 if hasattr(result, "__await__"):
@@ -131,7 +133,10 @@ _PLAN_APPROVAL_AUTO_MODES = {"bypass"}
 _PLAN_APPROVAL_GRANTABLE_MODES = {"confirm", "auto", "bypass", "plan"}
 
 
-def _leader_plan_review_required(metadata: dict[str, Any] | None) -> bool:
+def _leader_plan_review_required(
+    metadata: dict[str, Any] | None,
+    run_context: RunContext,
+) -> bool:
     """Approval belongs to the user unless the session pre-authorized it.
 
     ``bypass`` sessions already grant broad execution without
@@ -140,7 +145,7 @@ def _leader_plan_review_required(metadata: dict[str, Any] | None) -> bool:
     wait for an explicit ``subagent.plan_review`` decision.
     """
 
-    provider = metadata.get("permission_context_provider") if isinstance(metadata, dict) else None
+    provider = run_context.permission_context_provider
     mode = ""
     if callable(provider):
         try:
@@ -149,9 +154,11 @@ def _leader_plan_review_required(metadata: dict[str, Any] | None) -> bool:
             logger.warning("plan approval permission probe failed: %s", exc)
             context = None
         mode = str(getattr(context, "mode", "") or "").strip().lower()
-    if not mode and isinstance(metadata, dict):
+    if not mode:
         mode = str(
-            metadata.get("prompt_mode") or metadata.get("permission_mode") or ""
+            (metadata or {}).get("prompt_mode")
+            or (metadata or {}).get("permission_mode")
+            or ""
         ).strip().lower()
     return mode not in _PLAN_APPROVAL_AUTO_MODES
 
@@ -163,6 +170,7 @@ async def _handle_parent_plan_approval_requests(
     conversation_id: str,
     emit_event: Any | None,
     metadata: dict[str, Any] | None = None,
+    run_context: RunContext,
 ) -> int:
     """Leader-side handling of required-plan teammate requests.
 
@@ -177,7 +185,7 @@ async def _handle_parent_plan_approval_requests(
 
     if not parent_run_id:
         return 0
-    review_required = _leader_plan_review_required(metadata)
+    review_required = _leader_plan_review_required(metadata, run_context)
     surfaced_ids: list[str] = []
     if isinstance(metadata, dict):
         raw_surfaced = metadata.get("_surfaced_plan_request_ids")
@@ -352,8 +360,8 @@ async def _handle_parent_plan_approval_requests(
     return handled
 
 
-def _mailbox_deliverable(metadata: dict[str, Any]) -> bool:
-    owner = metadata.get("turn_input_queue") or metadata.get("turn_execution_state")
+def _mailbox_deliverable(metadata: dict[str, Any], run_context: RunContext) -> bool:
+    owner = run_context.turn_input_queue
     predicate = getattr(owner, "mailbox_deliverable", None)
     if not callable(predicate):
         return True
@@ -402,12 +410,13 @@ async def inject_subagent_mailbox_updates(
     metadata: dict[str, Any],
     conversation_id: str,
     emit_event: Any | None = None,
+    run_context: RunContext | None = None,
 ) -> int:
     """Pull addressed messages into a subagent at an iteration boundary."""
-    if not _mailbox_deliverable(metadata):
+    if run_context is None or not _mailbox_deliverable(metadata, run_context):
         return 0
     participant_id = subagent_mailbox_participant_id(metadata)
-    runtime = metadata.get("agent_runtime")
+    runtime = run_context.agent_runtime
     list_messages = getattr(runtime, "list_swarm_messages", None)
     if not participant_id or not callable(list_messages):
         return 0
@@ -430,6 +439,7 @@ async def inject_subagent_mailbox_updates(
             agent_path=current_agent_path,
             conversation_id=conversation_id,
             metadata=metadata,
+            run_context=run_context,
         )
 
     def belongs_to_current_incarnation(message: Any) -> bool:
@@ -619,12 +629,13 @@ async def inject_parent_notifications(
     state: AgentState,
     metadata: dict[str, Any],
     runtime: AgentRuntime | None,
+    run_context: RunContext | None = None,
     parent_run_id: str = "",
     conversation_id: str = "",
     emit_event: Any | None = None,
 ) -> int:
     """Inject durable child completion notifications into a parent turn."""
-    if not _mailbox_deliverable(metadata):
+    if run_context is None or not _mailbox_deliverable(metadata, run_context):
         return 0
     agent_mode = str(metadata.get("agent_mode") or "").strip().lower()
     agent_role = str(metadata.get("agent_role") or metadata.get("role") or "main").strip().lower()
@@ -643,6 +654,7 @@ async def inject_parent_notifications(
         conversation_id=conversation_id,
         emit_event=emit_event,
         metadata=metadata,
+        run_context=run_context,
     )
 
     list_notifications = getattr(runtime, "list_parent_notifications", None)

@@ -39,16 +39,9 @@ def _live_agent_model_catalog(workspace_root_override: str = "") -> list[dict[st
     sessions = list(iter_sessions()) if callable(iter_sessions) else []
     for session in reversed(sessions):
         try:
-            if not bool(getattr(session, "_is_connected", False)):
+            if not session.is_connected:
                 continue
-            workspace_resolver = getattr(
-                session,
-                "_workspace_root_for_conversation",
-                None,
-            )
-            session_workspace = (
-                workspace_resolver() if callable(workspace_resolver) else None
-            )
+            session_workspace = session.session_lifecycle.workspace_root_for_conversation()
             if (
                 workspace_root is not None
                 and session_workspace is not None

@@ -35,12 +35,17 @@ def replay_export_payload(
     clean_after_seq = max(0, int(after_seq or 0))
 
     session = ws_manager.get_session(clean_session_id) if ws_manager is not None else None
-    store = getattr(session, "_ws_event_store", None)
-    if store is None:
+    if session is not None:
+        window, read_status = session.event_outbox.load_persisted_window(
+            limit=MAX_REPLAY_LIMIT,
+        )
+    else:
         store = WebSocketReplayEventStore(
             session_id=clean_session_id,
             root_dir=root_dir or replay_log_root(),
         )
+        window = store.load(limit=MAX_REPLAY_LIMIT)
+        read_status = store.read_status
 
     # MiniCode pages rollout reads in memory and never rewrites transcripts,
     # so scope the read to the endpoint's max window, compute sequence gaps
@@ -48,8 +53,6 @@ def replay_export_payload(
     # replay), then apply the conversation filter and only afterwards the
     # caller's limit — a per-conversation export returns the last N events OF
     # that conversation, never another conversation's share of the window.
-    window = store.load(limit=MAX_REPLAY_LIMIT)
-    read_status = store.read_status
     scoped = [
         event
         for event in window
@@ -111,10 +114,7 @@ def _clean_session_id(session_id: str) -> str:
 
 def _current_seq(session: Any | None, events: list[dict[str, Any]]) -> int:
     if session is not None:
-        try:
-            return max(0, int(getattr(session, "_ws_replay_cursor", 0) or 0))
-        except (TypeError, ValueError):
-            pass
+        return session.event_outbox.current_replay_seq
     return max((_event_seq(event) or 0 for event in events), default=0)
 
 

@@ -86,7 +86,9 @@ def _is_dangerous_env_name(name: str) -> bool:
         or upper.startswith("GIT_CONFIG_")
     )
 
-def _as_bool(value: Any) -> bool:
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -133,14 +135,6 @@ def _validated_env(value: Any) -> tuple[dict[str, str], str]:
             return {}, f"Environment variable {key} exceeds 32768 characters"
         resolved[key] = raw_value
     return resolved, ""
-
-
-def _is_bypass_mode(context: Any = None) -> bool:
-    policy = getattr(context, "sandbox_policy", None)
-    if isinstance(policy, SandboxPolicy):
-        return policy.disable_os_sandbox
-    permission = getattr(context, "permission", None)
-    return getattr(permission, "mode", None) == "bypass"
 
 
 def _command_matches_excluded(command: str, policy: SandboxPolicy) -> bool:
@@ -338,7 +332,17 @@ def _model_shell_description() -> str:
             "On Windows, do not use POSIX-only head/tail/grep/sed/cat commands or inline "
             "NAME=value command assignments; use Get-Content/Select-String, dedicated workspace tools, "
             "and the structured env field. If a POSIX command is not recognized, retry with its PowerShell "
-            "equivalent instead of repeating it."
+            "equivalent instead of repeating it. "
+            # Codex shell_spec windows_shell_guidance: destructive-operation
+            # rules belong in the tool description the model reads, not only
+            # in user-facing prompt context.
+            "Windows safety rules: do not compose destructive filesystem commands across shells; "
+            "enumerate and delete/move within one shell end-to-end, preferring native cmdlets "
+            "(Remove-Item/Move-Item) with -LiteralPath over string-built commands. Before any "
+            "recursive delete or move, verify the resolved absolute target paths stay inside the "
+            "workspace or the explicitly named target directory; never recurse against an "
+            "unverified computed path. Launch background helpers with "
+            "Start-Process -WindowStyle Hidden unless the user explicitly asked for a visible window."
         )
     return "Execute a shell command for builds, tests, installs, git, processes, and scripts."
 

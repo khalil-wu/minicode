@@ -10,13 +10,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import inspect
 import logging
 import os
 import subprocess
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from datetime import UTC, datetime
@@ -35,13 +36,14 @@ from backend.agent.message import (
 )
 from backend.agent.provider_activity import (
     merge_provider_activity_detail,
-    provider_activity_status_rank,
+    provider_progress_lifecycle_regressed,
 )
 from backend.agent.query_engine import AgentSession, QuerySubmission
 from backend.agent.runtime import default_runtime
+from backend.agent.run_context import RunContext
 from backend.agent.turn_state import AgentTurnState
 from backend.artifact.store import MAX_CONTENT_LENGTH as MAX_ARTIFACT_CONTENT_CHARS
-from backend.config import get_available_models, get_llm_provider, load_config
+from backend.config import AppConfig, get_available_models, get_llm_provider, load_config
 from backend.agent.conversation_query_guard import (
     ConversationQueryClaim,
     conversation_query_guards,
@@ -66,6 +68,7 @@ from backend.ws.stream_state import (
     create_stream_state,
     upsert_pending_tool_call,
 )
+from backend.ws.ui_agent_state_store import UiAgentStateStore
 from backend.workspace.trust import is_workspace_trusted
 
 UI_AGENT_STATE_SNAPSHOT_KEY = "ui_agent_state"
@@ -338,11 +341,23 @@ def _project_agent_message_event(
     if event_type == "item.started":
         item = data.get("item") if isinstance(data.get("item"), dict) else {}
         if item.get("type") == "agent_message":
-            turn_state.start_agent_message(str(item.get("id") or "agent-message"))
+            turn_state.start_agent_message(
+                str(item.get("id") or "agent-message"),
+                {
+                    key: item[key]
+                    for key in ("phase", "visibility")
+                    if item.get(key) is not None
+                },
+            )
     elif event_type == "agent_message.delta":
         turn_state.append_agent_message_delta(
             str(data.get("item_id") or "agent-message"),
             str(data.get("delta") or ""),
+            {
+                key: data[key]
+                for key in ("phase", "visibility")
+                if data.get(key) is not None
+            },
         )
     elif event_type == "item.completed":
         item = data.get("item") if isinstance(data.get("item"), dict) else {}
@@ -582,14 +597,6 @@ def _activatable_tool_names(tool_registry: Any) -> list[str]:
     return result
 
 
-def _model_thinking_levels(model: Any, adapter: Any) -> tuple[str, ...]:
-    return model_thinking_levels(model, adapter)
-
-
-def _clamp_thinking_level(requested: Any, available: tuple[str, ...]) -> str:
-    return clamp_model_thinking_level(requested, available)
-
-
 def _apply_thinking_level(adapter: Any, model: Any, requested: Any) -> str:
     """Apply the canonical clamped thinking level to the active adapter."""
 
@@ -702,7 +709,7 @@ def _normalized_todo(todo: Any) -> dict[str, Any] | None:
     return {
         "id": todo_id,
         "content": content,
-        "activeForm": str(todo.get("activeForm") or todo.get("active_form") or content),
+        "activeForm": str(todo.get("activeForm") or content),
         "status": status,
     }
 
@@ -726,207 +733,292 @@ def _subagent_summary(data: dict[str, Any]) -> str:
     return ""
 
 
-def _ui_agent_state_for_event(current: Any, event_type: str, data: dict[str, Any]) -> dict[str, Any] | None:
-    state = _coerce_ui_agent_state(current)
+_UI_AGENT_STATE_HANDLER = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any] | None]
 
-    if event_type == "turn.plan.updated":
-        raw_steps = data.get("plan")
-        if not isinstance(raw_steps, list):
-            return None
-        steps = [
-            normalized
-            for index, step in enumerate(raw_steps)
-            if (normalized := _normalized_plan_step(step, index)) is not None
+
+def _project_turn_plan(state: dict[str, Any], data: dict[str, Any]) -> dict[str, Any] | None:
+    raw_steps = data.get("plan")
+    if not isinstance(raw_steps, list):
+        return None
+    steps = [
+        normalized
+        for index, step in enumerate(raw_steps)
+        if (normalized := _normalized_plan_step(step, index)) is not None
+    ]
+    state["plan"] = {
+        "threadId": str(data.get("thread_id") or data.get("conversation_id") or ""),
+        "turnId": str(data.get("turn_id") or ""),
+        "plan": steps,
+        **({"explanation": str(data.get("explanation"))} if data.get("explanation") else {}),
+    }
+    return state
+
+
+def _project_task_update(state: dict[str, Any], data: dict[str, Any]) -> dict[str, Any] | None:
+    if isinstance(data.get("session"), dict):
+        return None
+    if isinstance(data.get("todos"), list):
+        state["todos"] = [
+            todo
+            for raw in data["todos"]
+            if (todo := _normalized_todo(raw)) is not None
         ]
-        state["plan"] = {
-            "threadId": str(data.get("thread_id") or data.get("conversation_id") or ""),
-            "turnId": str(data.get("turn_id") or ""),
-            "plan": steps,
-            **({"explanation": str(data.get("explanation"))} if data.get("explanation") else {}),
-        }
         return state
+    todo = _normalized_todo(data)
+    if todo is None:
+        return None
+    state["todos"] = _upsert_by_id(list(state.get("todos") or []), todo)
+    return state
 
-    if event_type == "task.update":
-        if isinstance(data.get("session"), dict):
-            return None
-        if isinstance(data.get("todos"), list):
-            state["todos"] = [
-                todo
-                for raw in data["todos"]
-                if (todo := _normalized_todo(raw)) is not None
-            ]
+
+def _project_subagent_start(state: dict[str, Any], data: dict[str, Any]) -> dict[str, Any] | None:
+    subagent_id = str(data.get("subagent_id") or "").strip()
+    if not subagent_id:
+        return None
+    state["subagents"] = _upsert_by_id(list(state.get("subagents") or []), {
+        "id": subagent_id,
+        "role": str(data.get("role") or "subagent"),
+        "status": "running",
+        "summary": str(data.get("prompt") or ""),
+        **({"parentRunId": str(data.get("parent_run_id"))} if data.get("parent_run_id") is not None else {}),
+        **({"turnId": str(data.get("turn_id"))} if data.get("turn_id") else {}),
+    })[-20:]
+    return state
+
+
+def _project_subagent_progress(state: dict[str, Any], data: dict[str, Any]) -> dict[str, Any] | None:
+    subagent_id = str(data.get("subagent_id") or "").strip()
+    if not subagent_id:
+        return None
+    existing_subagent = next(
+        (item for item in state.get("subagents", [])
+         if isinstance(item, dict) and str(item.get("id") or "") == subagent_id),
+        None,
+    )
+    if isinstance(existing_subagent, dict) and str(existing_subagent.get("status") or "") in {
+        "done", "partial", "cancelled", "error",
+    }:
+        return state
+    summary = _subagent_summary(data)
+    state["subagents"] = _upsert_by_id(list(state.get("subagents") or []), {
+        "id": subagent_id,
+        "role": "subagent",
+        "status": "running",
+        **({"summary": summary} if summary else {}),
+        **({"iteration": data.get("iteration")} if isinstance(data.get("iteration"), int) else {}),
+        **({"maxIterations": data.get("max_iterations")} if isinstance(data.get("max_iterations"), int) else {}),
+        **({"currentTool": str(data.get("tool_name"))} if data.get("tool_name") is not None else {}),
+        **({"detail": str(data.get("detail"))} if data.get("detail") is not None else {}),
+        **({"currentActivity": str(data.get("current_activity"))} if data.get("current_activity") is not None else {}),
+        **({"waitingOn": str(data.get("waiting_on"))} if data.get("waiting_on") is not None else {}),
+        **({"lastProgressAt": data.get("last_progress_at")} if isinstance(data.get("last_progress_at"), int) else {}),
+    })[-20:]
+    return state
+
+
+def _project_subagent_done(state: dict[str, Any], data: dict[str, Any]) -> dict[str, Any] | None:
+    subagent_id = str(data.get("subagent_id") or "").strip()
+    if not subagent_id:
+        return None
+    raw_status = str(data.get("status") or "completed").strip().lower()
+    event_error = data.get("error") if isinstance(data.get("error"), str) else ""
+    status = (
+        "partial" if raw_status == "partial"
+        else "cancelled" if raw_status in {"cancelled", "interrupted"}
+        else "error" if event_error.strip() or raw_status in {"error", "failed"}
+        else "done"
+    )
+    result = data.get("result") if isinstance(data.get("result"), dict) else {}
+    record = (
+        data.get("record")
+        if isinstance(data.get("record"), dict)
+        else data.get("snapshot")
+        if isinstance(data.get("snapshot"), dict)
+        else {}
+    )
+    result_content = str(result.get("content") or data.get("summary") or "").strip()
+    result_error = str(result.get("error") or event_error or "").strip()
+    state["subagents"] = _upsert_by_id(list(state.get("subagents") or []), {
+        "id": subagent_id,
+        "role": str(record.get("agent_type") or record.get("role") or "subagent"),
+        "status": status if status in _SUBAGENT_STATUSES else "done",
+        "summary": str(event_error or data.get("summary") or ""),
+        "resultAvailable": bool(result_content or result_error),
+        **({"resultContent": result_content} if result_content else {}),
+        **({"resultError": result_error} if result_error else {}),
+        **({"durationMs": data.get("duration_ms")} if isinstance(data.get("duration_ms"), int) else {}),
+        **({"iteration": data.get("iterations")} if isinstance(data.get("iterations"), int) else {}),
+        **({"toolCallCount": data.get("tool_call_count")} if isinstance(data.get("tool_call_count"), int) else {}),
+        **({"terminationReason": str(data.get("termination_reason"))} if data.get("termination_reason") is not None else {}),
+        **({"terminationInitiator": str(data.get("initiator"))} if data.get("initiator") is not None else {}),
+        **({"checkpointId": str(record.get("checkpoint_id"))} if record.get("checkpoint_id") else {}),
+        **({"objective": str(record.get("objective"))} if record.get("objective") else {}),
+        **({"parentRunId": str(record.get("parent_run_id"))} if record.get("parent_run_id") else {}),
+        **({"turnId": str(data.get("turn_id"))} if data.get("turn_id") else {}),
+    })[-20:]
+    return state
+
+
+def _project_agent_progress(state: dict[str, Any], data: dict[str, Any]) -> dict[str, Any] | None:
+    stage = str(data.get("stage") or "").strip()
+    status = str(data.get("status") or "").strip()
+    progress_id = str(data.get("id") or "").strip()
+    message = str(data.get("message") or "").strip()
+    if (
+        not progress_id
+        or not message
+        or stage not in _PROGRESS_STAGES
+        or status not in _PROGRESS_STATUSES
+        or data.get("visibility") == "debug"
+    ):
+        return None
+    existing_progress = next(
+        (item for item in state.get("agentProgress", [])
+         if isinstance(item, dict) and str(item.get("id") or "") == progress_id),
+        None,
+    )
+    provider_progress = progress_id.startswith("provider:")
+    provider_retry_progress = provider_progress and any(
+        key in data or key in (existing_progress or {})
+        for key in (
+            "retry_attempt",
+            "max_retries",
+            "retryAttempt",
+            "maxRetries",
+            "provider_state",
+            "providerState",
+        )
+    )
+    if provider_progress and isinstance(existing_progress, dict):
+        previous_retry_attempt = existing_progress.get("retryAttempt")
+        incoming_retry_attempt = data.get("retry_attempt")
+        incoming_provider_state = data.get("provider_state", data.get("providerState"))
+        lifecycle_regressed = provider_progress_lifecycle_regressed(
+            previous_status=existing_progress.get("status"),
+            incoming_status=status,
+            previous_retry_attempt=(
+                previous_retry_attempt
+                if isinstance(previous_retry_attempt, int)
+                and not isinstance(previous_retry_attempt, bool)
+                else None
+            ),
+            incoming_retry_attempt=(
+                incoming_retry_attempt
+                if isinstance(incoming_retry_attempt, int)
+                and not isinstance(incoming_retry_attempt, bool)
+                else None
+            ),
+            previous_provider_state=existing_progress.get("providerState"),
+            incoming_provider_state=incoming_provider_state,
+        )
+        if lifecycle_regressed:
+            # A provider row is a terminal/liveness fence. Delayed frames
+            # from an older attempt are diagnostic-only and must not
+            # rewrite the persisted snapshot (including retry counters).
             return state
-        todo = _normalized_todo(data)
-        if todo is None:
-            return None
-        state["todos"] = _upsert_by_id(list(state.get("todos") or []), todo)
+    elif (
+        isinstance(existing_progress, dict)
+        and str(existing_progress.get("status") or "")
+        in {"completed", "failed", "partial"}
+        and status not in {"completed", "failed", "partial"}
+    ):
         return state
-
-    if event_type == "subagent.start":
-        subagent_id = str(data.get("subagent_id") or "").strip()
-        if not subagent_id:
-            return None
-        state["subagents"] = _upsert_by_id(list(state.get("subagents") or []), {
-            "id": subagent_id,
-            "role": str(data.get("role") or "subagent"),
-            "status": "running",
-            "summary": str(data.get("prompt") or ""),
-            **({"parentRunId": str(data.get("parent_run_id"))} if data.get("parent_run_id") is not None else {}),
-            **({"turnId": str(data.get("turn_id"))} if data.get("turn_id") else {}),
-        })[-20:]
-        return state
-
-    if event_type == "subagent.progress":
-        subagent_id = str(data.get("subagent_id") or "").strip()
-        if not subagent_id:
-            return None
-        existing_subagent = next(
-            (item for item in state.get("subagents", [])
-             if isinstance(item, dict) and str(item.get("id") or "") == subagent_id),
-            None,
-        )
-        if isinstance(existing_subagent, dict) and str(existing_subagent.get("status") or "") in {
-            "done", "partial", "cancelled", "error",
-        }:
-            return state
-        summary = _subagent_summary(data)
-        state["subagents"] = _upsert_by_id(list(state.get("subagents") or []), {
-            "id": subagent_id,
-            "role": "subagent",
-            "status": "running",
-            **({"summary": summary} if summary else {}),
-            **({"iteration": data.get("iteration")} if isinstance(data.get("iteration"), int) else {}),
-            **({"maxIterations": data.get("max_iterations")} if isinstance(data.get("max_iterations"), int) else {}),
-            **({"currentTool": str(data.get("tool_name"))} if data.get("tool_name") is not None else {}),
-            **({"detail": str(data.get("detail"))} if data.get("detail") is not None else {}),
-            **({"currentActivity": str(data.get("current_activity"))} if data.get("current_activity") is not None else {}),
-            **({"waitingOn": str(data.get("waiting_on"))} if data.get("waiting_on") is not None else {}),
-            **({"lastProgressAt": data.get("last_progress_at")} if isinstance(data.get("last_progress_at"), int) else {}),
-        })[-20:]
-        return state
-
-    if event_type == "subagent.done":
-        subagent_id = str(data.get("subagent_id") or "").strip()
-        if not subagent_id:
-            return None
-        raw_status = str(data.get("status") or "completed").strip().lower()
-        event_error = data.get("error") if isinstance(data.get("error"), str) else ""
-        status = (
-            "partial" if raw_status == "partial"
-            else "cancelled" if raw_status in {"cancelled", "interrupted"}
-            else "error" if event_error.strip() or raw_status in {"error", "failed"}
-            else "done"
-        )
-        result = data.get("result") if isinstance(data.get("result"), dict) else {}
-        record = (
-            data.get("record")
-            if isinstance(data.get("record"), dict)
-            else data.get("snapshot")
-            if isinstance(data.get("snapshot"), dict)
-            else {}
-        )
-        result_content = str(result.get("content") or data.get("summary") or "").strip()
-        result_error = str(result.get("error") or event_error or "").strip()
-        state["subagents"] = _upsert_by_id(list(state.get("subagents") or []), {
-            "id": subagent_id,
-            "role": str(record.get("agent_type") or record.get("role") or "subagent"),
-            "status": status if status in _SUBAGENT_STATUSES else "done",
-            "summary": str(event_error or data.get("summary") or ""),
-            "resultAvailable": bool(result_content or result_error),
-            **({"resultContent": result_content} if result_content else {}),
-            **({"resultError": result_error} if result_error else {}),
-            **({"durationMs": data.get("duration_ms")} if isinstance(data.get("duration_ms"), int) else {}),
-            **({"iteration": data.get("iterations")} if isinstance(data.get("iterations"), int) else {}),
-            **({"toolCallCount": data.get("tool_call_count")} if isinstance(data.get("tool_call_count"), int) else {}),
-            **({"terminationReason": str(data.get("termination_reason"))} if data.get("termination_reason") is not None else {}),
-            **({"terminationInitiator": str(data.get("initiator"))} if data.get("initiator") is not None else {}),
-            **({"checkpointId": str(record.get("checkpoint_id"))} if record.get("checkpoint_id") else {}),
-            **({"objective": str(record.get("objective"))} if record.get("objective") else {}),
-            **({"parentRunId": str(record.get("parent_run_id"))} if record.get("parent_run_id") else {}),
-            **({"turnId": str(data.get("turn_id"))} if data.get("turn_id") else {}),
-        })[-20:]
-        return state
-
-    if event_type == "agent.progress":
-        stage = str(data.get("stage") or "").strip()
-        status = str(data.get("status") or "").strip()
-        progress_id = str(data.get("id") or "").strip()
-        message = str(data.get("message") or "").strip()
-        if (
-            not progress_id
-            or not message
-            or stage not in _PROGRESS_STAGES
-            or status not in _PROGRESS_STATUSES
-            or data.get("visibility") == "debug"
-        ):
-            return None
-        existing_progress = next(
-            (item for item in state.get("agentProgress", [])
-             if isinstance(item, dict) and str(item.get("id") or "") == progress_id),
-            None,
-        )
-        preserve_existing_lifecycle = bool(
-            isinstance(existing_progress, dict)
-            and progress_id.startswith("provider:")
-            and provider_activity_status_rank(existing_progress.get("status"))
-            > provider_activity_status_rank(status)
-        )
-        if (
-            isinstance(existing_progress, dict)
-            and not preserve_existing_lifecycle
-            and str(existing_progress.get("status") or "") in {"completed", "failed"}
-            and status not in {"completed", "failed"}
-        ):
-            return state
-        detail = merge_provider_activity_detail(
+    # Provider retry detail is a live status line, not an event history.
+    # Replace it on each update so five retries do not produce one giant
+    # stale string.  Other progress kinds retain their existing merge
+    # behavior for compatibility with their cumulative diagnostics.
+    detail = (
+        str(data.get("detail") or "").strip()
+        if provider_retry_progress
+        else merge_provider_activity_detail(
             existing_progress.get("detail")
             if isinstance(existing_progress, dict)
             else "",
             data.get("detail"),
         )
-        entry = {
-            "type": "progress",
-            "id": progress_id,
-            "stage": stage,
-            **({"phase": str(data.get("phase"))} if data.get("phase") is not None else {}),
-            "status": (
-                str(existing_progress.get("status") or status)
-                if preserve_existing_lifecycle
-                else status
-            ),
-            "message": (
-                str(existing_progress.get("message") or message)
-                if preserve_existing_lifecycle
-                else message
-            ),
-            **({"label": str(data.get("label"))} if data.get("label") is not None else {}),
-            **(
-                {
-                    "summary": str(
-                        existing_progress.get("summary")
-                        or existing_progress.get("message")
-                        or message
-                    )
-                }
-                if preserve_existing_lifecycle
-                else {"summary": str(data.get("summary"))}
-                if data.get("summary") is not None
-                else {}
-            ),
-            **({"visibility": str(data.get("visibility"))} if data.get("visibility") is not None else {}),
-            **({"detail": detail} if detail else {}),
-            **({"toolCallId": str(data.get("tool_call_id"))} if data.get("tool_call_id") is not None else {}),
-            **({"toolName": str(data.get("tool_name"))} if data.get("tool_name") is not None else {}),
-            **({"groupId": str(data.get("group_id"))} if data.get("group_id") is not None else {}),
-            **({"stepId": str(data.get("step_id"))} if data.get("step_id") is not None else {}),
-            **({"count": data.get("count")} if isinstance(data.get("count"), int) else {}),
-            **({"iterationId": str(data.get("iteration_id"))} if data.get("iteration_id") is not None else {}),
-            "timestamp": int(time.time() * 1000),
-        }
-        state["agentProgress"] = _upsert_by_id(list(state.get("agentProgress") or []), entry)[-80:]
-        return state
+    )
+    # A provider retry ladder is one logical activity. Keep the first
+    # frame's timestamp as its start time when refreshing the persisted UI
+    # snapshot; replacing it with ``now`` makes the row jump after every
+    # retry and again after reconnect hydration.
+    progress_timestamp = (
+        existing_progress.get("timestamp")
+        if (
+            isinstance(existing_progress, dict)
+            and provider_progress
+            and isinstance(existing_progress.get("timestamp"), int)
+            and existing_progress.get("timestamp") >= 0
+        )
+        else int(time.time() * 1000)
+    )
+    incoming_provider_state = data.get("provider_state", data.get("providerState"))
+    entry = {
+        "type": "progress",
+        "id": progress_id,
+        "stage": stage,
+        **({"phase": str(data.get("phase"))} if data.get("phase") is not None else {}),
+        "status": status,
+        "message": message,
+        **({"label": str(data.get("label"))} if data.get("label") is not None else {}),
+        **({"summary": str(data.get("summary"))} if data.get("summary") is not None else {}),
+        **({"visibility": str(data.get("visibility"))} if data.get("visibility") is not None else {}),
+        **({"detail": detail} if detail else {}),
+        **({"toolCallId": str(data.get("tool_call_id"))} if data.get("tool_call_id") is not None else {}),
+        **({"toolName": str(data.get("tool_name"))} if data.get("tool_name") is not None else {}),
+        **({"groupId": str(data.get("group_id"))} if data.get("group_id") is not None else {}),
+        **({"stepId": str(data.get("step_id"))} if data.get("step_id") is not None else {}),
+        **({"count": data.get("count")} if isinstance(data.get("count"), int) else {}),
+        **({"retryAttempt": data.get("retry_attempt")} if isinstance(data.get("retry_attempt"), int) else {}),
+        **({"maxRetries": data.get("max_retries")} if isinstance(data.get("max_retries"), int) else {}),
+        **({"retryAfterMs": data.get("retry_after_ms")} if isinstance(data.get("retry_after_ms"), int) else {}),
+        **({"errorMessage": str(data.get("error_message"))} if data.get("error_message") is not None else {}),
+        **({"operationId": str(data.get("operation_id"))} if data.get("operation_id") is not None else {}),
+        **({"providerState": str(incoming_provider_state).strip()} if incoming_provider_state is not None else {}),
+        **({"iterationId": str(data.get("iteration_id"))} if data.get("iteration_id") is not None else {}),
+        "timestamp": progress_timestamp,
+    }
+    if provider_progress and isinstance(existing_progress, dict):
+        for source_key, target_key in (
+            ("retry_attempt", "retryAttempt"),
+            ("max_retries", "maxRetries"),
+            ("count", "count"),
+        ):
+            incoming_value = data.get(source_key)
+            previous_value = existing_progress.get(target_key)
+            if (
+                isinstance(incoming_value, int)
+                and not isinstance(incoming_value, bool)
+                and isinstance(previous_value, int)
+                and not isinstance(previous_value, bool)
+            ):
+                entry[target_key] = max(previous_value, incoming_value)
+        if isinstance(incoming_provider_state, str) and incoming_provider_state.strip():
+            entry["providerState"] = incoming_provider_state.strip()
+    state["agentProgress"] = _upsert_by_id(list(state.get("agentProgress") or []), entry)[-80:]
+    return state
 
-    return None
+
+_UI_AGENT_STATE_HANDLERS: dict[str, _UI_AGENT_STATE_HANDLER] = {
+    "turn.plan.updated": _project_turn_plan,
+    "task.update": _project_task_update,
+    "subagent.start": _project_subagent_start,
+    "subagent.progress": _project_subagent_progress,
+    "subagent.done": _project_subagent_done,
+    "agent.progress": _project_agent_progress,
+}
+if set(_UI_AGENT_STATE_HANDLERS) != _UI_AGENT_STATE_EVENT_TYPES:
+    raise RuntimeError(
+        "UI agent-state event registry is incomplete: "
+        f"expected={sorted(_UI_AGENT_STATE_EVENT_TYPES)!r} "
+        f"actual={sorted(_UI_AGENT_STATE_HANDLERS)!r}"
+    )
+
+
+def _ui_agent_state_for_event(current: Any, event_type: str, data: dict[str, Any]) -> dict[str, Any] | None:
+    handler = _UI_AGENT_STATE_HANDLERS.get(event_type)
+    if handler is None:
+        return None
+    return handler(_coerce_ui_agent_state(current), data)
 
 
 def _reconcile_ui_agent_state_with_runtime(
@@ -1165,17 +1257,74 @@ class SessionAgentRunnerMixin:
     Depends on session attributes: ws, query_engine, conversation_repo,
     context_builder, permission_checker, permission_context, config,
     llm, artifact_store, tool_registry, skill_manager,
-    _approval_handler, _active_task_id, _interrupted, etc.
+    approval handling, run ownership, interruption state, and related session
+    services.
     """
 
+    @property
+    def ui_agent_state_store(self) -> UiAgentStateStore:
+        """Return the single owner for live UI agent-state projection data."""
+        state = self.__dict__.get("_ui_agent_state_store")
+        if state is None:
+            state = UiAgentStateStore()
+            for legacy_name, field_name in (
+                ("_ui_agent_state_cache", "cache"),
+                ("_ui_agent_state_pending", "pending"),
+                ("_ui_agent_state_tasks", "tasks"),
+                ("_terminal_projection_fences", "terminal_fences"),
+            ):
+                legacy_value = self.__dict__.pop(legacy_name, None)
+                if isinstance(legacy_value, dict):
+                    setattr(state, field_name, legacy_value)
+            self.__dict__["_ui_agent_state_store"] = state
+        return state
+
+    @ui_agent_state_store.setter
+    def ui_agent_state_store(self, value: UiAgentStateStore) -> None:
+        self.__dict__["_ui_agent_state_store"] = value
+
+    # Compatibility accessors keep older test doubles on the same storage;
+    # production code uses ``ui_agent_state_store`` directly.
+    @property
+    def _ui_agent_state_cache(self) -> dict[str, tuple[int, dict[str, Any]]]:
+        return self.ui_agent_state_store.cache
+
+    @_ui_agent_state_cache.setter
+    def _ui_agent_state_cache(self, value: dict[str, tuple[int, dict[str, Any]]]) -> None:
+        self.ui_agent_state_store.cache = value
+
+    @property
+    def _ui_agent_state_pending(self) -> dict[str, tuple[int, dict[str, Any]]]:
+        return self.ui_agent_state_store.pending
+
+    @_ui_agent_state_pending.setter
+    def _ui_agent_state_pending(self, value: dict[str, tuple[int, dict[str, Any]]]) -> None:
+        self.ui_agent_state_store.pending = value
+
+    @property
+    def _ui_agent_state_tasks(self) -> dict[str, asyncio.Task[Any]]:
+        return self.ui_agent_state_store.tasks
+
+    @_ui_agent_state_tasks.setter
+    def _ui_agent_state_tasks(self, value: dict[str, asyncio.Task[Any]]) -> None:
+        self.ui_agent_state_store.tasks = value
+
+    @property
+    def _terminal_projection_fences(self) -> dict[str, str]:
+        return self.ui_agent_state_store.terminal_fences
+
+    @_terminal_projection_fences.setter
+    def _terminal_projection_fences(self, value: dict[str, str]) -> None:
+        self.ui_agent_state_store.terminal_fences = value
+
     def _conversation_projection_lock(self, conversation_id: str) -> asyncio.Lock:
-        locks = getattr(self, "_conversation_projection_locks", None)
-        if not isinstance(locks, dict):
-            locks = self._conversation_projection_locks = {}
-        lock = locks.get(conversation_id)
-        if not isinstance(lock, asyncio.Lock):
+        manager = self.ws_manager
+        if manager is not None:
+            return manager.conversation_projection_lock(conversation_id)
+        lock = self._conversation_projection_locks.get(conversation_id)
+        if lock is None:
             lock = asyncio.Lock()
-            locks[conversation_id] = lock
+            self._conversation_projection_locks[conversation_id] = lock
         return lock
 
     async def _flush_ui_agent_state_now(self, conversation_id: str) -> None:
@@ -1183,8 +1332,9 @@ class SessionAgentRunnerMixin:
             await self._flush_ui_agent_state_now_unlocked(conversation_id)
 
     async def _flush_ui_agent_state_now_unlocked(self, conversation_id: str) -> None:
-        pending = getattr(self, "_ui_agent_state_pending", {})
-        tasks = getattr(self, "_ui_agent_state_tasks", {})
+        state_store = self.ui_agent_state_store
+        pending = state_store.pending
+        tasks = state_store.tasks
         current_task = asyncio.current_task()
         scheduled = tasks.get(conversation_id)
         if scheduled is not None and scheduled is not current_task:
@@ -1228,27 +1378,18 @@ class SessionAgentRunnerMixin:
     ) -> None:
         if not conversation_id:
             return
-        terminal_fences = getattr(self, "_terminal_projection_fences", None)
-        fenced_message_id = (
-            terminal_fences.get(conversation_id)
-            if isinstance(terminal_fences, dict)
-            else None
-        )
+        terminal_fences = self.ui_agent_state_store.terminal_fences
+        fenced_message_id = terminal_fences.get(conversation_id)
         incoming_message_id = str(data.get("message_id") or "").strip()
         if fenced_message_id and incoming_message_id in {
             "",
             str(fenced_message_id),
         }:
             return
-        cache = getattr(self, "_ui_agent_state_cache", None)
-        pending = getattr(self, "_ui_agent_state_pending", None)
-        tasks = getattr(self, "_ui_agent_state_tasks", None)
-        if not isinstance(cache, dict):
-            cache = self._ui_agent_state_cache = {}
-        if not isinstance(pending, dict):
-            pending = self._ui_agent_state_pending = {}
-        if not isinstance(tasks, dict):
-            tasks = self._ui_agent_state_tasks = {}
+        state_store = self.ui_agent_state_store
+        cache = state_store.cache
+        pending = state_store.pending
+        tasks = state_store.tasks
 
         cached = cache.get(conversation_id)
         if isinstance(cached, tuple) and len(cached) == 2:
@@ -1274,7 +1415,7 @@ class SessionAgentRunnerMixin:
                 self._flush_ui_agent_state_after_delay(conversation_id)
             )
 
-    async def _reconcile_persisted_ui_agent_state(
+    async def reconcile_persisted_ui_agent_state(
         self,
         conversation_id: str,
         *,
@@ -1286,8 +1427,9 @@ class SessionAgentRunnerMixin:
         if not owner:
             return None
         async with self._conversation_projection_lock(owner):
-            pending = getattr(self, "_ui_agent_state_pending", {})
-            tasks = getattr(self, "_ui_agent_state_tasks", {})
+            state_store = self.ui_agent_state_store
+            pending = state_store.pending
+            tasks = state_store.tasks
             scheduled = tasks.get(owner) if isinstance(tasks, dict) else None
             must_reload_after_flush = (
                 isinstance(pending, dict)
@@ -1327,10 +1469,7 @@ class SessionAgentRunnerMixin:
                 revision=revision,
                 revision_key=UI_AGENT_STATE_REVISION_KEY,
             )
-            cache = getattr(self, "_ui_agent_state_cache", None)
-            if not isinstance(cache, dict):
-                cache = self._ui_agent_state_cache = {}
-            cache[owner] = (revision, reconciled_state)
+            state_store.cache[owner] = (revision, reconciled_state)
             return updated or conversation
 
     def _extension_runtime_state(self, conversation_id: str) -> LifecycleGenerationState:
@@ -1372,7 +1511,7 @@ class SessionAgentRunnerMixin:
             return False
         state["shutdown_requested"] = True
         setattr(self, "_extension_shutdown_requested", True)
-        run_manager = getattr(self, "_run_manager", None)
+        run_manager = getattr(self, "run_manager", None)
         stop_wakes = getattr(run_manager, "stop_notification_wake_intake", None)
         if callable(stop_wakes):
             stop_wakes()
@@ -1394,22 +1533,18 @@ class SessionAgentRunnerMixin:
                     # command boundaries. Session shutdown still proceeds.
                     pass
             await asyncio.sleep(0)
-            manager = getattr(self, "_ws_manager", None)
-            shutdown_session = getattr(manager, "shutdown_session", None)
-            if callable(shutdown_session):
-                await shutdown_session(
-                    str(getattr(self, "session_id", "") or ""),
+            manager = self.ws_manager
+            if manager is not None:
+                await manager.shutdown_session(
+                    str(self.session_id or ""),
                     reason="extension_shutdown",
                 )
                 return
-            shutdown = getattr(self, "shutdown", None)
-            if callable(shutdown):
-                await shutdown(reason="extension_shutdown")
-            websocket = getattr(self, "ws", None)
-            close = getattr(websocket, "close", None)
-            if callable(close):
+            await self.session_lifecycle.shutdown(reason="extension_shutdown")
+            websocket = self.ws
+            if websocket is not None:
                 try:
-                    await close(code=1000, reason="extension shutdown")
+                    await websocket.close(code=1000, reason="extension shutdown")
                 except Exception:
                     logger.debug(
                         "Failed to close websocket after extension shutdown",
@@ -1426,7 +1561,7 @@ class SessionAgentRunnerMixin:
         self._extension_requested_shutdown_task = task
 
         def _done(done: asyncio.Task[Any]) -> None:
-            if getattr(self, "_extension_requested_shutdown_task", None) is done:
+            if self._extension_requested_shutdown_task is done:
                 self._extension_requested_shutdown_task = None
             if done.cancelled():
                 return
@@ -1439,9 +1574,7 @@ class SessionAgentRunnerMixin:
                 )
 
         task.add_done_callback(_done)
-        track = getattr(self, "_track_command_task", None)
-        if callable(track):
-            track(task)
+        self.command_dispatcher.track_command_task(task)
         return True
 
     def _model_runtime_for_conversation(
@@ -1513,9 +1646,7 @@ class SessionAgentRunnerMixin:
                 )
 
         task.add_done_callback(_done)
-        track = getattr(self, "_track_command_task", None)
-        if callable(track):
-            track(task)
+        self.command_dispatcher.track_command_task(task)
 
     async def _refresh_model_runtime_projection(
         self,
@@ -1543,8 +1674,25 @@ class SessionAgentRunnerMixin:
             return
         if conversation_id != str(getattr(self, "active_conversation_id", "") or ""):
             return
+        conversation = self.conversation_repo.get_conversation(conversation_id)
+        workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
+        scoped_config = load_config(cwd=workspace_root)
+        scoped_settings = (
+            scoped_config.config_layer_stack.effective_config()
+            if scoped_config.config_layer_stack is not None
+            else None
+        )
+        provider_resolver = getattr(self, "_resolve_llm_provider", get_llm_provider)
         configured_provider = str(
-            getattr(self, "_resolve_llm_provider", get_llm_provider)() or ""
+            (
+                provider_resolver(scoped_settings)
+                if _resolver_accepts_positional_arguments(
+                    provider_resolver,
+                    scoped_settings,
+                )
+                else provider_resolver()
+            )
+            or ""
         ).strip().lower()
         provider = str(getattr(self, "provider", "") or "").strip()
         provider_override = bool(getattr(self, "_provider_override_active", False))
@@ -1563,7 +1711,7 @@ class SessionAgentRunnerMixin:
             # reports that mismatch; selecting the first catalog entry would
             # change the user's model silently.
             selected = str(
-                getattr(load_config().llm, "model", "") or ""
+                getattr(scoped_config.llm, "model", "") or ""
             ).strip()
         self.provider = provider
         self.available_models = available_models
@@ -1571,11 +1719,22 @@ class SessionAgentRunnerMixin:
         self.models_source = (
             "extension"
             if runtime.get_registered_provider_config(provider) is not None
-            else getattr(self, "_resolve_models_source", lambda _provider: "")(provider)
+            else (
+                getattr(self, "_resolve_models_source")(provider, scoped_settings)
+                if callable(getattr(self, "_resolve_models_source", None))
+                and _resolver_accepts_positional_arguments(
+                    getattr(self, "_resolve_models_source"),
+                    provider,
+                    scoped_settings,
+                )
+                else getattr(self, "_resolve_models_source", lambda _provider: "")(
+                    provider
+                )
+            )
         )
         if selected and runtime.get_model(provider, selected) is not None:
             self.config = _config_with_runtime_model_budget(
-                load_config(),
+                scoped_config,
                 model_runtime=runtime,
                 provider=provider,
                 model=selected,
@@ -1589,7 +1748,7 @@ class SessionAgentRunnerMixin:
             )
             self.context_builder._llm = self.llm
             self.context_builder._budget = self.config.token_budget
-        send_state = getattr(self, "_send_llm_state", None)
+        send_state = getattr(self, "send_llm_state", None)
         if callable(send_state):
             await send_state()
 
@@ -1609,14 +1768,11 @@ class SessionAgentRunnerMixin:
         if workspace_root is None and clean_id:
             conversation = self.conversation_repo.get_conversation(clean_id)
             if conversation is not None:
-                workspace_root = self._workspace_root_for_conversation(conversation)
+                workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
         current_manager = self._mcp_manager_for_workspace(workspace_root)
         current_version = int(getattr(current_manager, "registry_version", 0) or 0)
         workspace_key = self._extension_workspace_key(workspace_root)
-        try:
-            effective_config = load_config(cwd=workspace_root)
-        except TypeError:
-            effective_config = load_config()
+        effective_config = load_config(cwd=workspace_root)
         existing = registries.get(clean_id)
         if isinstance(existing, tuple) and len(existing) == 3:
             version, registry_workspace_key, registry = existing
@@ -1626,7 +1782,7 @@ class SessionAgentRunnerMixin:
                 and str(registry_workspace_key or "") == workspace_key
             ):
                 return registry
-            task = getattr(self, "_conversation_run_tasks", {}).get(clean_id)
+            task = self.run_manager.run_tasks.get(clean_id)
             if (
                 isinstance(task, asyncio.Task)
                 and task is not asyncio.current_task()
@@ -1639,6 +1795,7 @@ class SessionAgentRunnerMixin:
         registry = self._build_conversation_tool_registry(
             clean_id,
             workspace_root=workspace_root,
+            config=effective_config,
             mcp_manager=current_manager,
         )
         registries[clean_id] = (current_version, workspace_key, registry)
@@ -1665,6 +1822,7 @@ class SessionAgentRunnerMixin:
         conversation_id: str = "",
         *,
         workspace_root: Path | None = None,
+        config: AppConfig | None = None,
         mcp_manager: Any | None = None,
     ) -> Any:
         """Build one fresh MiniCode agent-run tool-registry generation."""
@@ -1684,6 +1842,8 @@ class SessionAgentRunnerMixin:
         try:
             return bootstrap.create_tool_registry(
                 self.artifact_store,
+                workspace_root=workspace_root,
+                config=config,
                 mcp_manager=manager,
             )
         except Exception:
@@ -2094,9 +2254,7 @@ class SessionAgentRunnerMixin:
                     )
                 except RuntimeError:
                     return
-                track = getattr(self, "_track_command_task", None)
-                if callable(track):
-                    track(cleanup)
+                self.command_dispatcher.track_command_task(cleanup)
 
             defer_until.add_done_callback(_ready)
             return
@@ -2286,6 +2444,7 @@ class SessionAgentRunnerMixin:
         model_runtime: Any | None = None,
         model_registry: Any | None = None,
         agent_session: AgentSession | None = None,
+        run_context: RunContext | None = None,
     ) -> None:
         """Bind MiniCode runtime actions to the existing websocket/session owner.
 
@@ -2301,7 +2460,8 @@ class SessionAgentRunnerMixin:
             return
 
         conversation_id = str(getattr(conversation, "id", "") or "").strip()
-        run_manager = getattr(self, "_run_manager", None)
+        run_manager = getattr(self, "run_manager", None)
+        owner_context = run_context or RunContext()
         model_runtime = model_runtime or self._model_runtime_for_conversation(
             conversation_id
         )
@@ -2571,7 +2731,7 @@ class SessionAgentRunnerMixin:
             return [
                 *extension_commands,
                 *get_enabled_composer_command_catalog(
-                    self._workspace_root_for_conversation(conversation),
+                    self.session_lifecycle.workspace_root_for_conversation(conversation),
                     resolve_active_workspace=False,
                 ),
             ]
@@ -2608,7 +2768,7 @@ class SessionAgentRunnerMixin:
             # Provider/model identity is immutable for a live turn.  A model
             # switch requested by an extension is staged for the next turn so
             # one transcript never contains mixed provider semantics.
-            turn_snapshot = run_metadata.get("_turn_model_snapshot")
+            turn_snapshot = owner_context.turn_model_snapshot
             if isinstance(turn_snapshot, dict):
                 current_identity = (
                     str(turn_snapshot.get("provider") or "").strip(),
@@ -2701,9 +2861,9 @@ class SessionAgentRunnerMixin:
                 resolved_model,
                 thinking_seed,
             )
-            run_metadata["_extension_thinking_level"] = effective_thinking
-            parent_runtime = run_metadata.get("_subagent_parent_runtime")
-            if isinstance(parent_runtime, dict):
+            owner_context.extension_thinking_level = effective_thinking
+            parent_runtime = owner_context.subagent_parent_runtime
+            if parent_runtime:
                 parent_runtime.update(
                     {
                         "config": selected_config,
@@ -2747,7 +2907,7 @@ class SessionAgentRunnerMixin:
         def _get_thinking_level() -> str:
             llm_config = getattr(getattr(self, "config", None), "llm", None)
             return str(
-                run_metadata.get("_extension_thinking_level")
+                owner_context.extension_thinking_level
                 or getattr(llm_config, "reasoning_effort", "")
                 or "off"
             )
@@ -2771,9 +2931,9 @@ class SessionAgentRunnerMixin:
                 selected_runtime_model,
                 level,
             )
-            run_metadata["_extension_thinking_level"] = value
-            parent_runtime = run_metadata.get("_subagent_parent_runtime")
-            if isinstance(parent_runtime, dict):
+            owner_context.extension_thinking_level = value
+            parent_runtime = owner_context.subagent_parent_runtime
+            if parent_runtime:
                 parent_runtime["llm"] = active_llm
                 parent_runtime["thinking_level"] = value or "off"
             emit = getattr(runner, "emit", None)
@@ -2807,7 +2967,7 @@ class SessionAgentRunnerMixin:
 
             from backend.agent.context import clone_context_builder
             from backend.agent.state import AgentState
-            from backend.agent.tool_execution import execute_tool_batch
+            from backend.agent.tool_batch_execution import execute_tool_batch
             from backend.llm.base import ToolCallEvent
             from backend.tools.base import ToolResult
 
@@ -2881,6 +3041,9 @@ class SessionAgentRunnerMixin:
                 display_summary=str(result_event.data.get("display_summary") or ""),
                 result_kind=str(result_event.data.get("result_kind") or "") or None,
                 limitation=str(result_event.data.get("limitation") or "") or None,
+                artifact_kind=str(result_event.data.get("artifact_kind") or "") or None,
+                artifact_media_type=str(result_event.data.get("artifact_media_type") or "") or None,
+                artifact_bytes=result_event.data.get("artifact_bytes"),
                 request_digest=str(result_event.data.get("request_digest") or ""),
                 cleanup_receipt=dict(result_event.data.get("cleanup_receipt") or {}),
             )
@@ -2907,7 +3070,7 @@ class SessionAgentRunnerMixin:
             bind_actions(actions)
 
         async def _wait_for_idle() -> None:
-            task = getattr(self, "_conversation_run_tasks", {}).get(conversation_id)
+            task = self.run_manager.run_tasks.get(conversation_id)
             if isinstance(task, asyncio.Task) and not task.done():
                 if task is asyncio.current_task():
                     raise RuntimeError(
@@ -2917,7 +3080,7 @@ class SessionAgentRunnerMixin:
 
         async def _reload_extensions() -> None:
             nonlocal tool_registry
-            task = getattr(self, "_conversation_run_tasks", {}).get(conversation_id)
+            task = self.run_manager.run_tasks.get(conversation_id)
             if isinstance(task, asyncio.Task) and not task.done():
                 raise RuntimeError(
                     "Extension reload requires an idle conversation; await wait_for_idle() from a command context"
@@ -2930,12 +3093,12 @@ class SessionAgentRunnerMixin:
             refresh_slash_commands(self.command_registry)
             tool_registry = self._conversation_tool_registry(
                 conversation_id,
-                workspace_root=self._workspace_root_for_conversation(conversation),
+                workspace_root=self.session_lifecycle.workspace_root_for_conversation(conversation),
                 force_rebuild=True,
             )
             refreshed = await self._ensure_lifecycle_runtime(
                 conversation_id=conversation_id,
-                workspace_root=self._workspace_root_for_conversation(conversation),
+                workspace_root=self.session_lifecycle.workspace_root_for_conversation(conversation),
                 tool_registry=tool_registry,
                 force_reload=True,
                 reload_reason="reload",
@@ -2981,6 +3144,7 @@ class SessionAgentRunnerMixin:
                 model_runtime=model_runtime,
                 model_registry=model_registry,
                 agent_session=agent_session,
+                run_context=owner_context,
             )
             self._mark_lifecycle_runtime_host_actions_bound(
                 conversation_id,
@@ -2988,7 +3152,7 @@ class SessionAgentRunnerMixin:
             )
             from backend.commands.catalog import get_enabled_composer_command_catalog
 
-            await self._send_ws_payload(
+            await self.send_payload(
                 {
                     "type": "commands.list",
                     "conversation_id": conversation_id,
@@ -2997,23 +3161,20 @@ class SessionAgentRunnerMixin:
                             scope_id=conversation_id
                         ),
                         *get_enabled_composer_command_catalog(
-                            self._workspace_root_for_conversation(conversation),
+                            self.session_lifecycle.workspace_root_for_conversation(conversation),
                             resolve_active_workspace=False,
                         ),
                     ],
                 },
                 log_context="commands.list",
             )
-            send_runtime_capabilities = getattr(
-                self,
-                "_send_runtime_capabilities",
-                None,
+            await self.session_lifecycle.send_runtime_capabilities(
+                source="extension.reload"
             )
-            if callable(send_runtime_capabilities):
-                await send_runtime_capabilities(source="extension.reload")
 
         async def _compact(options: Any = None) -> Any:
-            from backend.llm.base import LLMAdapter
+            from backend.ws.compaction_coordinator import compact_conversation
+            from backend.llm.base import LLMTurnContext
 
             active_llm = (
                 agent_session.llm
@@ -3024,19 +3185,31 @@ class SessionAgentRunnerMixin:
             if callable(bind_llm):
                 bind_llm(active_llm)
             _lease_session_llm_for_current_task(self, active_llm)
-            provider_hook_token = LLMAdapter.bind_provider_lifecycle_runtime(runner)
-            try:
-                options_map = options if isinstance(options, dict) else {}
-                # MiniCode's compact options carry customInstructions
-                # (agent-harness.ts); accept both it and the legacy focus key.
-                focus = (
-                    str(options_map.get("customInstructions") or "").strip()
-                    or str(options_map.get("focus") or "").strip()
-                    or None
+            llm_turn_context = owner_context.llm_turn_context
+            if llm_turn_context is None:
+                llm_turn_context = LLMTurnContext(
+                    cost_session_id=str(conversation_id or ""),
+                    lifecycle_runtime=runner,
                 )
-                return await run_context_builder.compact(focus=focus)
-            finally:
-                LLMAdapter.unbind_provider_lifecycle_runtime(provider_hook_token)
+                owner_context.llm_turn_context = llm_turn_context
+            else:
+                llm_turn_context.lifecycle_runtime = runner
+            run_context_builder.bind_llm_turn_context(llm_turn_context)
+            options_map = options if isinstance(options, dict) else {}
+            # MiniCode's compact options carry customInstructions
+            # (agent-harness.ts); accept both it and the legacy focus key.
+            focus = (
+                str(options_map.get("customInstructions") or "").strip()
+                or str(options_map.get("focus") or "").strip()
+                or None
+            )
+            committed = await compact_conversation(
+                self,
+                conversation_id=conversation_id,
+                context_builder=run_context_builder,
+                focus=focus or "",
+            )
+            return committed.summary
 
         context_actions = {
             "model": lambda: (
@@ -3051,15 +3224,15 @@ class SessionAgentRunnerMixin:
             "model_registry": lambda: model_registry,
             "is_idle": lambda: not bool(
                 isinstance(
-                    getattr(self, "_conversation_run_tasks", {}).get(conversation_id),
+                    self.run_manager.run_tasks.get(conversation_id),
                     asyncio.Task,
                 )
-                and not getattr(self, "_conversation_run_tasks", {})[conversation_id].done()
+                and not self.run_manager.run_tasks[conversation_id].done()
             ),
             "is_project_trusted": lambda: bool(
-                self._workspace_root_for_conversation(conversation)
+                self.session_lifecycle.workspace_root_for_conversation(conversation)
                 and is_workspace_trusted(
-                    self._workspace_root_for_conversation(conversation)
+                    self.session_lifecycle.workspace_root_for_conversation(conversation)
                 )
             ),
             "abort": lambda: cancel_event.set() if isinstance(cancel_event, asyncio.Event) else None,
@@ -3074,7 +3247,7 @@ class SessionAgentRunnerMixin:
             ),
             "get_system_prompt_options": lambda: {
                 "cwd": str(
-                    self._workspace_root_for_conversation(conversation)
+                    self.session_lifecycle.workspace_root_for_conversation(conversation)
                     or Path.cwd()
                 )
             },
@@ -3119,9 +3292,9 @@ class SessionAgentRunnerMixin:
         conversation_id = str(getattr(conversation, "id", "") or "").strip()
         if not conversation_id:
             raise ValueError("conversation id is required to bind extension actions")
-        workspace_root = self._workspace_root_for_conversation(conversation)
+        workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
         config = _config_with_runtime_model_budget(
-            load_config(),
+            load_config(cwd=workspace_root),
             model_runtime=model_runtime,
             provider=str(getattr(self, "provider", "") or ""),
             model=str(getattr(self, "selected_model", "") or ""),
@@ -3148,9 +3321,7 @@ class SessionAgentRunnerMixin:
         context_builder.load_snapshot(
             dict(getattr(conversation, "context_snapshot", {}) or {})
         )
-        cancel_event = getattr(self, "_conversation_run_cancel_events", {}).get(
-            conversation_id
-        )
+        cancel_event = self.run_manager.cancel_events.get(conversation_id)
         self._bind_lifecycle_runtime_host_actions(
             runner,
             conversation=conversation,
@@ -3182,7 +3353,7 @@ class SessionAgentRunnerMixin:
         refresh = getattr(self, "refresh_tool_registry_if_mcp_changed", None)
         if callable(refresh):
             refresh(allow_when_busy=False)
-        workspace_root = self._workspace_root_for_conversation(conversation)
+        workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
         tool_registry = self._conversation_tool_registry(
             clean_id,
             workspace_root=workspace_root,
@@ -3199,7 +3370,7 @@ class SessionAgentRunnerMixin:
         )
 
         state = self._extension_runtime_state(clean_id)
-        task = getattr(self, "_conversation_run_tasks", {}).get(clean_id)
+        task = self.run_manager.run_tasks.get(clean_id)
         if (
             isinstance(task, asyncio.Task)
             and not task.done()
@@ -3260,7 +3431,7 @@ class SessionAgentRunnerMixin:
             try:
                 conversation = self.conversation_repo.get_conversation(scope_id)
                 workspace_root = (
-                    self._workspace_root_for_conversation(conversation)
+                    self.session_lifecycle.workspace_root_for_conversation(conversation)
                     if conversation is not None
                     else getattr(previous, "workspace_root", None)
                 )
@@ -3318,12 +3489,10 @@ class SessionAgentRunnerMixin:
                     f"Skipped extension refresh for missing conversation {conversation_id}"
                 )
                 continue
-            workspace_root = self._workspace_root_for_conversation(conversation)
+            workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
             state = self._extension_runtime_state(conversation_id)
             previous_runner = state.runtime
-            running_task = getattr(self, "_conversation_run_tasks", {}).get(
-                conversation_id
-            )
+            running_task = self.run_manager.run_tasks.get(conversation_id)
             defer_until = (
                 running_task
                 if isinstance(running_task, asyncio.Task) and not running_task.done()
@@ -3390,7 +3559,7 @@ class SessionAgentRunnerMixin:
                     conversation_id,
                 )
 
-        if active_conversation_id and bool(getattr(self, "_is_connected", False)):
+        if active_conversation_id and self.is_connected:
             try:
                 from backend.commands.catalog import (
                     get_enabled_composer_command_catalog,
@@ -3400,11 +3569,11 @@ class SessionAgentRunnerMixin:
                     active_conversation_id
                 )
                 active_workspace_root = (
-                    self._workspace_root_for_conversation(active_conversation)
+                    self.session_lifecycle.workspace_root_for_conversation(active_conversation)
                     if active_conversation is not None
                     else None
                 )
-                await self._send_ws_payload(
+                await self.send_payload(
                     {
                         "type": "commands.list",
                         "conversation_id": active_conversation_id,
@@ -3420,13 +3589,9 @@ class SessionAgentRunnerMixin:
                     },
                     log_context="commands.list",
                 )
-                send_runtime_capabilities = getattr(
-                    self,
-                    "_send_runtime_capabilities",
-                    None,
+                await self.session_lifecycle.send_runtime_capabilities(
+                    source=refresh_reason
                 )
-                if callable(send_runtime_capabilities):
-                    await send_runtime_capabilities(source=refresh_reason)
             except Exception as exc:
                 report["ok"] = False
                 report["errors"].append(
@@ -3447,6 +3612,7 @@ class SessionAgentRunnerMixin:
         conversation_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         cancel_event: asyncio.Event | None = None,
+        run_context: RunContext | None = None,
     ) -> None:
         target_conversation_id = conversation_id or self.active_conversation_id or ""
         if not target_conversation_id:
@@ -3473,7 +3639,7 @@ class SessionAgentRunnerMixin:
         if query_claim is None:
             active_claim = query_guards.active_claim(target_conversation_id)
             message_id = _client_assistant_message_id(run_metadata)
-            await self._send_event(AgentEvent(
+            await self.send_event(AgentEvent(
                 type="error",
                 data={
                     "message": "This conversation already has an active turn. Queue the message as steer/follow-up or wait for completion.",
@@ -3491,8 +3657,8 @@ class SessionAgentRunnerMixin:
             done_event.data["conversation_id"] = target_conversation_id
             if message_id:
                 done_event.data["message_id"] = message_id
-            await self._send_event(done_event)
-            run_manager = getattr(self, "_run_manager", None)
+            await self.send_event(done_event)
+            run_manager = getattr(self, "run_manager", None)
             if run_manager is not None:
                 run_manager.mark_terminal_status(target_conversation_id, "failed")
                 run_manager.mark_delivery_complete(
@@ -3508,10 +3674,11 @@ class SessionAgentRunnerMixin:
                 conversation_id=target_conversation_id or None,
                 metadata=run_metadata,
                 cancel_event=cancel_event,
+                run_context=run_context,
                 query_claim=query_claim,
             )
             if not str(run_metadata.get("run_id") or "").strip():
-                run_manager = getattr(self, "_run_manager", None)
+                run_manager = getattr(self, "run_manager", None)
                 delivery_complete = bool(
                     run_manager is not None
                     and run_manager.is_delivery_complete(
@@ -3528,8 +3695,8 @@ class SessionAgentRunnerMixin:
                     done_event.data["conversation_id"] = target_conversation_id
                     if message_id:
                         done_event.data["message_id"] = message_id
-                    await self._send_event(done_event)
-                    await self._send_event(
+                    await self.send_event(done_event)
+                    await self.send_event(
                         AgentEvent.session_state_changed(
                             state="idle",
                             conversation_id=target_conversation_id,
@@ -3563,8 +3730,8 @@ class SessionAgentRunnerMixin:
                 if message_id:
                     done_event.data["message_id"] = message_id
                 try:
-                    await self._send_event(done_event)
-                    await self._send_event(
+                    await self.send_event(done_event)
+                    await self.send_event(
                         AgentEvent.session_state_changed(
                             state="idle",
                             conversation_id=target_conversation_id,
@@ -3572,7 +3739,7 @@ class SessionAgentRunnerMixin:
                         )
                     )
                 finally:
-                    run_manager = getattr(self, "_run_manager", None)
+                    run_manager = getattr(self, "run_manager", None)
                     if run_manager is not None:
                         run_manager.mark_terminal_status(
                             target_conversation_id,
@@ -3614,9 +3781,9 @@ class SessionAgentRunnerMixin:
                 if message_id:
                     done_event.data["message_id"] = message_id
                 try:
-                    await self._send_event(error_event)
-                    await self._send_event(done_event)
-                    await self._send_event(
+                    await self.send_event(error_event)
+                    await self.send_event(done_event)
+                    await self.send_event(
                         AgentEvent.session_state_changed(
                             state="idle",
                             conversation_id=target_conversation_id,
@@ -3624,7 +3791,7 @@ class SessionAgentRunnerMixin:
                         )
                     )
                 finally:
-                    run_manager = getattr(self, "_run_manager", None)
+                    run_manager = getattr(self, "run_manager", None)
                     if run_manager is not None:
                         run_manager.mark_terminal_status(
                             target_conversation_id,
@@ -3647,6 +3814,7 @@ class SessionAgentRunnerMixin:
         conversation_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         cancel_event: asyncio.Event | None = None,
+        run_context: RunContext | None = None,
         query_claim: ConversationQueryClaim | None = None,
     ) -> None:
         run_interrupted = False
@@ -3654,6 +3822,7 @@ class SessionAgentRunnerMixin:
         # Keep the caller-owned metadata mapping so durable admission identity
         # and scheduler fallback fields remain visible to the task owner.
         run_metadata = metadata if isinstance(metadata, dict) else {}
+        run_context = run_context or RunContext()
         run_task_id = str(run_metadata.get("_run_task_id") or "").strip()
         # Hot-reload any MCP tools connected since this session was created.
         # The conversation-owned AgentSession registry below is rebuilt from
@@ -3699,17 +3868,22 @@ class SessionAgentRunnerMixin:
             run_id=str(run_metadata.get("run_id") or "") or None,
             mailbox_epoch=int(run_metadata.get("mailbox_epoch") or 0),
         )
-        run_metadata["agent_runtime"] = admission_runtime
+        run_context.agent_runtime = admission_runtime
         run_metadata["run_id"] = admission_record.run_id
         run_metadata["conversation_id"] = conversation.id
+        conversation_store_id = await asyncio.to_thread(
+            self.conversation_repo.store_instance_id
+        )
+        run_metadata["conversation_store_id"] = conversation_store_id
         journal_owner = execution_journal_owner(
             "conversation",
+            conversation_store_id,
             conversation.id,
         )
         execution_journal = admission_runtime.execution_journal(journal_owner)
-        run_metadata["_execution_journal"] = execution_journal
+        run_context.execution_journal = execution_journal
 
-        run_workspace_root = self._workspace_root_for_conversation(conversation)
+        run_workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
         run_tool_registry = self._conversation_tool_registry(
             conversation.id,
             workspace_root=run_workspace_root,
@@ -3723,7 +3897,7 @@ class SessionAgentRunnerMixin:
                 conversation_id=conversation.id,
             )
             await self._flush_ui_agent_state_now_unlocked(conversation.id)
-            getattr(self, "_ui_agent_state_cache", {}).pop(conversation.id, None)
+            self.ui_agent_state_store.cache.pop(conversation.id, None)
             latest_for_turn = await asyncio.to_thread(
                 self.conversation_repo.get_conversation,
                 conversation.id,
@@ -3757,6 +3931,7 @@ class SessionAgentRunnerMixin:
             workspace_root=run_workspace_root,
             tool_registry=run_tool_registry,
         )
+        run_context.lifecycle_runtime = lifecycle_runtime
         run_model_runtime = self._model_runtime_for_conversation(conversation.id)
         if lifecycle_runtime is not None:
             run_tool_registry = (
@@ -3995,7 +4170,7 @@ class SessionAgentRunnerMixin:
                     "run_id": admission_record.run_id,
                     "terminal_commit_failed": True,
                 })
-                await self._send_event(terminal_error)
+                await self.send_event(terminal_error)
                 done_event = AgentEvent.done(
                     status="failed",
                     reason="terminal_commit_failed",
@@ -4004,20 +4179,20 @@ class SessionAgentRunnerMixin:
                     "conversation_id": conversation.id,
                     "message_id": assistant_message_id,
                 })
-                await self._send_event(done_event)
+                await self.send_event(done_event)
                 logger.error(
                     "Failed to commit initialization terminal for %s: %s",
                     admission_record.run_id,
                     commit_exc,
                     exc_info=True,
                 )
-                run_manager = getattr(self, "_run_manager", None)
+                run_manager = getattr(self, "run_manager", None)
                 if run_manager is not None:
                     run_manager.mark_terminal_status(conversation.id, "failed")
                     run_manager.mark_delivery_complete(conversation.id, run_task_id)
                 getattr(self, "_conversation_streams", {}).pop(conversation.id, None)
                 return
-            await self._send_event(
+            await self.send_event(
                 AgentEvent(
                     type="error",
                     data={
@@ -4030,18 +4205,18 @@ class SessionAgentRunnerMixin:
                     },
                 )
             )
-            await self._send_event(AgentEvent.agent_run_completed(committed_run))
+            await self.send_event(AgentEvent.agent_run_completed(committed_run))
             done_event = AgentEvent.done(status="failed", reason="llm_initialization_failed")
             done_event.data["failure_recoverable"] = not classification.fatal
             done_event.data["conversation_id"] = conversation.id
             done_event.data["message_id"] = assistant_message_id
-            await self._send_event(done_event)
-            await self._send_event(AgentEvent.session_state_changed(
+            await self.send_event(done_event)
+            await self.send_event(AgentEvent.session_state_changed(
                 state="idle",
                 conversation_id=conversation.id,
                 reason="failed",
             ))
-            run_manager = getattr(self, "_run_manager", None)
+            run_manager = getattr(self, "run_manager", None)
             mark_terminal_status = getattr(run_manager, "mark_terminal_status", None)
             if callable(mark_terminal_status):
                 mark_terminal_status(conversation.id, "failed")
@@ -4086,7 +4261,7 @@ class SessionAgentRunnerMixin:
             agent_settings=run_config.agent,
             token_budget=run_config.token_budget,
             context_builder=run_context_builder,
-            approval_handler=self._approval_handler,
+            approval_handler=self.approval_handler,
             lifecycle_observer_factory=lifecycle_observer_factory,
             lifecycle_runtime=lifecycle_runtime,
         )
@@ -4122,15 +4297,16 @@ class SessionAgentRunnerMixin:
             "acknowledge_consumed_turn_input",
             "_subagent_parent_runtime",
             "_extension_thinking_level",
+            "_turn_model_snapshot",
         ):
             run_metadata.pop(reserved_key, None)
-        run_metadata["_extension_thinking_level"] = run_thinking_level
-        run_metadata["_turn_model_snapshot"] = {
+        run_context.extension_thinking_level = run_thinking_level
+        run_context.turn_model_snapshot = {
             "provider": run_provider,
             "model": run_model,
             "adapter_type": type(run_llm).__name__,
         }
-        run_metadata["_subagent_parent_runtime"] = {
+        run_context.subagent_parent_runtime = {
             # Codex builds every child from the live turn config instead of
             # re-reading process-global provider settings. Pi passes the
             # dispatching session model/thinking values to its child process.
@@ -4167,6 +4343,7 @@ class SessionAgentRunnerMixin:
                 conversation=conversation,
                 tool_registry=run_tool_registry,
                 run_metadata=run_metadata,
+                run_context=run_context,
                 run_context_builder=run_context_builder,
                 run_llm=run_llm,
                 cancel_event=run_cancel_event,
@@ -4182,22 +4359,23 @@ class SessionAgentRunnerMixin:
             )
             # Preserve the exact published runtime so late extension
             # registrations refresh the live conversation registry.
-            run_metadata["_lifecycle_runtime"] = lifecycle_runtime
+            run_context.lifecycle_runtime = lifecycle_runtime
         if previous_turn_aborted:
-            run_metadata["previous_turn_aborted"] = True
+            run_context.previous_turn_aborted = True
         run_metadata["assistant_message_id"] = assistant_message_id
-        run_metadata["agent_runtime"] = admission_runtime
         run_metadata["run_id"] = admission_record.run_id
-        run_metadata["_execution_journal"] = execution_journal
-        run_workspace_context = self._workspace_context_for_conversation(conversation)
-        run_metadata["workspace_context"] = run_workspace_context
+        run_context.execution_journal = execution_journal
+        run_workspace_context = self.session_lifecycle.workspace_context_for_conversation(
+            conversation
+        )
+        run_context.workspace_context = run_workspace_context
         run_metadata["conversation_id"] = conversation.id
-        run_metadata["conversation_repository"] = self.conversation_repo
-        run_metadata["cost_session_id"] = self.session_id
-        run_metadata["requires_explicit_workspace"] = True
+        run_context.conversation_repository = self.conversation_repo
+        run_context.cost_session_id = str(self.session_id or "")
+        run_context.requires_explicit_workspace = True
         mcp_manager = self._mcp_manager_for_workspace(run_workspace_root)
-        run_metadata["_mcp_manager"] = mcp_manager
-        run_metadata["_mcp_owner_session_id"] = str(
+        run_context.mcp_manager = mcp_manager
+        run_context.mcp_owner_session_id = str(
             getattr(self, "session_id", "") or ""
         )
         iter_connected_mcp = getattr(mcp_manager, "iter_connected_clients", None)
@@ -4211,8 +4389,8 @@ class SessionAgentRunnerMixin:
                 ]
             except Exception as exc:
                 logger.debug("Unable to snapshot connected MCP servers: %s", exc)
-        run_metadata["connected_mcp_servers"] = connected_mcp_servers
-        run_permission_context = self._permission_context_for_conversation(
+        run_context.connected_mcp_servers = tuple(connected_mcp_servers)
+        run_permission_context = self.permission_context_for_conversation(
             conversation,
             source="agent.run",
         )
@@ -4275,7 +4453,7 @@ class SessionAgentRunnerMixin:
 
             is_active_owner = self.active_conversation_id == owner_id
             if is_active_owner:
-                self._set_permission_context_mode(target_mode, source=source)
+                self.set_permission_context_mode(target_mode, source=source)
                 self.permission_context = self.permission_checker.build_context(
                     mode=self.permission_context.mode,
                     session_overrides=self.permission_context.session_overrides,
@@ -4296,14 +4474,10 @@ class SessionAgentRunnerMixin:
                     sandbox_mode=self.permission_context.sandbox_mode,
                     requirements_source=self.permission_context.requirements_source,
                 )
-                await self._emit_permission_mode_updated()
-                send_runtime = getattr(self, "_send_task_runtime_update", None)
-                if callable(send_runtime):
-                    result = send_runtime()
-                    if asyncio.iscoroutine(result):
-                        await result
+                await self.emit_permission_mode_updated()
+                await self.session_lifecycle.send_task_runtime_update()
 
-            send_conversations = getattr(self, "_send_conversation_list", None)
+            send_conversations = getattr(self, "send_conversation_list", None)
             if callable(send_conversations):
                 result = send_conversations()
                 if asyncio.iscoroutine(result):
@@ -4318,10 +4492,10 @@ class SessionAgentRunnerMixin:
             if self.active_conversation_id == conversation.id:
                 return self.permission_context
             current = self.conversation_repo.get_conversation(conversation.id)
-            return self._permission_context_for_conversation(current, source="agent.run.live")
+            return self.permission_context_for_conversation(current, source="agent.run.live")
 
-        run_metadata["permission_mode_setter"] = _set_run_permission_mode
-        run_metadata["permission_context_provider"] = _live_run_permission_context
+        run_context.permission_mode_setter = _set_run_permission_mode
+        run_context.permission_context_provider = _live_run_permission_context
 
         async def _add_run_command_prompt_allow_rules(
             prompts: list[str] | tuple[str, ...],
@@ -4341,59 +4515,16 @@ class SessionAgentRunnerMixin:
                     source=source,
                 )
                 if changed:
-                    await self._emit_permission_rules_updated(
+                    await self.emit_permission_rules_updated(
                         conversation_id=conversation.id,
                         source=source,
                     )
 
-        run_metadata["command_prompt_allow_rules_setter"] = _add_run_command_prompt_allow_rules
-        run_manager = getattr(self, "_run_manager", None)
+        run_context.command_prompt_allow_rules_setter = _add_run_command_prompt_allow_rules
+        run_manager = getattr(self, "run_manager", None)
         turn_input_queue = getattr(run_manager, "turn_input_queue", None)
         if callable(turn_input_queue):
-            run_metadata["turn_input_queue"] = turn_input_queue(conversation.id)
-
-        def _persist_consumed_turn_input(item: Any) -> None:
-            persist_transcript = getattr(
-                self.conversation_repo,
-                "upsert_transcript_message",
-                None,
-            )
-            if not callable(persist_transcript):
-                persist_transcript = getattr(
-                    self.conversation_repo,
-                    "append_transcript_message",
-                    None,
-                )
-            if not callable(persist_transcript):
-                raise RuntimeError("Conversation transcript persistence is unavailable")
-            context_refs = [
-                {"kind": "skill", "name": value["name"], "path": value["path"]}
-                for value in getattr(item, "selected_skills", ())
-            ]
-            context_refs.extend(
-                {
-                    "kind": "plugin",
-                    "name": value["config_name"],
-                    "config_name": value["config_name"],
-                    "path": value["path"],
-                }
-                for value in getattr(item, "selected_plugins", ())
-            )
-            persist_transcript(
-                conversation.id,
-                {
-                    "id": str(getattr(item, "user_message_id", "") or f"user_{getattr(item, 'message_id', '')}"),
-                    "role": "user",
-                    "content": str(getattr(item, "content", "") or ""),
-                    "timestamp": datetime.now(UTC).isoformat(),
-                    "attachments": [dict(value) for value in getattr(item, "attachments", ())],
-                    **({"context_refs": context_refs} if context_refs else {}),
-                    "steered": True,
-                    "steer_target_message_id": str(getattr(item, "target_message_id", "") or ""),
-                },
-            )
-
-        run_metadata["persist_consumed_turn_input"] = _persist_consumed_turn_input
+            run_context.turn_input_queue = turn_input_queue(conversation.id)
 
         def _acknowledge_consumed_turn_input(item: Any) -> None:
             acknowledge = getattr(run_manager, "acknowledge_turn_input", None)
@@ -4401,7 +4532,7 @@ class SessionAgentRunnerMixin:
                 return
             acknowledge(conversation.id, getattr(item, "original_command", None))
 
-        run_metadata["acknowledge_consumed_turn_input"] = (
+        run_context.acknowledge_consumed_turn_input = (
             _acknowledge_consumed_turn_input
         )
 
@@ -4431,18 +4562,127 @@ class SessionAgentRunnerMixin:
                 and str(item.get("config_name") or item.get("name") or "").strip()
             )
 
-        if not parent_notification_only:
-            self.conversation_repo.append_transcript_message(
-                conversation.id,
-                {
-                    "id": str(run_metadata.get("user_message_id") or f"user_{uuid.uuid4().hex[:8]}"),
-                    "role": "user",
-                    "content": user_message,
-                    "timestamp": datetime.now(UTC).isoformat(),
-                    "attachments": normalized_attachments,
-                    **({"context_refs": persisted_context_refs} if persisted_context_refs else {}),
-                },
+        async def _commit_turn_admission(
+            *,
+            boundary_input: Any,
+            history_start: int,
+            history_end: int,
+        ) -> None:
+            if parent_notification_only:
+                return
+            consumed_steer = getattr(boundary_input, "consumed_steer", None)
+            user_message_id = str(
+                getattr(consumed_steer, "user_message_id", "")
+                or run_metadata.get("user_message_id")
+                or ""
+            ).strip()
+            if not user_message_id:
+                raise RuntimeError("turn admission has no stable user message id")
+            admitted_content = str(
+                getattr(consumed_steer, "content", "")
+                if consumed_steer is not None
+                else user_message
             )
+            admitted_attachments = (
+                [dict(item) for item in getattr(consumed_steer, "attachments", ())]
+                if consumed_steer is not None
+                else [dict(item) for item in normalized_attachments]
+            )
+            context_refs = list(persisted_context_refs)
+            if consumed_steer is not None:
+                context_refs = [
+                    {"kind": "skill", "name": value["name"], "path": value["path"]}
+                    for value in getattr(consumed_steer, "selected_skills", ())
+                ]
+                context_refs.extend(
+                    {
+                        "kind": "plugin",
+                        "name": value["config_name"],
+                        "config_name": value["config_name"],
+                        "path": value["path"],
+                    }
+                    for value in getattr(consumed_steer, "selected_plugins", ())
+                )
+            user_projection = {
+                "id": user_message_id,
+                "role": "user",
+                "content": admitted_content,
+                "timestamp": datetime.now(UTC).isoformat(),
+                "attachments": admitted_attachments,
+                **({"context_refs": context_refs} if context_refs else {}),
+                **(
+                    {
+                        "steered": True,
+                        "steer_target_message_id": str(
+                            getattr(consumed_steer, "target_message_id", "") or ""
+                        ),
+                    }
+                    if consumed_steer is not None
+                    else {}
+                ),
+            }
+            async with self._conversation_projection_lock(conversation.id):
+                latest = await asyncio.to_thread(
+                    self.conversation_repo.get_conversation,
+                    conversation.id,
+                )
+                if latest is None:
+                    raise RuntimeError("conversation disappeared during turn admission")
+                saved_snapshot = run_context_builder.export_snapshot()
+                _merge_ui_agent_state_into_snapshot(
+                    saved_snapshot,
+                    getattr(latest, "context_snapshot", None),
+                )
+                admissions = dict(saved_snapshot.get("turn_admissions") or {})
+                admissions[user_message_id] = {
+                    "history_start": max(0, int(history_start)),
+                    "history_end": max(0, int(history_end)),
+                    "run_id": str(run_metadata.get("run_id") or ""),
+                    "client_command_id": str(
+                        run_metadata.get("client_command_id") or ""
+                    ),
+                }
+                saved_snapshot["turn_admissions"] = admissions
+                append_once = getattr(execution_journal, "append_once", None)
+                if not callable(append_once):
+                    raise RuntimeError("turn admission has no idempotent journal writer")
+                journal_event_id = "user_prompt_" + hashlib.sha256(
+                    (
+                        f"{conversation_store_id}\0{conversation.id}\0"
+                        f"{user_message_id}"
+                    ).encode("utf-8")
+                ).hexdigest()
+                append_once(
+                    "user_prompt",
+                    {
+                        "content": admitted_content,
+                        "provider_content": admitted_content,
+                        "conversation_id": conversation.id,
+                        "user_message_id": user_message_id,
+                        "client_command_id": str(
+                            run_metadata.get("client_command_id") or ""
+                        ),
+                        "attachments": admitted_attachments,
+                        "context_snapshot": saved_snapshot,
+                    },
+                    event_id=journal_event_id,
+                )
+                committed = await asyncio.to_thread(
+                    self.conversation_repo.commit_turn_admission,
+                    conversation.id,
+                    user_message=user_projection,
+                    context_snapshot=saved_snapshot,
+                    expected_revision=max(
+                        0, int(getattr(latest, "revision", 0) or 0)
+                    ),
+                )
+                if committed is None:
+                    raise RuntimeError("conversation disappeared during turn admission")
+                admission_future = run_metadata.get("_turn_admission_future")
+                if isinstance(admission_future, asyncio.Future) and not admission_future.done():
+                    admission_future.set_result(None)
+
+        run_metadata["commit_turn_admission"] = _commit_turn_admission
 
         from backend.llm.cost_tracker import CostTracker
         tracker = CostTracker.get_instance()
@@ -4484,7 +4724,7 @@ class SessionAgentRunnerMixin:
                     f"Current conversation goal: {goal_text}\n"
                     "Treat user turns as progress toward this goal unless the user clearly changes direction."
                 )
-        self._last_agent_state = agent_state
+        self.last_agent_state = agent_state
 
         conv_id = conversation.id
 
@@ -4513,7 +4753,7 @@ class SessionAgentRunnerMixin:
                     "stream": payload["stream"],
                 })
                 await _persist_partial_turn()
-            await self._send_event(AgentEvent(type="command_output_chunk", data=payload))
+            await self.send_event(AgentEvent(type="command_output_chunk", data=payload))
 
         async def _emit_runtime_event(event_type: str, data: dict[str, Any]) -> None:
             if not _accepts_projection_events():
@@ -4533,8 +4773,8 @@ class SessionAgentRunnerMixin:
                 # callback-emitted events are not missing the multi-agent task id.
                 payload.setdefault(
                     "task_id",
-                    getattr(self, "_conversation_run_task_ids", {}).get(
-                        conversation.id, getattr(self, "_active_task_id", "") or ""
+                    self.run_manager.run_task_ids.get(
+                        conversation.id, self.run_manager.active_task_id or ""
                     ),
                 )
             self._persist_ui_agent_state_event(conversation.id, event_type, payload)
@@ -4556,7 +4796,7 @@ class SessionAgentRunnerMixin:
                 in {"completed", "failed", "partial", "cancelled", "interrupted"}
             ):
                 await _persist_partial_turn(force=True)
-            await self._send_event(AgentEvent(type=event_type, data=payload))
+            await self.send_event(AgentEvent(type=event_type, data=payload))
 
         assistant_artifacts: list[dict[str, Any]] = []
         assistant_image_contexts: list[dict[str, Any]] = []
@@ -4584,9 +4824,6 @@ class SessionAgentRunnerMixin:
             """Checkpoint the current typed turn without writing every token."""
             nonlocal last_partial_persisted_at
             if not _accepts_projection_events():
-                return
-            upsert = getattr(self.conversation_repo, "upsert_transcript_message", None)
-            if not callable(upsert):
                 return
             async with partial_persist_lock:
                 now = time.monotonic()
@@ -4622,7 +4859,6 @@ class SessionAgentRunnerMixin:
                     async with self._conversation_projection_lock(conversation.id):
                         if not _accepts_projection_events():
                             return
-                        await asyncio.to_thread(upsert, conversation.id, partial_message)
                         saved_snapshot = run_context_builder.export_snapshot()
                         latest_conversation = await asyncio.to_thread(
                             self.conversation_repo.get_conversation,
@@ -4632,10 +4868,57 @@ class SessionAgentRunnerMixin:
                             saved_snapshot,
                             getattr(latest_conversation, "context_snapshot", None),
                         )
-                        await asyncio.to_thread(
-                            self.conversation_repo.save_context_snapshot,
+                        if latest_conversation is None:
+                            raise RuntimeError(
+                                "conversation disappeared during partial projection"
+                            )
+                        partial_journal = run_context.execution_journal
+                        append_lifecycle = getattr(
+                            partial_journal,
+                            "append_lifecycle",
+                            None,
+                        )
+                        if not callable(append_lifecycle):
+                            raise RuntimeError(
+                                "partial conversation projection has no execution journal owner"
+                            )
+                        pending_projection = append_lifecycle(
+                            "conversation_projection_pending",
+                            {
+                                "conversation_id": conversation.id,
+                                "assistant_message": partial_message,
+                                "context_snapshot": saved_snapshot,
+                                "summary": None,
+                                "expected_revision": int(
+                                    getattr(latest_conversation, "revision", 0) or 0
+                                ),
+                            },
+                        )
+                        committed = await asyncio.to_thread(
+                            self.conversation_repo.commit_turn_projection,
                             conversation.id,
-                            saved_snapshot,
+                            assistant_message=partial_message,
+                            context_snapshot=saved_snapshot,
+                            summary=None,
+                            expected_revision=int(
+                                getattr(latest_conversation, "revision", 0) or 0
+                            ),
+                        )
+                        if committed is None:
+                            raise RuntimeError(
+                                "conversation disappeared during partial projection"
+                            )
+                        append_lifecycle(
+                            "conversation_projection_committed",
+                            {
+                                "conversation_id": conversation.id,
+                                "pending_event_id": pending_projection.event_id,
+                                "conversation_revision": int(
+                                    getattr(committed, "revision", 0) or 0
+                                ),
+                                "message_id": assistant_message_id,
+                                "partial": True,
+                            },
                         )
                         last_partial_persisted_at = time.monotonic()
                 except Exception:
@@ -4649,7 +4932,7 @@ class SessionAgentRunnerMixin:
             citation = turn_state.record_source_citation(data)
             if citation is None:
                 return
-            await self._send_event(AgentEvent(type="citation.add", data={
+            await self.send_event(AgentEvent(type="citation.add", data={
                 "conversation_id": conversation.id,
                 "message_id": assistant_message_id,
                 **citation,
@@ -4657,7 +4940,7 @@ class SessionAgentRunnerMixin:
 
         async def _cancel_child_subagents_for_run(reason: str) -> None:
             run_id = str(run_metadata.get("run_id") or "").strip()
-            runtime = run_metadata.get("agent_runtime")
+            runtime = run_context.agent_runtime
             cancel_children = getattr(runtime, "cancel_child_subagent_tasks", None)
             if not run_id or not callable(cancel_children):
                 return
@@ -4721,7 +5004,7 @@ class SessionAgentRunnerMixin:
             done_event.data["message_id"] = assistant_message_id
             if isinstance(run_failure_recoverable, bool) and "failure_recoverable" not in done_event.data:
                 done_event.data["failure_recoverable"] = run_failure_recoverable
-            await self._send_event(done_event)
+            await self.send_event(done_event)
             done_event_sent = True
             return True
 
@@ -4740,7 +5023,7 @@ class SessionAgentRunnerMixin:
                     await reasoning_deadline.disarm()
                 pending = reasoning_batcher.flush_if_pending()
                 if pending is not None:
-                    await self._send_event(pending)
+                    await self.send_event(pending)
                     await _persist_partial_turn()
 
         async def _flush_reasoning_at_deadline() -> None:
@@ -4760,7 +5043,7 @@ class SessionAgentRunnerMixin:
                 turn_state.append_thinking(content, metadata)
                 emitted = reasoning_batcher.push(event)
                 for reasoning_event in emitted:
-                    await self._send_event(reasoning_event)
+                    await self.send_event(reasoning_event)
                     await _persist_partial_turn()
 
                 if reasoning_batcher.has_pending:
@@ -4775,7 +5058,7 @@ class SessionAgentRunnerMixin:
 
         try:
             # Emit session.state_changed: working
-            await self._send_event(AgentEvent.session_state_changed(
+            await self.send_event(AgentEvent.session_state_changed(
                 state="working",
                 conversation_id=conversation.id,
                 reason="agent_run_started",
@@ -4790,12 +5073,15 @@ class SessionAgentRunnerMixin:
                         permission_context=run_permission_context,
                         workspace_root=run_workspace_root,
                         session_id=self.session_id,
-                        task_id=getattr(self, "_conversation_run_task_ids", {}).get(conversation.id, self._active_task_id or ""),
+                        task_id=self.run_manager.run_task_ids.get(
+                            conversation.id, self.run_manager.active_task_id or ""
+                        ),
                         task_manager=self.task_manager,
                         background_manager=getattr(self, "background_manager", None),
                         terminal_manager=getattr(self, "terminal_manager", None),
                         emit_event=_emit_runtime_event,
                         metadata=run_metadata,
+                        run_context=run_context,
                         stream_callback=_stream_callback,
                         cancel_event=run_cancel_event,
                         lifecycle_runtime=lifecycle_runtime,
@@ -4820,7 +5106,7 @@ class SessionAgentRunnerMixin:
                             conversation.id
                         ),
                     )
-                    await self._send_ws_payload(
+                    await self.send_payload(
                         {
                             "type": "conversation.compaction.updated",
                             "conversation_id": conversation.id,
@@ -4830,7 +5116,7 @@ class SessionAgentRunnerMixin:
                         log_context="conversation.compaction.updated",
                     )
                     event.data.setdefault("conversation_id", conversation.id)
-                    await self._send_event(event)
+                    await self.send_event(event)
                     continue
 
                 if event.type in _TURN_MESSAGE_SCOPED_EVENT_TYPES:
@@ -4883,7 +5169,7 @@ class SessionAgentRunnerMixin:
                             conversation.id,
                             exc,
                         )
-                        await self._send_event(
+                        await self.send_event(
                             _generated_image_rejection_notice(
                                 conversation_id=conversation.id,
                                 message_id=assistant_message_id,
@@ -4919,7 +5205,7 @@ class SessionAgentRunnerMixin:
                                 "size_bytes": len(decoded_image),
                             }
                         )
-                        await self._send_ws_payload(
+                        await self.send_payload(
                             artifact_event,
                             log_context="artifact.preview",
                         )
@@ -5033,7 +5319,7 @@ class SessionAgentRunnerMixin:
                     # Emit rate_limit event if this is a rate-limit error
                     provider_error_type = str(event.data.get("provider_error_type") or "")
                     if provider_error_type in ("rate_limit", "busy"):
-                        await self._send_event(AgentEvent.rate_limit(
+                        await self.send_event(AgentEvent.rate_limit(
                             provider=str(getattr(self, "provider", "") or event.data.get("provider") or ""),
                             error_type=provider_error_type,
                             message=str(event.data.get("message") or ""),
@@ -5059,7 +5345,7 @@ class SessionAgentRunnerMixin:
                     event.data.setdefault("message_id", assistant_message_id)
                 if event.type in {"agent.run.completed", "done"}:
                     continue
-                await self._send_event(event)
+                await self.send_event(event)
             if not provider_terminal_received:
                 query_terminal_status = "failed"
                 query_terminal_reason = "provider_terminal_missing"
@@ -5082,7 +5368,7 @@ class SessionAgentRunnerMixin:
             run_failed_message = str(exc)
             run_failure_recoverable = True
             await _cancel_child_subagents_for_run("attachment_unavailable")
-            await self._send_event(
+            await self.send_event(
                 AgentEvent(
                     type="error",
                     data={
@@ -5100,7 +5386,7 @@ class SessionAgentRunnerMixin:
             run_failed_message = f"Chat run failed: {exc}"
             run_failure_recoverable = False
             await _cancel_child_subagents_for_run("parent_failed")
-            await self._send_event(
+            await self.send_event(
                 AgentEvent(
                     type="error",
                     data={
@@ -5230,7 +5516,7 @@ class SessionAgentRunnerMixin:
                             "Failed to schedule memory forgetting for conversation %s",
                             conversation.id,
                         )
-            run_manager = getattr(self, "_run_manager", None)
+            run_manager = getattr(self, "run_manager", None)
             conversation_summary_payload: dict[str, Any] | None = None
             assistant_message: dict[str, Any] | None = None
             new_summary: str | None = None
@@ -5277,9 +5563,7 @@ class SessionAgentRunnerMixin:
 
             if terminal_projection_owned:
                 terminal_projection_started = True
-                terminal_fences = getattr(self, "_terminal_projection_fences", None)
-                if not isinstance(terminal_fences, dict):
-                    terminal_fences = self._terminal_projection_fences = {}
+                terminal_fences = self.ui_agent_state_store.terminal_fences
                 terminal_fences[conversation.id] = assistant_message_id
                 try:
                     async with self._conversation_projection_lock(conversation.id):
@@ -5311,7 +5595,7 @@ class SessionAgentRunnerMixin:
                             saved_snapshot,
                             getattr(latest_conversation, "context_snapshot", None),
                         )
-                        terminal_journal = run_metadata.get("_execution_journal")
+                        terminal_journal = run_context.execution_journal
                         append_lifecycle = getattr(
                             terminal_journal,
                             "append_lifecycle",
@@ -5357,7 +5641,7 @@ class SessionAgentRunnerMixin:
                             },
                         )
                         if conversation.id == self.active_conversation_id:
-                            self._load_active_conversation_snapshot(conversation.id, saved_snapshot)
+                            self.load_active_conversation_snapshot(conversation.id, saved_snapshot)
                         if new_summary is not None:
                             conversation_summary_payload = {
                                 "type": "conversation.summary.updated",
@@ -5380,7 +5664,7 @@ class SessionAgentRunnerMixin:
                         "Failed to atomically persist terminal conversation projection for %s",
                         conversation.id,
                     )
-                    await self._send_event(
+                    await self.send_event(
                         AgentEvent(
                             type="error",
                             data={
@@ -5432,7 +5716,7 @@ class SessionAgentRunnerMixin:
                         "cancelled": "Run cancelled",
                         "failed": "Run failed",
                     }.get(terminal_status, "Run completed")
-                await self._send_event(
+                await self.send_event(
                     AgentEvent(type="agent.run.completed", data=run_completed_payload)
                 )
             terminal_delivered = await _send_done_once()
@@ -5440,15 +5724,14 @@ class SessionAgentRunnerMixin:
             if terminal_projection_owned and terminal_delivered and callable(mark_delivery_complete):
                 mark_delivery_complete(conversation.id, run_task_id)
             if terminal_projection_owned and terminal_delivered:
-                await self._send_event(AgentEvent.session_state_changed(
+                await self.send_event(AgentEvent.session_state_changed(
                     state="idle",
                     conversation_id=conversation.id,
                     reason=("completed" if terminal_status == "completed"
                             else terminal_status),
                 ))
             if terminal_projection_owned and conversation_summary_payload is not None:
-                await self._send_ws_payload(
+                await self.send_payload(
                     conversation_summary_payload,
                     log_context="conversation.summary.updated",
                 )
-

@@ -78,6 +78,12 @@ export type {
   InspectorFocusCommand,
 } from "./streaming-types";
 
+export {
+  AGENT_PROGRESS_PROVIDER_STATES,
+  isAgentProgressProviderState,
+} from "./streaming-types";
+export type { AgentProgressProviderState } from "./streaming-types";
+
 export type {
   ConversationServerEventType,
   ConversationClientCommandType,
@@ -675,6 +681,8 @@ export interface ServerEventEnvelope {
   turn_id?: string;
   client_command_id?: string;
   client_command_type?: string;
+  /** Set by the backend on every event delivered inside a session.replay. */
+  replayed?: boolean;
 }
 
 type ServerEventPayload =
@@ -794,6 +802,10 @@ type ServerEventPayload =
   | UntypedServerEvent;
 
 export type ServerEvent = ServerEventPayload & ServerEventEnvelope;
+
+/** The backend stamps `replayed: true` on events delivered via session.replay. */
+export const isReplayedEvent = (event: ServerEvent): boolean =>
+  event.replayed === true;
 
 import type {
   UserMessageCommand,

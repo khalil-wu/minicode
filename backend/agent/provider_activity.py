@@ -13,11 +13,93 @@ _PROVIDER_ACTIVITY_STATUS_RANK = {
     "failed": 3,
 }
 
+_PROVIDER_PROGRESS_STATUS_RANK = {
+    "": 0,
+    "info": 0,
+    "running": 1,
+    "partial": 2,
+    "completed": 3,
+    "failed": 4,
+}
+_PROVIDER_PROGRESS_TERMINAL_STATUSES = frozenset(
+    {"partial", "completed", "failed"}
+)
+
+_PROVIDER_PROGRESS_STATE_RANK = {
+    "": 0,
+    "connecting": 1,
+    "reconnecting": 2,
+    "responding": 3,
+    "completed": 4,
+    "failed": 4,
+    "interrupted": 4,
+}
+
 
 def provider_activity_status_rank(status: object) -> int:
     return _PROVIDER_ACTIVITY_STATUS_RANK.get(
         str(status or "").strip().lower(),
         0,
+    )
+
+
+def provider_progress_status_rank(status: object) -> int:
+    """Rank the public provider-request lifecycle monotonically."""
+
+    return _PROVIDER_PROGRESS_STATUS_RANK.get(
+        str(status or "").strip().lower(),
+        0,
+    )
+
+
+def provider_progress_is_terminal(status: object) -> bool:
+    return str(status or "").strip().lower() in _PROVIDER_PROGRESS_TERMINAL_STATUSES
+
+
+def provider_progress_state_rank(state: object) -> int:
+    """Rank a typed provider lifecycle within one retry attempt."""
+
+    return _PROVIDER_PROGRESS_STATE_RANK.get(
+        str(state or "").strip().lower(),
+        0,
+    )
+
+
+def provider_progress_lifecycle_regressed(
+    *,
+    previous_status: object,
+    incoming_status: object,
+    previous_retry_attempt: int | None = None,
+    incoming_retry_attempt: int | None = None,
+    previous_provider_state: object = None,
+    incoming_provider_state: object = None,
+) -> bool:
+    """Return whether a delayed frame would move a provider row backwards."""
+
+    previous_rank = provider_progress_status_rank(previous_status)
+    incoming_rank = provider_progress_status_rank(incoming_status)
+    attempt_regressed = (
+        previous_retry_attempt is not None
+        and incoming_retry_attempt is not None
+        and incoming_retry_attempt < previous_retry_attempt
+    )
+    state_regressed = (
+        provider_progress_state_rank(previous_provider_state)
+        > provider_progress_state_rank(incoming_provider_state)
+        and (
+            previous_retry_attempt is None
+            or incoming_retry_attempt is None
+            or previous_retry_attempt == incoming_retry_attempt
+        )
+    )
+    return (
+        previous_rank > incoming_rank
+        or (
+            provider_progress_is_terminal(previous_status)
+            and not provider_progress_is_terminal(incoming_status)
+        )
+        or (previous_rank == incoming_rank and attempt_regressed)
+        or state_regressed
     )
 
 

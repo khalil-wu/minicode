@@ -36,6 +36,7 @@ def _is_answer_text_block(block: dict[str, Any]) -> bool:
 def start_agent_message_block(
     blocks: list[dict[str, Any]],
     item_id: str,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     blocks[:] = [
         block for block in blocks
@@ -48,6 +49,11 @@ def start_agent_message_block(
         'status': 'in_progress',
         'isStreaming': True,
     }
+    block.update({
+        key: value
+        for key, value in dict(metadata or {}).items()
+        if key in {'source', 'phase', 'visibility'} and value is not None
+    })
     blocks.append(block)
 
 
@@ -55,6 +61,7 @@ def append_agent_message_delta(
     blocks: list[dict[str, Any]],
     item_id: str,
     delta: str,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     if not delta:
         return
@@ -66,9 +73,14 @@ def append_agent_message_delta(
                 'content': str(block.get('content') or '') + delta,
                 'status': 'in_progress',
                 'isStreaming': True,
+                **{
+                    key: value
+                    for key, value in dict(metadata or {}).items()
+                    if key in {'source', 'phase', 'visibility'} and value is not None
+                },
             }
             return
-    start_agent_message_block(blocks, item_id)
+    start_agent_message_block(blocks, item_id, metadata)
     blocks[-1]['content'] = delta
 
 
@@ -154,11 +166,20 @@ class AgentTurnState:
         self._usage: dict[str, int] = {}
         self._run_failed_message = ''
 
-    def start_agent_message(self, item_id: str) -> None:
-        start_agent_message_block(self._blocks, item_id)
+    def start_agent_message(
+        self,
+        item_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        start_agent_message_block(self._blocks, item_id, metadata)
 
-    def append_agent_message_delta(self, item_id: str, delta: str) -> None:
-        append_agent_message_delta(self._blocks, item_id, delta)
+    def append_agent_message_delta(
+        self,
+        item_id: str,
+        delta: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        append_agent_message_delta(self._blocks, item_id, delta, metadata)
 
     def complete_agent_message(
         self,
@@ -293,15 +314,30 @@ class AgentTurnState:
             ('label', 'label'),
             ('summary', 'summary'),
             ('visibility', 'visibility'),
+            ('tool_call_id', 'toolCallId'),
+            ('tool_name', 'toolName'),
             ('group_id', 'groupId'),
             ('step_id', 'stepId'),
+            ('iteration_id', 'iterationId'),
         ):
             if data.get(source_key):
                 progress[target_key] = str(data.get(source_key) or '')
         if data.get('detail'):
             progress['detail'] = str(data.get('detail') or '')
         if data.get('count') is not None:
-            progress['count'] = int(data.get('count') or 0)
+            progress['count'] = max(0, _int_or(data.get('count'), 0))
+        for source_key, target_key in (
+            ('retry_attempt', 'retryAttempt'),
+            ('max_retries', 'maxRetries'),
+            ('retry_after_ms', 'retryAfterMs'),
+            ('provider_state', 'providerState'),
+        ):
+            if data.get(source_key) is not None:
+                progress[target_key] = max(0, _int_or(data.get(source_key), 0))
+        if data.get('error_message'):
+            progress['errorMessage'] = str(data.get('error_message') or '')
+        if data.get('operation_id'):
+            progress['operationId'] = str(data.get('operation_id') or '')
         if data.get('ephemeral'):
             progress['ephemeral'] = True
         # Ephemeral progress with the same group_id replaces any previous
@@ -459,6 +495,14 @@ class AgentTurnState:
             updated_record['durationMs'] = int(data.get('duration_ms') or 0)
         if data.get('artifact_id'):
             updated_record['artifactId'] = data.get('artifact_id')
+        for source_key, target_key in (
+            ('artifact_kind', 'artifactKind'),
+            ('artifact_media_type', 'artifactMediaType'),
+        ):
+            if data.get(source_key):
+                updated_record[target_key] = str(data.get(source_key) or '')
+        if data.get('artifact_bytes') is not None:
+            updated_record['artifactBytes'] = max(0, _int_or(data.get('artifact_bytes'), 0))
         if data.get('diff') is not None:
             updated_record['diff'] = data.get('diff')
         output_files = data.get('output_files')

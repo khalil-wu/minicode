@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -22,6 +23,7 @@ from backend.agent.message import AgentEvent
 from backend.agent.public_projection import project_public_subagent_result
 from backend.agent.prompt_cache import prompt_cache_fork_diagnostic
 from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
+from backend.agent.run_context import RunContext
 from backend.agent.rollout_budget import RolloutBudget
 from backend.agent.execution_journal import (
     ExecutionJournal,
@@ -94,6 +96,7 @@ from backend.tools.subagent_support import (
     _PUBLIC_PERMISSION_MODE_TO_INTERNAL,
     _SUBAGENT_CAPACITY_MESSAGE,
     _SUBAGENT_RESULT_ARTIFACT_THRESHOLD_BYTES,
+    _SubagentLifecycleOwner,
     _SubagentLLMResolution,
     _adapter_provider_model,
     _available_agent_types,
@@ -118,11 +121,7 @@ from backend.tools.subagent_support import (
     _prompt_scope_summary,
     _resolve_subagent_llm,
     _run_subagent_start_hook,
-    _run_subagent_stop_hook,
-    _run_task_completed_hook,
     _run_task_created_hook,
-    _run_teammate_idle_hook,
-    _run_terminal_lifecycle_hooks,
     _sanitize_teammate_name,
     _scope_is_within_any,
     _string_list,
@@ -385,15 +384,23 @@ class TaskTool(BaseTool):
         description = str(args.get("description") or "").strip()
         parallel_tasks = args.get("parallel_tasks")
         parent_metadata = self._metadata_from_context(context)
-        parent_runtime = parent_metadata.get("_subagent_parent_runtime")
-        parent_runtime = parent_runtime if isinstance(parent_runtime, dict) else {}
+        run_context = context.run_context if context is not None else None
+        parent_runtime = (
+            run_context.subagent_parent_runtime
+            if run_context is not None
+            else {}
+        )
         llm = (
             parent_runtime.get("llm")
             or (context.llm if context is not None else None)
             or self._resolve_llm()
         )
         tool_registry = self._resolve_tool_registry()
-        permission_checker = self._resolve_permission_checker()
+        permission_checker = (
+            context.permission_checker
+            if context is not None and context.permission_checker is not None
+            else self._resolve_permission_checker()
+        )
         if llm is None or tool_registry is None or permission_checker is None:
             return self._error_result("Subagent runtime is not configured")
         if isinstance(parallel_tasks, list) and any(
@@ -458,6 +465,7 @@ class TaskTool(BaseTool):
                         await _resolve_subagent_llm(
                             llm,
                             parent_metadata=parent_metadata,
+                            run_context=run_context,
                             agent_type=str(task.get("agent_type") or "general-purpose"),
                             model_override=str(task_runtime_config.get("model") or ""),
                             effort_override=str(task_runtime_config.get("effort") or ""),
@@ -628,6 +636,7 @@ class TaskTool(BaseTool):
             await _resolve_subagent_llm(
                 llm,
                 parent_metadata=parent_metadata,
+                run_context=run_context,
                 agent_type=agent_type,
                 model_override=str(single_runtime_config.get("model") or ""),
                 effort_override=str(single_runtime_config.get("effort") or ""),
@@ -769,11 +778,17 @@ class TaskTool(BaseTool):
         subagent_id = subagent_id or f"subagent-{uuid4().hex[:8]}"
         teammate_config = _subagent_metadata(subagent_metadata)
         is_teammate = _is_team_subagent(teammate_config)
+        hook_manager = (
+            context.run_context.hook_manager
+            if context is not None and context.run_context is not None
+            else None
+        )
         # Background calls return to the parent immediately, so the lifecycle
         # gate must run in this synchronous caller before a queued child task
         # is exposed as running.  The child path receives an explicit marker to
         # avoid firing TaskCreated a second time when it eventually starts.
         task_created_result = await _run_task_created_hook(
+            hook_manager,
             task_id=subagent_id,
             subject=description,
             description=prompt,
@@ -899,6 +914,11 @@ class TaskTool(BaseTool):
         started: list[tuple[str, dict[str, str]]] = []
         prepared_resolutions: list[_SubagentLLMResolution] = []
         runtime = require_runtime_from_context(context)
+        hook_manager = (
+            context.run_context.hook_manager
+            if context is not None and context.run_context is not None
+            else None
+        )
         parent_run_id = str(metadata_from_context(context).get("run_id") or "").strip()
         try:
             # Validate every TaskCreated hook before queueing any worker.  A
@@ -909,6 +929,7 @@ class TaskTool(BaseTool):
             for subagent_id, task in zip(subagent_ids, tasks, strict=True):
                 task_config = _subagent_metadata(task)
                 task_created_result = await _run_task_created_hook(
+                    hook_manager,
                     task_id=subagent_id,
                     subject=task["description"],
                     description=task["prompt"],
@@ -1457,12 +1478,9 @@ class TaskTool(BaseTool):
         """Build the canonical child config before the child is published."""
 
         parent_metadata = self._metadata_from_context(context)
+        run_context = context.run_context if context is not None else None
         inherited_llm = (
-            (
-                parent_metadata.get("_subagent_parent_runtime", {}).get("llm")
-                if isinstance(parent_metadata.get("_subagent_parent_runtime"), dict)
-                else None
-            )
+            (run_context.subagent_parent_runtime.get("llm") if run_context else None)
             or (context.llm if context is not None else None)
             or self._resolve_llm()
         )
@@ -1470,6 +1488,7 @@ class TaskTool(BaseTool):
         return await _resolve_subagent_llm(
             inherited_llm,
             parent_metadata=parent_metadata,
+            run_context=run_context,
             agent_type=agent_type,
             model_override=str(requested.get("model") or ""),
             effort_override=str(requested.get("effort") or ""),
@@ -1623,13 +1642,18 @@ class TaskTool(BaseTool):
         """
         llm = llm_resolution.llm
         tool_registry = self._resolve_tool_registry()
-        permission_checker = self._resolve_permission_checker()
+        permission_checker = (
+            context.permission_checker
+            if context is not None and context.permission_checker is not None
+            else self._resolve_permission_checker()
+        )
 
         subagent_id = subagent_id or f"subagent-{uuid4().hex[:8]}"
         parent_id = context.task_id if context and context.task_id else context.session_id if context else ""
         emit_event = context.emit_event if context else None
         runtime = require_runtime_from_context(context)
         parent_metadata = self._metadata_from_context(context)
+        parent_run_context = context.run_context
         subagent_config = _subagent_metadata(subagent_metadata)
         restored_session_policy = (
             (subagent_metadata or {}).get(SESSION_TOOLSET_POLICY_METADATA_KEY)
@@ -1718,6 +1742,7 @@ class TaskTool(BaseTool):
         # gate before queueing; foreground callers do it here.
         if not task_created_checked:
             task_created_hook_result = await _run_task_created_hook(
+                parent_run_context.hook_manager,
                 task_id=subagent_id,
                 subject=description,
                 description=prompt,
@@ -1849,7 +1874,7 @@ class TaskTool(BaseTool):
         if team_mode and not str(subagent_config.get("plan_slug") or ""):
             from backend.agent.plans import bind_plan_owner, plan_slug_from_snapshot
 
-            repository = parent_metadata.get("conversation_repository")
+            repository = parent_run_context.conversation_repository
             if repository is not None and context is not None:
                 parent_record = repository.get_conversation(context.conversation_id)
                 parent_snapshot = dict(
@@ -2098,7 +2123,11 @@ class TaskTool(BaseTool):
                 start_event.data["record"] = subagent_record.public_dict()
                 start_event.data["parent_run_id"] = parent_run_id
             await _emit_incarnation_event("subagent.start", start_event.data)
-        start_hook_result = await _run_subagent_start_hook(subagent_id, agent_type)
+        start_hook_result = await _run_subagent_start_hook(
+            parent_run_context.hook_manager,
+            subagent_id,
+            agent_type,
+        )
         start_hook_blocked, start_hook_message = _hook_veto(start_hook_result)
         if start_hook_blocked:
             raise RuntimeError(start_hook_message)
@@ -2219,18 +2248,32 @@ class TaskTool(BaseTool):
             agent_triggers_enabled=feature_enabled("agent_triggers"),
             execution_profile=execution_profile,
         )
-        sub_state = AgentState(user_message=effective_user_prompt, max_iterations=sub_settings.max_iterations)
+        lifecycle_owner = _SubagentLifecycleOwner(
+            subagent_id=subagent_id,
+            agent_type=agent_type,
+            runtime=runtime,
+            hook_manager=parent_run_context.hook_manager,
+            team_mode=team_mode,
+            teammate_name=str(subagent_config.get("teammate_name") or ""),
+            team_name=str(subagent_config.get("team_name") or ""),
+            conversation_id=str(getattr(context, "conversation_id", "") or ""),
+            subject=description,
+        )
+        sub_state = AgentState(
+            user_message=effective_user_prompt,
+            max_iterations=sub_settings.max_iterations,
+        )
         # The prompt/runtime surface is derived from the execution profile;
         # ordinary children remain non-delegating while hierarchical profiles
         # may opt into child delegation.
-        sub_state.prompt_context["subagent"] = agent_type
+        lifecycle_owner.bind_turn_state(sub_state)
         # Preserve the delegated role in the prompt context. Without this,
         # explore/plan children fall back to the parent's build-mode guidance
         # even though their permission profile is read-only.
         if agent_type in {"explore", "plan"}:
             sub_state.prompt_context["agent_mode"] = agent_type
 
-        sub_state.workspace_context = parent_metadata.get("workspace_context")
+        sub_state.workspace_context = parent_run_context.workspace_context
         if context is not None:
             sub_state.conversation_id = context.conversation_id
             sub_state.checkpoint_manager = context.checkpoint_manager
@@ -2241,14 +2284,23 @@ class TaskTool(BaseTool):
             or explicit_child_workspace
         )
         inherited_subagent_metadata = sanitize_subagent_runtime_metadata(parent_metadata)
+        # Child tools may execute in an isolated worktree, but their transcript
+        # is projected through the parent conversation. Keep the parent
+        # conversation's workspace as the artifact owner so a later raw/read
+        # request can satisfy the same composite owner scope.
+        artifact_owner_workspace = str(
+            parent_metadata.get("artifact_owner_workspace_root")
+            or (context.workspace_root if context is not None else "")
+            or ""
+        ).strip()
         subagent_metadata_payload = {
             **inherited_subagent_metadata,
-            "agent_runtime": runtime,
             "parent_run_id": parent_run_id,
             "agent_role": f"subagent:{agent_type}",
             "agent_mode": "subagent",
             "query_source": "background" if background else "subagent",
             "run_id": subagent_id,
+            "artifact_owner_workspace_root": artifact_owner_workspace,
             **subagent_fence,
             "cancel_event": subagent_cancel_event,
             "retain_completed_checkpoint": True,
@@ -2286,7 +2338,7 @@ class TaskTool(BaseTool):
 
             teammate_plan_path: Path | None = None
             parent_snapshot = {}
-            repository = parent_metadata.get("conversation_repository")
+            repository = parent_run_context.conversation_repository
             if repository is not None and context is not None:
                 parent_record = repository.get_conversation(context.conversation_id)
                 parent_snapshot = dict(getattr(parent_record, "context_snapshot", {}) or {})
@@ -2353,14 +2405,8 @@ class TaskTool(BaseTool):
                     mailbox_epoch=int(subagent_fence.get("mailbox_epoch") or 0),
                 )
 
-            subagent_metadata_payload["permission_mode_setter"] = _set_teammate_permission_mode
-
             def _teammate_permission_context_provider() -> PermissionContext:
                 return sub_context
-
-            subagent_metadata_payload["permission_context_provider"] = (
-                _teammate_permission_context_provider
-            )
 
             async def _request_teammate_plan_approval(
                 *,
@@ -2412,9 +2458,6 @@ class TaskTool(BaseTool):
                     "request_id": request_id,
                 }
 
-            subagent_metadata_payload["teammate_plan_approval_requester"] = (
-                _request_teammate_plan_approval
-            )
         if background:
             request_metadata = subagent_metadata_payload.get("llm_request_metadata")
             if not isinstance(request_metadata, dict):
@@ -2439,7 +2482,7 @@ class TaskTool(BaseTool):
                 parent_prompt_cache_safe_params
             )
 
-        def prompt_cache_fork_diagnostic() -> dict[str, Any]:
+        def _current_prompt_cache_fork_diagnostic() -> dict[str, Any]:
             existing = subagent_metadata_payload.get("prompt_cache_fork")
             if isinstance(existing, dict) and existing:
                 return dict(existing)
@@ -2490,6 +2533,7 @@ class TaskTool(BaseTool):
             token_budget=sub_budget,
             agent_settings=sub_settings,
             llm=llm,
+            workspace_root=effective_child_workspace,
         )
         if resume_snapshot:
             sub_context_builder.load_snapshot(resume_snapshot)
@@ -2701,7 +2745,38 @@ class TaskTool(BaseTool):
                 last_error = ""
                 summary_parts.clear()
                 if journal is not None:
-                    subagent_metadata_payload["_execution_journal"] = journal
+
+                    async def _commit_child_turn_admission(
+                        *,
+                        boundary_input: Any,
+                        history_start: int,
+                        history_end: int,
+                    ) -> None:
+                        del boundary_input, history_end
+                        snapshot = sub_context_builder.export_snapshot()
+                        event_id = "user_prompt_" + hashlib.sha256(
+                            (
+                                f"{subagent_id}\0{max(0, int(history_start))}\0"
+                                f"{turn_prompt}"
+                            ).encode("utf-8")
+                        ).hexdigest()
+                        journal.append_once(
+                            "user_prompt",
+                            {
+                                **journal_user_metadata,
+                                "content": turn_prompt,
+                                "provider_content": turn_prompt,
+                                "context_snapshot": snapshot,
+                            },
+                            event_id=event_id,
+                        )
+                        journal_events[:] = [
+                            event.to_dict() for event in journal.read_events()
+                        ]
+
+                    subagent_metadata_payload["commit_turn_admission"] = (
+                        _commit_child_turn_admission
+                    )
 
                 async def _emit_live_transcript_snapshot(source_event_type: str) -> None:
                     transcript_snapshot = _current_transcript_snapshot()
@@ -2729,35 +2804,51 @@ class TaskTool(BaseTool):
                         progress_event.data,
                         transcript_snapshot=transcript_snapshot,
                     )
-                # Keep the entire child query generator in ONE task. Advancing
-                # it across per-event tasks breaks ContextVar token continuity.
+                # Keep one owner advancing the canonical child query stream;
+                # per-event tasks can otherwise reorder durable projections.
+                child_run_context = RunContext(
+                    lifecycle_runtime=parent_run_context.lifecycle_runtime,
+                    execution_journal=journal,
+                    mcp_manager=parent_run_context.mcp_manager,
+                    mcp_owner_session_id=parent_run_context.mcp_owner_session_id,
+                    subagent_parent_runtime=parent_run_context.subagent_parent_runtime,
+                    turn_model_snapshot=parent_run_context.turn_model_snapshot,
+                    agent_runtime=runtime,
+                    hook_manager=parent_run_context.hook_manager,
+                    workspace_context=parent_run_context.workspace_context,
+                    cost_session_id=parent_run_context.cost_session_id,
+                    requires_explicit_workspace=parent_run_context.requires_explicit_workspace,
+                    conversation_repository=parent_run_context.conversation_repository,
+                )
+                if team_mode:
+                    child_run_context.permission_mode_setter = _set_teammate_permission_mode
+                    child_run_context.permission_context_provider = (
+                        _teammate_permission_context_provider
+                    )
+                    child_run_context.teammate_plan_approval_requester = (
+                        _request_teammate_plan_approval
+                    )
                 query_stream = QueryEngine().submit(QuerySubmission(
                         user_message=turn_prompt,
                         session=child_agent_session,
                         state=turn_state,
-                        runtime=AgentLoopSessionContext(
+                            runtime=AgentLoopSessionContext(
                             permission_context=sub_context,
-                            workspace_root=(
-                                resume_workspace_root
-                                or (
-                                    agent_worktree.worktree_path
-                                    if agent_worktree is not None
-                                    else None
-                                )
-                            ),
+                            workspace_root=effective_child_workspace,
                             session_id=subagent_id,
                             task_id=subagent_id,
                             task_manager=context.task_manager if context else None,
                             emit_event=subagent_event_bridge,
-                            metadata=(
+                                metadata=(
                                 {
                                     **subagent_metadata_payload,
                                     "parent_run_id": subagent_id,
                                 }
                                 if team_mode
                                 else subagent_metadata_payload
+                                ),
+                                run_context=child_run_context,
                             ),
-                        ),
                     ))
                 # The producer must not advance the canonical query stream
                 # until this projection consumer has delivered the current
@@ -3094,16 +3185,33 @@ class TaskTool(BaseTool):
                             await pump_task
             await _run_query_turn(effective_user_prompt, sub_state)
 
+            if not team_mode:
+                while True:
+                    exit_decision = await lifecycle_owner.after_subagent_stop(
+                        sub_state
+                    )
+                    if exit_decision.action == "terminal":
+                        break
+                    if exit_decision.action != "continue":
+                        raise RuntimeError(
+                            "Ordinary subagent reached an invalid post-stop state"
+                        )
+                    sub_state = AgentState(
+                        user_message=exit_decision.prompt,
+                        max_iterations=sub_settings.max_iterations,
+                    )
+                    lifecycle_owner.bind_turn_state(sub_state)
+                    sub_state.workspace_context = parent_run_context.workspace_context
+                    if context is not None:
+                        sub_state.conversation_id = context.conversation_id
+                        sub_state.checkpoint_manager = context.checkpoint_manager
+                    await _run_query_turn(exit_decision.prompt, sub_state)
+
             if team_mode:
-                teammate_name = str(
-                    subagent_config.get("teammate_name") or agent_type
-                ).strip()
-                team_name = str(subagent_config.get("team_name") or "").strip()
-                conversation_id = str(
-                    getattr(context, "conversation_id", "") or ""
-                ).strip()
+                teammate_name = lifecycle_owner.teammate_name
+                team_name = lifecycle_owner.team_name
+                conversation_id = lifecycle_owner.conversation_id
                 current_prompt = effective_user_prompt
-                last_summary = ""
                 shutdown_requested = False
                 while True:
                     streamed_summary = "".join(summary_parts).strip()
@@ -3117,50 +3225,18 @@ class TaskTool(BaseTool):
                     if not turn_summary:
                         raise RuntimeError("Teammate turn ended without a final response.")
 
-                    last_summary = turn_summary
                     cumulative_iterations += sub_state.iterations
                     cumulative_tool_calls += len(sub_state.tool_calls)
 
-                    # MiniCode runs SubagentStop first, then TaskCompleted for
-                    # currently-owned in-progress tasks, then TeammateIdle. A
-                    # blocking hook becomes the next model prompt; it does not
-                    # seal the teammate.
-                    stop_result = await _run_subagent_stop_hook(
-                        subagent_id,
-                        "completed",
-                        turn_summary,
-                        agent_type=agent_type,
+                    exit_decision = await lifecycle_owner.after_subagent_stop(
+                        sub_state
                     )
-                    hook_blocked, hook_feedback = _hook_veto(stop_result)
-                    if not hook_blocked:
-                        owned_tasks = runtime.list_swarm_tasks(
-                            assignee=teammate_name,
-                            status="in_progress",
-                            team_name=team_name,
-                            conversation_id=conversation_id,
-                            limit=100,
-                        )
-                        for owned_task in owned_tasks:
-                            completed_result = await _run_task_completed_hook(
-                                task_id=owned_task.task_id,
-                                subject=owned_task.title,
-                                description=owned_task.description,
-                                teammate_name=teammate_name,
-                                team_name=team_name,
-                            )
-                            hook_blocked, hook_feedback = _hook_veto(completed_result)
-                            if hook_blocked:
-                                break
-                    if not hook_blocked:
-                        idle_result = await _run_teammate_idle_hook(
-                            teammate_name=teammate_name,
-                            team_name=team_name,
-                        )
-                        hook_blocked, hook_feedback = _hook_veto(idle_result)
-
-                    if hook_blocked:
-                        current_prompt = hook_feedback
-                    else:
+                    if exit_decision.action == "terminal":
+                        terminal_reason = exit_decision.prompt or exit_decision.gate
+                        break
+                    if exit_decision.action == "continue":
+                        current_prompt = exit_decision.prompt
+                    elif exit_decision.action == "idle":
                         if bool(subagent_metadata_payload.get("awaiting_plan_approval")):
                             runtime.update_subagent_lifecycle(
                                 subagent_id,
@@ -3459,10 +3535,8 @@ class TaskTool(BaseTool):
                         user_message=current_prompt,
                         max_iterations=sub_settings.max_iterations,
                     )
-                    sub_state.prompt_context["subagent"] = agent_type
-                    sub_state.workspace_context = parent_metadata.get(
-                        "workspace_context"
-                    )
+                    lifecycle_owner.bind_turn_state(sub_state)
+                    sub_state.workspace_context = parent_run_context.workspace_context
                     if context is not None:
                         sub_state.conversation_id = context.conversation_id
                         sub_state.checkpoint_manager = context.checkpoint_manager
@@ -3505,7 +3579,7 @@ class TaskTool(BaseTool):
                     model_id=getattr(llm, "_model", None),
                     provider=provider,
                     session_id=str(
-                        (context.metadata.get("cost_session_id") if context and isinstance(context.metadata, dict) else "")
+                        parent_run_context.cost_session_id
                         or (context.session_id if context else "")
                     ),
                     input_includes_cache_read=bool(
@@ -3532,31 +3606,10 @@ class TaskTool(BaseTool):
             result_text = summary
             if result_status == "partial" and last_error and last_error not in result_text:
                 result_text = f"{result_text}\n\n{last_error}".strip()
+            full_result_text = result_text
             worktree_note = await _cleanup_worktree()
             if worktree_note:
                 result_text += f"\n\n{worktree_note}"
-            full_result_text = result_text
-            # Stop/TaskCompleted/TeammateIdle are lifecycle gates.  Consume
-            # their HookResults before sealing the durable subagent record so a
-            # veto cannot be reported as a successful completion. The bounded
-            # child reports an explicit failed transition with hook feedback.
-            # TaskCompleted/TeammateIdle only advance after the stop boundary
-            # passes, so a veto cannot emit completion/idle side effects.
-            terminal_hook_blocked, terminal_hook_message = await _run_terminal_lifecycle_hooks(
-                subagent_id=subagent_id,
-                status=result_status,
-                summary=result_text,
-                subject=description,
-                agent_type=agent_type,
-                team_mode=team_mode,
-            )
-            if terminal_hook_blocked:
-                result_status = "failed"
-                terminal_reason = "hook_blocked"
-                result_text = (
-                    f"Subagent completion blocked by lifecycle hook: {terminal_hook_message}\n\n"
-                    f"{result_text}"
-                ).strip()
                 full_result_text = result_text
             result_text, result_artifact_id = _externalize_large_subagent_result(
                 self._artifact_store,
@@ -3621,7 +3674,7 @@ class TaskTool(BaseTool):
                     done_event.data["artifact_id"] = result_artifact_id
                 if completed_record is not None:
                     done_event.data["record"] = completed_record.public_dict()
-                prompt_cache_fork = prompt_cache_fork_diagnostic()
+                prompt_cache_fork = _current_prompt_cache_fork_diagnostic()
                 if prompt_cache_fork:
                     done_event.data["prompt_cache_fork"] = prompt_cache_fork
                 await _emit_incarnation_event(
@@ -3629,13 +3682,9 @@ class TaskTool(BaseTool):
                 )
             return ToolResult(
                 content=result_text,
-                is_error=terminal_hook_blocked,
+                is_error=False,
                 duration_ms=elapsed_ms,
-                display_summary=(
-                    "Subagent completion blocked by hook"
-                    if terminal_hook_blocked
-                    else f"Subagent ({agent_type}): {description[:60]}"
-                ),
+                display_summary=f"Subagent ({agent_type}): {description[:60]}",
                 result_kind="subagent",
                 status=result_status,
                 artifact_id=result_artifact_id or None,
@@ -3652,7 +3701,6 @@ class TaskTool(BaseTool):
             ).strip()[:128]
             record = None
             retained = "".join(summary_parts).strip()
-            cancel_summary = retained
             with suppress(Exception):
                 worktree_note = await _cleanup_worktree()
                 if worktree_note:
@@ -3702,27 +3750,11 @@ class TaskTool(BaseTool):
                     error="cancelled",
                     reason=cancel_reason,
                 )
-                prompt_cache_fork = prompt_cache_fork_diagnostic()
+                prompt_cache_fork = _current_prompt_cache_fork_diagnostic()
                 if prompt_cache_fork:
                     done_event.data["prompt_cache_fork"] = prompt_cache_fork
                 await _emit_incarnation_event(
                     "subagent.done", done_event.data, require_running=False
-                )
-            cancellation_hook_blocked, cancellation_hook_message = await _run_terminal_lifecycle_hooks(
-                subagent_id=subagent_id,
-                status="cancelled",
-                summary=retained,
-                subject=description,
-                agent_type=agent_type,
-                run_completion=False,
-                run_idle=False,
-                team_mode=team_mode,
-            )
-            if cancellation_hook_blocked:
-                logger.info(
-                    "Subagent %s cancellation hook returned veto: %s",
-                    subagent_id,
-                    cancellation_hook_message,
                 )
             raise
         except Exception as exc:
@@ -3810,25 +3842,12 @@ class TaskTool(BaseTool):
                     error=f"{type(exc).__name__}: {exc}",
                     reason=terminal_reason or type(exc).__name__,
                 )
-                prompt_cache_fork = prompt_cache_fork_diagnostic()
+                prompt_cache_fork = _current_prompt_cache_fork_diagnostic()
                 if prompt_cache_fork:
                     done_event.data["prompt_cache_fork"] = prompt_cache_fork
                 await _emit_incarnation_event(
                     "subagent.done", done_event.data, require_running=False
                 )
-            failure_hook_blocked, failure_hook_message = await _run_terminal_lifecycle_hooks(
-                subagent_id=subagent_id,
-                status=failure_status,
-                summary=error_content,
-                subject=description,
-                agent_type=agent_type,
-                team_mode=team_mode,
-            )
-            if failure_hook_blocked:
-                error_content = (
-                    f"Subagent lifecycle hook blocked terminal transition: {failure_hook_message}\n\n"
-                    f"{error_content}"
-                ).strip()
             return ToolResult(
                 content=error_content,
                 is_error=not has_partial_output,
@@ -4065,6 +4084,7 @@ class TaskTool(BaseTool):
         token_budget: TokenBudget,
         agent_settings: AgentSettings,
         llm: LLMAdapter | None = None,
+        workspace_root: str | Path | None = None,
     ) -> ContextBuilder:
         # A worker cannot see the parent conversation. Its delegated
         # prompt is self-contained, while ContextBuilder still loads workspace
@@ -4073,4 +4093,5 @@ class TaskTool(BaseTool):
             token_budget=token_budget,
             agent_settings=agent_settings,
             llm=llm,
+            workspace_root=workspace_root,
         )

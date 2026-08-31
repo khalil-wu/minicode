@@ -18,16 +18,21 @@ import re
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncIterator, cast
 from uuid import uuid4
 
 from backend.agent.lifecycle_errors import LifecycleStaleError
-from backend.agent.lifecycle_observer import LIFECYCLE_RUNTIME_METADATA_KEY
-from backend.agent.provider_lifecycle import ProviderLifecycleRuntime
-from backend.llm.errors import classify_llm_error, llm_error_status_code, retry_after_seconds
+from backend.agent.provider_lifecycle import (
+    LIFECYCLE_RUNTIME_METADATA_KEY,
+    ProviderLifecycleRuntime,
+)
+from backend.llm.errors import (
+    classify_llm_error,
+    llm_error_status_code,
+    retry_after_seconds,
+)
 from backend.llm.provider_contracts import ReasoningPolicy
 
 logger = logging.getLogger(__name__)
@@ -79,12 +84,6 @@ _SIDE_QUERY_ATTEMPT_TIMEOUT_SECONDS = 300.0
 def resolve_provider_lifecycle_runtime(
     metadata: dict[str, Any] | None,
 ) -> ProviderLifecycleRuntime | None:
-    # The turn-scoped binding is authoritative. Request metadata may have
-    # crossed an adapter boundary or come from an older host, so it must never
-    # override the live MiniCode lifecycle generation.
-    bound_runtime = LLMAdapter.current_provider_lifecycle_runtime()
-    if bound_runtime is not None:
-        return cast(ProviderLifecycleRuntime, bound_runtime)
     if isinstance(metadata, dict):
         runtime = metadata.get(LIFECYCLE_RUNTIME_METADATA_KEY)
         if runtime is not None:
@@ -199,6 +198,7 @@ async def emit_provider_lifecycle_response(
         raise
     except Exception:
         logger.debug("Provider lifecycle response hook failed", exc_info=True)
+
 
 def sanitize_llm_request_metadata(metadata: dict[str, Any] | None) -> dict[str, str]:
     """Return provider-safe request metadata.
@@ -394,6 +394,11 @@ class ToolCallEvent:
     # provider's tool-call protocol stays balanced, but it must never execute.
     arguments_repaired: bool = False
     duplicate_id: bool = False
+    # A tool-specific argument normalizer rejected the provider payload. Keep
+    # the reason on the typed event so history validation and execution share
+    # one immutable-by-convention record instead of attaching a private
+    # attribute dynamically.
+    prepare_arguments_error: str = ""
 
 
 @dataclass
@@ -543,6 +548,33 @@ class SideQueryOptions:
     # smaller, operation-specific budget without nesting another retry policy.
     max_retries: int | None = None
     query_source: str = ""
+
+
+@dataclass(slots=True)
+class LLMTurnContext:
+    """Explicit accounting and lifecycle owner for provider calls in one turn."""
+
+    usage: UsageInfo = field(default_factory=UsageInfo)
+    side_call_records: list[dict[str, Any]] = field(default_factory=list)
+    cost_session_id: str = ""
+    lifecycle_runtime: Any | None = None
+
+    def request_metadata(self) -> dict[str, Any]:
+        if self.lifecycle_runtime is None:
+            return {}
+        return {LIFECYCLE_RUNTIME_METADATA_KEY: self.lifecycle_runtime}
+
+
+@dataclass(slots=True)
+class LLMSideCallContext:
+    """One auxiliary request and its owning turn, passed through adapters."""
+
+    options: SideQueryOptions
+    record: dict[str, Any]
+    turn: LLMTurnContext | None = None
+
+    def request_metadata(self) -> dict[str, Any]:
+        return self.turn.request_metadata() if self.turn is not None else {}
 
 
 @dataclass
@@ -834,94 +866,23 @@ class LLMAdapter(ABC):
             完整的回复文本。max_tokens 由有权威输出预算的辅助请求使用。
         """
 
-    # Optional per-turn bucket so simple_chat side calls (compaction /
-    # last-resort / compaction) also land in the current turn's usage totals,
-    # not only the global CostTracker. ContextVar keeps subagent tasks isolated.
-    _turn_usage_bucket: ContextVar["UsageInfo | None"] = ContextVar(
-        "llm_turn_usage_bucket",
-        default=None,
-    )
-    _side_query_options: ContextVar["SideQueryOptions | None"] = ContextVar(
-        "llm_side_query_options",
-        default=None,
-    )
-    _side_call_record: ContextVar["dict[str, Any] | None"] = ContextVar(
-        "llm_side_call_record",
-        default=None,
-    )
-    _side_call_records: ContextVar["list[dict[str, Any]] | None"] = ContextVar(
-        "llm_side_call_records",
-        default=None,
-    )
-    _provider_lifecycle_runtime: ContextVar[Any | None] = ContextVar(
-        "llm_provider_lifecycle_runtime",
-        default=None,
-    )
-
-    @classmethod
-    def bind_turn_usage(cls, usage: "UsageInfo") -> Token:
-        """Attach a mutable UsageInfo bucket for the current agent-loop turn."""
-        return cls._turn_usage_bucket.set(usage)
-
-    @classmethod
-    def unbind_turn_usage(cls, token: Token) -> None:
-        # ContextVar tokens must be reset in the same Context that set them.
-        # Subagent event pumps historically advanced the child loop across
-        # tasks; keep this defensive so a residual mismatch never hard-fails
-        # an otherwise healthy turn.
-        try:
-            cls._turn_usage_bucket.reset(token)
-        except ValueError:
-            cls._turn_usage_bucket.set(None)
-
-    @classmethod
-    def bind_side_call_records(cls, records: list[dict[str, Any]]) -> Token:
-        """Attach a turn-owned sink for structured auxiliary-call telemetry."""
-        return cls._side_call_records.set(records)
-
-    @classmethod
-    def unbind_side_call_records(cls, token: Token) -> None:
-        try:
-            cls._side_call_records.reset(token)
-        except ValueError:
-            cls._side_call_records.set(None)
-
-    @classmethod
-    def current_side_query_options(cls) -> "SideQueryOptions | None":
-        return cls._side_query_options.get()
-
-    @classmethod
-    def bind_provider_lifecycle_runtime(cls, runtime: Any | None) -> Token:
-        """Bind the current MiniCode lifecycle runtime for provider calls."""
-
-        return cls._provider_lifecycle_runtime.set(runtime)
-
-    @classmethod
-    def unbind_provider_lifecycle_runtime(cls, token: Token) -> None:
-        try:
-            cls._provider_lifecycle_runtime.reset(token)
-        except ValueError:
-            cls._provider_lifecycle_runtime.set(None)
-
-    @classmethod
-    def current_provider_lifecycle_runtime(cls) -> Any | None:
-        return cls._provider_lifecycle_runtime.get()
-
-    @classmethod
-    def annotate_side_call(cls, *, provider: str, model_id: str) -> None:
-        record = cls._side_call_record.get()
-        if record is None:
+    @staticmethod
+    def annotate_side_call(
+        context: LLMSideCallContext | None,
+        *,
+        provider: str,
+        model_id: str,
+    ) -> None:
+        if context is None:
             return
-        record["provider"] = str(provider or "")
-        record["model"] = str(model_id or "")
+        context.record["provider"] = str(provider or "")
+        context.record["model"] = str(model_id or "")
 
     def model_id(self) -> str:
         """Return the adapter's main model without requiring provider casts."""
         settings = getattr(self, "_settings", None)
         return str(
-            getattr(settings, "model", "")
-            or getattr(self, "_model", "")
-            or ""
+            getattr(settings, "model", "") or getattr(self, "_model", "") or ""
         ).strip()
 
     def supported_reasoning_efforts(self) -> tuple[str, ...]:
@@ -930,9 +891,7 @@ class LLMAdapter(ABC):
         capabilities = getattr(self, "capabilities", None)
         return tuple(
             str(value).strip().lower()
-            for value in (
-                getattr(capabilities, "reasoning_effort_levels", ()) or ()
-            )
+            for value in (getattr(capabilities, "reasoning_effort_levels", ()) or ())
             if str(value).strip()
         )
 
@@ -943,9 +902,11 @@ class LLMAdapter(ABC):
         if isinstance(policy, ReasoningPolicy):
             return policy.level
         capabilities = getattr(self, "capabilities", None)
-        return str(
-            getattr(capabilities, "effective_reasoning_effort", "") or ""
-        ).strip().lower()
+        return (
+            str(getattr(capabilities, "effective_reasoning_effort", "") or "")
+            .strip()
+            .lower()
+        )
 
     def apply_reasoning_policy(self, policy: ReasoningPolicy) -> None:
         """Apply a canonical reasoning policy at the provider boundary."""
@@ -986,6 +947,7 @@ class LLMAdapter(ABC):
         messages: list[LLMMessage],
         *,
         options: "SideQueryOptions",
+        turn_context: LLMTurnContext | None = None,
     ) -> str:
         """Run one observable auxiliary call without mutating main-loop state."""
         operation = str(options.operation or "side_query").strip() or "side_query"
@@ -1005,14 +967,21 @@ class LLMAdapter(ABC):
                 "cost_usd": 0.0,
             },
         }
-        options_token = self._side_query_options.set(options)
-        record_token = self._side_call_record.set(record)
+        call_context = LLMSideCallContext(
+            options=options,
+            record=record,
+            turn=turn_context,
+        )
         started = time.monotonic()
         attempt = 0
         max_retries = (
             max(0, int(options.max_retries))
             if options.max_retries is not None
-            else int(_SIDE_QUERY_OPERATION_MAX_RETRIES.get(operation, _SIDE_QUERY_MAX_RETRIES))
+            else int(
+                _SIDE_QUERY_OPERATION_MAX_RETRIES.get(
+                    operation, _SIDE_QUERY_MAX_RETRIES
+                )
+            )
         )
         query_source = str(options.query_source or "").strip().lower()
         if not query_source:
@@ -1036,17 +1005,6 @@ class LLMAdapter(ABC):
         }
         consecutive_529 = 0
         try:
-            simple_chat = self.simple_chat
-            accepts_limit = False
-            if options.max_tokens is not None:
-                try:
-                    parameters = inspect.signature(simple_chat).parameters
-                    accepts_limit = "max_tokens" in parameters or any(
-                        parameter.kind == inspect.Parameter.VAR_KEYWORD
-                        for parameter in parameters.values()
-                    )
-                except (TypeError, ValueError):
-                    accepts_limit = False
             while True:
                 record["attempts"] = attempt + 1
                 try:
@@ -1056,11 +1014,7 @@ class LLMAdapter(ABC):
                         else _SIDE_QUERY_ATTEMPT_TIMEOUT_SECONDS
                     )
                     result = await asyncio.wait_for(
-                        (
-                            simple_chat(messages, max_tokens=options.max_tokens)
-                            if accepts_limit
-                            else simple_chat(messages)
-                        ),
+                        self._side_query_chat(messages, context=call_context),
                         timeout=(attempt_timeout if attempt_timeout > 0 else None),
                     )
                     record["status"] = "completed"
@@ -1095,7 +1049,7 @@ class LLMAdapter(ABC):
                     if server_delay > _SIDE_QUERY_SERVER_DELAY_LIMIT_SECONDS:
                         raise
                     delay_seconds = min(
-                        _SIDE_QUERY_BASE_DELAY_SECONDS * (2 ** attempt),
+                        _SIDE_QUERY_BASE_DELAY_SECONDS * (2**attempt),
                         _SIDE_QUERY_MAX_DELAY_SECONDS,
                     )
                     delay_seconds *= 1.0 - random.random() * 0.25
@@ -1111,17 +1065,31 @@ class LLMAdapter(ABC):
                     )
                     await asyncio.sleep(delay_seconds)
         except BaseException as exc:
-            record["status"] = "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
+            record["status"] = (
+                "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
+            )
             record["error_type"] = type(exc).__name__
             record["retry_count"] = attempt
             raise
         finally:
             record["elapsed_ms"] = max(0, int((time.monotonic() - started) * 1000))
-            sink = self._side_call_records.get()
-            if sink is not None:
-                sink.append(record)
-            self._side_call_record.reset(record_token)
-            self._side_query_options.reset(options_token)
+            if turn_context is not None:
+                turn_context.side_call_records.append(record)
+
+    async def _side_query_chat(
+        self,
+        messages: list[LLMMessage],
+        *,
+        context: LLMSideCallContext,
+    ) -> str:
+        """Provider override for explicit side-call policy and accounting."""
+
+        if context.options.max_tokens is None:
+            return await self.simple_chat(messages)
+        return await self.simple_chat(
+            messages,
+            max_tokens=context.options.max_tokens,
+        )
 
     @staticmethod
     def record_non_stream_usage(
@@ -1131,6 +1099,7 @@ class LLMAdapter(ABC):
         model_id: str | None,
         input_includes_cache_read: bool,
         input_includes_cache_write: bool = True,
+        context: LLMSideCallContext | None = None,
     ) -> None:
         """Record token usage from a non-streaming response to the global
         CostTracker. Adapters should call this in ``simple_chat`` so that side
@@ -1178,7 +1147,7 @@ class LLMAdapter(ABC):
                 ordinary_input -= min(cache_creation, ordinary_input)
             ordinary_input = max(0, ordinary_input)
             prompt_cache_total = ordinary_input + cache_read + cache_creation
-            side_record = LLMAdapter._side_call_record.get()
+            side_record = context.record if context is not None else None
             if side_record is not None:
                 side_record["provider"] = str(provider or "")
                 side_record["model"] = str(model_id or "")
@@ -1190,9 +1159,7 @@ class LLMAdapter(ABC):
                     "reasoning_output_tokens": reasoning_output_tokens,
                     "cost_usd": cost_usd,
                     "input_includes_cache_read": bool(input_includes_cache_read),
-                    "input_includes_cache_write": bool(
-                        input_includes_cache_write
-                    ),
+                    "input_includes_cache_write": bool(input_includes_cache_write),
                     "ordinary_input_tokens": ordinary_input,
                     "prompt_cache_total_tokens": prompt_cache_total,
                 }
@@ -1205,7 +1172,11 @@ class LLMAdapter(ABC):
                 or cost_usd
             ):
                 return
-            bucket = LLMAdapter._turn_usage_bucket.get()
+            bucket = (
+                context.turn.usage
+                if context is not None and context.turn is not None
+                else None
+            )
             if bucket is not None:
                 bucket.input_tokens += input_tokens
                 bucket.output_tokens += output_tokens
@@ -1245,6 +1216,11 @@ class LLMAdapter(ABC):
                 input_includes_cache_read=input_includes_cache_read,
                 input_includes_cache_write=input_includes_cache_write,
                 cost_usd=cost_usd,
+                session_id=(
+                    context.turn.cost_session_id
+                    if context is not None and context.turn is not None
+                    else ""
+                ),
             )
         except Exception:  # noqa: BLE001 — accounting must never break the call
             # Accounting must not fail the call, but it must not fail silently

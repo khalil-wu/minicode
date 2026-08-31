@@ -255,10 +255,6 @@ def next_run_after(
     return None
 
 
-def _minute_floor(dt: datetime) -> datetime:
-    return dt.astimezone(UTC).replace(second=0, microsecond=0)
-
-
 def _parse_last_run_at(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -272,6 +268,8 @@ def _parse_last_run_at(value: str | None) -> datetime | None:
 
 
 def _stored_next_run(task: ScheduledTask) -> datetime | None:
+    if task.deleted_at is not None:
+        return None
     persisted = _parse_last_run_at(task.next_run_at)
     if persisted is not None:
         return persisted
@@ -380,7 +378,9 @@ class TaskScheduler:
             if workspace_root and task.workspace_root != workspace_root:
                 logger.warning("Ignoring task %s with mismatched workspace store", task.id)
                 continue
-            if task.enabled:
+            if task.deleted_at is not None:
+                task.next_run_at = None
+            elif task.enabled:
                 try:
                     next_run = _stored_next_run(task)
                 except (ZoneInfoNotFoundError, ValueError) as exc:
@@ -488,7 +488,7 @@ class TaskScheduler:
         now = time.time()
         changed = False
         for task in list(self._tasks.values()):
-            if task.deleted_at is not None:
+            if task.deleted_at is not None or not task.recurring:
                 continue
             try:
                 created = datetime.fromisoformat(task.created_at).timestamp()
@@ -503,7 +503,6 @@ class TaskScheduler:
 
     def list_tasks(self, *, workspace_root: str | None = None) -> list[dict[str, Any]]:
         self._sweep_expired()
-        now = datetime.now(UTC)
         requested_workspace = _normalize_workspace_root(workspace_root) if workspace_root is not None else None
         rows: list[dict[str, Any]] = []
         for task in self._tasks.values():
@@ -578,7 +577,11 @@ class TaskScheduler:
 
     def toggle_task(self, task_id: str, enabled: bool, *, workspace_root: str | None = None) -> bool:
         task = self._tasks.get(task_id)
-        if not task or not self._workspace_matches(task.workspace_root, workspace_root):
+        if (
+            task is None
+            or task.deleted_at is not None
+            or not self._workspace_matches(task.workspace_root, workspace_root)
+        ):
             return False
         if enabled and task.timezone and not is_valid_timezone(task.timezone):
             raise ValueError(
@@ -596,7 +599,11 @@ class TaskScheduler:
 
     def run_now(self, task_id: str, *, workspace_root: str | None = None) -> ScheduledTaskRun | None:
         task = self._tasks.get(task_id)
-        if task is None or not self._workspace_matches(task.workspace_root, workspace_root):
+        if (
+            task is None
+            or task.deleted_at is not None
+            or not self._workspace_matches(task.workspace_root, workspace_root)
+        ):
             return None
         for run_id, worker in self._run_tasks.items():
             active_run = self._runs.get(run_id)
@@ -607,6 +614,9 @@ class TaskScheduler:
     def retry_run(self, run_id: str, *, workspace_root: str | None = None) -> ScheduledTaskRun | None:
         previous = self._runs.get(run_id)
         if previous is None or not self._workspace_matches(previous.workspace_root, workspace_root):
+            return None
+        task = self._tasks.get(previous.task_id)
+        if task is None or task.deleted_at is not None:
             return None
         return self.run_now(previous.task_id, workspace_root=workspace_root)
 
@@ -734,7 +744,11 @@ class TaskScheduler:
 
     def _tick(self, now: datetime) -> None:
         for task in list(self._tasks.values()):
-            if not task.enabled or self._active_run_for_task(task.id) is not None:
+            if (
+                task.deleted_at is not None
+                or not task.enabled
+                or self._active_run_for_task(task.id) is not None
+            ):
                 continue
             if task.id in self._unusable_schedule_ids:
                 continue
@@ -821,6 +835,8 @@ class TaskScheduler:
         *,
         consume_schedule: bool,
     ) -> ScheduledTaskRun:
+        if task.deleted_at is not None:
+            raise ValueError(f"Cannot schedule deleted task '{task.id}'")
         run = ScheduledTaskRun(
             task_id=task.id,
             scheduled_at=due_at.astimezone(UTC).isoformat(),
@@ -830,6 +846,7 @@ class TaskScheduler:
         previous = (
             task.last_run_at,
             task.next_run_at,
+            task.deleted_at,
             task.last_run_id,
             task.last_run_status,
             task.last_error,
@@ -858,6 +875,7 @@ class TaskScheduler:
             (
                 task.last_run_at,
                 task.next_run_at,
+                task.deleted_at,
                 task.last_run_id,
                 task.last_run_status,
                 task.last_error,
@@ -924,9 +942,10 @@ class TaskScheduler:
             return None
         try:
             parameters = inspect.signature(callback).parameters
-            result = callback(task, run) if len(parameters) >= 2 else callback(task)
         except (TypeError, ValueError):
             result = callback(task, run)
+        else:
+            result = callback(task, run) if len(parameters) >= 2 else callback(task)
         return await result
 
 

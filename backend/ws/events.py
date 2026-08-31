@@ -353,6 +353,16 @@ class TurnDiffUpdatedData(TypedDict):
     diff: str
 
 
+AgentProgressProviderState = Literal[
+    "connecting",
+    "reconnecting",
+    "responding",
+    "completed",
+    "failed",
+    "interrupted",
+]
+
+
 class AgentProgressData(TypedDict, total=False):
     id: str
     stage: Literal["status", "planning", "tool", "approval", "verification", "final"]
@@ -369,6 +379,15 @@ class AgentProgressData(TypedDict, total=False):
     step_id: str
     count: int
     ephemeral: bool       # if True, UI should replace (not append) this progress message
+    # Provider retry lifecycle.  ``retry_attempt`` is zero for the initial
+    # request; it increments only when a new request is scheduled.  The
+    # initial request is therefore never rendered as ``1/N``.
+    retry_attempt: int
+    max_retries: int
+    retry_after_ms: int
+    error_message: str
+    operation_id: str
+    provider_state: AgentProgressProviderState
 
 
 class RuntimeSpanData(TypedDict, total=False):
@@ -518,6 +537,9 @@ class ToolResultData(TypedDict, total=False):
     id: str
     summary: str
     artifact_id: str
+    artifact_kind: Literal["file", "diff", "image", "json", "code", "text"] | str
+    artifact_media_type: str
+    artifact_bytes: int
     is_error: bool
     diff: Any
     source_url: str

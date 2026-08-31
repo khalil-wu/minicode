@@ -6,12 +6,10 @@ focused on protocol while trace/redaction helpers are independently testable.
 
 from __future__ import annotations
 
-from __future__ import annotations
-from backend.agent.prompting import split_sys_prompt_prefix
+from backend.agent.prompting import _json_fingerprint, _short_sha256, split_sys_prompt_prefix
 from backend.config import LLMSettings
 from backend.llm.base import LLMMessage
 from typing import Any
-import hashlib
 import json
 
 
@@ -75,17 +73,6 @@ _RESPONSES_MAX_OUTPUT_REASONS = frozenset(
 
 _CHAT_TOOL_FINISH_REASONS = frozenset({"tool_calls", "function_call"})
 
-
-
-def _short_sha256(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
-
-
-def _json_fingerprint(value: Any) -> str:
-    raw = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
-    )
-    return _short_sha256(raw)
 
 
 def _safe_tool_names(tools: list[dict[str, Any]]) -> list[str]:

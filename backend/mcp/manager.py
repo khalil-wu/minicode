@@ -1280,6 +1280,7 @@ class MCPServerManager:
                 f"MCP server '{name}' is still shutting down and cannot be removed"
             )
         self._servers.pop(name, None)
+        self._resource_subscriptions.pop(name, None)
         self._connection_locks.pop(name, None)
         await self._notify_status(name, ServerStatus.OFFLINE)
 
@@ -1501,8 +1502,16 @@ class MCPServerManager:
             await asyncio.wait_for(client.connect(), timeout=connect_timeout)
             # Replay durable subscription intent after every new transport
             # session.  The old client-owned set cannot survive reconnect.
+            restore_failures: list[tuple[str, BaseException]] = []
             for uri in sorted(self._resource_subscriptions.get(name, set())):
-                await client.subscribe_resource(uri)
+                try:
+                    restored = await client.subscribe_resource(uri)
+                    if not restored:
+                        raise RuntimeError(
+                            "server does not support resource subscriptions"
+                        )
+                except Exception as exc:
+                    restore_failures.append((uri, exc))
             state.tools = _filter_mcp_tools(state.config, await client.list_tools())
             stored_auth_status = self._stored_auth_status(state.config)
             state.auth_status = (
@@ -1516,7 +1525,27 @@ class MCPServerManager:
             state.last_error = ""
             state.last_exception = None
             state.operation_failures.pop("connect", None)
-            state.operation_failures.pop("resource_restore", None)
+            if restore_failures:
+                failed_uris = [uri for uri, _ in restore_failures]
+                state.operation_failures["resource_restore"] = {
+                    "operation": "resource_restore",
+                    "failure_kind": "partial_failure",
+                    "message": (
+                        f"Failed to restore {len(failed_uris)} MCP resource "
+                        f"subscription(s): {', '.join(failed_uris)}"
+                    ),
+                    "retryable": True,
+                    "uris": failed_uris,
+                }
+                for uri, exc in restore_failures:
+                    logger.warning(
+                        "MCP server '%s' could not restore resource subscription %s: %s",
+                        name,
+                        uri,
+                        exc,
+                    )
+            else:
+                state.operation_failures.pop("resource_restore", None)
             state.operation_failures.pop("tool_catalog", None)
             await self._notify_status(name, ServerStatus.CONNECTED)
         except Exception as exc:
@@ -1781,7 +1810,14 @@ class MCPServerManager:
     async def _notify_status(self, name: str, status: ServerStatus) -> None:
         self._registry_version += 1
         if self._on_status_change:
-            await self._on_status_change(name, status)
+            try:
+                await self._on_status_change(name, status)
+            except Exception:
+                logger.exception(
+                    "MCP status observer failed for server %s (%s)",
+                    name,
+                    status.value,
+                )
 
 
 def _positive_env_int(name: str, default: int) -> int:

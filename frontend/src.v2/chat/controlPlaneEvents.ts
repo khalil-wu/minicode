@@ -14,6 +14,7 @@ import type {
   ServerEvent,
   WorkspaceRecentListEvent,
 } from "../protocol/events";
+import { isReplayedEvent as isReplayed } from "../protocol/events";
 import { useAppStore } from "../stores";
 import type {
   CheckpointProjectionRecord,
@@ -22,9 +23,6 @@ import type {
 } from "../stores/types";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { addInspectorPayload } from "./inspectorEntries";
-
-const isReplayed = (event: ServerEvent): boolean =>
-  (event as ServerEvent & { __replayed?: boolean }).__replayed === true;
 
 const eventTime = (event: ServerEvent): number => {
   const parsed = Date.parse(String(event.timestamp || ""));

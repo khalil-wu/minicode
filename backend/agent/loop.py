@@ -35,7 +35,8 @@ from backend.agent.turn_kernel import (
     TurnKernel,
     _set_terminal_reason,
 )
-from backend.agent.runtime import AgentRuntime, default_runtime
+from backend.agent.runtime import AgentRuntime
+from backend.agent.run_context import RunContext
 from backend.agent.turn_budget import TurnBudgetController
 from backend.agent.turn_iteration_admission import (
     IterationAdmissionResult,
@@ -55,7 +56,7 @@ from backend.agent.terminal_projection import (
 from backend.agent.terminal_validation import validate_terminal_outcome
 from backend.artifact.store import ArtifactStore
 from backend.config import AgentSettings, TokenBudget
-from backend.llm.base import LLMAdapter, UsageInfo
+from backend.llm.base import LLMAdapter, LLMTurnContext
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
 from backend.tools.registry import ToolRegistry
@@ -88,6 +89,7 @@ async def run_agent_loop(
     stream_callback: Any | None = None,
     emit_event: Any | None = None,
     metadata: dict[str, Any] | None = None,
+    run_context: RunContext | None = None,
     session_context: AgentLoopSessionContext | None = None,
     turn_kernel: TurnKernel | None = None,
     state_prepared: bool = False,
@@ -103,11 +105,24 @@ async def run_agent_loop(
     if metadata is None and session_context is not None and not state_prepared:
         metadata = session_context.metadata
     metadata = metadata if metadata is not None else {}
-    runtime_value = metadata.get("agent_runtime")
+    run_context = run_context or (
+        session_context.run_context
+        if session_context is not None
+        else None
+    ) or RunContext()
+    runtime_value = run_context.agent_runtime
     if runtime_value is None:
-        metadata["agent_runtime"] = default_runtime()
+        runtime_value = AgentRuntime()
     elif not isinstance(runtime_value, AgentRuntime):
-        raise TypeError("Turn metadata agent_runtime must be an AgentRuntime")
+        raise TypeError("RunContext agent_runtime must be an AgentRuntime")
+    run_context.agent_runtime = runtime_value
+    if run_context.llm_turn_context is None:
+        side_call_records = metadata.setdefault("_side_calls", [])
+        run_context.llm_turn_context = LLMTurnContext(
+            side_call_records=side_call_records,
+            cost_session_id=str(run_context.cost_session_id or session_id or ""),
+            lifecycle_runtime=run_context.lifecycle_runtime,
+        )
     bootstrap = None
     async for bootstrap_update in bootstrap_agent_loop(
         AgentLoopBootstrapRequest(
@@ -130,6 +145,7 @@ async def run_agent_loop(
             stream_callback=stream_callback,
             emit_event=emit_event,
             metadata=metadata,
+            run_context=run_context,
             session_context=session_context,
             turn_kernel=turn_kernel,
             state_prepared=state_prepared,
@@ -147,6 +163,7 @@ async def run_agent_loop(
     skill_manager = bootstrap.skill_manager
     emit_event = bootstrap.emit_event
     metadata = bootstrap.metadata
+    run_context = bootstrap.run_context
     external_metadata = bootstrap.external_metadata
     cancel_event = bootstrap.cancel_event
     settings = bootstrap.settings
@@ -169,19 +186,14 @@ async def run_agent_loop(
     stream_text = StreamTextState()
     initial_user_turn_pending = not bool(
         metadata.get("_query_engine_recovery_restored")
+        or metadata.get("_turn_admission_restored")
     )
-    turn_usage = UsageInfo()
+    llm_turn_context = run_context.llm_turn_context
+    if not isinstance(llm_turn_context, LLMTurnContext):
+        raise TypeError("RunContext llm_turn_context must be an LLMTurnContext")
+    turn_usage = llm_turn_context.usage
     terminal_projection: TurnTerminalProjection | None = None
     saw_non_text_result = False
-    side_call_records = metadata.get("_side_calls")
-    if not isinstance(side_call_records, list):
-        side_call_records = []
-        metadata["_side_calls"] = side_call_records
-    from backend.llm.cost_tracker import CostTracker
-    _cost_session_token = CostTracker.bind_session(bootstrap.cost_session_id)
-    # Bind side-call usage (for example compaction) to the current turn.
-    _turn_usage_token = LLMAdapter.bind_turn_usage(turn_usage)
-    _side_call_records_token = LLMAdapter.bind_side_call_records(side_call_records)
 
     try:
         for event in apply_hook_results(
@@ -393,17 +405,10 @@ async def run_agent_loop(
                 stream_text=iteration_execution_state.stream_text,
                 scrub_text=_scrub_thinking_tags,
             )
-            checkpoint_status = turn_kernel.finalize_checkpoint(
-                session_id=session_id,
-                user_message=user_message,
-                state=state,
-                context_builder=ctx,
-                defer_completed_clear=True,
-            )
             for interrupt_event in interrupt_events:
                 yield interrupt_event
-            # Defer propagation until checkpoint persistence below has flushed the
-            # current messages/tool evidence. This makes deadline resume real.
+            # Defer propagation until the single terminal boundary below has
+            # persisted the checkpoint and emitted its receipt.
             deferred_cancel = exc
 
         validation = validate_terminal_outcome(
@@ -453,7 +458,7 @@ async def run_agent_loop(
             raise deferred_cancel
     except asyncio.CancelledError:
         raise
-    except Exception as exc:
+    except Exception:
         # Every run crosses the durable ``running`` boundary in TurnKernel.create.
         # An unexpected admission, provider, tool, or final-answer exception must
         # therefore become one canonical failed terminal transition instead of
@@ -479,15 +484,3 @@ async def run_agent_loop(
                 reason="runtime_error",
             ):
                 yield event
-    finally:
-        if bootstrap.hook_manager_token is not None:
-            from backend.hooks.manager import unbind_hook_manager
-
-            unbind_hook_manager(bootstrap.hook_manager_token)
-        if bootstrap.provider_hook_runner_token is not None:
-            LLMAdapter.unbind_provider_lifecycle_runtime(
-                bootstrap.provider_hook_runner_token
-            )
-        LLMAdapter.unbind_side_call_records(_side_call_records_token)
-        LLMAdapter.unbind_turn_usage(_turn_usage_token)
-        CostTracker.unbind_session(_cost_session_token)

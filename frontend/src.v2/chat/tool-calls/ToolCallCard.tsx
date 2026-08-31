@@ -4,10 +4,12 @@ import {
   Copy,
   FileText,
   Globe,
+  Image as ImageIcon,
   LoaderCircle,
+  RotateCw,
   TerminalSquare,
 } from "lucide-react";
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useSharedSecondTick } from "../../lib/shared-tick";
 import { isFileChangeToolRecord, type ToolCallRecord, type ToolCallStatus } from "../../lib/tool-call-reducer";
 import {
@@ -29,6 +31,18 @@ import {
 } from "./renderers";
 import { InlineDiff } from "../diff/InlineDiff";
 import { workspaceRelativeDiffPath } from "../diffPaths";
+import { getWebSocket } from "../../hooks/useWebSocket";
+import {
+  artifactImageResourceUrl,
+  inlineImageResourceUrl,
+  withPreviewCacheBust,
+} from "../../lib/artifact-resource";
+import {
+  artifactMediaTypeForProjection,
+  artifactSummaryForRecord,
+  canonicalArtifactKind,
+  recordHasImageArtifact,
+} from "../../lib/artifact-projection";
 
 const LOCAL_URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+(?:[/?#][^\s'"<>]*)?/i;
 
@@ -133,11 +147,14 @@ export const ToolCallCard = memo(({
   viewMode = "normal",
   compact = false,
   workspaceDirectory = "",
+  conversationId,
 }: {
   record: ToolCallRecord;
   viewMode?: ViewMode;
   compact?: boolean;
   workspaceDirectory?: string;
+  /** Explicit transcript owner; side/history views must not borrow the active chat. */
+  conversationId?: string;
 }) => {
   const [open, setOpen] = useState(() => shouldAutoOpen(viewMode));
   const [outputExpanded, setOutputExpanded] = useState(false);
@@ -183,6 +200,15 @@ export const ToolCallCard = memo(({
           : record.displayHint || record.displaySummary || record.name || "工具",
       );
   const evidence = evidenceLabel(record);
+  const imageArtifact = recordHasImageArtifact(record)
+    ? {
+        kind: canonicalArtifactKind(record.artifactKind, record.artifactMediaType, record),
+        mediaType: artifactMediaTypeForProjection(
+          record.artifactMediaType,
+          canonicalArtifactKind(record.artifactKind, record.artifactMediaType, record),
+        ),
+      }
+    : null;
 
   const copyResult = () => {
     // Copy the actual bounded tool output, not the humanized display summary
@@ -201,13 +227,15 @@ export const ToolCallCard = memo(({
 
   const openArtifact = () => {
     if (!record.artifactId) return;
-    const store = useAppStore.getState();
+    const ownerConversationId = String(conversationId || "").trim();
+    if (!ownerConversationId) return;
     openArtifactPreview({
       artifactId: record.artifactId,
       name: record.displaySummary || record.summary || "生成文件",
       summary: record.displaySummary || record.summary,
-      kind: record.resultKind,
-      conversationId: store.conversationId || undefined,
+      kind: record.artifactKind || record.resultKind,
+      mediaType: record.artifactMediaType,
+      conversationId: ownerConversationId,
     });
   };
 
@@ -346,6 +374,13 @@ export const ToolCallCard = memo(({
           {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </button>
       </div>
+      {imageArtifact && record.artifactId && (
+        <ToolCallArtifactImage
+          record={record}
+          conversationId={conversationId}
+          onOpen={openArtifact}
+        />
+      )}
       {open && (
         <div className="border-t border-[var(--border-subtle)] bg-[var(--surface-base)] overflow-y-auto"
           style={{
@@ -429,6 +464,97 @@ export const ToolCallCard = memo(({
 });
 
 ToolCallCard.displayName = "ToolCallCard";
+
+function ToolCallArtifactImage({
+  record,
+  conversationId,
+  onOpen,
+}: {
+  record: ToolCallRecord;
+  conversationId?: string;
+  onOpen: () => void;
+}) {
+  const isConnected = useAppStore((state) => state.isConnected);
+  const sessionId = isConnected ? String(getWebSocket()?.sessionId || "").trim() : "";
+  const artifactId = String(record.artifactId || "").trim();
+  const ownerConversationId = String(conversationId || "").trim();
+  const kind = canonicalArtifactKind(record.artifactKind, record.artifactMediaType, record);
+  const mediaType = artifactMediaTypeForProjection(record.artifactMediaType, kind) || "image/png";
+  const inlineUrl = inlineImageResourceUrl(record.sourceUrl);
+  const [reloadNonce, setReloadNonce] = useState(0);
+  const [loadState, setLoadState] = useState<"loading" | "loaded" | "error">("loading");
+  const baseUrl = useMemo(() => artifactImageResourceUrl({
+    artifactId,
+    conversationId: ownerConversationId,
+    sessionId,
+    source: "artifact",
+    originalUrl: inlineUrl,
+    isConnected,
+  }), [artifactId, inlineUrl, isConnected, ownerConversationId, sessionId]);
+
+  useEffect(() => {
+    setReloadNonce(0);
+    setLoadState("loading");
+  }, [artifactId, baseUrl, isConnected, ownerConversationId, mediaType, sessionId]);
+
+  const imageUrl = withPreviewCacheBust(baseUrl, reloadNonce);
+
+  const retry = () => {
+    setLoadState("loading");
+    setReloadNonce((value) => value + 1);
+  };
+
+  if (!imageUrl || loadState === "error") {
+    return (
+      <div
+        data-artifact-id={artifactId}
+        data-artifact-conversation-id={ownerConversationId || undefined}
+        style={toolArtifactFallbackStyle}
+      >
+        <ImageIcon size={16} aria-hidden="true" />
+        <span>{!ownerConversationId
+          ? "截图未关联会话"
+          : !isConnected || !sessionId
+            ? "连接恢复后载入截图"
+            : "截图加载失败"}</span>
+        {imageUrl && loadState === "error" && (
+          <button type="button" onClick={retry} style={toolArtifactRetryStyle}>
+            <RotateCw size={13} aria-hidden="true" />
+            重试
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      data-artifact-id={artifactId}
+      data-artifact-conversation-id={ownerConversationId || undefined}
+      style={toolArtifactImageWrapStyle}
+    >
+      <button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          onOpen();
+        }}
+        aria-label={`打开${artifactSummaryForRecord(record)}`}
+        style={toolArtifactImageButtonStyle}
+      >
+        <img
+          key={`${imageUrl}:${reloadNonce}`}
+          src={imageUrl}
+          alt={artifactSummaryForRecord(record)}
+          style={toolArtifactImageStyle}
+          data-load-state={loadState}
+          onLoad={() => setLoadState("loaded")}
+          onError={() => setLoadState("error")}
+        />
+      </button>
+    </div>
+  );
+}
 
 function formatElapsed(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -523,4 +649,55 @@ const sourceUrlStyle: React.CSSProperties = {
   color: "var(--text-muted)",
   fontFamily: "var(--font-mono)",
   wordBreak: "break-all",
+};
+
+const toolArtifactImageWrapStyle: React.CSSProperties = {
+  margin: "0 12px 8px",
+  overflow: "hidden",
+  border: "1px solid var(--border-subtle)",
+  borderRadius: "var(--radius-sm, 6px)",
+  background: "var(--surface-soft)",
+};
+
+const toolArtifactImageButtonStyle: React.CSSProperties = {
+  display: "block",
+  width: "100%",
+  padding: 0,
+  border: 0,
+  background: "transparent",
+  cursor: "zoom-in",
+};
+
+const toolArtifactImageStyle: React.CSSProperties = {
+  display: "block",
+  width: "100%",
+  maxHeight: 220,
+  objectFit: "contain",
+};
+
+const toolArtifactFallbackStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 7,
+  margin: "0 12px 8px",
+  padding: "10px 12px",
+  border: "1px solid var(--border-subtle)",
+  borderRadius: "var(--radius-sm, 6px)",
+  background: "var(--surface-soft)",
+  color: "var(--text-muted)",
+  fontSize: "var(--text-xs)",
+};
+
+const toolArtifactRetryStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
+  marginLeft: "auto",
+  padding: "2px 7px",
+  border: "1px solid var(--border-subtle)",
+  borderRadius: "var(--radius-sm, 4px)",
+  background: "transparent",
+  color: "var(--accent-primary)",
+  cursor: "pointer",
+  font: "inherit",
 };

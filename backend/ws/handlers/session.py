@@ -18,7 +18,7 @@ async def handle_session_tasks_inspect(session: "WebSocketSession", data: dict[s
 
     snapshot = session.runtime_snapshot()
     outcome = build_tasks_inspect_outcome(session.session_id, snapshot)
-    await session._emit_command_result(
+    await session.emit_command_result(
         outcome.command,
         outcome.message,
         data=outcome.data,
@@ -42,7 +42,7 @@ async def handle_session_status_inspect(session: "WebSocketSession", data: dict[
         active_skills=active_skills,
         runtime_snapshot=snapshot,
     )
-    await session._emit_command_result(
+    await session.emit_command_result(
         outcome.command,
         outcome.message,
         data=outcome.data,
@@ -57,7 +57,7 @@ async def emit_session_usage_snapshot(session: "WebSocketSession") -> Any:
     from backend.services.session_inspect_service import build_usage_inspect_result
 
     tracker_summary = CostTracker.get_instance().get_summary(session.session_id)
-    state = getattr(session, "_last_agent_state", None)
+    state = session.last_agent_state
     if state is None:
         from backend.agent.state import AgentState
         state = AgentState(user_message="")
@@ -93,8 +93,8 @@ async def emit_session_usage_snapshot(session: "WebSocketSession") -> Any:
         budget_snapshot=budget_snapshot,
         context_ledger=session.context_builder.context_ledger(),
     )
-    await session._send_event(budget_event)
-    await session._send_event(context_event)
+    await session.send_event(budget_event)
+    await session.send_event(context_event)
     return outcome
 
 
@@ -104,7 +104,7 @@ async def handle_session_usage_inspect(session: "WebSocketSession", data: dict[s
     # context_usage / budget_update events above to refresh the indicator —
     # they must not append a visible "/usage" notice to the transcript.
     if not data.get("silent"):
-        await session._emit_command_result(
+        await session.emit_command_result(
             outcome.command,
             outcome.message,
             data=outcome.data,
@@ -115,13 +115,13 @@ async def handle_session_usage_inspect(session: "WebSocketSession", data: dict[s
 async def handle_session_permissions_inspect(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.services.session_inspect_service import build_permissions_inspect_outcome
 
-    rules = session._build_permission_rules_payload(conversation=session.active_conversation)
+    rules = session.build_permission_rules_payload(conversation=session.active_conversation)
     outcome = build_permissions_inspect_outcome(
         session_id=session.session_id,
         conversation_id=session.active_conversation_id,
         rules=rules,
     )
-    await session._emit_command_result(
+    await session.emit_command_result(
         outcome.command,
         outcome.message,
         data=outcome.data,
@@ -130,7 +130,9 @@ async def handle_session_permissions_inspect(session: "WebSocketSession", data: 
 
 
 async def handle_runtime_capabilities_inspect(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    await session._send_runtime_capabilities(source=str(data.get("source") or "runtime.inspect"))
+    await session.session_lifecycle.send_runtime_capabilities(
+        source=str(data.get("source") or "runtime.inspect")
+    )
     return True
 
 
@@ -146,12 +148,12 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
     last_conversation_id = data.get("last_conversation_id")
     last_workspace_root = data.get("last_workspace_root")
     requested_last_seq = seq_from_restore_payload(data)
-    current_seq = int(getattr(session, "_ws_replay_cursor", 0) or 0)
+    current_seq = session.event_outbox.current_replay_seq
     cursor_reset = requested_last_seq > current_seq
     last_seq = current_seq if cursor_reset else requested_last_seq
     missed_by_seq = bool(last_seq and last_seq < current_seq)
     replay_candidates, event_log_gap = (
-        session._replay_window_after(last_seq)
+        session.event_outbox.replay_window_after(last_seq)
         if last_seq
         else ([], False)
     )
@@ -185,22 +187,22 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
             and not getattr(target, "archived", False)
             and getattr(target, "conversation_type", "main") == "main"
         ):
-            target = await session._reconcile_persisted_ui_agent_state(
+            target = await session.reconcile_persisted_ui_agent_state(
                 target.id,
                 conversation=target,
             ) or target
             session.active_conversation_id = target.id
-            await session._switch_workspace_for_conversation(target, announce=False)
+            await session.switch_workspace_for_conversation(target, announce=False)
             # Session restore publishes the same hydration lifecycle as an
             # explicit conversation switch.  Without the completion callback
             # the renderer can remain in the restoring state indefinitely.
-            is_hydrating = session._load_active_conversation_snapshot(
+            is_hydrating = session.load_active_conversation_snapshot(
                 target.id,
                 target.context_snapshot,
                 notify=True,
                 defer_start=True,
             )
-            session._sync_permission_mode_with_active_conversation(source="session.restore")
+            session.sync_permission_mode_with_active_conversation(source="session.restore")
             active_payload = project_public_conversation(target)
         else:
             restored_conversation_id = None
@@ -222,7 +224,7 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
     base_url = str((provider_capabilities or {}).get("base_url") or "").strip()
     wire_api = str((provider_capabilities or {}).get("wire_api") or "").strip()
 
-    await session._send_ws_payload(
+    await session.send_payload(
         build_session_restored_payload(
             result,
             restored_conversation_id=restored_conversation_id,
@@ -237,7 +239,7 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
                 cursor_reset
                 or event_log_gap
                 or (
-                    session._events_dropped_during_disconnect
+                    session.event_outbox.events_dropped_during_disconnect
                     and missed_by_seq
                     and not replay_can_cover_miss
                 )
@@ -255,10 +257,10 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
         ),
         log_context="session.restored",
     )
-    session._events_dropped_during_disconnect = False
+    session.event_outbox.clear_disconnect_drop_marker()
 
     if restored_conversation_id and active_payload:
-        await session._send_ws_payload(
+        await session.send_payload(
             build_restore_conversation_switched_payload(
                 restored_conversation_id=restored_conversation_id,
                 active_payload=active_payload,
@@ -268,23 +270,23 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
             log_context="conversation.switched",
         )
         if is_hydrating:
-            session._start_active_conversation_hydration(restored_conversation_id)
+            session.start_active_conversation_hydration(restored_conversation_id)
 
     if replay_candidates:
-        await session._replay_missed_events(
+        await session.event_outbox.replay_missed_events(
             last_seq,
             events=replay_candidates,
             current_seq=current_seq,
         )
     # Replay the frozen incremental window first, then replace it with the
     # authoritative accumulated stream snapshot. This avoids duplicated text.
-    await session._reemit_pending_state(
+    await session.reemit_pending_state(
         skip_stream_conversation_ids=replay_terminal_conversation_ids,
     )
     if restored_conversation_id:
         # Durable follow-ups survive a process/WebSocket restart. Dispatch only
         # after the authoritative session snapshot and replay have been applied.
-        session._schedule_next_queued_user_message(restored_conversation_id)
+        session.schedule_next_queued_user_message(restored_conversation_id)
     return True
 
 
@@ -293,11 +295,11 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
     from backend.ws.session_restore import SessionRestoreManager
 
     requested_last_seq = seq_from_restore_payload(data)
-    current_seq = int(getattr(session, "_ws_replay_cursor", 0) or 0)
+    current_seq = session.event_outbox.current_replay_seq
     cursor_reset = requested_last_seq > current_seq
     last_seq = current_seq if cursor_reset else requested_last_seq
     replay_candidates, event_log_gap = (
-        session._replay_window_after(last_seq)
+        session.event_outbox.replay_window_after(last_seq)
         if last_seq
         else ([], False)
     )
@@ -316,14 +318,14 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
         session_id=session.session_id,
         session_snapshot=session.runtime_snapshot(),
     )
-    workspace_root = session._workspace_root_for_conversation()
+    workspace_root = session.session_lifecycle.workspace_root_for_conversation()
     runtime_snapshot = result.get("session") if isinstance(result.get("session"), dict) else {}
     provider_capabilities = runtime_snapshot.get("provider_capabilities") if isinstance(runtime_snapshot, dict) else {}
     provider_id = str((provider_capabilities or {}).get("provider_id") or "").strip()
     base_url = str((provider_capabilities or {}).get("base_url") or "").strip()
     wire_api = str((provider_capabilities or {}).get("wire_api") or "").strip()
 
-    await session._send_ws_payload(
+    await session.send_payload(
         build_session_synced_payload(
             result,
             protocol_version=RUNTIME_PROTOCOL_VERSION,
@@ -352,7 +354,7 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
         log_context="session.synced",
     )
     if replay_candidates:
-        await session._replay_missed_events(
+        await session.event_outbox.replay_missed_events(
             last_seq,
             events=replay_candidates,
             current_seq=current_seq,
@@ -360,12 +362,12 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
     # A stream or approval can change without changing transcript length.  The
     # replay log is the source of truth for those mutations; this snapshot is
     # only the authoritative fallback when the bounded log has a gap.
-    await session._reemit_pending_state(
+    await session.reemit_pending_state(
         skip_stream_conversation_ids=replay_terminal_conversation_ids,
     )
     active_conversation_id = str(session.active_conversation_id or "").strip()
     if active_conversation_id:
-        session._schedule_next_queued_user_message(active_conversation_id)
+        session.schedule_next_queued_user_message(active_conversation_id)
     return True
 
 

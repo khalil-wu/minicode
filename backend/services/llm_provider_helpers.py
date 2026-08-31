@@ -334,16 +334,6 @@ def _manual_models_from_payload(payload: Any) -> list[str]:
     return [model.strip() for model in available if isinstance(model, str) and model.strip()]
 
 
-def _merge_model_sources(*sources: list[str]) -> list[str]:
-    merged: list[str] = []
-    for source in sources:
-        for model in source:
-            value = model.strip() if isinstance(model, str) else ""
-            if value and value not in merged:
-                merged.append(value)
-    return merged
-
-
 def _persist_refreshed_models(
     provider: str,
     models: list[str],

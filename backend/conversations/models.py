@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from backend.config_requirements import normalize_string_array
+
 
 ConversationMemoryMode = Literal["enabled", "disabled", "polluted"]
 ConversationCompactionState = Literal["clean", "compacted", "retrieved"]
@@ -42,10 +44,12 @@ def normalize_memory_mode(
 
 
 def normalize_permission_mode(value: Any) -> ConversationPermissionMode:
-    mode = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if mode in {"plan", "confirm", "bypass", "auto"}:
-        return mode
-    raise ValueError(f"Unsupported permission mode: {value!r}")
+    # The token table lives with the permission checker so the conversation
+    # boundary and the policy boundary cannot drift apart (same delegation as
+    # backend.ws.utils); the ValueError contract is preserved.
+    from backend.permissions.checker import normalize_permission_mode_token
+
+    return normalize_permission_mode_token(value)
 
 
 def _normalize_previous_permission_mode(value: Any) -> ConversationPermissionMode | str:
@@ -101,17 +105,12 @@ def normalize_permission_overrides(value: Any) -> dict[str, ConversationPermissi
 
 
 def _normalize_string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for item in value:
-        text = str(item or "").strip().lower()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        normalized.append(text)
-    return normalized
+    return normalize_string_array(
+        value,
+        field_name="memory_pollution_sources",
+        source="conversation record",
+        lowercase=True,
+    )
 
 
 def _normalize_revision(value: Any) -> int:

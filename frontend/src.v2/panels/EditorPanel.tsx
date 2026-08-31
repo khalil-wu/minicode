@@ -25,6 +25,7 @@ import {
   workspaceRootsEqual,
 } from "../lib/workspace-path";
 import { isImagePath, isPdfPath, isPreviewableMediaPath } from "../lib/media-types";
+import { formatBytes } from "../lib/format-bytes";
 
 const configureMonacoWorkers = () => {
   const scope = globalThis as typeof globalThis & {
@@ -261,13 +262,6 @@ const MAX_EDITOR_CHARS = 1_000_000;
 const MAX_EDITOR_LINES = 20_000;
 const MAX_MARKDOWN_PREVIEW_IMAGES = 80;
 const EDITOR_FRAME_REFERRER_POLICY = "no-referrer";
-
-const formatBytes = (bytes?: number): string => {
-  if (!bytes || !Number.isFinite(bytes)) return "";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-};
 
 const countLines = (content: string): number =>
   content ? content.split(/\r\n|\r|\n/).length : 0;

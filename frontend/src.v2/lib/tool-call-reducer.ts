@@ -16,6 +16,9 @@ export interface ToolCallRecord {
   blockingReason?: string;
   summary?: string;
   artifactId?: string;
+  artifactKind?: "file" | "diff" | "image" | "json" | "code" | "text" | string;
+  artifactMediaType?: string;
+  artifactBytes?: number;
   sourceUrl?: string;
   extractionStatus?: string;
   contentPreview?: string;
@@ -41,6 +44,8 @@ export interface ToolCallRecord {
   taskId?: string;
   turnId?: string;
   seq?: number;
+  /** Number of explicit scope migrations accepted for this lifecycle. */
+  scopeMigrationCount?: number;
   iterationId?: string;
   phase?: string;
   startedAt: number;
@@ -74,6 +79,61 @@ export interface ToolCallRecord {
   /** True when a file created by this call was later removed in the same turn. */
   temporaryRemoved?: boolean;
 }
+
+const TOOL_STATUS_RANK: Record<ToolCallStatus, number> = {
+  pending: 0,
+  running: 1,
+  partial: 2,
+  failed: 3,
+  blocked: 3,
+  timeout: 3,
+  cancelled: 3,
+  success: 4,
+};
+
+/**
+ * Merge a result without allowing an old terminal frame to reopen or replace
+ * a newer terminal state.  A later, explicitly sequenced success may promote
+ * a provisional/failed result; an unsequenced late frame is diagnostic-only.
+ */
+export const mergeToolCallResultRecord = (
+  existing: ToolCallRecord,
+  incoming: ToolCallRecord,
+): ToolCallRecord => {
+  const existingSeq = typeof existing.seq === "number" && Number.isFinite(existing.seq)
+    ? existing.seq
+    : undefined;
+  const incomingSeq = typeof incoming.seq === "number" && Number.isFinite(incoming.seq)
+    ? incoming.seq
+    : undefined;
+  const stale = existingSeq !== undefined && incomingSeq !== undefined && incomingSeq <= existingSeq;
+  const existingTerminal = isTerminalToolCallStatus(existing.status);
+  const incomingTerminal = isTerminalToolCallStatus(incoming.status);
+  if (stale || (existingTerminal && !incomingTerminal)) return existing;
+  if (existingTerminal && incomingTerminal && incomingSeq === undefined) {
+    // The transport does not provide an ordering fence for this frame. Keep
+    // the first terminal status and only fill fields that were previously
+    // absent, so a delayed failed event cannot overwrite a confirmed success.
+    return {
+      ...existing,
+      summary: existing.summary ?? incoming.summary,
+      artifactId: existing.artifactId ?? incoming.artifactId,
+      artifactKind: existing.artifactKind ?? incoming.artifactKind,
+      artifactMediaType: existing.artifactMediaType ?? incoming.artifactMediaType,
+      artifactBytes: existing.artifactBytes ?? incoming.artifactBytes,
+      outputPreview: existing.outputPreview ?? incoming.outputPreview,
+      stdoutPreview: existing.stdoutPreview ?? incoming.stdoutPreview,
+      stderrPreview: existing.stderrPreview ?? incoming.stderrPreview,
+      diff: existing.diff ?? incoming.diff,
+      finishedAt: existing.finishedAt ?? incoming.finishedAt,
+    };
+  }
+  if (existingTerminal && incomingTerminal
+    && TOOL_STATUS_RANK[incoming.status] < TOOL_STATUS_RANK[existing.status]) {
+    return existing;
+  }
+  return incoming;
+};
 
 const normalizedProjectionValue = (value: string | undefined): string => String(value || "").trim().toLowerCase();
 
@@ -246,6 +306,11 @@ export const reduceToolCallStart = (
 ): Map<string, ToolCallRecord> => {
   const next = new Map(prev);
   const existing = prev.get(e.id);
+  const incomingSeq = typeof e.seq === "number" && Number.isFinite(e.seq) ? e.seq : undefined;
+  const existingSeq = typeof existing?.seq === "number" && Number.isFinite(existing.seq) ? existing.seq : undefined;
+  if (existing && incomingSeq !== undefined && existingSeq !== undefined && incomingSeq <= existingSeq) {
+    return next;
+  }
   const terminal = existing && isTerminalToolCallStatus(existing.status);
   next.set(e.id, {
     ...existing,
@@ -285,7 +350,7 @@ export const reduceToolCallResult = (
   const existing = prev.get(e.id);
   if (!existing) return new Map(prev);
   const next = new Map(prev);
-  next.set(e.id, {
+  const incoming: ToolCallRecord = {
     ...existing,
     status: e.status === "blocked"
       ? "blocked"
@@ -301,7 +366,10 @@ export const reduceToolCallResult = (
               ? "failed"
               : "success",
     summary: e.summary,
-    artifactId: e.artifact_id,
+    artifactId: e.artifact_id ?? existing.artifactId,
+    artifactKind: e.artifact_kind ?? existing.artifactKind,
+    artifactMediaType: e.artifact_media_type ?? existing.artifactMediaType,
+    artifactBytes: e.artifact_bytes ?? existing.artifactBytes,
     sourceUrl: e.source_url,
     extractionStatus: e.extraction_status,
     contentPreview: e.content_preview,
@@ -336,7 +404,8 @@ export const reduceToolCallResult = (
       isImage: file.is_image,
     })) ?? existing.outputFiles,
     finishedAt: now,
-  });
+  };
+  next.set(e.id, mergeToolCallResultRecord(existing, incoming));
   return next;
 };
 

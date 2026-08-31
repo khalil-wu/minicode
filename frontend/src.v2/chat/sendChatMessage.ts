@@ -442,6 +442,9 @@ export const sendChatMessage = ({
       retryFromMessageId,
       queued,
     });
+    if (!queued && targetConversationId && assistantMessageId) {
+      useAppStore.getState().flushPendingProviderProgress(targetConversationId, assistantMessageId);
+    }
   }
 
   try {
@@ -459,6 +462,9 @@ export const sendChatMessage = ({
         retryFromMessageId,
         queued: false,
       });
+      if (targetConversationId && assistantMessageId) {
+        useAppStore.getState().flushPendingProviderProgress(targetConversationId, assistantMessageId);
+      }
     }
     lastSendSignature = sendSignature;
     lastSendAt = now;

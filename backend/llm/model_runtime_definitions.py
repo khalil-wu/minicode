@@ -7,22 +7,7 @@ independent of the ModelRuntime class that orchestrates them.
 
 from __future__ import annotations
 
-from backend.config import STATE_ROOT
-from backend.llm.model_selection import REASONING_LEVEL_ORDER
-from backend.llm.provider_contracts import (
-    ProviderRegistrationError,
-    TokenNumber,
-    UnsupportedProviderCapabilityError,
-)
-from collections.abc import (
-    Mapping,
-    Sequence,
-)
-from dataclasses import replace
-from pathlib import Path
-from typing import Any
 import inspect
-import json
 import math
 import os
 import re
@@ -30,6 +15,22 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+from backend.config import (
+    MINICODE_CAPPED_DEFAULT_MAX_TOKENS,
+    STATE_ROOT,
+    get_provider_model_metadata,
+)
+from backend.llm.model_selection import REASONING_LEVEL_ORDER
+from backend.llm.provider_contracts import (
+    ModelDefinition,
+    ProviderRegistrationError,
+    TokenNumber,
+    UnsupportedProviderCapabilityError,
+)
 
 
 _SUPPORTED_APIS = {
@@ -771,4 +772,339 @@ def _minicode_network_allowed() -> bool:
         return True
     return str(value).strip().lower() in {"", "0", "false", "no", "off"}
 
+# ─────────────────────────────────────────────
+# Pure provider/auth/model helpers extracted from ModelRuntime
+# ─────────────────────────────────────────────
+def _oauth_config(extension: Mapping[str, Any]) -> Mapping[str, Any] | Any | None:
+    value = extension.get("oauth")
+    if value is not None:
+        return value
+    auth = extension.get("auth")
+    if isinstance(auth, Mapping):
+        return auth.get("oauth")
+    return getattr(auth, "oauth", None) if auth is not None else None
 
+
+
+def _api_key_config(extension: Mapping[str, Any]) -> Mapping[str, Any] | Any | None:
+    auth = extension.get("auth")
+    if isinstance(auth, Mapping):
+        value = auth.get("api_key")
+        if value is not None:
+            return value
+    elif auth is not None:
+        value = getattr(auth, "api_key", None)
+        if value is not None:
+            return value
+    return None
+
+
+
+def _oauth_method(provider: Any, name: str) -> Any | None:
+    if isinstance(provider, Mapping):
+        return provider.get(name)
+    return getattr(provider, name, None)
+
+
+
+def _provider_credential_payload(
+    credentials: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(credentials, Mapping):
+        return None
+    # Older MiniCode generations persisted the derived request auth beside
+    # the canonical Pi credential.  It is not part of Credential and must
+    # never be passed into extension callbacks or re-published by a refresh.
+    return {
+        key: value
+        for key, value in credentials.items()
+        if key != "_minicode_auth"
+    }
+
+
+
+def _normalize_oauth_credentials(
+    provider_id: str,
+    credentials: Any,
+) -> dict[str, Any]:
+    if not isinstance(credentials, Mapping):
+        raise ProviderRegistrationError("OAuth login must return a credentials object")
+    payload = dict(credentials)
+    for field_name in ("access", "refresh"):
+        value = payload.get(field_name)
+        if not isinstance(value, str) or not value:
+            raise ProviderRegistrationError(
+                f'Provider "{provider_id}" OAuth credentials require a non-empty {field_name} token'
+            )
+    expires = payload.get("expires")
+    if (
+        isinstance(expires, bool)
+        or not isinstance(expires, (int, float))
+        or not math.isfinite(float(expires))
+        or float(expires) < 0
+    ):
+        raise ProviderRegistrationError(
+            f'Provider "{provider_id}" OAuth credentials require a finite expires timestamp'
+        )
+    payload["type"] = "oauth"
+    return payload
+
+
+
+def _normalize_api_key_credential(
+    provider_id: str,
+    credential: Any,
+) -> dict[str, Any]:
+    if not isinstance(credential, Mapping):
+        raise ProviderRegistrationError(
+            "API-key login must return a credential object"
+        )
+    credential_type = credential.get("type")
+    if credential_type != "api_key":
+        raise ProviderRegistrationError(
+            f'Provider "{provider_id}" API-key login must return type="api_key"'
+        )
+    payload: dict[str, Any] = {"type": "api_key"}
+    if "key" in credential:
+        key = credential.get("key")
+        if not isinstance(key, str):
+            raise ProviderRegistrationError(
+                f'Provider "{provider_id}" API-key credential key must be a string'
+            )
+        payload["key"] = key
+    if "env" in credential:
+        payload["env"] = _normalize_provider_env(
+            credential.get("env"),
+            source=f'Provider "{provider_id}" API-key credential',
+        )
+    return payload
+
+
+
+def _normalize_model_auth(
+    value: Any,
+    *,
+    source: str,
+    allow_empty: bool = False,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ProviderRegistrationError(f"{source} must return an auth object")
+    _reject_noncanonical_fields(
+        value,
+        {"apiKey": "api_key", "baseUrl": "base_url"},
+        source=source,
+    )
+    auth: dict[str, Any] = {}
+    api_key = value.get("api_key")
+    if api_key is not None:
+        if not isinstance(api_key, str):
+            raise ProviderRegistrationError(f"{source} api_key must be a string")
+        if api_key:
+            auth["api_key"] = api_key
+    base_url = value.get("base_url")
+    if base_url is not None:
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise ProviderRegistrationError(f"{source} base_url must be a non-empty string")
+        auth["base_url"] = base_url.strip()
+    raw_headers = value.get("headers")
+    if raw_headers is not None:
+        if not isinstance(raw_headers, Mapping):
+            raise ProviderRegistrationError(f"{source} headers must be an object")
+        headers: dict[str, str] = {}
+        for key, header_value in raw_headers.items():
+            name, rendered = _validated_header_pair(
+                key,
+                header_value,
+                source=source,
+            )
+            headers[name] = rendered
+        if headers:
+            auth["headers"] = headers
+    if not allow_empty and not auth.get("api_key") and not auth.get("headers"):
+        raise ProviderRegistrationError(f"{source} returned no usable request authentication")
+    return auth
+
+
+
+def _normalize_provider_env(value: Any, *, source: str) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ProviderRegistrationError(f"{source} env must be an object")
+    environment: dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ProviderRegistrationError(
+                f"{source} env names must be non-empty strings"
+            )
+        if not isinstance(item, str):
+            raise ProviderRegistrationError(f"{source} env values must be strings")
+        if any(character in key or character in item for character in ("\r", "\n", "\0")):
+            raise ProviderRegistrationError(
+                f"{source} env values must not contain control separators"
+            )
+        environment[key] = item
+    return environment
+
+
+
+def _normalize_auth_check(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ProviderRegistrationError("API-key check must return an auth check object")
+    auth_type = str(value.get("type") or "")
+    if auth_type != "api_key":
+        raise ProviderRegistrationError("API-key check type must be 'api_key'")
+    source = value.get("source")
+    return {
+        "type": "api_key",
+        **({"source": str(source)} if isinstance(source, str) and source else {}),
+    }
+
+
+
+def _base_model(
+    provider_id: str,
+    model_id: str,
+    *,
+    api: str,
+    base_url: str,
+    max_tokens: int,
+    settings: Mapping[str, Any],
+) -> ModelDefinition:
+    metadata = get_provider_model_metadata(settings, model_id)
+    try:
+        configured_thinking_budget = int(settings.get("thinking_budget") or 0)
+    except (TypeError, ValueError):
+        configured_thinking_budget = 0
+    return ModelDefinition(
+        provider=provider_id,
+        id=model_id,
+        name=model_id,
+        api=api,
+        base_url=base_url,
+        # Anthropic exposes extended thinking through a token budget, not
+        # OpenAI's reasoning-effort enum.  Pi marks the model as reasoning
+        # capable and lets the provider clamp levels; MiniCode's concrete
+        # adapter can faithfully support only off/high for one configured
+        # budget, so advertise capability without inventing intermediate
+        # budget mappings.
+        reasoning=(
+            configured_thinking_budget > 0
+            if api == "anthropic-messages"
+            else bool(metadata["reasoning_effort_levels"])
+        ),
+        input=("text",),
+        cost={},
+        context_window=int(metadata["context_window"]),
+        context_window_source=str(metadata["context_window_source"]),
+        context_window_verified=bool(metadata["context_window_verified"]),
+        max_context_window=int(metadata["max_context_window"]),
+        max_context_window_source=str(metadata["max_context_window_source"]),
+        max_context_window_verified=bool(metadata["max_context_window_verified"]),
+        max_tokens=(
+            max(
+                1,
+                int(
+                    max_tokens
+                    or MINICODE_CAPPED_DEFAULT_MAX_TOKENS
+                ),
+            )
+            if api == "anthropic-messages"
+            else max(0, int(max_tokens or 0))
+        ),
+        max_output_tokens=int(metadata["max_output_tokens"]),
+        max_output_tokens_source=str(metadata["max_output_tokens_source"]),
+        max_output_tokens_verified=bool(metadata["max_output_tokens_verified"]),
+        reasoning_effort_levels=tuple(metadata["reasoning_effort_levels"]),
+        default_reasoning_effort=str(metadata["default_reasoning_effort"]),
+        default_reasoning_summary=str(metadata["default_reasoning_summary"]),
+    )
+
+
+
+def _load_base_providers(
+    *,
+    openai: Mapping[str, Any],
+    anthropic: Mapping[str, Any],
+    custom: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    definitions: dict[str, dict[str, Any]] = {}
+    for provider_id, settings in (
+        ("openai", openai),
+        ("anthropic", anthropic),
+        ("custom", custom),
+    ):
+        raw_wire = _clean_text(settings.get("wire_api")).lower()
+        if provider_id == "anthropic" or raw_wire == "anthropic":
+            api = "anthropic-messages"
+        elif raw_wire == "responses":
+            api = "openai-responses"
+        else:
+            api = "openai-completions"
+        models = [
+            _clean_text(item)
+            for item in settings.get("available_models", [])
+            if _clean_text(item)
+        ]
+        configured_model = _clean_text(settings.get("model"))
+        if configured_model and configured_model not in models:
+            models.insert(0, configured_model)
+        max_tokens = int(settings.get("max_tokens") or 0)
+        definitions[provider_id] = {
+            "name": _clean_text(settings.get("display_name")) or provider_id,
+            "api_key": str(settings.get("api_key") or ""),
+            "base_url": _clean_text(settings.get("base_url")),
+            "api": api,
+            "proxy_mode": _clean_text(settings.get("proxy_mode")) or "inherit",
+            "models": tuple(
+                _base_model(
+                    provider_id,
+                    model,
+                    api=api,
+                    base_url=_clean_text(settings.get("base_url")),
+                    max_tokens=max_tokens,
+                    settings=settings,
+                )
+                for model in models
+            ),
+            "small_fast_model": _clean_text(settings.get("small_fast_model")),
+            "reasoning_effort": _clean_text(settings.get("reasoning_effort")),
+            "responses_reasoning_summary": _clean_text(
+                settings.get("responses_reasoning_summary")
+            )
+            or "off",
+            "thinking_budget": int(settings.get("thinking_budget") or 0) or None,
+            "prompt_cache_retention": _clean_text(
+                settings.get("prompt_cache_retention")
+            ),
+            "model": configured_model,
+            "model_metadata": dict(settings.get("model_metadata") or {}),
+            "reasoning_effort_levels": tuple(
+                _clean_text(item)
+                for item in settings.get("reasoning_effort_levels", ())
+                if _clean_text(item)
+            ),
+        }
+    return definitions
+
+
+
+def _matching_model_definition(
+    values: Any,
+    model_id: str,
+) -> Mapping[str, Any] | None:
+    if not isinstance(values, Sequence) or isinstance(
+        values,
+        (str, bytes, bytearray),
+    ):
+        return None
+    for raw_value in values:
+        try:
+            value = _as_mapping(raw_value, description="provider model")
+        except ProviderRegistrationError:
+            continue
+        if _clean_text(value.get("id")) == model_id:
+            return value
+    return None

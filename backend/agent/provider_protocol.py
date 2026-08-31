@@ -11,8 +11,12 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from backend.agent.terminal_projection import TurnTerminalProjection
 
-from backend.agent.message import AgentEvent
-from backend.agent.public_projection import project_public_usage, public_text
+from backend.agent.provider_lifecycle import LIFECYCLE_RUNTIME_METADATA_KEY
+from backend.agent.public_projection import (
+    project_public_usage,
+    public_string_list,
+    public_text,
+)
 from backend.agent.state import AgentState
 from backend.llm.base import (
     UsageInfo,
@@ -82,12 +86,8 @@ def provider_raw_for_projection(
     refusal = raw.get("refusal")
     if isinstance(refusal, Mapping):
         safe_refusal: dict[str, Any] = {}
-        refusal_type = public_text(
-            refusal.get("type"), max_chars=80, single_line=True
-        )
-        category = public_text(
-            refusal.get("category"), max_chars=80, single_line=True
-        )
+        refusal_type = public_text(refusal.get("type"), max_chars=80, single_line=True)
+        category = public_text(refusal.get("category"), max_chars=80, single_line=True)
         if refusal_type:
             safe_refusal["type"] = refusal_type
         if category:
@@ -102,9 +102,7 @@ def provider_raw_for_projection(
     container = raw.get("container")
     if isinstance(container, Mapping):
         safe_container = {
-            key: public_text(
-                container.get(key), max_chars=256, single_line=True
-            )
+            key: public_text(container.get(key), max_chars=256, single_line=True)
             for key in ("id", "expires_at")
             if str(container.get(key) or "").strip()
         }
@@ -117,9 +115,7 @@ def provider_raw_for_projection(
         for source in search_sources[:256]:
             if not isinstance(source, Mapping):
                 continue
-            title = public_text(
-                source.get("title"), max_chars=512, single_line=True
-            )
+            title = public_text(source.get("title"), max_chars=512, single_line=True)
             url = public_text(source.get("url"), max_chars=2_048, single_line=True)
             if not title and not url:
                 continue
@@ -268,17 +264,6 @@ def _safe_boolean_mapping(value: Any, fields: tuple[str, ...]) -> dict[str, bool
     }
 
 
-def _safe_string_list(value: Any, *, maximum: int = 256) -> list[str]:
-    if not isinstance(value, (list, tuple)):
-        return []
-    result: list[str] = []
-    for item in value[:maximum]:
-        rendered = public_text(item, max_chars=256, single_line=True)
-        if rendered and rendered not in result:
-            result.append(rendered)
-    return result
-
-
 def _safe_provider_output_items(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -299,22 +284,20 @@ def _safe_provider_output_items(value: Any) -> list[dict[str, Any]]:
             continue
         item: dict[str, Any] = {}
         for key in string_fields:
-            rendered = public_text(
-                raw_item.get(key), max_chars=256, single_line=True
-            )
+            rendered = public_text(raw_item.get(key), max_chars=256, single_line=True)
             if rendered:
                 item[key] = rendered
         for key in count_fields:
             count = _safe_nonnegative_int(raw_item.get(key))
             if count is not None:
                 item[key] = count
-        content_types = _safe_string_list(raw_item.get("content_types"), maximum=32)
+        content_types = public_string_list(
+            raw_item.get("content_types"), maximum=32, item_max_chars=256
+        )
         if content_types:
             item["content_types"] = content_types
         if isinstance(raw_item.get("has_encrypted_content"), bool):
-            item["has_encrypted_content"] = bool(
-                raw_item.get("has_encrypted_content")
-            )
+            item["has_encrypted_content"] = bool(raw_item.get("has_encrypted_content"))
         if item.get("type"):
             result.append(item)
     return result
@@ -353,9 +336,7 @@ def _safe_provider_timeline(value: Any) -> list[dict[str, Any]]:
             continue
         item: dict[str, Any] = {}
         for key in string_fields:
-            rendered = public_text(
-                raw_item.get(key), max_chars=256, single_line=True
-            )
+            rendered = public_text(raw_item.get(key), max_chars=256, single_line=True)
             if rendered:
                 item[key] = rendered
         for key in numeric_fields:
@@ -388,9 +369,10 @@ def _safe_provider_items_summary(value: Any) -> dict[str, Any]:
         if item_counts:
             result["item_counts"] = item_counts
 
-    hashes = _safe_string_list(
+    hashes = public_string_list(
         source.get("encrypted_reasoning_hashes"),
         maximum=8,
+        item_max_chars=256,
     )
     if hashes:
         result["encrypted_reasoning_hashes"] = hashes
@@ -412,9 +394,7 @@ def _safe_named_count_rows(
             continue
         item: dict[str, Any] = {}
         for key in string_fields:
-            rendered = public_text(
-                raw_item.get(key), max_chars=256, single_line=True
-            )
+            rendered = public_text(raw_item.get(key), max_chars=256, single_line=True)
             if rendered:
                 item[key] = rendered
         for key in numeric_fields:
@@ -510,7 +490,7 @@ def _safe_provider_request_summary(value: Any) -> dict[str, Any]:
         if isinstance(source.get(key), bool):
             result[key] = bool(source.get(key))
     for key in ("tool_names", "metadata_keys", "request_param_keys"):
-        values = _safe_string_list(source.get(key))
+        values = public_string_list(source.get(key), item_max_chars=256)
         if values:
             result[key] = values
     schema_hashes = source.get("tool_schema_hashes")
@@ -573,16 +553,12 @@ def _safe_provider_request_summary(value: Any) -> dict[str, Any]:
                 if number is not None:
                     safe_params[key] = number
             elif isinstance(raw_value, str):
-                rendered = public_text(
-                    raw_value, max_chars=80, single_line=True
-                )
+                rendered = public_text(raw_value, max_chars=80, single_line=True)
                 if rendered:
                     safe_params[key] = rendered
         if safe_params:
             result["request_params"] = safe_params
-    prompt_sections = _safe_prompt_section_summary(
-        source.get("prompt_section_summary")
-    )
+    prompt_sections = _safe_prompt_section_summary(source.get("prompt_section_summary"))
     if prompt_sections:
         result["prompt_section_summary"] = prompt_sections
     return result
@@ -595,7 +571,9 @@ def _safe_prompt_section_delta(value: Any) -> dict[str, Any]:
     if status:
         result["status"] = status
     for key in ("added", "removed"):
-        values = _safe_string_list(source.get(key), maximum=128)
+        values = public_string_list(
+            source.get(key), maximum=128, item_max_chars=256
+        )
         if values:
             result[key] = values
     for key in ("section_count_delta", "total_chars_delta"):
@@ -628,7 +606,9 @@ def _safe_prompt_section_delta(value: Any) -> dict[str, Any]:
             chars_delta = _safe_number(raw_item.get("chars_delta"))
             if chars_delta is not None:
                 item["chars_delta"] = chars_delta
-            changes = _safe_string_list(raw_item.get("changes"), maximum=32)
+            changes = public_string_list(
+                raw_item.get("changes"), maximum=32, item_max_chars=256
+            )
             if changes:
                 item["changes"] = changes
             if item:
@@ -656,7 +636,9 @@ def _safe_prompt_cache_diagnostic(value: Any) -> dict[str, Any]:
         number = _safe_number(source.get(key))
         if number is not None:
             result[key] = number
-    changes = _safe_string_list(source.get("changes"), maximum=128)
+    changes = public_string_list(
+        source.get("changes"), maximum=128, item_max_chars=256
+    )
     if changes:
         result["changes"] = changes
     tool_delta = source.get("tool_delta")
@@ -666,7 +648,9 @@ def _safe_prompt_cache_diagnostic(value: Any) -> dict[str, Any]:
             ("added_count", "removed_count", "changed_schema_count"),
         )
         for key in ("added", "removed", "changed_schemas"):
-            values = _safe_string_list(tool_delta.get(key), maximum=64)
+            values = public_string_list(
+                tool_delta.get(key), maximum=64, item_max_chars=256
+            )
             if values:
                 safe_tool_delta[key] = values
         if safe_tool_delta:
@@ -686,9 +670,7 @@ def _safe_side_calls(value: Any) -> list[dict[str, Any]]:
             continue
         item: dict[str, Any] = {}
         for key in ("id", "operation", "provider", "model", "status", "error_type"):
-            rendered = public_text(
-                raw_item.get(key), max_chars=256, single_line=True
-            )
+            rendered = public_text(raw_item.get(key), max_chars=256, single_line=True)
             if rendered:
                 item[key] = rendered
         for key in ("elapsed_ms", "attempts", "retry_count"):
@@ -723,11 +705,9 @@ def usage_terminal_projection(
 def add_usage(left: UsageInfo, right: UsageInfo | None) -> UsageInfo:
     """Accumulate into the turn-owned mutable usage bucket.
 
-    ``LLMAdapter.bind_turn_usage`` keeps a ContextVar reference to ``left`` so
-    non-stream side calls can charge the same turn. Replacing that object here
-    would split accounting after the first provider response: stream usage
-    would move to a new object while compaction/recovery kept mutating the
-    stale bound bucket.
+    Main-stream and side-call accounting share this exact object through the
+    explicit ``LLMTurnContext``. Replacing it would split accounting after the
+    first provider response.
     """
     if right is None:
         return left
@@ -768,6 +748,7 @@ def build_llm_request_metadata(
     workspace_root: Path | None,
     run_id: str,
     conversation_id: str,
+    provider_lifecycle_runtime: Any | None = None,
 ) -> dict[str, Any]:
     explicit = metadata.get("llm_request_metadata")
     remaining: dict[str, Any] = dict(explicit) if isinstance(explicit, dict) else {}
@@ -794,17 +775,19 @@ def build_llm_request_metadata(
     app_session_id = str(
         pop_explicit("minicode_app_session_id", runtime_session_id) or ""
     ).strip()
-    effective_task_id = str(
-        pop_explicit("minicode_task_id", task_id) or ""
-    ).strip()
+    effective_task_id = str(pop_explicit("minicode_task_id", task_id) or "").strip()
     effective_run_id = str(pop_explicit("run_id", run_id) or "").strip()
 
-    agent_mode = str(
-        metadata.get("agent_mode") or remaining.get("agent_mode") or ""
-    ).strip().lower()
-    agent_role = str(
-        metadata.get("agent_role") or remaining.get("agent_role") or ""
-    ).strip().lower()
+    agent_mode = (
+        str(metadata.get("agent_mode") or remaining.get("agent_mode") or "")
+        .strip()
+        .lower()
+    )
+    agent_role = (
+        str(metadata.get("agent_role") or remaining.get("agent_role") or "")
+        .strip()
+        .lower()
+    )
     is_non_root_agent = (
         agent_mode in {"subagent", "background"}
         or agent_role in {"subagent", "background"}
@@ -889,6 +872,8 @@ def build_llm_request_metadata(
         )
     for key, value in remaining.items():
         request.setdefault(key, value)
+    if provider_lifecycle_runtime is not None:
+        request[LIFECYCLE_RUNTIME_METADATA_KEY] = provider_lifecycle_runtime
     return request
 
 
@@ -907,7 +892,9 @@ def annotate_request_metadata_with_prompt_cache_fork(
     scalar_fields = {
         "prompt_cache_fork_status": fork.get("status"),
         "prompt_cache_fork_stable_prefix": fork.get("stable_prefix"),
-        "prompt_cache_parent_stable_hash": prefix_shadow.get("parent_stable_system_hash"),
+        "prompt_cache_parent_stable_hash": prefix_shadow.get(
+            "parent_stable_system_hash"
+        ),
         "prompt_cache_child_stable_hash": prefix_shadow.get("child_stable_system_hash"),
         "prompt_cache_parent_tools_hash": schema_shadow.get("parent_tools_hash"),
         "prompt_cache_child_tools_hash": schema_shadow.get("child_tools_hash"),
@@ -918,7 +905,9 @@ def annotate_request_metadata_with_prompt_cache_fork(
             request_metadata[key] = text
 
 
-def prompt_cache_tracking_source(*, run_record: Any, session_id: str, task_id: str) -> str:
+def prompt_cache_tracking_source(
+    *, run_record: Any, session_id: str, task_id: str
+) -> str:
     role = str(getattr(run_record, "role", "") or "main")
     conversation_id = str(getattr(run_record, "conversation_id", "") or "").strip()
     if role == "main":
@@ -931,7 +920,9 @@ def merge_prompt_cache_safe_request_summary(
     prompt_cache_safe_params: dict[str, Any] | None,
 ) -> dict[str, Any]:
     summary = dict(request_summary) if isinstance(request_summary, dict) else {}
-    safe = prompt_cache_safe_params if isinstance(prompt_cache_safe_params, dict) else {}
+    safe = (
+        prompt_cache_safe_params if isinstance(prompt_cache_safe_params, dict) else {}
+    )
     if not safe:
         return summary
     field_defaults = {
@@ -998,14 +989,28 @@ def provider_trace_payload(
             if isinstance(raw.get("usage"), dict)
             else {}
         ),
-        "citations": raw.get("citations") if isinstance(raw.get("citations"), list) else [],
-        "search_sources": raw.get("search_sources") if isinstance(raw.get("search_sources"), list) else [],
-        "output_items": raw.get("output_items") if isinstance(raw.get("output_items"), list) else [],
-        "provider_timeline": raw.get("provider_timeline") if isinstance(raw.get("provider_timeline"), list) else [],
+        "citations": raw.get("citations")
+        if isinstance(raw.get("citations"), list)
+        else [],
+        "search_sources": raw.get("search_sources")
+        if isinstance(raw.get("search_sources"), list)
+        else [],
+        "output_items": raw.get("output_items")
+        if isinstance(raw.get("output_items"), list)
+        else [],
+        "provider_timeline": raw.get("provider_timeline")
+        if isinstance(raw.get("provider_timeline"), list)
+        else [],
         "request_summary": request_summary,
-        "prompt_cache_diagnostic": raw.get("prompt_cache_diagnostic") if isinstance(raw.get("prompt_cache_diagnostic"), dict) else {},
-        "safety": raw.get("safety") if isinstance(raw.get("safety"), dict) else {"redacted_prompt": True},
-        "loop_metrics": raw.get("loop_metrics") if isinstance(raw.get("loop_metrics"), dict) else dict(loop_metrics or {}),
+        "prompt_cache_diagnostic": raw.get("prompt_cache_diagnostic")
+        if isinstance(raw.get("prompt_cache_diagnostic"), dict)
+        else {},
+        "safety": raw.get("safety")
+        if isinstance(raw.get("safety"), dict)
+        else {"redacted_prompt": True},
+        "loop_metrics": raw.get("loop_metrics")
+        if isinstance(raw.get("loop_metrics"), dict)
+        else dict(loop_metrics or {}),
         "iteration_id": iteration_id,
         "call_index": call_index,
     }
@@ -1048,7 +1053,9 @@ def loop_metrics_payload(
     pending_tool_call_count: int = 0,
 ) -> dict[str, Any]:
     """Build stable loop metrics."""
-    completed = max(0, len(state.tool_calls) - max(0, int(turn_start_tool_call_count or 0)))
+    completed = max(
+        0, len(state.tool_calls) - max(0, int(turn_start_tool_call_count or 0))
+    )
     pending = max(0, int(pending_tool_call_count or 0))
     now = int(time.time() * 1000)
     return {

@@ -33,7 +33,7 @@ async def apply_provider_chunk_steer(
     context_builder: Any,
     stream_text: Any,
     state: Any,
-    tool_executor: Any,
+    tool_tracker: Any,
     stream_iter: Any,
     provider_attempt: Any,
 ) -> AsyncIterator[AgentEvent | ProviderSteerResult]:
@@ -63,9 +63,7 @@ async def apply_provider_chunk_steer(
             context_builder,
             partial_text,
             phase=(
-                "final_answer"
-                if stream_text.saw_final_answer_phase
-                else "commentary"
+                "final_answer" if stream_text.saw_final_answer_phase else "commentary"
             ),
         )
     await turn_kernel.accept_turn_steer(chunk_steer)
@@ -75,7 +73,7 @@ async def apply_provider_chunk_steer(
         user_message_id=chunk_steer.user_message_id,
         target_message_id=chunk_steer.target_message_id,
     )
-    tool_executor.cancel_remaining()
+    tool_tracker.cancel_remaining()
     close_stream = getattr(stream_iter, "aclose", None)
     if callable(close_stream):
         with suppress(Exception):
@@ -96,11 +94,11 @@ async def reset_for_provider_retry(
     *,
     stream_text: Any,
     stream_state: Any,
-    tool_executor: Any,
+    tool_tracker: Any,
 ) -> AsyncIterator[AgentEvent | ProviderRetryReset]:
     """Discard speculative output before replaying on the same provider."""
 
-    tool_executor.cancel_remaining()
+    tool_tracker.cancel_remaining()
     completed = stream_text.cancel_active_agent_message()
     if completed is not None:
         yield completed

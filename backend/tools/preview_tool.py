@@ -157,6 +157,10 @@ class PreviewServerTool(BaseTool):
         timeout = float(raw_timeout) if raw_timeout is not None else None
         session_id, conversation_id = self._owner(context)
         workspace_root = self._workspace(context)
+        if workspace_root is None:
+            return self._error_result(
+                "Starting a preview requires an open workspace."
+            )
         try:
             proc = (
                 await start_static_preview(

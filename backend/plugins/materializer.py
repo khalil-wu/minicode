@@ -530,12 +530,14 @@ def _download(url: str, destination: Path, *, urlopen: Callable[..., Any] | None
             header_value = response.headers.get("Content-Length") if getattr(response, "headers", None) else None
             if header_value:
                 try:
-                    if int(header_value) > MAX_MARKETPLACE_ARCHIVE_BYTES:
+                    content_length = int(header_value)
+                except ValueError:
+                    pass
+                else:
+                    if content_length > MAX_MARKETPLACE_ARCHIVE_BYTES:
                         raise MaterializationError(
                             f"marketplace archive exceeds the {MAX_MARKETPLACE_ARCHIVE_BYTES} byte limit"
                         )
-                except ValueError:
-                    pass
             with destination.open("wb") as output:
                 total = 0
                 while True:

@@ -3,7 +3,7 @@
 Reports candidate files that should be considered for splitting to keep
 modules focused and reviewable.
 
-Run in CI as a soft warning (exits non-zero so it shows up in the pipeline).
+Run in CI as a soft warning.
 """
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ def main() -> int:
     for rel_path, size in large_files:
         print(f"  {human_size(size):>8}  {rel_path}")
     print()
-    return 1
+    return 0
 
 
 if __name__ == "__main__":

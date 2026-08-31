@@ -12,6 +12,9 @@ if TYPE_CHECKING:
     from backend.permissions.context import ToolExecutionContext
 
 
+_WORKSPACE_ROOT_UNSET = object()
+
+
 class FuzzySearchTool(BaseTool):
     """
     模糊文件搜索工具。
@@ -46,19 +49,25 @@ class FuzzySearchTool(BaseTool):
     )
     permission = PermissionLevel.AUTO
 
-    def __init__(self, workspace_root: Path):
+    def __init__(self, workspace_root: Path | None | object = _WORKSPACE_ROOT_UNSET):
         """
         初始化工具。
 
         Args:
             workspace_root: 工作区根目录
         """
-        self.workspace_root = workspace_root
+        self.workspace_root = (
+            Path.cwd()
+            if workspace_root is _WORKSPACE_ROOT_UNSET
+            else Path(workspace_root).expanduser().resolve()
+            if workspace_root is not None
+            else None
+        )
 
-    def _resolve_workspace_root(self, context: ToolExecutionContext | None = None) -> Path:
+    def _resolve_workspace_root(self, context: ToolExecutionContext | None = None) -> Path | None:
         if context and getattr(context, "workspace_root", None):
             return Path(context.workspace_root).resolve()
-        return Path(self.workspace_root).resolve()
+        return self.workspace_root.resolve() if self.workspace_root is not None else None
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -98,6 +107,8 @@ class FuzzySearchTool(BaseTool):
             return self._error_result("缺少 query 参数")
 
         workspace_root = self._resolve_workspace_root(context)
+        if workspace_root is None:
+            return self._error_result("Fuzzy search requires an open workspace.")
 
         # 获取搜索引擎
         engine = get_global_fuzzy_search(workspace_root)

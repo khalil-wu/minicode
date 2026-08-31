@@ -40,9 +40,6 @@ from backend.tools.base import (
     truncate_text_tail,
 )
 
-MAX_TIMEOUT_MS = 30_000
-MAX_TIMEOUT_SECONDS = 30
-
 from backend.tools.command_support import (
     _as_bool,
     _coerce_timeout,
@@ -50,14 +47,23 @@ from backend.tools.command_support import (
     _command_matches_patterns,
     _command_side_effect_kind,
     _host_shell_command,
-    _is_bypass_mode,
     _looks_like_sandbox_denial,
     _model_shell_description,
     _validated_env,
     _windows_command_portability_hint,
     _workspace_sandbox_policy,
+    DEFAULT_TIMEOUT,
+    MAX_TIMEOUT_SECONDS,
+)
+from backend.tools.path_resolution import _is_bypass_mode
 
-    DEFAULT_TIMEOUT,)
+if TYPE_CHECKING:
+    from backend.permissions.context import ToolExecutionContext
+    from backend.terminal.manager import BackgroundCommandManager
+
+
+logger = logging.getLogger(__name__)
+
 
 class RunCommandTool(BaseTool):
     """Execute shell commands."""
@@ -504,7 +510,11 @@ class RunCommandTool(BaseTool):
         except RuntimeError as exc:
             return self._error_result(str(exc))
 
-        sandbox_label = "bypass execution" if policy.disable_os_sandbox else "OS sandbox"
+        sandbox_label = (
+            "bypass execution"
+            if capability.backend == "full-access"
+            else "OS sandbox"
+        )
         return ToolResult(
             content=(
                 f"Background command started (ID: {bg_cmd.command_id})\n"
@@ -676,11 +686,8 @@ class RunCommandTool(BaseTool):
                 type="command_output",
             )
         except (OSError, ValueError):
-            metadata = getattr(context, "metadata", None)
             tool_call_id = str(
-                metadata.get("_current_tool_call_id")
-                if isinstance(metadata, dict)
-                else ""
+                getattr(context, "tool_call_id", "") or ""
             ).strip() or "run_command"
             persisted = persist_tool_result(
                 output,

@@ -44,11 +44,11 @@ async def handle_preview_detect(session: "WebSocketSession", data: dict[str, Any
     except Exception as exc:
         await emit_command_error(session, "preview.detect", f"Failed to detect dev servers: {exc}")
         return True
-    await session._send_event(_scope_event(preview_servers_updated_event(servers), scope))
+    await session.send_event(_scope_event(preview_servers_updated_event(servers), scope))
     for server in servers:
-        await session._send_event(_scope_event(preview_server_detected_event(server), scope))
+        await session.send_event(_scope_event(preview_server_detected_event(server), scope))
     if not servers:
-        await session._send_event(_scope_event(no_preview_servers_notice(), scope))
+        await session.send_event(_scope_event(no_preview_servers_notice(), scope))
     return True
 
 
@@ -72,7 +72,7 @@ async def handle_preview_launch_config(session: "WebSocketSession", data: dict[s
             data={"workspace_root": workspace_root, "source": exc.source, "reason": exc.reason},
         )
         return True
-    await session._send_event(
+    await session.send_event(
         _scope_event(preview_launch_config_event(
             workspace_root=workspace_root,
             configs=configs,
@@ -105,7 +105,7 @@ async def handle_preview_launch_start(session: "WebSocketSession", data: dict[st
         event_type = str(event.get("type", ""))
         if not is_server_event(event_type):
             return
-        await session._send_event(
+        await session.send_event(
             _scope_event(AgentEvent(
                 type=cast(ServerEventType, event_type),
                 data={k: v for k, v in event.items() if k != "type"},
@@ -123,12 +123,12 @@ async def handle_preview_launch_start(session: "WebSocketSession", data: dict[st
     except Exception as exc:
         await emit_command_error(session, "preview.launch.start", f"Failed to start preview: {exc}")
         return True
-    await session._send_event(_scope_event(preview_launch_started_event(process), scope))
-    await session._send_event(_scope_event(preview_launch_detected_event(process), scope))
+    await session.send_event(_scope_event(preview_launch_started_event(process), scope))
+    await session.send_event(_scope_event(preview_launch_detected_event(process), scope))
     verification = await wait_until_ready(process.effective_url, timeout=20.0, interval=1.0)
     if verification.ok:
         await mark_preview_ready(process)
-    await session._send_event(_scope_event(preview_verified_event(verification), scope))
+    await session.send_event(_scope_event(preview_verified_event(verification), scope))
     return True
 
 
@@ -153,9 +153,9 @@ async def handle_preview_launch_stop(session: "WebSocketSession", data: dict[str
         await emit_command_error(session, "preview.launch.stop", str(exc))
         return True
     for process in stopped:
-        await session._send_event(_scope_event(preview_launch_stopped_event(process), scope))
+        await session.send_event(_scope_event(preview_launch_stopped_event(process), scope))
     if not stopped:
-        await session._send_event(_scope_event(no_preview_launch_notice(), scope))
+        await session.send_event(_scope_event(no_preview_launch_notice(), scope))
     return True
 
 
@@ -176,9 +176,9 @@ async def handle_preview_navigate(session: "WebSocketSession", data: dict[str, A
     if error_event is not None:
         await emit_command_error(session, "preview.navigate", error_event)
         return True
-    await session._send_event(_scope_event(preview_navigated_event(url), scope))
+    await session.send_event(_scope_event(preview_navigated_event(url), scope))
     result = await verify_preview_url(url)
-    await session._send_event(_scope_event(preview_verified_event(result), scope))
+    await session.send_event(_scope_event(preview_verified_event(result), scope))
     return True
 
 
@@ -200,7 +200,7 @@ async def handle_preview_refresh(session: "WebSocketSession", data: dict[str, An
         if error_event is not None:
             await emit_command_error(session, "preview.refresh", error_event)
             return True
-    await session._send_event(_scope_event(preview_refreshed_event(url), scope))
+    await session.send_event(_scope_event(preview_refreshed_event(url), scope))
     return True
 
 
@@ -222,7 +222,7 @@ async def handle_preview_verify(session: "WebSocketSession", data: dict[str, Any
         await emit_command_error(session, "preview.verify", error_event)
         return True
     result = await verify_preview_url(url)
-    await session._send_event(_scope_event(preview_verified_event(result), scope))
+    await session.send_event(_scope_event(preview_verified_event(result), scope))
     return True
 
 

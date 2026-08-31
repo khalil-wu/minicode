@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import threading
 from dataclasses import asdict, dataclass, field
@@ -15,6 +16,11 @@ from filelock import FileLock
 logger = logging.getLogger(__name__)
 
 CHECKPOINT_DATA_DIR = DATA_ROOT / "checkpoints"
+MAX_RETAINED_FILE_CHECKPOINTS = 100
+
+
+def checkpoint_owner_key(conversation_id: str) -> str:
+    return hashlib.sha256(str(conversation_id or "").encode("utf-8")).hexdigest()[:16]
 
 
 class CheckpointCorruptError(RuntimeError):
@@ -23,6 +29,15 @@ class CheckpointCorruptError(RuntimeError):
     Distinct from "not found": callers and users must be able to tell a
     missing checkpoint from one that was created and later became unreadable.
     """
+
+
+@dataclass(frozen=True)
+class CheckpointScanStatus:
+    corrupt_files: tuple[str, ...] = ()
+
+    @property
+    def degraded(self) -> bool:
+        return bool(self.corrupt_files)
 
 
 @dataclass(frozen=True)
@@ -106,19 +121,29 @@ class CheckpointStore:
         # MiniCode equivalent, shared by every session under this data root.
         self._blobs = self._root / "blobs"
         self._blobs.mkdir(parents=True, exist_ok=True)
+        self._records = self._root / "records"
+        self._records.mkdir(parents=True, exist_ok=True)
         self._thread_lock = threading.RLock()
         self._process_lock = FileLock(str(self._root / ".checkpoints.lock"), timeout=60)
+        self.scan_status = CheckpointScanStatus()
 
     def _locked(self) -> "_CheckpointLock":
         return _CheckpointLock(self._thread_lock, self._process_lock)
 
     def save(self, record: CheckpointRecord) -> CheckpointRecord:
         with self._locked():
+            embedded_owner = self._owner_key_from_checkpoint_id(record.id)
+            expected_owner = checkpoint_owner_key(record.conversation_id)
+            if embedded_owner and embedded_owner != expected_owner:
+                raise ValueError("Checkpoint id does not match its conversation owner")
             path = self._path_for(record.id)
+            path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(
                 path,
                 json.dumps(record.to_dict(), ensure_ascii=False, indent=2) + "\n",
             )
+            if embedded_owner:
+                self._prune_owner_unlocked(embedded_owner)
         return record
 
     def get(self, checkpoint_id: str) -> CheckpointRecord | None:
@@ -126,20 +151,19 @@ class CheckpointStore:
         if not checkpoint_id:
             return None
         with self._locked():
-            path = self._path_for(checkpoint_id)
-            if not path.exists():
-                return None
-            try:
-                return CheckpointRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
-            except (OSError, json.JSONDecodeError) as exc:
-                # Swallowing this as None made a corrupt checkpoint report
-                # "not found", hiding real data loss from the user.
-                logger.error(
-                    "Checkpoint file %s is corrupt: %s", path, exc
-                )
-                raise CheckpointCorruptError(
-                    f"Checkpoint '{checkpoint_id}' exists but is corrupt and cannot be loaded: {exc}"
-                ) from exc
+            for path in self._candidate_paths_for(checkpoint_id):
+                if not path.exists():
+                    continue
+                try:
+                    return self._read_record(path)
+                except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+                    # A direct lookup names one checkpoint, so corruption must
+                    # remain a user-visible error rather than "not found".
+                    logger.error("Checkpoint file %s is corrupt: %s", path, exc)
+                    raise CheckpointCorruptError(
+                        f"Checkpoint '{checkpoint_id}' exists but is corrupt and cannot be loaded: {exc}"
+                    ) from exc
+            return None
 
     def list_for_conversation(
         self,
@@ -149,25 +173,30 @@ class CheckpointStore:
     ) -> list[CheckpointRecord]:
         if limit is not None and int(limit) <= 0:
             return []
+        owner = str(conversation_id or "").strip()
         records: list[CheckpointRecord] = []
         with self._locked():
+            corrupt_files: list[str] = []
             paths: list[tuple[int, Path]] = []
-            for path in self._root.glob("*.json"):
+            for path in self._conversation_paths(owner):
                 try:
                     paths.append((path.stat().st_mtime_ns, path))
-                except OSError:
+                except OSError as exc:
+                    corrupt_files.append(self._path_label(path))
+                    logger.warning("Cannot inspect checkpoint file %s: %s", path, exc)
                     continue
             for _stamp, path in sorted(paths, reverse=True):
                 try:
-                    record = CheckpointRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
+                    record = self._read_record(path)
                 except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-                    raise CheckpointCorruptError(
-                        f"Checkpoint file {path.name} is corrupt and cannot be listed: {exc}"
-                    ) from exc
-                if record.conversation_id == conversation_id:
+                    corrupt_files.append(self._path_label(path))
+                    logger.warning("Skipping corrupt checkpoint file %s: %s", path, exc)
+                    continue
+                if record.conversation_id == owner:
                     records.append(record)
                     if limit is not None and len(records) >= int(limit):
                         break
+            self.scan_status = CheckpointScanStatus(tuple(corrupt_files))
         return records
 
     def delete_for_conversation(self, conversation_id: str) -> int:
@@ -177,26 +206,37 @@ class CheckpointStore:
             return 0
         removed = 0
         with self._locked():
-            for path in self._root.glob("*.json"):
+            corrupt_files: list[str] = []
+            owner_dir = self._owner_dir(checkpoint_owner_key(owner))
+            owner_paths = list(owner_dir.glob("*.json")) if owner_dir.exists() else []
+            legacy_paths = list(self._root.glob("*.json"))
+            for path in [*owner_paths, *legacy_paths]:
                 try:
-                    record = CheckpointRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
+                    record = self._read_record(path)
                 except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-                    raise CheckpointCorruptError(
-                        f"Checkpoint file {path.name} is corrupt and cannot be deleted safely"
-                    ) from exc
+                    corrupt_files.append(self._path_label(path))
+                    if path.parent == owner_dir:
+                        logger.warning(
+                            "Deleting corrupt checkpoint file from its isolated owner directory %s: %s",
+                            path,
+                            exc,
+                        )
+                        path.unlink(missing_ok=True)
+                        removed += 1
+                    else:
+                        logger.warning(
+                            "Skipping corrupt legacy checkpoint with unknown owner %s: %s",
+                            path,
+                            exc,
+                        )
+                    continue
                 if record.conversation_id != owner:
                     continue
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    continue
-                except OSError as exc:
-                    raise CheckpointCorruptError(
-                        f"Checkpoint file {path.name} could not be deleted"
-                    ) from exc
-                for snapshot in record.files:
-                    self._unlink_blob(snapshot.blob)
+                self._delete_record_unlocked(path, record)
                 removed += 1
+            if owner_dir.exists() and not any(owner_dir.iterdir()):
+                owner_dir.rmdir()
+            self.scan_status = CheckpointScanStatus(tuple(corrupt_files))
         return removed
 
     def write_blob(self, name: str, data: bytes) -> None:
@@ -229,6 +269,42 @@ class CheckpointStore:
         return self._blobs / clean
 
     def _path_for(self, checkpoint_id: str) -> Path:
+        clean = self._validate_checkpoint_id(checkpoint_id)
+        owner_key = self._owner_key_from_checkpoint_id(clean)
+        if owner_key:
+            return self._owner_dir(owner_key) / f"{clean}.json"
+        return self._root / f"{clean}.json"
+
+    def _candidate_paths_for(self, checkpoint_id: str) -> list[Path]:
+        clean = self._validate_checkpoint_id(checkpoint_id)
+        primary = self._path_for(clean)
+        legacy = self._root / f"{clean}.json"
+        return [primary] if primary == legacy else [primary, legacy]
+
+    def _conversation_paths(self, conversation_id: str) -> list[Path]:
+        owner_dir = self._owner_dir(checkpoint_owner_key(conversation_id))
+        isolated = list(owner_dir.glob("*.json")) if owner_dir.exists() else []
+        return [*isolated, *self._root.glob("*.json")]
+
+    def _owner_dir(self, owner_key: str) -> Path:
+        return self._records / owner_key
+
+    @staticmethod
+    def _owner_key_from_checkpoint_id(checkpoint_id: str) -> str:
+        parts = str(checkpoint_id or "").split("_")
+        if (
+            len(parts) == 3
+            and parts[0] == "chk"
+            and len(parts[1]) == 16
+            and len(parts[2]) == 12
+            and all(ch in "0123456789abcdef" for ch in parts[1])
+            and all(ch in "0123456789abcdef" for ch in parts[2])
+        ):
+            return parts[1]
+        return ""
+
+    @staticmethod
+    def _validate_checkpoint_id(checkpoint_id: str) -> str:
         clean = str(checkpoint_id or "").strip()
         if not clean or clean in {".", ".."}:
             raise ValueError("checkpoint_id is required")
@@ -237,7 +313,53 @@ class CheckpointStore:
             for ch in clean
         ):
             raise ValueError("Invalid checkpoint_id")
-        return self._root / f"{clean}.json"
+        return clean
+
+    @staticmethod
+    def _read_record(path: Path) -> CheckpointRecord:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("checkpoint payload must be an object")
+        return CheckpointRecord.from_dict(payload)
+
+    def _delete_record_unlocked(self, path: Path, record: CheckpointRecord) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise CheckpointCorruptError(
+                f"Checkpoint file {path.name} could not be deleted"
+            ) from exc
+        for snapshot in record.files:
+            self._unlink_blob(snapshot.blob)
+
+    def _prune_owner_unlocked(
+        self,
+        owner_key: str,
+        *,
+        keep: int = MAX_RETAINED_FILE_CHECKPOINTS,
+    ) -> None:
+        owner_dir = self._owner_dir(owner_key)
+        paths = sorted(
+            owner_dir.glob("*.json"),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        for path in paths[keep:]:
+            try:
+                record = self._read_record(path)
+            except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+                logger.warning("Deleting corrupt expired checkpoint file %s: %s", path, exc)
+                path.unlink(missing_ok=True)
+                continue
+            self._delete_record_unlocked(path, record)
+
+    def _path_label(self, path: Path) -> str:
+        try:
+            return path.relative_to(self._root).as_posix()
+        except ValueError:
+            return path.name
 
 
 class _CheckpointLock:

@@ -9,6 +9,7 @@ import { MainSlots } from "./MainSlots";
 import { SideChatPanel } from "../panels/SideChatPanel";
 import { ChatPane } from "../chat/ChatPane";
 import { useAppStore } from "../stores";
+import { selectPreviewSurface } from "../lib/preview-projection";
 import { isCompactWorkbenchViewport, LEFT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
 import { SafeBoundary } from "./ChunkErrorBoundary";
 import { ChatErrorFallback } from "../components/ChatErrorFallback";
@@ -27,30 +28,51 @@ const useCompactWorkbench = () => {
   return compact;
 };
 
-const currentConnectionPresentation = (isConnected: boolean) => getConnectionPresentation({
-  isConnected,
+const currentConnectionPresentation = (state: {
+  isConnected: boolean;
+  connectionPhase: Parameters<typeof getConnectionPresentation>[0]["connectionPhase"];
+  reconnectAttempt: number;
+  reconnectMaxAttempts: number | null;
+  connectionError: string | null;
+}) => getConnectionPresentation({
+  isConnected: state.isConnected,
   isDesktop: isDesktop(),
   hasRuntimeToken: Boolean(runtime()?.runtimeToken?.trim()),
+  connectionPhase: state.connectionPhase,
+  reconnectAttempt: state.reconnectAttempt,
+  reconnectMaxAttempts: state.reconnectMaxAttempts,
+  connectionError: state.connectionError,
 });
 
 const ConnectionBanner = () => {
   const isConnected = useAppStore((s) => s.isConnected);
-  const presentation = currentConnectionPresentation(isConnected);
-  const previousConnectedRef = useRef(isConnected);
+  const connectionPhase = useAppStore((s) => s.connectionPhase);
+  const reconnectAttempt = useAppStore((s) => s.reconnectAttempt);
+  const reconnectMaxAttempts = useAppStore((s) => s.reconnectMaxAttempts);
+  const connectionError = useAppStore((s) => s.connectionError);
+  const connectionState = {
+    isConnected,
+    connectionPhase,
+    reconnectAttempt,
+    reconnectMaxAttempts,
+    connectionError,
+  };
+  const presentation = currentConnectionPresentation(connectionState);
+  const previousAnnouncementRef = useRef(presentation.accessibleLabel);
   const [announcement, setAnnouncement] = useState(
     presentation.accessibleLabel,
   );
   useEffect(() => {
-    if (previousConnectedRef.current === isConnected) return;
-    previousConnectedRef.current = isConnected;
-    setAnnouncement(currentConnectionPresentation(isConnected).accessibleLabel);
-  }, [isConnected]);
+    if (previousAnnouncementRef.current === presentation.accessibleLabel) return;
+    previousAnnouncementRef.current = presentation.accessibleLabel;
+    setAnnouncement(presentation.accessibleLabel);
+  }, [presentation.accessibleLabel]);
   return (
     <>
       <span role="status" aria-live="polite" aria-atomic="true" className="sr-only">
         {announcement}
       </span>
-      {!isConnected && (
+      {!connectionState.isConnected && (
         <div
           aria-hidden="true"
           className="mc-connection-banner"
@@ -178,7 +200,7 @@ export const WorkbenchShell = () => {
   const panelSlots = useAppStore((s) => s.panelSlots);
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
   const rightStackTab = useAppStore((s) => s.rightStackTab);
-  const previewRequestAt = useAppStore((s) => s.previewArtifact?.loadedAt ?? 0);
+  const previewRequestAt = useAppStore((s) => selectPreviewSurface(s).previewArtifact?.loadedAt ?? 0);
   const setLeftSidebarWidth = useAppStore((s) => s.setLeftSidebarWidth);
   const toggleRightPanel = useAppStore((s) => s.toggleRightPanel);
   const compact = useCompactWorkbench();

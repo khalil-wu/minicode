@@ -39,6 +39,7 @@ import {
   isPreviewableMediaPath,
   mediaTypeForPath,
 } from "../lib/media-types";
+import { formatBytes } from "../lib/format-bytes";
 import {
   type FileSearchResult,
   type ExplorerDensity,
@@ -279,11 +280,7 @@ export const formatFileMeta = (node: WorkspaceTreeNode): string => {
   return bits.join(" \u2022 ");
 };
 
-export const formatBytes = (value: number): string => {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-};
+export { formatBytes };
 
 // ── Icon helpers ───────────────────────────────────────────────────────
 

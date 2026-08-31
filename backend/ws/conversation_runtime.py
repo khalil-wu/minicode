@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from copy import deepcopy
 from typing import Any
 
 from backend.agent.context import ContextBuilder
@@ -24,13 +25,16 @@ class ConversationRuntime:
         *,
         conversation_repo: ConversationRepository,
         context_builder: ContextBuilder,
-        build_effective_transcript_content: Callable[[dict[str, Any]], str],
         build_summary_from_transcript: Callable[..., str],
+        projection_lock_for: Callable[[str], asyncio.Lock] | None = None,
     ) -> None:
         self._conversation_repo = conversation_repo
         self._context_builder = context_builder
-        self._build_effective_transcript_content = build_effective_transcript_content
         self._build_summary_from_transcript = build_summary_from_transcript
+        self._local_projection_locks: dict[str, asyncio.Lock] = {}
+        self._projection_lock_for = (
+            projection_lock_for or self._local_projection_lock_for
+        )
 
         self.active_conversation_id: str | None = None
         self._hydration_task: asyncio.Task[None] | None = None
@@ -39,10 +43,17 @@ class ConversationRuntime:
         self._pending_hydration: tuple[
             str,
             int,
+            int,
             list[dict[str, Any]],
             bool,
             Callable[[str], Any] | None,
         ] | None = None
+
+    def _local_projection_lock_for(self, conversation_id: str) -> asyncio.Lock:
+        return self._local_projection_locks.setdefault(
+            str(conversation_id or ""),
+            asyncio.Lock(),
+        )
 
     @property
     def active_conversation(self) -> Any | None:
@@ -94,6 +105,8 @@ class ConversationRuntime:
         defer_start: bool = False,
     ) -> bool:
         snapshot = self._restore_plan_snapshot(conversation_id, snapshot)
+        current = self._conversation_repo.get_conversation(conversation_id)
+        expected_revision = max(0, int(getattr(current, "revision", 0) or 0))
         if self._hydration_task and not self._hydration_task.done():
             previous = self._hydration_task
             previous.cancel()
@@ -115,6 +128,7 @@ class ConversationRuntime:
             self._pending_hydration = (
                 conversation_id,
                 generation,
+                expected_revision,
                 pending_history,
                 notify,
                 on_hydration_complete,
@@ -125,6 +139,7 @@ class ConversationRuntime:
         task = self._create_hydration_task(
             conversation_id=conversation_id,
             generation=generation,
+            expected_revision=expected_revision,
             pending_history=pending_history,
             notify=notify,
             on_hydration_complete=on_hydration_complete,
@@ -143,10 +158,11 @@ class ConversationRuntime:
         if pending is None or pending[0] != conversation_id:
             return False
         self._pending_hydration = None
-        pending_id, generation, history, notify, callback = pending
+        pending_id, generation, expected_revision, history, notify, callback = pending
         task = self._create_hydration_task(
             conversation_id=pending_id,
             generation=generation,
+            expected_revision=expected_revision,
             pending_history=history,
             notify=notify,
             on_hydration_complete=callback,
@@ -165,6 +181,7 @@ class ConversationRuntime:
         *,
         conversation_id: str,
         generation: int,
+        expected_revision: int,
         pending_history: list[dict[str, Any]],
         notify: bool,
         on_hydration_complete: Callable[[str], Any] | None,
@@ -173,6 +190,7 @@ class ConversationRuntime:
             self._hydrate_snapshot(
                 conversation_id=conversation_id,
                 generation=generation,
+                expected_revision=expected_revision,
                 pending_history=pending_history,
                 notify=notify,
                 on_hydration_complete=on_hydration_complete,
@@ -254,6 +272,7 @@ class ConversationRuntime:
         *,
         conversation_id: str,
         generation: int,
+        expected_revision: int,
         pending_history: list[dict[str, Any]],
         notify: bool,
         on_hydration_complete: Callable[[str], Any] | None,
@@ -275,110 +294,27 @@ class ConversationRuntime:
             )
             raise
 
-        if generation != self._hydration_generation or conversation_id != self.active_conversation_id:
-            return
-
-        self._context_builder.prepend_history_messages(parsed_history)
+        async with self._projection_lock_for(conversation_id):
+            if (
+                generation != self._hydration_generation
+                or conversation_id != self.active_conversation_id
+            ):
+                return
+            current = await asyncio.to_thread(
+                self._conversation_repo.get_conversation,
+                conversation_id,
+            )
+            if current is None:
+                return
+            current_revision = max(0, int(getattr(current, "revision", 0) or 0))
+            if current_revision != expected_revision:
+                self._context_builder.load_snapshot(
+                    deepcopy(dict(getattr(current, "context_snapshot", {}) or {}))
+                )
+            else:
+                self._context_builder.prepend_history_messages(parsed_history)
         if notify and on_hydration_complete is not None:
             await on_hydration_complete(conversation_id)
-
-    def rebuild_context_from_transcript(
-        self,
-        conversation: Any,
-        transcript: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        previous_snapshot = conversation.context_snapshot or {}
-
-        def _tool_call_entry(call: dict[str, Any]) -> dict[str, Any] | None:
-            call_id = str(call.get("id") or "").strip()
-            call_name = str(call.get("name") or "").strip()
-            if not call_id or not call_name:
-                return None
-            arguments = call.get("args")
-            if not isinstance(arguments, dict):
-                arguments = call.get("arguments")
-            return {
-                "id": call_id,
-                "name": call_name,
-                "arguments": dict(arguments) if isinstance(arguments, dict) else {},
-            }
-
-        history: list[dict[str, Any]] = []
-        for message in transcript:
-            role = str(message.get("role", "")).strip()
-            if role not in {"user", "assistant"}:
-                continue
-            entry = {
-                "role": role,
-                "content": self._build_effective_transcript_content(message),
-                "name": None,
-                "tool_call_id": None,
-                "tool_calls": [],
-            }
-            if role == "assistant":
-                parsed_calls: list[dict[str, Any]] = []
-                tool_results: list[dict[str, Any]] = []
-                for raw_call in message.get("tool_calls") or []:
-                    if not isinstance(raw_call, dict):
-                        continue
-                    parsed = _tool_call_entry(raw_call)
-                    if parsed is None:
-                        continue
-                    parsed_calls.append(parsed)
-                    result_text = str(
-                        raw_call.get("summary")
-                        or raw_call.get("outputPreview")
-                        or raw_call.get("result")
-                        or ""
-                    ).strip()
-                    tool_results.append(
-                        {
-                            "role": "tool",
-                            "content": result_text or "(tool result omitted by rewind)",
-                            "name": None,
-                            "tool_call_id": parsed["id"],
-                            "tool_calls": [],
-                        }
-                    )
-                if parsed_calls:
-                    entry["tool_calls"] = parsed_calls
-                    history.append(entry)
-                    # Pair each assistant tool_call with its tool-role result
-                    # so the rebuilt provider history stays structurally valid
-                    # (cc rewinds keep tool_use/tool_result pairs intact).
-                    history.extend(tool_results)
-                    continue
-            # Ordinary user/assistant messages are just as authoritative as
-            # tool-call groups.  The rewind path previously appended only the
-            # assistant branch above, which silently discarded every normal
-            # exchange from the rebuilt provider context.
-            history.append(entry)
-        snapshot = {
-            "history": history,
-            "persistent_notes": list(previous_snapshot.get("persistent_notes", [])),
-            "compaction_count": int(previous_snapshot.get("compaction_count", 0) or 0),
-        }
-        if UI_AGENT_STATE_SNAPSHOT_KEY in previous_snapshot:
-            snapshot[UI_AGENT_STATE_SNAPSHOT_KEY] = previous_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY]
-        # Rebuild only replaces model history. Conversation/session ownership
-        # metadata (including MiniCode's Plan slug/reference) survives rewinds.
-        for key, value in previous_snapshot.items():
-            if key not in snapshot and key not in {"history", "context_ledger"}:
-                snapshot[key] = value
-        from backend.agent.plans import ensure_plan_file_for_resume
-
-        ensure_plan_file_for_resume(
-            snapshot,
-            transcript,
-            getattr(conversation, "workspace_root", "") or None,
-        )
-        self._context_builder.load_snapshot(snapshot)
-        # A persisted ledger is a projection of the exact history above, not
-        # durable ownership metadata.  Reusing the pre-rewind ledger makes the
-        # UI report the removed tail (or ``--`` after a reload), so regenerate
-        # it only after ContextBuilder has accepted the rebuilt snapshot.
-        snapshot["context_ledger"] = self._context_builder.context_ledger()
-        return snapshot
 
     def rewind_to_user_turn(
         self,
@@ -403,20 +339,57 @@ class ConversationRuntime:
         if retry_index == -1:
             return None
 
+        previous_snapshot = deepcopy(dict(conversation.context_snapshot or {}))
+        history = previous_snapshot.get("history")
+        admissions = previous_snapshot.get("turn_admissions")
+        if not isinstance(history, list) or not isinstance(admissions, dict):
+            return None
+        boundary = admissions.get(target_id)
+        if not isinstance(boundary, dict):
+            return None
+        try:
+            history_start = int(boundary["history_start"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if history_start < 0 or history_start > len(history):
+            return None
+
         trimmed_transcript = transcript[:retry_index]
-        pollution_sources = pollution_sources_from_transcript(trimmed_transcript)
-        snapshot = self.rebuild_context_from_transcript(conversation, trimmed_transcript)
-        self._conversation_repo.replace_transcript(conversation.id, trimmed_transcript)
-        self._conversation_repo.update_summary(
+        snapshot = previous_snapshot
+        snapshot["history"] = deepcopy(history[:history_start])
+        retained_admissions: dict[str, dict[str, Any]] = {}
+        for message_id, value in admissions.items():
+            if not isinstance(value, dict) or str(message_id) == target_id:
+                continue
+            try:
+                history_end = int(value.get("history_end") or 0)
+            except (TypeError, ValueError):
+                continue
+            if history_end <= history_start:
+                retained_admissions[str(message_id)] = deepcopy(value)
+        snapshot["turn_admissions"] = retained_admissions
+        snapshot.pop("context_ledger", None)
+        from backend.agent.plans import ensure_plan_file_for_resume
+
+        ensure_plan_file_for_resume(
+            snapshot,
+            trimmed_transcript,
+            getattr(conversation, "workspace_root", "") or None,
+        )
+        committed = self._conversation_repo.commit_rewind_projection(
             conversation.id,
-            self._build_summary_from_transcript(
+            transcript=trimmed_transcript,
+            context_snapshot=snapshot,
+            summary=self._build_summary_from_transcript(
                 trimmed_transcript,
                 compaction_summary=conversation.compaction_summary or "",
             ),
+            memory_pollution_sources=pollution_sources_from_transcript(
+                trimmed_transcript
+            ),
+            expected_revision=int(getattr(conversation, "revision", 0) or 0),
         )
-        self._conversation_repo.set_memory_pollution(
-            conversation.id,
-            pollution_sources,
-        )
-        self._conversation_repo.save_context_snapshot(conversation.id, snapshot)
-        return self._conversation_repo.get_conversation(conversation.id)
+        if committed is None:
+            return None
+        self._context_builder.load_snapshot(snapshot)
+        return committed

@@ -12,6 +12,7 @@ from backend.permissions.context import ToolExecutionContext
 from backend.tools.agent_control_plane import AgentControlPlane
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.subagent_runtime import require_runtime_from_context
+from backend.tools.subagent_support import _hook_veto, _run_task_completed_hook
 
 TASK_STATUSES = ("pending", "in_progress", "blocked", "completed", "cancelled")
 
@@ -259,7 +260,10 @@ class SendMessageTool(_AgentCoordinationTool):
             and str(recipient_record.status or "") in _ENDED_SUBAGENT_STATUSES
         )
         if recipient_ended:
-            registry = metadata.get("_tool_registry")
+            registry = context.tool_registry if context is not None else None
+            if registry is None and context is not None and isinstance(context.metadata, dict):
+                registry = context.metadata.pop("_tool_registry", None)
+                context.tool_registry = registry
             task_tool = registry.get_tool("task") if registry is not None and hasattr(registry, "get_tool") else None
             resume = getattr(task_tool, "resume_background_subtask", None)
             if not callable(resume):
@@ -821,15 +825,57 @@ class TaskUpdateTool(_AgentCoordinationTool):
         }
         if not patch:
             return self._error_result("No task fields provided to update")
+        runtime = _runtime(context)
+        conversation_id = _conversation_id(context)
+        existing = await _runtime_call(
+            runtime,
+            "get_swarm_task",
+            task_id,
+            conversation_id=conversation_id,
+        )
+        if existing is None:
+            return self._error_result(f"Shared swarm task not found: {task_id}")
+        if patch.get("status") == "completed" and existing.status != "completed":
+            metadata = (
+                context.metadata
+                if context is not None and isinstance(context.metadata, dict)
+                else {}
+            )
+            teammate_name = str(
+                metadata.get("teammate_name")
+                or metadata.get("name")
+                or _actor_id(context)
+            ).strip()
+            hook_result = await _run_task_completed_hook(
+                (
+                    context.run_context.hook_manager
+                    if context is not None and context.run_context is not None
+                    else None
+                ),
+                task_id=existing.task_id,
+                subject=existing.title,
+                description=existing.description,
+                teammate_name=teammate_name,
+                team_name=existing.team_name,
+            )
+            blocked, message = _hook_veto(hook_result)
+            if blocked:
+                return ToolResult(
+                    content=message,
+                    is_error=True,
+                    status="blocked",
+                    display_summary=f"Task completion blocked: {existing.title}",
+                    result_kind="subagent",
+                )
         task = await _runtime_call(
-            _runtime(context),
+            runtime,
             "update_swarm_task",
             task_id,
             patch,
-            conversation_id=_conversation_id(context),
+            conversation_id=conversation_id,
         )
         if task is None:
-            return self._error_result(f"Shared swarm task not found: {task_id}")
+            return self._error_result(f"Shared swarm task changed before update: {task_id}")
         payload = task.to_dict()
         await _emit_swarm_event(
             context,

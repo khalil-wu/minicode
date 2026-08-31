@@ -13,6 +13,24 @@ export interface ActivityDetail {
 
 export type ActivityToolRecord = NonNullable<ActivityCellState["toolCallRecords"]>[number];
 
+/** Web fetch records share the web-search activity envelope but render as a
+ * separate, flat transcript action. Keep the discriminator in one place so
+ * labels, targets, icons, and surface styling cannot drift apart. */
+export function isWebFetchRecord(record: ActivityToolRecord): boolean {
+  const name = String(record.name || "").trim().toLowerCase();
+  const resultKind = String(record.resultKind || "").trim().toLowerCase();
+  return name === "web_fetch" || name === "webfetch" || resultKind === "web";
+}
+
+export function isWebFetchActivity(
+  cell: Pick<ActivityCellState, "activityKind" | "toolCallRecords">,
+): boolean {
+  const records = cell.toolCallRecords ?? [];
+  return cell.activityKind === "webSearch"
+    && records.length > 0
+    && records.every(isWebFetchRecord);
+}
+
 export type PlanUpdateStep = {
   step: string;
   status: "pending" | "in_progress" | "completed";
@@ -52,8 +70,8 @@ export function readableTimelineTitle(cell: ActivityCellState): string {
   const title = readableToolLabel(cell.title);
   const records = cell.toolCallRecords ?? [];
   if (cell.activityKind === "webSearch" && records.length > 0) {
+    const isFetch = records.every(isWebFetchRecord);
     const names = records.map((record) => String(record.name || "").toLowerCase());
-    const isFetch = names.every((name) => /web_fetch|webfetch/.test(name));
     const isSearch = names.every((name) => /web_search|websearch/.test(name));
     const hasFailure = records.some((record) => ["failed", "blocked", "timeout", "cancelled"].includes(String(record.status)));
     if (!hasFailure && (isFetch || isSearch)) {
@@ -113,10 +131,25 @@ export function recordInputTarget(record: ActivityToolRecord): string {
     ]);
   }
   if (activityKind === "websearch") {
-    const isFetch = name === "web_fetch" || name === "webfetch" || String(record.resultKind || "").toLowerCase() === "web";
+    const isFetch = isWebFetchRecord(record);
     return (isFetch ? url : [query, url].filter(Boolean).join(" · ")) || firstString([
       record.inputSummary,
       record.displaySummary,
+    ]);
+  }
+
+  if (
+    activityKind === "browser"
+    || name === "browser_control"
+    || name === "browser"
+    || name === "computer"
+  ) {
+    return firstString([
+      url,
+      args.target_id,
+      args.selector,
+      args.action,
+      record.inputSummary,
     ]);
   }
 

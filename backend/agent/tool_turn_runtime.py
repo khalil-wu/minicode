@@ -35,7 +35,7 @@ async def execute_tool_turn(
     context_builder: Any,
     stream_state: Any,
     stream_text: Any,
-    tool_executor: Any,
+    tool_tracker: Any,
     tool_registry: Any,
     permission_checker: Any,
     approval_handler: Any,
@@ -66,8 +66,7 @@ async def execute_tool_turn(
         skill_manager=skill_manager,
         tool_context=tool_context,
         refresh_permission=turn_kernel.refresh_live_permission_context,
-        cancel_prefetch=tool_executor.cancel_remaining,
-        prefetched_results=tool_executor.prefetched_results,
+        clear_stream_tracking=tool_tracker.cancel_remaining,
         record_tool_call=record_tool_call,
     )
     transition_execution = transition_controller.start(
@@ -86,11 +85,13 @@ async def execute_tool_turn(
             else None
         ),
     )
+    for tool_call in transition_execution.prepared.tool_calls:
+        tool_tracker.mark_yielded(tool_call.id)
     tool_batch_count += 1
     tool_call_count = transition_execution.call_count
     async for event in project_tool_transition(
         transition_execution,
-        cancel_remaining=tool_executor.cancel_remaining,
+        cancel_remaining=tool_tracker.cancel_remaining,
     ):
         yield event
     boundary = turn_budget_controller.evaluate(

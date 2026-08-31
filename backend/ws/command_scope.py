@@ -65,14 +65,26 @@ def resolve_command_scope(
         or getattr(conversation, "workspace_root", "")
         or ""
     ).strip()
-    resolve_requested = getattr(session, "_resolve_requested_workspace", None)
-    current_workspace = getattr(session, "_current_workspace_root", None)
-    session_workspace = getattr(session, "workspace_root", None)
+    resolve_requested = session.resolve_requested_workspace
+    current_workspace = session.session_lifecycle.current_workspace_root
+    session_workspace = session.session_lifecycle.workspace_root
     workspace: Path | None = None
-    if callable(resolve_requested):
+    session_root_value = session.session_lifecycle.workspace_root
+    current_root_value = None
+    if callable(current_workspace):
+        try:
+            current_root_value = current_workspace()
+        except RuntimeError:
+            current_root_value = None
+    has_bound_workspace = bool(
+        bound_workspace or session_root_value or session_workspace or current_root_value
+    )
+    if has_bound_workspace or requested_workspace:
         workspace = Path(resolve_requested(requested_workspace or None)).expanduser().resolve()
     else:
-        root_value = current_workspace() if callable(current_workspace) else session_workspace
+        root_value = (
+            current_root_value if has_bound_workspace else session_workspace
+        )
         root_text = str(root_value or bound_workspace or "").strip()
         if root_text:
             from backend.services.workspace_service import resolve_requested_workspace

@@ -215,6 +215,9 @@ def build_provider_adapter(
                     anthropic_settings["small_fast_model"] or ""
                 ),
                 max_tokens=max_tokens,
+                wire_api="anthropic",
+                proxy_mode=str(anthropic_settings.get("proxy_mode") or "inherit"),
+                context_window=int(anthropic_settings.get("context_window") or 0),
                 default_headers=tuple(anthropic_settings.get("default_headers") or ()),
                 auth_header=bool(anthropic_settings.get("auth_header")),
             ),

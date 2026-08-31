@@ -130,12 +130,6 @@ def normalize_plugin_id(value: Any, marketplace: str = "local") -> str:
     return plugin_id(value, marketplace).casefold()
 
 
-def normalize_constraint(value: Any) -> str:
-    if isinstance(value, (list, tuple, set)):
-        return ",".join(str(item).strip() for item in value if str(item).strip())
-    return str(value or "").strip()
-
-
 def has_explicit_marketplace(value: Any) -> bool:
     raw = str(value or "").strip()
     if not raw:

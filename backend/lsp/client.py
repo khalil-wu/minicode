@@ -211,7 +211,7 @@ class LSPClient:
         self._opened_files.clear()
 
     async def _initialize(self) -> None:
-        result = await self._send_request("initialize", {
+        await self._send_request("initialize", {
             "processId": os.getpid(),
             "rootUri": self._path_to_uri(self._workspace_root),
             "capabilities": {

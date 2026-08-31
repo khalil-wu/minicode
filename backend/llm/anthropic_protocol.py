@@ -23,7 +23,7 @@ _ADAPTIVE_THINKING_MODEL_MARKERS = (
 
 
 
-from backend.agent.prompting import split_sys_prompt_prefix
+from backend.agent.prompting import _json_fingerprint, _short_sha256, split_sys_prompt_prefix
 from backend.llm.base import (
     ProviderActivityEvent,
     StreamEvent,
@@ -954,9 +954,18 @@ def _anthropic_usage_value_or_existing(
     field_name: str,
     existing: int,
 ) -> int:
+    """cc updateUsage discipline for cumulative Anthropic counters.
+
+    message_delta repeats the cumulative counters and is observed to send
+    0/null mid-stream (claude.ts guards the same way); neither may erase a
+    previously observed non-zero value.
+    """
     if _anthropic_field(usage_obj, field_name, None) is None:
         return existing
-    return _get_usage_field(usage_obj, field_name)
+    parsed = _get_usage_field(usage_obj, field_name)
+    if parsed == 0 and existing != 0:
+        return existing
+    return parsed
 
 
 def _anthropic_usage_metadata(usage_obj: Any) -> dict[str, Any]:
@@ -1016,26 +1025,6 @@ def _anthropic_request_metadata(metadata: dict[str, Any] | None) -> dict[str, st
         return {}
     digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:32]
     return {"user_id": f"minicode-{digest}"}
-
-
-def _short_sha256(value: str, length: int = 12) -> str:
-    if not value:
-        return ""
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
-
-
-def _json_fingerprint(value: Any, length: int = 12) -> str:
-    try:
-        raw = json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-    except TypeError:
-        raw = repr(value)
-    return _short_sha256(raw, length=length)
 
 
 def _anthropic_tool_names(tools: list[dict[str, Any]]) -> list[str]:
@@ -1369,6 +1358,5 @@ def _anthropic_safe_request_summary_from_payload(
         metadata=metadata,
         kwargs=payload,
     )
-
 
 

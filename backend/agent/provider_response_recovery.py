@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Literal
 
 from backend.agent.loop_preflight import run_stop_failure_hook
@@ -71,7 +72,7 @@ def textual_tool_call_imitation(
         # that merely names the XML form as an attempted execution.  The window
         # also catches malformed/missing closing tags such as the observed
         # provider output while keeping the check bounded.
-        tail = visible[match.end():match.end() + 4096]
+        tail = visible[match.end() : match.end() + 4096]
         if _TEXTUAL_PARAMETER_RE.search(tail):
             return tool_name
     return ""
@@ -82,7 +83,7 @@ async def recover_provider_response(
     state: Any,
     stream_state: Any,
     stream_text: Any,
-    tool_executor: Any,
+    tool_tracker: Any,
     context_builder: Any,
     budget_runtime: Any,
     turn_usage: Any,
@@ -117,7 +118,7 @@ async def recover_provider_response(
             and isinstance(item.get("content"), list)
         ]
         if not replay_items:
-            tool_executor.cancel_remaining()
+            tool_tracker.cancel_remaining()
             yield AgentEvent.error(
                 message=(
                     f"The provider returned stop_reason={normalized_finish_reason} "
@@ -126,9 +127,7 @@ async def recover_provider_response(
                 ),
                 recoverable=True,
                 error_type="provider_protocol",
-                error_code=(
-                    f"{normalized_finish_reason}_missing_provider_state"
-                ),
+                error_code=(f"{normalized_finish_reason}_missing_provider_state"),
             )
             _set_terminal_reason(state, "provider_protocol", status="failed")
             yield usage_terminal_projection(
@@ -141,7 +140,7 @@ async def recover_provider_response(
             )
             return
 
-        tool_executor.cancel_remaining()
+        tool_tracker.cancel_remaining()
         recovery_count = int(
             getattr(state, "provider_continuation_recovery_count", 0) or 0
         )
@@ -191,6 +190,7 @@ async def recover_provider_response(
             normalized_finish_reason,
             error_details=_PROVIDER_CONTINUATION_ERROR,
             last_assistant_message=stream_text.pending_recovery_text(scrub_text),
+            hook_manager=context_builder.hook_manager,
         )
         yield AgentEvent.error(
             message=_PROVIDER_CONTINUATION_ERROR,
@@ -215,25 +215,30 @@ async def recover_provider_response(
         recovery = await recover_max_output(
             state=state,
             stream_text=stream_text,
-            tool_executor=tool_executor,
+            tool_tracker=tool_tracker,
             context_builder=context_builder,
             budget_runtime=budget_runtime,
             provider_items=stream_state.response_items,
             turn_usage=turn_usage,
             finish_reason=finish_reason,
             scrub_text=scrub_text,
-            run_stop_failure_hook=run_stop_failure_hook,
+            run_stop_failure_hook=partial(
+                run_stop_failure_hook,
+                hook_manager=context_builder.hook_manager,
+            ),
             provider_raw_done=stream_state.raw_done,
         )
         for event in recovery.events:
             yield event
-        yield PostStreamRecoveryResult(recovery.action, tool_batch_count, degraded_reason)
+        yield PostStreamRecoveryResult(
+            recovery.action, tool_batch_count, degraded_reason
+        )
         return
 
     if stream_state.saw_partial_tool_call and (
         not pending_tool_calls or not stream_state.final_tool_batch_received
     ):
-        tool_executor.cancel_remaining()
+        tool_tracker.cancel_remaining()
         yield AgentEvent.error(
             message="The provider stream ended before the tool arguments were complete.",
             recoverable=True,
@@ -278,7 +283,9 @@ async def recover_provider_response(
                 status="failed",
                 reason="invalid_model_action",
             )
-            yield PostStreamRecoveryResult("terminate", tool_batch_count, degraded_reason)
+            yield PostStreamRecoveryResult(
+                "terminate", tool_batch_count, degraded_reason
+            )
             return
 
     yield PostStreamRecoveryResult("proceed", tool_batch_count, degraded_reason)

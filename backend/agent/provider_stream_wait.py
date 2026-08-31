@@ -62,6 +62,7 @@ async def wait_for_next_provider_event(
             stream_iter,
             timeout_seconds=timeout,
             cancel_event=tool_context.cancel_event,
+            owner=tool_context.pending_provider_tasks,
         )
     except PhaseDeadlineExceeded:
         raise

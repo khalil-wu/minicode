@@ -1,10 +1,8 @@
 import { useAppStore } from "../stores";
 import type { PreviewRefreshedEvent, ServerEvent } from "../protocol/events";
+import { isReplayedEvent as isReplayed } from "../protocol/events";
 import { pushToast } from "../overlays/ToastContainer";
 import { normalizeWorkspaceRoot } from "../lib/workspace-path";
-
-const isReplayed = (event: ServerEvent): boolean =>
-  (event as ServerEvent & { __replayed?: boolean }).__replayed === true;
 
 export const handlePreviewEvent = (e: ServerEvent): boolean => {
   if (!e.type.startsWith("preview.")) return false;
@@ -17,15 +15,46 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
     (e as unknown as { workspace_root?: unknown }).workspace_root,
   );
   const activeWorkspaceRoot = normalizeWorkspaceRoot(s.workingDirectory);
+  const isActiveEvent = Boolean(
+    eventConversationId
+    && activeConversationId
+    && eventConversationId === activeConversationId,
+  );
+  const isKnownConversation = Boolean(
+    eventConversationId
+    && (
+      isActiveEvent
+      || s.conversations.some((conversation) => conversation.id === eventConversationId)
+      || Object.prototype.hasOwnProperty.call(s.sideChats, eventConversationId)
+      || Object.prototype.hasOwnProperty.call(s.conversationMessages, eventConversationId)
+      || Object.prototype.hasOwnProperty.call(s.conversationWorkbenchStates, eventConversationId)
+    ),
+  );
   if (
     !eventConversationId
-    || !activeConversationId
-    || eventConversationId !== activeConversationId
+    || !isKnownConversation
     || !eventWorkspaceRoot
+    || !activeWorkspaceRoot
     || eventWorkspaceRoot !== activeWorkspaceRoot
   ) {
     return true;
   }
+  const updateLivePreview = (url: string): void => {
+    if (isActiveEvent) {
+      s.openLivePreview(url, eventConversationId);
+      return;
+    }
+    // A background conversation may report a new preview URL during an active
+    // main-chat turn. Preserve its state, but do not steal focus or reload the
+    // current iframe.
+    s.setLivePreviewUrl(url, eventConversationId);
+  };
+  const launchProcessesForEvent = () => {
+    const latest = useAppStore.getState();
+    return isActiveEvent
+      ? latest.previewLaunchProcesses
+      : latest.conversationWorkbenchStates?.[eventConversationId]?.previewLaunchProcesses ?? [];
+  };
   switch (e.type) {
     case "preview.servers.updated": {
       const ev = e as unknown as {
@@ -40,7 +69,7 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
           url: server.url,
           name: server.name ?? `:${server.port}`,
           framework: server.framework,
-        })));
+        })), eventConversationId);
       return true;
     }
     case "preview.server.detected": {
@@ -51,25 +80,25 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
           url: ev.url,
           name: ev.name ?? `:${ev.port}`,
           framework: ev.framework,
-        });
+        }, eventConversationId);
       }
       return true;
     }
     case "preview.server.stopped": {
       const ev = e as unknown as { port?: number };
-      if (ev.port) s.removePreviewServer(ev.port);
+      if (ev.port) s.removePreviewServer(ev.port, eventConversationId);
       return true;
     }
     case "preview.navigated": {
       const ev = e as unknown as { url?: string };
-      if (ev.url) s.openLivePreview(ev.url);
+      if (ev.url) updateLivePreview(ev.url);
       return true;
     }
     case "preview.refreshed": {
       const ev = e as PreviewRefreshedEvent;
       // A replayed file-watcher notification is historical evidence, not a
       // request to reload the live iframe and issue a fresh verification call.
-      if (isReplayed(e)) return true;
+      if (isReplayed(e) || !isActiveEvent) return true;
       window.dispatchEvent(new CustomEvent("preview:auto-refresh", {
         detail: {
           conversation_id: ev.conversation_id,
@@ -107,8 +136,8 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
           output_tail?: { stream: "stdout" | "stderr"; line: string; timestamp?: number }[];
         }[];
       };
-      s.setPreviewLaunchConfigs(ev.configs ?? []);
-      s.setPreviewLaunchProcesses(ev.running ?? []);
+      s.setPreviewLaunchConfigs(ev.configs ?? [], eventConversationId);
+      s.setPreviewLaunchProcesses(ev.running ?? [], eventConversationId);
       return true;
     }
     case "preview.launch.started": {
@@ -136,30 +165,30 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
           status: ev.status ?? "running",
           stderr_tail: ev.stderr_tail,
           output_tail: ev.output_tail,
-        });
-        s.openLivePreview(ev.url);
+        }, eventConversationId);
+        updateLivePreview(ev.url);
       }
       return true;
     }
     case "preview.server.ready": {
       const ev = e as unknown as { id?: string; url?: string; port?: number };
       if (!ev.id || !ev.url || typeof ev.port !== "number") return true;
-      const current = useAppStore.getState().previewLaunchProcesses.find((process) => process.id === ev.id);
+      const current = launchProcessesForEvent().find((process) => process.id === ev.id);
       if (current) {
         s.upsertPreviewLaunchProcess({
           ...current,
           url: ev.url,
           port: ev.port,
           status: "ready",
-        });
+        }, eventConversationId);
       }
       s.addPreviewServer({
         port: ev.port,
         url: ev.url,
         name: ev.id,
         framework: "launch",
-      });
-      s.openLivePreview(ev.url);
+      }, eventConversationId);
+      updateLivePreview(ev.url);
       return true;
     }
     case "preview.server.output": {
@@ -169,7 +198,7 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
         line?: string;
       };
       if (!ev.id || !ev.stream || typeof ev.line !== "string") return true;
-      const current = useAppStore.getState().previewLaunchProcesses.find((process) => process.id === ev.id);
+      const current = launchProcessesForEvent().find((process) => process.id === ev.id);
       if (!current) return true;
       s.upsertPreviewLaunchProcess({
         ...current,
@@ -180,40 +209,44 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
         stderr_tail: ev.stream === "stderr"
           ? [...(current.stderr_tail ?? []), ev.line].slice(-20)
           : current.stderr_tail,
-      });
+      }, eventConversationId);
       return true;
     }
     case "preview.server.crashed": {
       const ev = e as unknown as { id?: string; exit_code?: number | null; stderr_tail?: string[] };
       if (!ev.id) return true;
-      const current = useAppStore.getState().previewLaunchProcesses.find((process) => process.id === ev.id);
+      const current = launchProcessesForEvent().find((process) => process.id === ev.id);
       if (current) {
         s.upsertPreviewLaunchProcess({
           ...current,
           status: "crashed",
           stderr_tail: ev.stderr_tail,
-        });
+        }, eventConversationId);
       }
-      pushToast(`预览服务 ${ev.id} 已退出（${ev.exit_code ?? "未知"}）`, "error");
+      if (isActiveEvent) {
+        pushToast(`预览服务 ${ev.id} 已退出（${ev.exit_code ?? "未知"}）`, "error");
+      }
       return true;
     }
     case "preview.server.unhealthy": {
       const ev = e as unknown as { id?: string; last_error?: string };
       if (!ev.id) return true;
-      const current = useAppStore.getState().previewLaunchProcesses.find((process) => process.id === ev.id);
+      const current = launchProcessesForEvent().find((process) => process.id === ev.id);
       if (current) {
         s.upsertPreviewLaunchProcess({
           ...current,
           status: "unhealthy",
-        });
+        }, eventConversationId);
       }
-      pushToast(`预览服务 ${ev.id} 状态异常：${ev.last_error ?? "无响应"}`, "warning");
+      if (isActiveEvent) {
+        pushToast(`预览服务 ${ev.id} 状态异常：${ev.last_error ?? "无响应"}`, "warning");
+      }
       return true;
     }
     case "preview.launch.stopped": {
       const ev = e as unknown as { id?: string; port?: number };
-      if (ev.id) s.removePreviewLaunchProcess(ev.id);
-      if (typeof ev.port === "number") s.removePreviewServer(ev.port);
+      if (ev.id) s.removePreviewLaunchProcess(ev.id, eventConversationId);
+      if (typeof ev.port === "number") s.removePreviewServer(ev.port, eventConversationId);
       return true;
     }
     case "preview.verified": {
@@ -232,7 +265,7 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
           elapsed_ms: ev.elapsed_ms ?? 0,
           error: ev.error,
           checkedAt: Date.now(),
-        });
+        }, eventConversationId);
       }
       return true;
     }

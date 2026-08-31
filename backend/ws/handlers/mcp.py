@@ -329,11 +329,6 @@ class _ProviderOAuthCallbacks:
         prompt = self._normalize_prompt(payload)
         request_id = f"llm-oauth-{uuid.uuid4().hex}"
         future = asyncio.get_running_loop().create_future()
-        future.conversation_id = self.conversation_id  # type: ignore[attr-defined]
-        pending = getattr(self.session, "_provider_oauth_pending", None)
-        if not isinstance(pending, dict):
-            pending = {}
-            setattr(self.session, "_provider_oauth_pending", pending)
         self._assert_owner()
         expires_at = int(time.time() * 1000) + int(self._PROMPT_TIMEOUT_SECONDS * 1_000)
         request: dict[str, Any] = {
@@ -356,16 +351,13 @@ class _ProviderOAuthCallbacks:
             "expires_at": expires_at,
             "request": request,
         }
-        pending_approvals = getattr(self.session, "_pending_approvals", None)
-        if not isinstance(pending_approvals, dict):
-            pending_approvals = {}
-            setattr(self.session, "_pending_approvals", pending_approvals)
-        pending_payloads = getattr(self.session, "_pending_approval_payloads", None)
-        if not isinstance(pending_payloads, dict):
-            pending_payloads = {}
-            setattr(self.session, "_pending_approval_payloads", pending_payloads)
-        pending[request_id] = future
-        pending_approvals[request_id] = future
+        wait_state = self.session.turn_wait_state
+        pending_payloads = wait_state.pending_approval_payloads
+        wait_state.register_waiter(
+            request_id,
+            future,
+            kind="provider_oauth",
+        )
         pending_payloads[request_id] = control_payload
         abort_waiters: list[asyncio.Task[None]] = [
             asyncio.create_task(
@@ -383,7 +375,7 @@ class _ProviderOAuthCallbacks:
                 name=f"provider-oauth-prompt-abort:{request_id}",
             ))
         try:
-            sent = await self.session._send_ws_payload(
+            sent = await self.session.send_payload(
                 control_payload,
                 log_context="llm.provider.oauth.prompt",
             )
@@ -404,7 +396,7 @@ class _ProviderOAuthCallbacks:
                 "deny",
                 "reject",
             }:
-                await self.session._emit_approval_cancelled_once(
+                await self.session.emit_approval_cancelled_once(
                     [request_id],
                     reason="provider_auth_rejected",
                     conversation_id=self.conversation_id,
@@ -425,21 +417,21 @@ class _ProviderOAuthCallbacks:
                 option_ids = {option["id"] for option in prompt.get("options", [])}
                 if answer_text not in option_ids:
                     raise ValueError("OAuth select response does not match an offered option id")
-            await self.session._emit_approval_cancelled_once(
+            await self.session.emit_approval_cancelled_once(
                 [request_id],
                 reason="provider_auth_resolved",
                 conversation_id=self.conversation_id,
             )
             return answer_text
         except asyncio.TimeoutError:
-            await self.session._emit_approval_cancelled_once(
+            await self.session.emit_approval_cancelled_once(
                 [request_id],
                 reason="provider_auth_timeout",
                 conversation_id=self.conversation_id,
             )
             raise
         except asyncio.CancelledError:
-            await self.session._emit_approval_cancelled_once(
+            await self.session.emit_approval_cancelled_once(
                 [request_id],
                 reason="provider_auth_cancelled",
                 conversation_id=self.conversation_id,
@@ -450,7 +442,7 @@ class _ProviderOAuthCallbacks:
             # re-raise without the duplicate failed terminal event.
             raise
         except Exception:
-            await self.session._emit_approval_cancelled_once(
+            await self.session.emit_approval_cancelled_once(
                 [request_id],
                 reason="provider_auth_failed",
                 conversation_id=self.conversation_id,
@@ -462,13 +454,12 @@ class _ProviderOAuthCallbacks:
                     waiter.cancel()
             if abort_waiters:
                 await asyncio.gather(*abort_waiters, return_exceptions=True)
-            pending.pop(request_id, None)
-            pending_approvals.pop(request_id, None)
+            wait_state.remove_waiter(request_id)
             pending_payloads.pop(request_id, None)
 
     async def _emit(self, event_type: str, data: dict[str, Any]) -> None:
         self._assert_owner()
-        sent = await self.session._send_ws_payload(
+        sent = await self.session.send_payload(
             {
                 "type": event_type,
                 "conversation_id": self.conversation_id,
@@ -571,11 +562,11 @@ async def handle_mcp_list(session: "WebSocketSession", data: dict[str, Any]) -> 
     except MCPServiceError as exc:
         await emit_command_error(session, "mcp.list", exc)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         {"type": "mcp_status", "servers": servers},
         log_context="mcp_status",
     )
-    await session._send_event(AgentEvent.command_result("mcp.list", ""))
+    await session.send_event(AgentEvent.command_result("mcp.list", ""))
     return True
 
 
@@ -665,7 +656,7 @@ async def handle_mcp_inventory_list(session: "WebSocketSession", data: dict[str,
             },
         )
     else:
-        await session._send_event(
+        await session.send_event(
             AgentEvent.command_result(
                 "mcp.inventory.list",
                 "",
@@ -697,7 +688,7 @@ async def handle_mcp_inventory_cancel(session: "WebSocketSession", data: dict[st
         _mcp_inventory_cancelled(session).add(operation_id)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result(
             "mcp.inventory.cancel",
             "",
@@ -741,12 +732,12 @@ async def _run_mcp_server_command(
             error = error_template.format(exc=exc)
         await emit_command_error(session, command, error)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         {"type": "mcp_status", "servers": servers},
         log_context="mcp_status",
     )
     name = str(data.get("name", "")).strip()
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result(
             command,
             "",
@@ -821,12 +812,12 @@ async def _handle_project_mcp_decision(
     except Exception as exc:
         await emit_command_error(session, command, exc)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         {"type": "mcp_status", "servers": servers},
         log_context="mcp_status",
     )
     name = str(data.get("name") or "").strip()
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result(
             command,
             "",
@@ -878,7 +869,7 @@ async def handle_mcp_project_reject(session: "WebSocketSession", data: dict[str,
 async def handle_env_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.services.env_vault_service import list_env_entries
 
-    await session._send_ws_payload(
+    await session.send_payload(
         {"type": "env.list", "entries": list_env_entries().entries},
         log_context="env.list",
     )
@@ -893,11 +884,11 @@ async def handle_env_set(session: "WebSocketSession", data: dict[str, Any]) -> b
     except EnvVaultServiceError as exc:
         await emit_command_error(session, "env.set", exc)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         {"type": "env.list", "entries": result.entries},
         log_context="env.list",
     )
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result("env.set", "", data={"name": str(data.get("name", "")).strip()})
     )
     return True
@@ -911,11 +902,11 @@ async def handle_env_delete(session: "WebSocketSession", data: dict[str, Any]) -
     except EnvVaultServiceError as exc:
         await emit_command_error(session, "env.delete", exc)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         {"type": "env.list", "entries": result.entries},
         log_context="env.list",
     )
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result("env.delete", "", data={"name": str(data.get("name", "")).strip()})
     )
     return True
@@ -947,7 +938,7 @@ async def _send_scheduler_snapshot(session: "WebSocketSession", scheduler: Any, 
     from backend.services.scheduler_service import list_scheduled_tasks
 
     result = list_scheduled_tasks(scheduler, workspace_root=scope.workspace_root)
-    await session._send_ws_payload(
+    await session.send_payload(
         _scheduler_snapshot_payload(result, scope),
         log_context="scheduler.list",
     )
@@ -974,11 +965,11 @@ async def handle_scheduler_add(session: "WebSocketSession", data: dict[str, Any]
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.add", exc)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         _scheduler_snapshot_payload(result, scope),
         log_context="scheduler.list",
     )
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result("scheduler.add", "", data={"name": str(data.get("name", "")).strip()})
     )
     return True
@@ -1028,11 +1019,11 @@ async def handle_scheduler_remove(session: "WebSocketSession", data: dict[str, A
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.remove", exc)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         _scheduler_snapshot_payload(result, scope),
         log_context="scheduler.list",
     )
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result(
             "scheduler.remove",
             "",
@@ -1052,11 +1043,11 @@ async def handle_scheduler_toggle(session: "WebSocketSession", data: dict[str, A
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.toggle", exc)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         _scheduler_snapshot_payload(result, scope),
         log_context="scheduler.list",
     )
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result(
             "scheduler.toggle",
             "",
@@ -1076,12 +1067,12 @@ async def handle_mcp_oauth_login(session: "WebSocketSession", data: dict[str, An
     except (MCPServiceError, KeyError) as exc:
         await emit_command_error(session, "mcp.oauth.login", exc)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         {"type": "mcp_status", "servers": servers},
         log_context="mcp_status",
     )
     name = str(data.get("name", "")).strip()
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result(
             "mcp.oauth.login",
             "",
@@ -1103,12 +1094,12 @@ async def handle_mcp_oauth_logout(session: "WebSocketSession", data: dict[str, A
     except (MCPServiceError, KeyError) as exc:
         await emit_command_error(session, "mcp.oauth.logout", exc)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         {"type": "mcp_status", "servers": servers},
         log_context="mcp_status",
     )
     name = str(data.get("name", "")).strip()
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result(
             "mcp.oauth.logout",
             "",
@@ -1149,8 +1140,8 @@ async def handle_llm_provider_oauth_login(session: "WebSocketSession", data: dic
             provider,
             callbacks,
         )
-        session._refresh_llm_selection(prefer_config=False)
-        await session._send_llm_state()
+        session.refresh_llm_selection(prefer_config=False)
+        await session.send_llm_state()
     except Exception as exc:
         await emit_command_error(session, "llm.provider.oauth.login", exc, data={"provider": provider})
         return True
@@ -1164,7 +1155,7 @@ async def handle_llm_provider_oauth_login(session: "WebSocketSession", data: dic
                     conversation_id,
                     provider,
                 )
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result("llm.provider.oauth.login", "", data={"provider": provider, **result})
     )
     return True
@@ -1183,12 +1174,12 @@ async def handle_llm_provider_oauth_logout(session: "WebSocketSession", data: di
             raise ValueError("provider logout conversation does not match the active conversation")
         runtime = _provider_runtime(session)
         removed = await runtime.logout_provider(provider)
-        session._refresh_llm_selection(prefer_config=False)
-        await session._send_llm_state()
+        session.refresh_llm_selection(prefer_config=False)
+        await session.send_llm_state()
     except Exception as exc:
         await emit_command_error(session, "llm.provider.oauth.logout", exc, data={"provider": provider})
         return True
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result("llm.provider.oauth.logout", "", data={"provider": provider, "removed": removed})
     )
     return True
@@ -1209,7 +1200,7 @@ async def handle_llm_provider_oauth_status(session: "WebSocketSession", data: di
     except Exception as exc:
         await emit_command_error(session, "llm.provider.oauth.status", exc, data={"provider": provider})
         return True
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result("llm.provider.oauth.status", "", data={"provider": provider, **status})
     )
     return True
@@ -1225,11 +1216,11 @@ async def handle_scheduler_run_now(session: "WebSocketSession", data: dict[str, 
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.run_now", exc)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         _scheduler_snapshot_payload(result, scope),
         log_context="scheduler.list",
     )
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result(
             "scheduler.run_now",
             "",
@@ -1249,11 +1240,11 @@ async def handle_scheduler_retry(session: "WebSocketSession", data: dict[str, An
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.retry", exc)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         _scheduler_snapshot_payload(result, scope),
         log_context="scheduler.list",
     )
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result(
             "scheduler.retry",
             "",
@@ -1273,11 +1264,11 @@ async def handle_scheduler_cancel(session: "WebSocketSession", data: dict[str, A
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.cancel", exc)
         return True
-    await session._send_ws_payload(
+    await session.send_payload(
         _scheduler_snapshot_payload(result, scope),
         log_context="scheduler.list",
     )
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result(
             "scheduler.cancel",
             "",

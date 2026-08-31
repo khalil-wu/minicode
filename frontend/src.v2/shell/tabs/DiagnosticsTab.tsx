@@ -12,6 +12,7 @@ import {
 import { isDesktop } from '../../desktop/runtime'
 import { sendClientCommand } from '../../protocol/ws-outbox'
 import { useAppStore } from '../../stores'
+import { selectActiveConversationPreview } from '../../lib/preview-projection'
 import { branchDisplayName, workspaceDisplayName } from '../../lib/workspace-display'
 import {
   capabilityFlagLabel,
@@ -238,7 +239,7 @@ const useLocalDiagnostics = () => {
   const currentModel = useAppStore((s) => s.currentModel)
   const workingDirectory = useAppStore((s) => s.workingDirectory)
   const workspaceGit = useAppStore((s) => s.workspaceGit)
-  const livePreviewUrl = useAppStore((s) => s.livePreviewUrl)
+  const livePreviewUrl = useAppStore((s) => selectActiveConversationPreview(s).livePreviewUrl)
   const terminalSessions = useAppStore((s) => s.terminalSessions)
   const mcpServers = useAppStore((s) => s.mcpServers)
   return useMemo(() => ({

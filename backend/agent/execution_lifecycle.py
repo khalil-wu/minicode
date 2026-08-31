@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
 
-def epoch_ms() -> int:
-    return int(time.time() * 1000)
+from backend.agent.runtime_records import epoch_ms
 
 
 @dataclass

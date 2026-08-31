@@ -303,8 +303,10 @@ class ExitPlanModeTool(BaseTool):
         pre_plan_mode = str(getattr(context.permission, "pre_plan_mode", "") or "").strip()
         approved_permission_mode = pre_plan_mode if pre_plan_mode and pre_plan_mode != "plan" else "confirm"
         if is_teammate and plan_required:
-            mailbox_requester = (context.metadata or {}).get(
-                "teammate_plan_approval_requester"
+            mailbox_requester = getattr(
+                getattr(context, "run_context", None),
+                "teammate_plan_approval_requester",
+                None,
             )
             if not callable(mailbox_requester):
                 return ToolResult(
@@ -341,7 +343,11 @@ class ExitPlanModeTool(BaseTool):
                 display_summary="Awaiting team leader approval",
             )
 
-        setter = (context.metadata or {}).get("permission_mode_setter")
+        setter = getattr(
+            getattr(context, "run_context", None),
+            "permission_mode_setter",
+            None,
+        )
         if callable(setter):
             # The host rereads permission_previous_mode from the repository;
             # model/run metadata is intentionally not trusted here.
@@ -421,11 +427,11 @@ class EnterPlanModeTool(BaseTool):
         if context is not None:
             current = getattr(context, "permission", None)
             if isinstance(current, PermissionContext) and current.mode != "plan":
-                metadata = getattr(context, "metadata", None)
-                setter = metadata.get("permission_mode_setter") if isinstance(metadata, dict) else None
+                run_context = getattr(context, "run_context", None)
+                setter = getattr(run_context, "permission_mode_setter", None)
                 if callable(setter):
                     await _maybe_await(setter("plan", source="enter_plan_mode"))
-                provider = metadata.get("permission_context_provider") if isinstance(metadata, dict) else None
+                provider = getattr(run_context, "permission_context_provider", None)
                 if callable(provider):
                     refreshed = provider()
                     if isinstance(refreshed, PermissionContext):

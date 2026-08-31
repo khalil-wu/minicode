@@ -19,6 +19,10 @@ import { ChunkErrorBoundary, SafeBoundary } from "./ChunkErrorBoundary";
 import { PanelErrorFallback } from "../components/PanelErrorFallback";
 import { ScrollablePanel } from "./SidebarShared";
 import { ActivityTab } from "./tabs/ActivityTab";
+import {
+  selectActiveConversationPreview,
+  selectPreviewSurface,
+} from "../lib/preview-projection";
 
 type StackTab = "preview" | "browser" | "terminal" | "tasks" | "diff" | "plan" | "subagents" | "artifacts" | "inspector" | "diagnostics";
 
@@ -117,8 +121,10 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
     setActiveTab(tab);
   }, [setActiveTab]);
   const subagents = useAppStore((s) => s.subagents);
-  const livePreviewUrl = useAppStore((s) => s.livePreviewUrl);
-  const previewArtifact = useAppStore((s) => s.previewArtifact);
+  const activeLivePreviewUrl = useAppStore((s) => selectActiveConversationPreview(s).livePreviewUrl);
+  const activePreviewArtifact = useAppStore((s) => selectActiveConversationPreview(s).previewArtifact);
+  const previewSurfaceLiveUrl = useAppStore((s) => selectPreviewSurface(s).livePreviewUrl);
+  const previewSurfaceArtifact = useAppStore((s) => selectPreviewSurface(s).previewArtifact);
   const diffReview = useAppStore((s) => s.diffReview);
   const gitChanges = useAppStore((s) => s.gitChanges);
   const mcpServers = useAppStore((s) => s.mcpServers);
@@ -133,10 +139,10 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
 
   useEffect(() => {
     if (!allowAutoSwitch) return;
-    if (livePreviewUrl) {
+    if (activeLivePreviewUrl) {
       setRightStackTab("preview", { automatic: true });
     }
-  }, [allowAutoSwitch, livePreviewUrl, setRightStackTab]);
+  }, [activeLivePreviewUrl, allowAutoSwitch, setRightStackTab]);
 
   const runningSubagents = subagents.filter((subagent) => subagent.status === "running").length;
   const mcpErrors = mcpServers.filter((s) => s.status === "error").length;
@@ -145,10 +151,10 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
   const tabs: { id: StackTab; label: string; badge?: string; icon: React.ReactNode }[] = [
     { id: "tasks", label: "上下文", icon: <PanelRightOpen {...sidebarIconProps} /> },
     { id: "subagents", label: "子智能体", badge: runningSubagents ? String(runningSubagents) : undefined, icon: <Bot {...sidebarIconProps} /> },
-    { id: "artifacts", label: "产物", badge: previewArtifact ? "1" : undefined, icon: <Layers {...sidebarIconProps} /> },
+    { id: "artifacts", label: "产物", badge: activePreviewArtifact ? "1" : undefined, icon: <Layers {...sidebarIconProps} /> },
     { id: "inspector", label: "运行详情", icon: <FileSearch {...sidebarIconProps} /> },
     { id: "diff", label: "审阅", badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <FileDiff {...sidebarIconProps} /> },
-    { id: "preview", label: "预览", badge: livePreviewUrl || previewArtifact ? "开" : undefined, icon: <MonitorPlay {...sidebarIconProps} /> },
+    { id: "preview", label: "预览", badge: previewSurfaceLiveUrl || previewSurfaceArtifact ? "开" : undefined, icon: <MonitorPlay {...sidebarIconProps} /> },
     { id: "browser", label: "浏览器", icon: <Globe2 {...sidebarIconProps} /> },
     { id: "diagnostics", label: "运行状态", badge: mcpErrors ? String(mcpErrors) : undefined, icon: <HeartPulse {...sidebarIconProps} /> },
   ];
@@ -202,8 +208,8 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
   }, [addOpenTab, diffReview, gitChangeCount]);
 
   useEffect(() => {
-    if (livePreviewUrl || previewArtifact) addOpenTab("preview");
-  }, [addOpenTab, livePreviewUrl, previewArtifact]);
+    if (previewSurfaceLiveUrl || previewSurfaceArtifact) addOpenTab("preview");
+  }, [addOpenTab, previewSurfaceArtifact, previewSurfaceLiveUrl]);
 
   const activePrimaryTab = openedTabs.some((tab) => tab.id === activeTab);
   const compactPanel = ["tasks", "inspector", "subagents", "artifacts", "diagnostics"].includes(activeTab);

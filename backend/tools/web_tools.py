@@ -152,6 +152,11 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
                     disable_reasoning=True,
                     enable_prompt_cache=False,
                 ),
+                turn_context=(
+                    context.run_context.llm_turn_context
+                    if context is not None and context.run_context is not None
+                    else None
+                ),
             )
         return await llm.simple_chat(messages)
 
@@ -754,6 +759,11 @@ class WebSearchTool(BaseTool):
                     hosted_web_search=True,
                     web_search_allowed_domains=tuple(allowed_domains),
                     web_search_blocked_domains=tuple(blocked_domains),
+                ),
+                turn_context=(
+                    context.run_context.llm_turn_context
+                    if context is not None and context.run_context is not None
+                    else None
                 ),
             )
         except Exception as exc:

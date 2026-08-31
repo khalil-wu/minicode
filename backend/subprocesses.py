@@ -402,3 +402,7 @@ async def communicate_bounded(
             await asyncio.wait_for(operation, timeout=2.0)
         record_unproven_cleanup(exc, reaped=reaped, proc=proc)
         raise
+
+
+def decode_process_output(data: bytes | None) -> str:
+    return (data or b"").decode("utf-8", errors="replace")

@@ -24,12 +24,13 @@ class JobClaim:
     kind: str
     job_key: str
     ownership_token: str
-    input_watermark: int
+    input_revision: int
 
 
 @dataclass(frozen=True)
 class Stage1Output:
     thread_id: str
+    source_revision: int
     source_updated_at: int
     raw_memory: str
     rollout_summary: str
@@ -38,12 +39,22 @@ class Stage1Output:
     usage_count: int | None = None
     last_usage: int | None = None
     selected_for_phase2: bool = False
-    selected_for_phase2_source_updated_at: int | None = None
+    selected_for_phase2_source_revision: int | None = None
 
 
-_SCHEMA = """
+_SCHEMA_VERSION = 2
+
+_CREATE_MEMORY_STATE = """
+CREATE TABLE IF NOT EXISTS memory_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    catalog_revision INTEGER NOT NULL
+)
+"""
+
+_CREATE_STAGE1_OUTPUTS = """
 CREATE TABLE IF NOT EXISTS stage1_outputs (
     thread_id TEXT PRIMARY KEY,
+    source_revision INTEGER NOT NULL,
     source_updated_at INTEGER NOT NULL,
     raw_memory TEXT NOT NULL,
     rollout_summary TEXT NOT NULL,
@@ -52,9 +63,11 @@ CREATE TABLE IF NOT EXISTS stage1_outputs (
     usage_count INTEGER,
     last_usage INTEGER,
     selected_for_phase2 INTEGER NOT NULL DEFAULT 0,
-    selected_for_phase2_source_updated_at INTEGER
-);
+    selected_for_phase2_source_revision INTEGER
+)
+"""
 
+_CREATE_JOBS = """
 CREATE TABLE IF NOT EXISTS jobs (
     kind TEXT NOT NULL,
     job_key TEXT NOT NULL,
@@ -67,10 +80,19 @@ CREATE TABLE IF NOT EXISTS jobs (
     retry_at INTEGER,
     retry_remaining INTEGER NOT NULL,
     last_error TEXT,
-    input_watermark INTEGER,
-    last_success_watermark INTEGER,
+    input_revision INTEGER,
+    last_success_revision INTEGER,
     PRIMARY KEY (kind, job_key)
-);
+)
+"""
+
+_INDEX_SCHEMA = """
+CREATE INDEX IF NOT EXISTS idx_stage1_outputs_source_revision
+    ON stage1_outputs(source_revision DESC, thread_id DESC);
+CREATE INDEX IF NOT EXISTS idx_stage1_outputs_source_updated_at
+    ON stage1_outputs(source_updated_at DESC, thread_id DESC);
+CREATE INDEX IF NOT EXISTS idx_jobs_kind_status_retry_lease
+    ON jobs(kind, status, retry_at, lease_until);
 """
 
 
@@ -100,7 +122,7 @@ class MemoryJobStore:
                 try:
                     connection.execute("PRAGMA busy_timeout = 5000")
                     connection.execute("PRAGMA journal_mode = WAL")
-                    connection.executescript(_SCHEMA)
+                    self._ensure_schema(connection)
                     yield connection
                 finally:
                     connection.close()
@@ -111,11 +133,77 @@ class MemoryJobStore:
     def _now(now: int | None) -> int:
         return int(time.time()) if now is None else int(now)
 
+    @classmethod
+    def _ensure_schema(cls, connection: sqlite3.Connection) -> None:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if version > _SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Memory database schema {version} is newer than supported {_SCHEMA_VERSION}"
+            )
+        connection.execute(_CREATE_MEMORY_STATE)
+        connection.execute(
+            "INSERT OR IGNORE INTO memory_state (singleton, catalog_revision) VALUES (1, 0)"
+        )
+        connection.execute(_CREATE_STAGE1_OUTPUTS)
+        connection.execute(_CREATE_JOBS)
+
+        output_columns = cls._table_columns(connection, "stage1_outputs")
+        job_columns = cls._table_columns(connection, "jobs")
+        if "source_revision" not in output_columns:
+            if "source_updated_at" not in output_columns:
+                raise RuntimeError("Unsupported memory stage1_outputs schema")
+            if "input_watermark" not in job_columns:
+                raise RuntimeError("Unsupported memory jobs schema")
+            cls._migrate_v1_schema(connection)
+        elif "input_revision" not in job_columns:
+            raise RuntimeError("Unsupported memory jobs schema")
+
+        connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        connection.executescript(_INDEX_SCHEMA)
+
+    @staticmethod
+    def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+        return {
+            str(row[1])
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+
+    @classmethod
+    def _migrate_v1_schema(cls, connection: sqlite3.Connection) -> None:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("ALTER TABLE stage1_outputs RENAME TO stage1_outputs_v1")
+        connection.execute("ALTER TABLE jobs RENAME TO jobs_v1")
+        connection.execute(_CREATE_STAGE1_OUTPUTS)
+        connection.execute(_CREATE_JOBS)
+        connection.execute(
+            """
+            INSERT INTO stage1_outputs (
+                thread_id, source_revision, source_updated_at, raw_memory,
+                rollout_summary, rollout_slug, generated_at, usage_count,
+                last_usage, selected_for_phase2,
+                selected_for_phase2_source_revision
+            )
+            SELECT
+                thread_id, -1, source_updated_at, raw_memory,
+                rollout_summary, rollout_slug, generated_at, usage_count,
+                last_usage, selected_for_phase2,
+                CASE WHEN selected_for_phase2 != 0 THEN -1 ELSE NULL END
+            FROM stage1_outputs_v1
+            """
+        )
+        connection.execute("DROP TABLE jobs_v1")
+        connection.execute("DROP TABLE stage1_outputs_v1")
+        connection.execute(
+            "UPDATE memory_state SET catalog_revision = 0 WHERE singleton = 1"
+        )
+        connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        connection.commit()
+
     def claim_stage1(
         self,
         *,
         thread_id: str,
-        source_updated_at: int,
+        source_revision: int,
         worker_id: str,
         lease_seconds: int,
         retry_limit: int,
@@ -123,10 +211,13 @@ class MemoryJobStore:
         now: int | None = None,
     ) -> JobClaim | None:
         timestamp = self._now(now)
+        source_revision = int(source_revision)
+        if source_revision < 0:
+            raise ValueError("source_revision must be non-negative")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             output = connection.execute(
-                "SELECT source_updated_at FROM stage1_outputs WHERE thread_id = ?",
+                "SELECT source_revision FROM stage1_outputs WHERE thread_id = ?",
                 (thread_id,),
             ).fetchone()
             job = connection.execute(
@@ -134,15 +225,24 @@ class MemoryJobStore:
                 (STAGE1_JOB_KIND, thread_id),
             ).fetchone()
 
-            if output is not None and int(output["source_updated_at"]) >= source_updated_at:
+            if output is not None and int(output["source_revision"]) >= source_revision:
                 connection.commit()
                 return None
-            if job is not None and int(job["last_success_watermark"] or 0) >= source_updated_at:
+            last_success_revision = (
+                int(job["last_success_revision"])
+                if job is not None and job["last_success_revision"] is not None
+                else -1
+            )
+            if last_success_revision >= source_revision:
                 connection.commit()
                 return None
 
-            previous_watermark = int(job["input_watermark"] or 0) if job is not None else 0
-            source_advanced = source_updated_at > previous_watermark
+            previous_revision = (
+                int(job["input_revision"])
+                if job is not None and job["input_revision"] is not None
+                else -1
+            )
+            source_advanced = source_revision > previous_revision
             if job is not None and not source_advanced:
                 if str(job["status"]) == "running" and int(job["lease_until"] or 0) > timestamp:
                     connection.commit()
@@ -159,8 +259,9 @@ class MemoryJobStore:
                 """
                 SELECT COUNT(*) FROM jobs
                 WHERE kind = ? AND status = 'running' AND lease_until > ?
+                  AND job_key != ?
                 """,
-                (STAGE1_JOB_KIND, timestamp),
+                (STAGE1_JOB_KIND, timestamp, thread_id),
             ).fetchone()[0]
             if int(running) >= max(1, int(max_running_jobs)):
                 connection.commit()
@@ -177,8 +278,8 @@ class MemoryJobStore:
                 INSERT INTO jobs (
                     kind, job_key, status, worker_id, ownership_token,
                     started_at, finished_at, lease_until, retry_at,
-                    retry_remaining, last_error, input_watermark,
-                    last_success_watermark
+                    retry_remaining, last_error, input_revision,
+                    last_success_revision
                 ) VALUES (?, ?, 'running', ?, ?, ?, NULL, ?, NULL, ?, NULL, ?, ?)
                 ON CONFLICT(kind, job_key) DO UPDATE SET
                     status = 'running',
@@ -190,7 +291,7 @@ class MemoryJobStore:
                     retry_at = NULL,
                     retry_remaining = excluded.retry_remaining,
                     last_error = NULL,
-                    input_watermark = excluded.input_watermark
+                    input_revision = excluded.input_revision
                 """,
                 (
                     STAGE1_JOB_KIND,
@@ -200,12 +301,12 @@ class MemoryJobStore:
                     timestamp,
                     timestamp + max(1, int(lease_seconds)),
                     retry_remaining,
-                    source_updated_at,
-                    int(job["last_success_watermark"] or 0) if job is not None else None,
+                    source_revision,
+                    last_success_revision if job is not None else None,
                 ),
             )
             connection.commit()
-            return JobClaim(STAGE1_JOB_KIND, thread_id, token, source_updated_at)
+            return JobClaim(STAGE1_JOB_KIND, thread_id, token, source_revision)
 
     def complete_stage1(
         self,
@@ -214,6 +315,7 @@ class MemoryJobStore:
         raw_memory: str,
         rollout_summary: str,
         rollout_slug: str | None,
+        source_updated_at: int,
         now: int | None = None,
     ) -> bool:
         timestamp = self._now(now)
@@ -226,48 +328,49 @@ class MemoryJobStore:
                 return False
 
             if raw_memory and rollout_summary:
-                connection.execute(
+                written = connection.execute(
                     """
                     INSERT INTO stage1_outputs (
-                        thread_id, source_updated_at, raw_memory, rollout_summary,
-                        rollout_slug, generated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        thread_id, source_revision, source_updated_at, raw_memory,
+                        rollout_summary, rollout_slug, generated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(thread_id) DO UPDATE SET
+                        source_revision = excluded.source_revision,
                         source_updated_at = excluded.source_updated_at,
                         raw_memory = excluded.raw_memory,
                         rollout_summary = excluded.rollout_summary,
                         rollout_slug = excluded.rollout_slug,
                         generated_at = excluded.generated_at
-                    WHERE excluded.source_updated_at >= stage1_outputs.source_updated_at
+                    WHERE excluded.source_revision > stage1_outputs.source_revision
                     """,
                     (
                         claim.job_key,
-                        claim.input_watermark,
+                        claim.input_revision,
+                        int(source_updated_at),
                         raw_memory,
                         rollout_summary,
                         rollout_slug,
                         timestamp,
                     ),
                 )
-                self._enqueue_phase2_tx(connection, claim.input_watermark, timestamp)
+                if written.rowcount:
+                    catalog_revision = self._advance_catalog_revision_tx(connection)
+                    self._enqueue_phase2_tx(connection, catalog_revision, timestamp)
             else:
-                previous = connection.execute(
-                    "SELECT selected_for_phase2 FROM stage1_outputs WHERE thread_id = ?",
-                    (claim.job_key,),
-                ).fetchone()
-                connection.execute(
+                deleted = connection.execute(
                     "DELETE FROM stage1_outputs WHERE thread_id = ?",
                     (claim.job_key,),
                 )
-                if previous is not None and bool(previous["selected_for_phase2"]):
-                    self._enqueue_phase2_tx(connection, claim.input_watermark, timestamp)
+                if deleted.rowcount:
+                    catalog_revision = self._advance_catalog_revision_tx(connection)
+                    self._enqueue_phase2_tx(connection, catalog_revision, timestamp)
 
             connection.execute(
                 """
                 UPDATE jobs SET
                     status = 'succeeded', worker_id = NULL, ownership_token = NULL,
                     finished_at = ?, lease_until = NULL, retry_at = NULL,
-                    last_error = NULL, last_success_watermark = input_watermark
+                    last_error = NULL, last_success_revision = input_revision
                 WHERE kind = ? AND job_key = ? AND ownership_token = ?
                 """,
                 (timestamp, claim.kind, claim.job_key, claim.ownership_token),
@@ -309,21 +412,41 @@ class MemoryJobStore:
             connection.commit()
             return True
 
+    def abandon_stage1(self, claim: JobClaim) -> bool:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not self._owns(connection, claim):
+                connection.commit()
+                return False
+            cursor = connection.execute(
+                """
+                UPDATE jobs SET
+                    status = 'pending', worker_id = NULL, ownership_token = NULL,
+                    started_at = NULL, finished_at = NULL, lease_until = NULL,
+                    retry_at = NULL, last_error = NULL
+                WHERE kind = ? AND job_key = ? AND ownership_token = ?
+                  AND input_revision = ?
+                """,
+                (
+                    claim.kind,
+                    claim.job_key,
+                    claim.ownership_token,
+                    claim.input_revision,
+                ),
+            )
+            connection.commit()
+            return cursor.rowcount == 1
+
     def remove_thread_output(
         self,
         thread_id: str,
         *,
-        watermark: int | None = None,
         now: int | None = None,
     ) -> bool:
         timestamp = self._now(now)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            previous = connection.execute(
-                "SELECT source_updated_at, selected_for_phase2 FROM stage1_outputs WHERE thread_id = ?",
-                (thread_id,),
-            ).fetchone()
-            connection.execute(
+            deleted = connection.execute(
                 "DELETE FROM stage1_outputs WHERE thread_id = ?",
                 (thread_id,),
             )
@@ -331,15 +454,11 @@ class MemoryJobStore:
                 "DELETE FROM jobs WHERE kind = ? AND job_key = ?",
                 (STAGE1_JOB_KIND, thread_id),
             )
-            if previous is not None:
-                next_watermark = max(
-                    int(previous["source_updated_at"] or 0) + 1,
-                    int(watermark or 0),
-                    timestamp,
-                )
-                self._enqueue_phase2_tx(connection, next_watermark, timestamp)
+            if deleted.rowcount:
+                catalog_revision = self._advance_catalog_revision_tx(connection)
+                self._enqueue_phase2_tx(connection, catalog_revision, timestamp)
             connection.commit()
-            return previous is not None
+            return deleted.rowcount == 1
 
     def prune_unselected_outputs(
         self,
@@ -347,6 +466,7 @@ class MemoryJobStore:
         older_than: int,
         limit: int | None,
     ) -> int:
+        timestamp = self._now(None)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
@@ -370,14 +490,17 @@ class MemoryJobStore:
                     f"DELETE FROM jobs WHERE kind = ? AND job_key IN ({placeholders})",
                     [STAGE1_JOB_KIND, *ids],
                 )
+                catalog_revision = self._advance_catalog_revision_tx(connection)
+                self._enqueue_phase2_tx(connection, catalog_revision, timestamp)
             connection.commit()
             return len(ids)
 
-    def enqueue_phase2(self, input_watermark: int, *, now: int | None = None) -> None:
+    def enqueue_phase2(self, *, now: int | None = None) -> None:
         timestamp = self._now(now)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            self._enqueue_phase2_tx(connection, int(input_watermark), timestamp)
+            catalog_revision = self._advance_catalog_revision_tx(connection)
+            self._enqueue_phase2_tx(connection, catalog_revision, timestamp)
             connection.commit()
 
     def claim_phase2(
@@ -398,14 +521,15 @@ class MemoryJobStore:
             ).fetchone()
             if job is None:
                 token = uuid.uuid4().hex
+                input_revision = self._catalog_revision_tx(connection)
                 connection.execute(
                     """
                     INSERT INTO jobs (
                         kind, job_key, status, worker_id, ownership_token,
                         started_at, finished_at, lease_until, retry_at,
-                        retry_remaining, last_error, input_watermark,
-                        last_success_watermark
-                    ) VALUES (?, ?, 'running', ?, ?, ?, NULL, ?, NULL, ?, NULL, 0, 0)
+                        retry_remaining, last_error, input_revision,
+                        last_success_revision
+                    ) VALUES (?, ?, 'running', ?, ?, ?, NULL, ?, NULL, ?, NULL, ?, NULL)
                     """,
                     (
                         PHASE2_JOB_KIND,
@@ -415,11 +539,12 @@ class MemoryJobStore:
                         timestamp,
                         timestamp + max(1, int(lease_seconds)),
                         max(1, int(retry_limit)),
+                        input_revision,
                     ),
                 )
                 connection.commit()
-                return JobClaim(PHASE2_JOB_KIND, PHASE2_JOB_KEY, token, 0)
-            input_watermark = int(job["input_watermark"] or 0)
+                return JobClaim(PHASE2_JOB_KIND, PHASE2_JOB_KEY, token, input_revision)
+            input_revision = int(job["input_revision"] or 0)
             if str(job["status"]) == "running" and int(job["lease_until"] or 0) > timestamp:
                 connection.commit()
                 return None
@@ -457,7 +582,7 @@ class MemoryJobStore:
                 ),
             )
             connection.commit()
-            return JobClaim(PHASE2_JOB_KIND, PHASE2_JOB_KEY, token, input_watermark)
+            return JobClaim(PHASE2_JOB_KIND, PHASE2_JOB_KEY, token, input_revision)
 
     def owns_phase2(self, claim: JobClaim) -> bool:
         with self._connect() as connection:
@@ -520,7 +645,6 @@ class MemoryJobStore:
         claim: JobClaim,
         selected_outputs: Iterable[Stage1Output],
         *,
-        completion_watermark: int,
         now: int | None = None,
     ) -> bool:
         timestamp = self._now(now)
@@ -534,9 +658,9 @@ class MemoryJobStore:
                 """
                 UPDATE stage1_outputs SET
                     selected_for_phase2 = 0,
-                    selected_for_phase2_source_updated_at = NULL
+                    selected_for_phase2_source_revision = NULL
                 WHERE selected_for_phase2 != 0
-                   OR selected_for_phase2_source_updated_at IS NOT NULL
+                   OR selected_for_phase2_source_revision IS NOT NULL
                 """
             )
             for output in selected:
@@ -544,13 +668,13 @@ class MemoryJobStore:
                     """
                     UPDATE stage1_outputs SET
                         selected_for_phase2 = 1,
-                        selected_for_phase2_source_updated_at = ?
-                    WHERE thread_id = ? AND source_updated_at = ?
+                        selected_for_phase2_source_revision = ?
+                    WHERE thread_id = ? AND source_revision = ?
                     """,
                     (
-                        output.source_updated_at,
+                        output.source_revision,
                         output.thread_id,
-                        output.source_updated_at,
+                        output.source_revision,
                     ),
                 )
             connection.execute(
@@ -558,12 +682,11 @@ class MemoryJobStore:
                 UPDATE jobs SET
                     status = 'succeeded', worker_id = NULL, ownership_token = NULL,
                     finished_at = ?, lease_until = NULL, retry_at = NULL,
-                    last_error = NULL, last_success_watermark = ?
+                    last_error = NULL, last_success_revision = input_revision
                 WHERE kind = ? AND job_key = ? AND ownership_token = ?
                 """,
                 (
                     timestamp,
-                    int(completion_watermark),
                     claim.kind,
                     claim.job_key,
                     claim.ownership_token,
@@ -584,7 +707,7 @@ class MemoryJobStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             # Phase-2 failure is a state transition just like completion.  A
-            # stale worker must match the claimed input watermark as well as
+            # stale worker must match the claimed input revision as well as
             # its token; otherwise it can consume the retry budget for a
             # newer phase-2 generation after the row was advanced in place.
             if not self._owns(connection, claim):
@@ -634,6 +757,9 @@ class MemoryJobStore:
                     (timestamp, thread_id),
                 )
                 updated += cursor.rowcount
+            if updated:
+                catalog_revision = self._advance_catalog_revision_tx(connection)
+                self._enqueue_phase2_tx(connection, catalog_revision, timestamp)
             connection.commit()
             return updated
 
@@ -643,33 +769,21 @@ class MemoryJobStore:
             """
             SELECT 1 FROM jobs
             WHERE kind = ? AND job_key = ? AND status = 'running'
-              AND ownership_token = ? AND input_watermark = ?
+              AND ownership_token = ? AND input_revision = ?
             """,
             (
                 claim.kind,
                 claim.job_key,
                 claim.ownership_token,
-                claim.input_watermark,
+                claim.input_revision,
             ),
-        ).fetchone()
-        return row is not None
-
-    @staticmethod
-    def _owns_token(connection: sqlite3.Connection, claim: JobClaim) -> bool:
-        row = connection.execute(
-            """
-            SELECT 1 FROM jobs
-            WHERE kind = ? AND job_key = ? AND status = 'running'
-              AND ownership_token = ?
-            """,
-            (claim.kind, claim.job_key, claim.ownership_token),
         ).fetchone()
         return row is not None
 
     @staticmethod
     def _enqueue_phase2_tx(
         connection: sqlite3.Connection,
-        input_watermark: int,
+        input_revision: int,
         timestamp: int,
     ) -> None:
         row = connection.execute(
@@ -680,40 +794,60 @@ class MemoryJobStore:
             connection.execute(
                 """
                 INSERT INTO jobs (
-                    kind, job_key, status, retry_remaining, input_watermark
+                    kind, job_key, status, retry_remaining, input_revision
                 ) VALUES (?, ?, 'pending', 3, ?)
                 """,
-                (PHASE2_JOB_KIND, PHASE2_JOB_KEY, int(input_watermark)),
+                (PHASE2_JOB_KIND, PHASE2_JOB_KEY, int(input_revision)),
             )
             return
-        current_watermark = int(row["input_watermark"] or 0)
-        next_watermark = (
-            int(input_watermark)
-            if int(input_watermark) > current_watermark
-            else current_watermark + 1
-        )
+        current_revision = int(row["input_revision"] or 0)
+        next_revision = max(int(input_revision), current_revision)
         if str(row["status"]) == "running":
             connection.execute(
                 """
-                UPDATE jobs SET input_watermark = ?
+                UPDATE jobs SET
+                    status = 'pending', worker_id = NULL, ownership_token = NULL,
+                    started_at = NULL, finished_at = NULL, lease_until = NULL,
+                    retry_at = NULL, retry_remaining = MAX(retry_remaining, 3),
+                    last_error = NULL, input_revision = ?
                 WHERE kind = ? AND job_key = ?
                 """,
-                (next_watermark, PHASE2_JOB_KIND, PHASE2_JOB_KEY),
+                (next_revision, PHASE2_JOB_KIND, PHASE2_JOB_KEY),
             )
         else:
             connection.execute(
                 """
-                UPDATE jobs SET status = 'pending', input_watermark = ?,
+                UPDATE jobs SET status = 'pending', input_revision = ?,
                     retry_at = CASE WHEN retry_at > ? THEN retry_at ELSE NULL END
                 WHERE kind = ? AND job_key = ?
                 """,
-                (next_watermark, timestamp, PHASE2_JOB_KIND, PHASE2_JOB_KEY),
+                (next_revision, timestamp, PHASE2_JOB_KIND, PHASE2_JOB_KEY),
             )
+
+    @staticmethod
+    def _catalog_revision_tx(connection: sqlite3.Connection) -> int:
+        row = connection.execute(
+            "SELECT catalog_revision FROM memory_state WHERE singleton = 1"
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("Memory catalog revision row is missing")
+        return int(row["catalog_revision"])
+
+    @classmethod
+    def _advance_catalog_revision_tx(cls, connection: sqlite3.Connection) -> int:
+        current = cls._catalog_revision_tx(connection)
+        next_revision = current + 1
+        connection.execute(
+            "UPDATE memory_state SET catalog_revision = ? WHERE singleton = 1",
+            (next_revision,),
+        )
+        return next_revision
 
     @staticmethod
     def _stage1_from_row(row: sqlite3.Row) -> Stage1Output:
         return Stage1Output(
             thread_id=str(row["thread_id"]),
+            source_revision=int(row["source_revision"]),
             source_updated_at=int(row["source_updated_at"]),
             raw_memory=str(row["raw_memory"]),
             rollout_summary=str(row["rollout_summary"]),
@@ -722,9 +856,9 @@ class MemoryJobStore:
             usage_count=int(row["usage_count"]) if row["usage_count"] is not None else None,
             last_usage=int(row["last_usage"]) if row["last_usage"] is not None else None,
             selected_for_phase2=bool(row["selected_for_phase2"]),
-            selected_for_phase2_source_updated_at=(
-                int(row["selected_for_phase2_source_updated_at"])
-                if row["selected_for_phase2_source_updated_at"] is not None
+            selected_for_phase2_source_revision=(
+                int(row["selected_for_phase2_source_revision"])
+                if row["selected_for_phase2_source_revision"] is not None
                 else None
             ),
         )

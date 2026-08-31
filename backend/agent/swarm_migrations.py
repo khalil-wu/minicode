@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Sequence
 
+from backend.agent.runtime_records import epoch_ms
+
 MIGRATION_KEY = "legacy_json_import_v1"
 MIGRATION_REPORT_KEY = "legacy_json_import_report_v1"
-
-
-def _epoch_ms() -> int:
-    return int(time.time() * 1000)
 
 
 def _json(value: Any) -> str:
@@ -43,7 +40,7 @@ class LegacySwarmMigrator:
                 ).fetchone():
                     empty_report = {
                         "version": 1,
-                        "completed_at": _epoch_ms(),
+                        "completed_at": epoch_ms(),
                         "verified": not any(self.store.root.glob("*.json")),
                         "totals": {
                             "messages": 0,
@@ -106,7 +103,7 @@ class LegacySwarmMigrator:
             ]
             report = {
                 "version": 1,
-                "completed_at": _epoch_ms(),
+                        "completed_at": epoch_ms(),
                 "verified": True,
                 "totals": totals,
                 "canonical_sha256": sha256(_json(canonical_manifest).encode("utf-8")).hexdigest(),
@@ -114,7 +111,7 @@ class LegacySwarmMigrator:
             }
             connection.execute(
                 "INSERT INTO metadata(key, value) VALUES (?, ?)",
-                (MIGRATION_KEY, str(_epoch_ms())),
+                (MIGRATION_KEY, str(epoch_ms())),
             )
             connection.execute(
                 "INSERT INTO metadata(key, value) VALUES (?, ?)",

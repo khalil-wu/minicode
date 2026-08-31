@@ -80,6 +80,14 @@ class ToolResult:
     # here avoids parsing human-readable ToolResult.content or creating a
     # second Agent runtime path merely to obtain a dialect-specific result.
     runtime_metadata: dict[str, Any] = field(default_factory=dict, repr=False)
+    # Typed metadata for a persisted artifact.  Keep this at the end of the
+    # dataclass so older positional ToolResult(...) callers retain their ABI.
+    # The payload is deliberately metadata-only; binary bodies stay in the
+    # owner-scoped ArtifactStore and are fetched through the authorized raw
+    # artifact endpoint by the UI.
+    artifact_kind: str | None = None
+    artifact_media_type: str | None = None
+    artifact_bytes: int | None = None
 
     def to_context_string(self) -> str:
         """Return the compact representation injected into model context.
@@ -121,6 +129,25 @@ class ToolResult:
                 f"Full result saved as artifact. Use read_artifact('{self.artifact_id}') if more detail is needed."
             )
         return "\n".join(parts)
+
+
+def artifact_owner_workspace_root(context: Any | None) -> str:
+    """Return the workspace scope that owns artifacts emitted by a tool call.
+
+    A delegated agent may execute filesystem operations in an isolated worktree
+    while its transcript and artifacts remain owned by the parent conversation.
+    The delegation boundary records that owner explicitly in metadata. Root
+    turns have no override and use their execution workspace as the owner.
+    """
+
+    if context is None:
+        return ""
+    metadata = getattr(context, "metadata", None)
+    if isinstance(metadata, dict):
+        owner = str(metadata.get("artifact_owner_workspace_root") or "").strip()
+        if owner:
+            return owner
+    return str(getattr(context, "workspace_root", "") or "").strip()
 
 
 # MiniCode persists tool results above DEFAULT_MAX_RESULT_SIZE_CHARS=50_000

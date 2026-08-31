@@ -12,6 +12,7 @@ has been replaced.  Every API/context operation checks the generation guard.
 
 from __future__ import annotations
 
+import copy
 import inspect
 import logging
 from collections.abc import Callable, Mapping, Sequence
@@ -900,19 +901,19 @@ class ExtensionToolAdapter(BaseTool):
         self.description = definition.description
         from backend.tools.base import PermissionLevel
 
-        # Mirror the MCP tool mapping (mcp/registry.py): tools whose declared
-        # semantics mutate state escalate to CONFIRM instead of a blanket
-        # AUTO, so a changed extension tool re-earns approval.
-        if definition.mutates_workspace or definition.mutates_external_state or definition.destructive:
-            self.permission = PermissionLevel.CONFIRM
-        else:
-            self.permission = PermissionLevel.AUTO
         self.read_only = definition.read_only
         self.destructive = definition.destructive
         self.open_world = definition.open_world
         self.mutates_workspace = definition.mutates_workspace
         self.mutates_external_state = definition.mutates_external_state
         self.side_effect_kind = definition.side_effect_kind
+        # Mirror the MCP tool mapping (mcp/registry.py): tools whose declared
+        # semantics mutate state escalate to CONFIRM instead of a blanket
+        # AUTO, so a changed extension tool re-earns approval.
+        if self.get_side_effect_kind() != "none":
+            self.permission = PermissionLevel.CONFIRM
+        else:
+            self.permission = PermissionLevel.AUTO
         self.idempotent = definition.idempotent
         self.timeout_seconds = definition.timeout_seconds
         self.streams_output = definition.streams_output
@@ -947,7 +948,7 @@ class ExtensionToolAdapter(BaseTool):
             {
                 "extension_path": self._runner.extension_for_tool(self.name),
                 "extension": True,
-                "read_only": self.read_only,
+                "read_only": self.is_read_only(),
                 "destructive": self.destructive,
                 "open_world": self.open_world,
                 "mutates_workspace": self.mutates_workspace,
@@ -982,7 +983,13 @@ class ExtensionToolAdapter(BaseTool):
         return result
 
     def is_read_only(self, args: dict[str, Any] | None = None) -> bool:
-        return self.read_only
+        return (
+            self.read_only
+            and not self.destructive
+            and not self.open_world
+            and not self.mutates_workspace
+            and not self.mutates_external_state
+        )
 
     def is_concurrency_safe(self, args: dict[str, Any] | None = None) -> bool:
         if self.execution_mode == "parallel":
@@ -1007,14 +1014,14 @@ class ExtensionToolAdapter(BaseTool):
         return dict(value)
 
     def get_side_effect_kind(self, args: dict[str, Any] | None = None) -> str:
-        if self.side_effect_kind:
-            return self.side_effect_kind
         if self.destructive:
             return "destructive"
-        if self.mutates_external_state:
+        if self.mutates_external_state or self.open_world:
             return "external"
         if self.mutates_workspace:
             return "workspace"
+        if self.side_effect_kind:
+            return self.side_effect_kind
         return "none"
 
     def is_idempotent(self, args: dict[str, Any] | None = None) -> bool:
@@ -1028,7 +1035,7 @@ class ExtensionToolAdapter(BaseTool):
         if context is not None:
             metadata = getattr(context, "metadata", {}) or {}
             tool_call_id = str(
-                metadata.get("_current_tool_call_id")
+                getattr(context, "tool_call_id", "")
                 or metadata.get("tool_call_id")
                 or metadata.get("tool_call_id_hint")
                 or ""
@@ -1529,10 +1536,11 @@ class ExtensionRunner:
         """Apply the sequential ``context`` transform before provider I/O."""
 
         self.assert_active()
-        current = list(messages)
+        current = copy.deepcopy(list(messages))
         context = self.create_context()
         for extension, handler in self._handlers_for("context"):
-            event = {"type": "context", "messages": current}
+            handler_messages = copy.deepcopy(current)
+            event = {"type": "context", "messages": handler_messages}
             try:
                 value = await _maybe_await(
                     _call_with_signature(handler, {"event": event, "ctx": context, "context": context}, (event, context))
@@ -1543,9 +1551,11 @@ class ExtensionRunner:
                 self.record_error("context", extension.path, exc)
                 continue
             if isinstance(value, Mapping) and isinstance(value.get("messages"), (list, tuple)):
-                current = list(value["messages"])
+                current = copy.deepcopy(list(value["messages"]))
             elif isinstance(value, (list, tuple)):
-                current = list(value)
+                current = copy.deepcopy(list(value))
+            else:
+                current = handler_messages
         return current
 
     async def emit_before_provider_request(self, payload: Any) -> Any:
@@ -1609,18 +1619,6 @@ class ExtensionRunner:
         self, event: ToolCallEvent, *, context: ExtensionContext | None = None
     ) -> ToolCallDecision | None:
         self.assert_active()
-        if isinstance(event, Mapping):
-            event = ToolCallEvent(
-                tool_call_id=str(
-                    event.get("tool_call_id", event.get("id", ""))
-                    or ""
-                ),
-                tool_name=str(
-                    event.get("tool_name", event.get("name", ""))
-                    or ""
-                ),
-                input=dict(event.get("input", event.get("args", {})) or {}),
-            )
         ctx = context or self.create_context()
         decision: ToolCallDecision | None = None
         for extension, handler in self._handlers_for("tool_call"):

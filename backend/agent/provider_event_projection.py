@@ -25,8 +25,11 @@ class ProviderProjectionResult:
 _DISPLAYABLE_PROVIDER_REASONING_TYPES = frozenset(
     {
         "reasoning_summary_text",  # OpenAI Responses reasoning summaries
-        "thinking_delta",          # Anthropic extended-thinking deltas
-        "thinking",                # extension transport thinking deltas
+        "reasoning_content",  # OpenAI-compatible Chat reasoning deltas
+        "reasoning",  # OpenAI-compatible Chat reasoning deltas
+        "reasoning_text",  # OpenAI-compatible Chat reasoning deltas
+        "thinking_delta",  # Anthropic extended-thinking deltas
+        "thinking",  # extension transport thinking deltas
     }
 )
 
@@ -37,7 +40,9 @@ async def project_non_text_provider_event(
     stream_state: StreamAttemptState,
     stream_text: StreamTextState,
     live_text_streaming: bool,
-    tool_executor: Any,
+    tool_tracker: Any,
+    tool_registry: Any,
+    tool_context: Any,
     process_event_factory: Callable[..., AgentEvent | None],
 ) -> AsyncIterator[AgentEvent | ProviderProjectionResult]:
     """Reduce tool/media/reasoning frames while leaving policy to the loop.
@@ -49,8 +54,7 @@ async def project_non_text_provider_event(
 
     if event.type == StreamEventType.THINKING_CHUNK:
         reasoning_type = str(
-            (getattr(event, "raw", {}) or {}).get("provider_reasoning_type")
-            or ""
+            (getattr(event, "raw", {}) or {}).get("provider_reasoning_type") or ""
         )
         # Only surfaces the provider itself intends for display. Raw
         # chain-of-thought stays internal (OpenAI's response.reasoning_text.* is
@@ -87,14 +91,14 @@ async def project_non_text_provider_event(
         yield ProviderProjectionResult(True)
         return
     if event.type == StreamEventType.PROVIDER_ACTIVITY:
-        activity = stream_state.accept_provider_activity(
-            event.provider_activity
-        )
+        activity = stream_state.accept_provider_activity(event.provider_activity)
         if activity is not None and activity.message:
             status = str(activity.status or "info").strip().lower()
             if status not in {"running", "completed", "failed", "info"}:
                 status = "info"
-            image_activity = str(activity.kind or "").strip().lower() == "image_generation"
+            image_activity = (
+                str(activity.kind or "").strip().lower() == "image_generation"
+            )
             yield AgentEvent.progress(
                 activity.message,
                 stage="image_generation" if image_activity else "tool",
@@ -131,7 +135,7 @@ async def project_non_text_provider_event(
                 start,
                 started_at=int(time.time() * 1000),
                 iteration_id=stream_text.iteration_id,
-                tool_registry=tool_executor.tool_registry,
+                tool_registry=tool_registry,
             )
         yield ProviderProjectionResult(True)
         return
@@ -139,9 +143,7 @@ async def project_non_text_provider_event(
         delta = event.tool_call_delta
         if delta is not None and delta.id:
             tool_name = stream_state.partial_tool_names.get(delta.id, "")
-            tool = (
-                tool_executor.tool_registry.get_tool(tool_name) if tool_name else None
-            )
+            tool = tool_registry.get_tool(tool_name) if tool_name else None
             if tool is not None:
                 try:
                     parsed = from_json(
@@ -153,7 +155,7 @@ async def project_non_text_provider_event(
                 if isinstance(parsed, dict):
                     preview = tool.streamed_input_preview(
                         parsed,
-                        context=getattr(tool_executor, "tool_ctx", None),
+                        context=tool_context,
                         prior=stream_state.partial_tool_args.get(delta.id),
                     )
                     if preview and preview != stream_state.partial_tool_args.get(
@@ -203,7 +205,13 @@ async def project_non_text_provider_event(
         # cannot leak side effects.
         completed = stream_text.complete_active_agent_message(
             stream_text.active_agent_message_text,
-            source="commentary",
+            # An unphased provisional item is narration once a tool boundary
+            # arrives; a provider-declared final item keeps its final source.
+            source=(
+                "model_final"
+                if stream_text.active_agent_message_source == "model_final"
+                else "commentary"
+            ),
             status="completed",
         )
         if completed is not None:
@@ -239,7 +247,7 @@ async def project_non_text_provider_event(
             sdk_only=True,
         )
 
-    tool_executor.add_tools(list(outcome.complete_tool_calls))
+    tool_tracker.add_tools(list(outcome.complete_tool_calls))
     await asyncio.sleep(0)
     pending = stream_state.tool_calls
     if event.tool_calls_final and pending:

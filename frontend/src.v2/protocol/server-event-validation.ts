@@ -1,6 +1,7 @@
 import { SERVER_EVENT_TYPES, type ServerEvent, type ServerEventType } from "./events";
 import {
   AGENT_PROGRESS_PHASES,
+  AGENT_PROGRESS_PROVIDER_STATES,
   AGENT_PROGRESS_STAGES,
   AGENT_PROGRESS_STATUSES,
 } from "./streaming-types";
@@ -731,6 +732,24 @@ const isReplyAttachment = (value: unknown): boolean => isRecord(value)
   && isNonNegativeSafeInteger(value.size)
   && typeof value.is_image === "boolean";
 
+/**
+ * Validate the small metadata records carried alongside a tool result.
+ *
+ * The artifact body is deliberately not transported in a tool_result event;
+ * only its owner-scoped id and descriptive metadata are.  Keep the legacy
+ * fields optional so older transcripts that only contain artifact_id continue
+ * to hydrate, while rejecting malformed values when a field is present.
+ */
+const isToolOutputFile = (value: unknown): boolean => {
+  if (!isRecord(value) || !isBoundedString(value.path, 32_768) || String(value.path).includes("\0")) {
+    return false;
+  }
+  return (!('size' in value) || isNonNegativeSafeInteger(value.size))
+    && (!('name' in value) || isBoundedString(value.name, 512))
+    && (!('mime_type' in value) || isBoundedString(value.mime_type, 128))
+    && (!('is_image' in value) || typeof value.is_image === "boolean");
+};
+
 const isNonNegativeNumberRecord = (value: unknown): value is Record<string, number> => {
   if (!isRecord(value)) return false;
   const entries = Object.entries(value);
@@ -744,6 +763,7 @@ const isNonNegativeNumberRecord = (value: unknown): value is Record<string, numb
 const AGENT_PROGRESS_STAGE_SET = new Set<string>(AGENT_PROGRESS_STAGES);
 const AGENT_PROGRESS_STATUS_SET = new Set<string>(AGENT_PROGRESS_STATUSES);
 const AGENT_PROGRESS_PHASE_SET = new Set<string>(AGENT_PROGRESS_PHASES);
+const AGENT_PROGRESS_PROVIDER_STATE_SET = new Set<string>(AGENT_PROGRESS_PROVIDER_STATES);
 const RUNTIME_SPAN_STATUSES = new Set([
   "running",
   "completed",
@@ -1184,9 +1204,31 @@ const hasValidSemanticPayload = (
       && (!("item_id" in value) || isBoundedString(value.item_id, 1_024))
       && (!("content_index" in value) || isNonNegativeSafeInteger(value.content_index));
   }
-  if (type === "tool_call" || type === "tool_result") {
+  if (type === "tool_call") {
     valid = valid
       && (!("visibility" in value) || ["timeline", "compact", "debug"].includes(String(value.visibility)));
+  }
+  if (type === "tool_result") {
+    const retryableArtifactFields = [
+      ["artifact_id", 1_024],
+      ["artifact_kind", 64],
+      ["artifact_media_type", 128],
+    ] as const;
+    valid = valid
+      // summary is required by the routing contract. Empty summaries are
+      // retained for compatibility with a few legacy blocked-tool events.
+      && isBoundedString(value.summary, MAX_EVENT_SUMMARY_CHARS, { allowEmpty: true })
+      && retryableArtifactFields.every(([field, maximum]) => (
+        !(field in value) || isBoundedString(value[field], maximum)
+      ))
+      && (!('artifact_bytes' in value) || isNonNegativeSafeInteger(value.artifact_bytes))
+      && (!('is_error' in value) || typeof value.is_error === "boolean")
+      && (!('visibility' in value) || ["timeline", "compact", "debug"].includes(String(value.visibility)))
+      && (!('output_files' in value) || (
+        Array.isArray(value.output_files)
+        && value.output_files.length <= 2_048
+        && value.output_files.every(isToolOutputFile)
+      ));
   }
   if (type === "agent.item") {
     const status = String(value.status ?? "completed");
@@ -1250,6 +1292,14 @@ const hasValidSemanticPayload = (
         !(field in value) || isBoundedString(value[field], 1_024)
       ))
       && (!("count" in value) || isNonNegativeSafeInteger(value.count))
+      && (!("retry_attempt" in value) || isNonNegativeSafeInteger(value.retry_attempt))
+      && (!("max_retries" in value) || isNonNegativeSafeInteger(value.max_retries))
+      && (!("retry_attempt" in value) || !("max_retries" in value)
+        || Number(value.retry_attempt) <= Number(value.max_retries))
+      && (!("retry_after_ms" in value) || isNonNegativeSafeInteger(value.retry_after_ms))
+      && (!("error_message" in value) || isBoundedString(value.error_message, MAX_EVENT_SUMMARY_CHARS))
+      && (!("operation_id" in value) || isBoundedString(value.operation_id, 1_024))
+      && (!("provider_state" in value) || AGENT_PROGRESS_PROVIDER_STATE_SET.has(String(value.provider_state)))
       && (!("ephemeral" in value) || typeof value.ephemeral === "boolean");
   }
   if (type === "runtime.span") {

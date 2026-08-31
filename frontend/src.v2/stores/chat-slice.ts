@@ -4,8 +4,10 @@ import type {
   ChatSlice,
   ContentBlock,
   ConversationGoal,
+  ConnectionPhase,
   MessageContextRef,
   MessageAttachmentRef,
+  ProgressContentBlock,
   SkillContextRef,
 } from "./types";
 import { canonicalWorkspacePath } from "../lib/workspace-display";
@@ -45,6 +47,12 @@ import {
   LS,
   writeLS,
 } from "./shared-helpers";
+import {
+  isTerminalToolCallStatus,
+  mergeToolCallResultRecord,
+  type ToolCallRecord,
+} from "../lib/tool-call-reducer";
+import { providerProgressLifecycleRegressed } from "../lib/provider-progress";
 
 function stripDisplayContextSuffix(content: string, refs: MessageContextRef[]): string {
   const suffixItems = refs
@@ -116,6 +124,106 @@ function completeRunWorkState(state: AppStore, terminalStatus: "completed" | "pa
     todos: state.todos,
   };
 }
+
+const PROVIDER_PROGRESS_TERMINAL_STATUSES = new Set(["partial", "completed", "failed"]);
+
+const maxProgressNumber = (left: number | undefined, right: number | undefined): number | undefined => {
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  return Math.max(left, right);
+};
+
+const isProviderProgressId = (id: string): boolean => id.startsWith("provider:");
+
+const isProviderRetryProgress = (
+  progress: Pick<ProgressContentBlock, "id" | "retryAttempt" | "maxRetries" | "providerState">,
+  previous?: Pick<ProgressContentBlock, "retryAttempt" | "maxRetries" | "providerState">,
+): boolean => isProviderProgressId(progress.id) && (
+  typeof progress.retryAttempt === "number"
+  || typeof progress.maxRetries === "number"
+  || Boolean(progress.providerState)
+  || typeof previous?.retryAttempt === "number"
+  || typeof previous?.maxRetries === "number"
+  || Boolean(previous?.providerState)
+);
+
+const mergeProviderMessageProgress = (
+  previous: ProgressContentBlock,
+  incoming: ProgressContentBlock,
+): ProgressContentBlock => {
+  const lifecycleRegressed = providerProgressLifecycleRegressed(previous, incoming);
+  const next: ProgressContentBlock = lifecycleRegressed
+    ? { ...previous }
+    : {
+        ...previous,
+        ...incoming,
+        // Keep the provider retry ladder anchored to its first frame. The
+        // block timestamp is used as its start time by timeline projections.
+        timestamp: previous.timestamp,
+      };
+
+  const terminalFence = lifecycleRegressed
+    && PROVIDER_PROGRESS_TERMINAL_STATUSES.has(previous.status);
+  if (!terminalFence) {
+    const retryAttempt = maxProgressNumber(previous.retryAttempt, incoming.retryAttempt);
+    const maxRetries = maxProgressNumber(previous.maxRetries, incoming.maxRetries);
+    const count = maxProgressNumber(previous.count, incoming.count);
+    if (retryAttempt !== undefined) next.retryAttempt = retryAttempt;
+    if (maxRetries !== undefined) next.maxRetries = maxRetries;
+    if (count !== undefined) next.count = count;
+  }
+
+  if (!lifecycleRegressed) {
+    const retryProgress = isProviderRetryProgress(incoming, previous);
+    const detail = String(incoming.detail ?? "").trim();
+    if (retryProgress) {
+      if (detail) next.detail = detail;
+      else delete next.detail;
+    }
+  }
+
+  if (next.status !== "running") delete next.ephemeral;
+  return next;
+};
+
+const pendingProviderProgressKey = (conversationId: string, messageId: string): string =>
+  `${conversationId}\u0000${messageId}`;
+
+const assistantIsTerminal = (message: AppStore["messages"][number]): boolean =>
+  Boolean(message.terminalStatus)
+  || Boolean(message.completedAt)
+  || (!message.isStreaming && !message.isThinkingStreaming);
+
+/** Merge one already-normalized progress block into its exact assistant. */
+const mergeProgressBlockIntoAssistant = (
+  message: AppStore["messages"][number],
+  incoming: ProgressContentBlock,
+): AppStore["messages"][number] => {
+  const provider = isProviderProgressId(incoming.id);
+  if (provider && assistantIsTerminal(message)) return message;
+
+  const blocks = getContentBlocks(message).slice();
+  const existingIdx = blocks.findIndex((block) =>
+    block.type === "progress" && block.id === incoming.id,
+  );
+  if (existingIdx >= 0) {
+    const existing = blocks[existingIdx];
+    if (existing.type === "progress") {
+      if (provider) {
+        blocks[existingIdx] = mergeProviderMessageProgress(existing, incoming);
+      } else {
+        const terminal = new Set(["completed", "failed", "partial"]);
+        if (terminal.has(existing.status) && incoming.status === "running") return message;
+        blocks[existingIdx] = { ...existing, ...incoming };
+      }
+    } else {
+      blocks[existingIdx] = incoming;
+    }
+  } else {
+    blocks.push(incoming);
+  }
+  return { ...message, blocks };
+};
 
 /**
  * Answer text that arrived with no live assistant record to attach it to is
@@ -189,10 +297,15 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   messages: [],
   conversationMessages: {},
   conversationStreaming: {},
+  pendingProviderProgress: {},
   conversationRecallTruncations: {},
   isStreaming: false,
   isPaused: false,
   isConnected: false,
+  connectionPhase: "connecting",
+  reconnectAttempt: 0,
+  reconnectMaxAttempts: null,
+  connectionError: null,
   lastUsage: null,
   usageTotals: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, turns: 0 },
   sideChats: {},
@@ -624,7 +737,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           : s.conversations,
       };
     }),
-  hydrateConversationMessages: (id, messages, options) =>
+  hydrateConversationMessages: (id, messages, options) => {
     set((s) => {
       const activate = options?.activate ?? id === s.conversationId;
       const guardedMessages = applyRecallTruncation(id, messages, s);
@@ -646,7 +759,14 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           [id]: nextStreaming,
         },
       };
-    }),
+    });
+    const hydrated = get().getVisibleMessages(id);
+    for (const message of hydrated) {
+      if (message.role === "assistant") {
+        get().flushPendingProviderProgress(id, message.id);
+      }
+    }
+  },
   bindStreamingTurn: (conversationId, messageId, turnId) => {
     const normalizedTurnId = turnId?.trim();
     if (!normalizedTurnId) return;
@@ -661,7 +781,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       return next;
     }));
   },
-  startAgentMessage: (itemId, conversationId, messageId, source) =>
+  startAgentMessage: (itemId, conversationId, messageId, source) => {
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
         const idx = findStreamingIndexForMessage(messages, messageId);
@@ -686,7 +806,11 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         };
         return next;
       });
-    }),
+    });
+    if (conversationId?.trim() && messageId?.trim()) {
+      get().flushPendingProviderProgress(conversationId, messageId);
+    }
+  },
   appendAgentMessageDelta: (itemId, delta, conversationId, messageId, source) => {
     let droppedDelta = false;
     set((s) => updateMessagesForConversation(s, conversationId, (messages) => {
@@ -862,41 +986,99 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     }),
   upsertMessageProgress: (progress, conversationId, messageId) =>
     set((s) => {
-      return updateMessagesForConversation(s, conversationId, (messages) => {
-        const targetId = messageId?.trim();
-        const idx = targetId
-          ? messages.findIndex((message) => message.role === "assistant" && message.id === targetId)
+      const targetConversationId = conversationId?.trim() || s.conversationId?.trim();
+      const targetMessageId = messageId?.trim();
+      const incoming: ProgressContentBlock = {
+        ...progress,
+        type: "progress",
+        timestamp: Date.now(),
+      };
+      const provider = isProviderProgressId(incoming.id);
+      let pendingKey: string | undefined;
+      let pendingProgress: ProgressContentBlock | undefined;
+      const result = updateMessagesForConversation(s, conversationId, (messages) => {
+        const idx = targetMessageId
+          ? messages.findIndex((message) => message.role === "assistant" && message.id === targetMessageId)
           : findLastStreamingIndex(messages);
-        if (idx < 0) return null;
-        const next = messages.slice();
-        const message = next[idx];
-        const blocks = getContentBlocks(message).slice();
-        const timestamp = Date.now();
-        const incoming = {
-          ...progress,
-          type: "progress" as const,
-          timestamp,
-        };
-        const existingIdx = blocks.findIndex((block) =>
-          block.type === "progress" && block.id === incoming.id,
-        );
-        if (existingIdx >= 0) {
-          const existing = blocks[existingIdx];
-          if (existing.type === "progress") {
-            const terminal = new Set(["completed", "failed"]);
-            if (terminal.has(existing.status) && incoming.status === "running") {
-              return null;
-            }
-            blocks[existingIdx] = { ...existing, ...incoming };
-          } else {
-            blocks[existingIdx] = incoming;
+        if (idx < 0) {
+          if (provider && targetConversationId && targetMessageId) {
+            pendingKey = pendingProviderProgressKey(targetConversationId, targetMessageId);
+            pendingProgress = incoming;
           }
-        } else {
-          blocks.push(incoming);
+          return null;
         }
-        next[idx] = { ...message, blocks };
+        const message = messages[idx];
+        const next = messages.slice();
+        next[idx] = mergeProgressBlockIntoAssistant(message, incoming);
         return next;
       });
+
+      if (!pendingKey || !pendingProgress) return result;
+      const current = s.pendingProviderProgress[pendingKey] ?? [];
+      const existingIdx = current.findIndex((block) => block.id === pendingProgress!.id);
+      const nextPending = current.slice();
+      if (existingIdx >= 0) {
+        nextPending[existingIdx] = mergeProviderMessageProgress(
+          nextPending[existingIdx],
+          pendingProgress,
+        );
+      } else {
+        nextPending.push(pendingProgress);
+      }
+      return {
+        ...result,
+        pendingProviderProgress: {
+          ...s.pendingProviderProgress,
+          [pendingKey]: nextPending,
+        },
+      };
+    }),
+  flushPendingProviderProgress: (conversationId, messageId) =>
+    set((s) => {
+      const owner = conversationId.trim();
+      const targetMessageId = messageId.trim();
+      const key = pendingProviderProgressKey(owner, targetMessageId);
+      const pending = s.pendingProviderProgress[key];
+      if (!pending || pending.length === 0) return s;
+
+      let found = false;
+      const result = updateMessagesForConversation(s, owner, (messages) => {
+        const idx = messages.findIndex((message) =>
+          message.role === "assistant" && message.id === targetMessageId,
+        );
+        if (idx < 0) return null;
+        found = true;
+        const message = messages[idx];
+        if (assistantIsTerminal(message)) return messages;
+        const next = messages.slice();
+        next[idx] = pending.reduce(
+          (current, progress) => mergeProgressBlockIntoAssistant(current, progress),
+          message,
+        );
+        return next;
+      });
+      if (!found) return s;
+      const pendingProviderProgress = { ...s.pendingProviderProgress };
+      delete pendingProviderProgress[key];
+      return { ...result, pendingProviderProgress };
+    }),
+  clearPendingProviderProgress: (conversationId, messageId) =>
+    set((s) => {
+      const owner = conversationId?.trim();
+      if (!owner) return s;
+      const targetMessageId = messageId?.trim();
+      const prefix = `${owner}\u0000`;
+      const pendingProviderProgress = Object.fromEntries(
+        Object.entries(s.pendingProviderProgress).filter(([key]) =>
+          targetMessageId
+            ? key !== pendingProviderProgressKey(owner, targetMessageId)
+            : !key.startsWith(prefix),
+        ),
+      );
+      if (Object.keys(pendingProviderProgress).length === Object.keys(s.pendingProviderProgress).length) {
+        return s;
+      }
+      return { pendingProviderProgress };
     }),
   removeProcessItem: (itemId, conversationId, messageId) =>
     set((s) => {
@@ -944,35 +1126,59 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     set((s) => {
       const matchesScope = (record: ReturnType<typeof getToolCallsFromMessage>[number]) => {
         if (record.id !== id) return false;
-        // messageId already scopes this reducer to one assistant turn. The
-        // provider tool-use ID is authoritative within that turn.
-        if (messageId) return true;
-        if (scope?.turnId && record.turnId && record.turnId !== scope.turnId) return false;
-        if (scope?.iterationId && record.iterationId && record.iterationId !== scope.iterationId) return false;
-        if (scope?.stepId && record.stepId && record.stepId !== scope.stepId) return false;
+        // A supplied scope field is an assertion. The caller may pass the
+        // record's previous scope for the one explicit lifecycle migration;
+        // otherwise missing candidate fields are not wildcards.
+        if (scope?.turnId && record.turnId !== scope.turnId) return false;
+        if (scope?.iterationId && record.iterationId !== scope.iterationId) return false;
+        if (scope?.stepId && record.stepId !== scope.stepId) return false;
         return true;
       };
       return updateMessagesForConversation(s, conversationId, (messages) => {
-        const idx = messages.findIndex((m) =>
-          (!messageId || m.id === messageId)
-          && getToolCallsFromMessage(m).some(matchesScope),
-        );
-        if (idx < 0) return null;
+        const candidates = messages.flatMap((message, messageIndex) => {
+          if (messageId && message.id !== messageId) return [];
+          return getContentBlocks(message).flatMap((block, blockIndex) =>
+            block.type === "tool_call" && matchesScope(block.record)
+              ? [{ messageIndex, blockIndex, record: block.record }]
+              : [],
+          );
+        });
+        // A lifecycle id is only safe when it resolves to exactly one block.
+        // Counting messages alone allowed duplicate ids inside one message to
+        // be updated together, which corrupted parallel/legacy tool records.
+        if (candidates.length !== 1) return null;
+        const [{ messageIndex: idx, blockIndex }] = candidates;
         const next = messages.slice();
         const msg = next[idx];
         const baseMsg = stripLegacyContentFields(msg);
+        const blocks = getContentBlocks(msg).slice();
+        const block = blocks[blockIndex];
+        if (!block || block.type !== "tool_call") return null;
+        const record = block.record;
+        const incomingSeq = typeof patch.seq === "number" && Number.isSafeInteger(patch.seq)
+          ? patch.seq
+          : undefined;
+        const existingSeq = typeof record.seq === "number" && Number.isSafeInteger(record.seq)
+          ? record.seq
+          : undefined;
+        if (incomingSeq !== undefined && existingSeq !== undefined && incomingSeq <= existingSeq) {
+          return null;
+        }
+        const incoming = { ...record, ...patch } as ToolCallRecord;
+        const nextRecord = patch.status && isTerminalToolCallStatus(record.status)
+          ? mergeToolCallResultRecord(record, incoming)
+          : patch.status === "running" || patch.status === "pending"
+            ? isTerminalToolCallStatus(record.status) ? record : incoming
+            : incoming;
+        blocks[blockIndex] = { ...block, record: nextRecord };
         next[idx] = {
           ...baseMsg,
-          blocks: getContentBlocks(msg).map((block) =>
-            block.type === "tool_call" && matchesScope(block.record)
-              ? { ...block, record: { ...block.record, ...patch } }
-              : block,
-          ),
+          blocks,
         };
         return next;
       });
     }),
-  finishStreaming: (conversationId, usage, terminalStatus = "completed", messageId, failureMessage, failureRecoverable, durationMs, terminationReason) =>
+  finishStreaming: (conversationId, usage, terminalStatus = "completed", messageId, failureMessage, failureRecoverable, durationMs, terminationReason) => {
     set((s) => {
       const finishedAt = Date.now();
       const normalizedFailureMessage = terminalStatus === "failed" ? String(failureMessage || "").trim() : "";
@@ -1059,7 +1265,6 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
               content,
               isStreaming: false,
               isThinkingStreaming: false,
-              resumeState: undefined,
               terminalStatus,
               terminationReason: String(terminationReason || "").trim() || undefined,
               failureMessage: normalizedFailureMessage || undefined,
@@ -1118,8 +1323,10 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         ...workState,
         ...(targetId ? { conversationAgentStates: nextConversationAgentStates } : {}),
       };
-    }),
-  resumeStreaming: (conversationId, toolCallsPending, messageId, turnId, snapshotBlocks) =>
+    });
+    get().clearPendingProviderProgress(conversationId, messageId);
+  },
+  resumeStreaming: (conversationId, toolCallsPending, messageId, turnId, snapshotBlocks) => {
     set((s) => {
       const targetId = conversationId || s.conversationId;
       const sourceMessages = targetId && targetId !== s.conversationId
@@ -1149,7 +1356,6 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           content: hasStructuredSnapshot ? getAnswerTextFromBlocks(blocks) : "",
           ...(turnId ? { turnId } : {}),
           isStreaming: true,
-          resumeState: "resumed",
           blocks,
         };
       } else {
@@ -1165,7 +1371,6 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
             artifacts: [],
             timestamp: Date.now(),
             isStreaming: true,
-            resumeState: "resumed",
           },
         ];
       }
@@ -1184,8 +1389,43 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         toolCallCount: computeToolCallCount(nextMessages),
         ...cacheMessagesForConversation(s, targetId, nextMessages, true),
       };
-    }),
-  setConnected: (c) => set(c ? { isConnected: true } : { isConnected: false, runtimeSession: null }),
+    });
+    const owner = conversationId?.trim() || get().conversationId?.trim();
+    const targetMessageId = messageId?.trim();
+    if (owner && targetMessageId) {
+      get().flushPendingProviderProgress(owner, targetMessageId);
+    }
+  },
+  setConnected: (c) => set((s) => c
+    ? {
+        isConnected: true,
+        connectionPhase: "connected" as ConnectionPhase,
+        reconnectAttempt: 0,
+        reconnectMaxAttempts: null,
+        connectionError: null,
+      }
+    : {
+        isConnected: false,
+        runtimeSession: null,
+        // A direct disconnect from a protocol/runtime error is terminal. The
+        // transport close handler immediately replaces this with reconnecting
+        // for ordinary network failures.
+        connectionPhase: s.connectionPhase === "reconnecting"
+          ? s.connectionPhase
+          : "failed" as ConnectionPhase,
+      }),
+  setConnectionState: (phase, details) => set((s) => ({
+    isConnected: phase === "connected",
+    connectionPhase: phase,
+    runtimeSession: phase === "connected" ? s.runtimeSession : null,
+    reconnectAttempt: details?.attempt ?? (phase === "connected" ? 0 : s.reconnectAttempt),
+    reconnectMaxAttempts: details?.maxAttempts === undefined
+      ? (phase === "connected" ? null : s.reconnectMaxAttempts)
+      : details.maxAttempts,
+    connectionError: details?.error === undefined
+      ? (phase === "connected" ? null : s.connectionError)
+      : details.error,
+  })),
   setLastUsage: (u) =>
     set((s) => ({
       lastUsage: u,

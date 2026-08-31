@@ -886,10 +886,6 @@ async def import_plugin_package(
         if _trusted_marketplace and isinstance(_marketplace_source_descriptor, Mapping)
         else source_descriptor
     )
-    policy.assert_plugin_installable(
-        plugin_id_for_name(_plugin_name_from_package(package), marketplace),
-        trusted_marketplace=_trusted_marketplace,
-    )
 
     install_root = plugin_install_root()
     install_root.mkdir(parents=True, exist_ok=True)
@@ -972,6 +968,7 @@ async def _install_plugin_directory(
     plugin_id = plugin_id_for_name(plugin_name, marketplace)
     effective_policy.assert_plugin_installable(
         plugin_id,
+        version=str((manifest_payload or {}).get("version") or "").strip(),
         trusted_marketplace=trusted_marketplace,
     )
     validation = validate_plugin_directory(source)

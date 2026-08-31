@@ -195,6 +195,25 @@
   max-width: 100%;
 }
 
+.user-cell-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 1.2;
+}
+
+.user-cell-source-id {
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-tertiary, var(--text-muted));
+}
+
 .user-cell-bubble {
   width: fit-content;
   max-width: 100%;
@@ -1210,6 +1229,91 @@
   border-radius: var(--radius-md);
   background: var(--surface-raised);
   animation: expand-detail var(--duration-fast) cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.activity-cell-artifact-gallery {
+  gap: 8px;
+  padding: 8px;
+}
+
+.activity-cell-artifact-card {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+}
+
+.activity-cell-artifact-button {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-base);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.activity-cell-artifact-button:disabled {
+  cursor: default;
+  opacity: 0.82;
+}
+
+.activity-cell-artifact-image {
+  display: block;
+  width: 100%;
+  max-height: min(360px, 44vh);
+  object-fit: contain;
+  background: var(--surface-soft);
+}
+
+.activity-cell-artifact-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 96px;
+  padding: 16px;
+  color: var(--text-muted);
+  background: var(--surface-soft);
+  font-size: var(--text-xs);
+  text-align: center;
+}
+
+.activity-cell-artifact-caption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px 2px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.activity-cell-artifact-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px 2px;
+  color: var(--state-danger);
+  font-size: var(--text-xs);
+}
+
+.activity-cell-artifact-retry {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in oklch, var(--state-danger) 40%, var(--border-subtle));
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.activity-cell-artifact-retry:hover {
+  background: color-mix(in oklch, var(--state-danger) 8%, transparent);
 }
 
 .activity-cell-detail-row {

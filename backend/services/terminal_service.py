@@ -10,7 +10,7 @@ from uuid import uuid4
 from backend.agent.context import ContextBuilder
 from backend.agent.message import AgentEvent
 from backend.agent.state import AgentState
-from backend.agent.tool_execution import execute_tool_batch
+from backend.agent.tool_batch_execution import execute_tool_batch
 from backend.config import AgentSettings, TokenBudget
 from backend.llm.base import ToolCallEvent
 from backend.tools.registry import ToolRegistry

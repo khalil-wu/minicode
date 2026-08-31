@@ -800,17 +800,13 @@ def _publish_registry_cleanup_receipt(
         return
     evidence = receipt.to_evidence(
         resource_kind="tool",
-        resource_id=str(
-            getattr(context, "metadata", {}).get("_active_tool_call_id") or tool_name
-        ),
+        resource_id=str(getattr(context, "tool_call_id", "") or tool_name),
         reason=reason,
     )
     metadata = getattr(context, "metadata", None)
     if isinstance(metadata, dict):
         metadata["_registry_cleanup_receipt"] = evidence
-    call_id = str(
-        getattr(context, "metadata", {}).get("_active_tool_call_id") or ""
-    ).strip()
+    call_id = str(getattr(context, "tool_call_id", "") or "").strip()
     receipts = getattr(context, "cleanup_receipts", None)
     if call_id and isinstance(receipts, dict):
         receipts[call_id] = evidence

@@ -47,7 +47,12 @@ class GenerateImageTool(BaseTool):
         if context is None:
             return None
         metadata = context.metadata if isinstance(context.metadata, dict) else {}
-        parent_runtime = metadata.get("_subagent_parent_runtime")
+        run_context = context.run_context
+        parent_runtime = (
+            run_context.subagent_parent_runtime
+            if run_context is not None
+            else {}
+        )
         candidates = []
         if isinstance(parent_runtime, dict):
             candidates.append(parent_runtime.get("provider"))
@@ -129,8 +134,7 @@ class GenerateImageTool(BaseTool):
         emitter = getattr(context, "emit_event", None) if context is not None else None
         if not callable(emitter):
             return
-        metadata = context.metadata if isinstance(context.metadata, dict) else {}
-        tool_call_id = str(metadata.get("_current_tool_call_id") or "").strip()
+        tool_call_id = str(context.tool_call_id or "").strip()
         payload: dict[str, Any] = {
             "id": progress_id,
             "stage": "image_generation",
@@ -159,8 +163,10 @@ class GenerateImageTool(BaseTool):
     ) -> ToolResult:
         prompt = str(args.get("prompt") or "").strip()
         settings = self._settings_for_context(context)
-        metadata = context.metadata if context is not None and isinstance(context.metadata, dict) else {}
-        tool_call_id = str(metadata.get("_current_tool_call_id") or "").strip()
+        metadata = context.metadata if context is not None else {}
+        tool_call_id = str(
+            getattr(context, "tool_call_id", "") or ""
+        ).strip()
         progress_id = f"image-generation:{tool_call_id or uuid4().hex[:16]}"
 
         if not settings.get("enabled"):

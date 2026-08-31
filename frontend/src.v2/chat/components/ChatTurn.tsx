@@ -29,11 +29,19 @@ export const ChatTurn = memo(function ChatTurn({
   wide = false,
   defaultProcessExpanded,
   isTranscriptMode = false,
+  conversationId,
+  workspaceRoot,
 }: {
   turn: ChatTurnState;
   wide?: boolean;
   defaultProcessExpanded?: boolean;
   isTranscriptMode?: boolean;
+  /** Conversation that owns artifacts in this transcript.  This is explicit
+   * because transcript cells can be rendered while another conversation is
+   * active (for example, a child-agent replay). */
+  conversationId?: string;
+  /** Workspace that owns file paths projected into this transcript. */
+  workspaceRoot?: string;
 }) {
   const committedCells = turn.committedCells;
   const processDetailMode = useAppStore((state) => state.viewMode);
@@ -54,10 +62,12 @@ export const ChatTurn = memo(function ChatTurn({
           isActive={isActive}
           onStopExecution={isTranscriptMode ? undefined : stopActiveRun}
           isTranscriptMode={isTranscriptMode}
+          conversationId={conversationId}
+          workspaceRoot={workspaceRoot}
         />
       </div>
     ),
-    [isTranscriptMode, stopActiveRun],
+    [conversationId, isTranscriptMode, stopActiveRun, workspaceRoot],
   );
 
   return (
@@ -77,15 +87,19 @@ export function HistoryCellRenderer({
   isActive = false,
   onStopExecution,
   isTranscriptMode = false,
+  conversationId,
+  workspaceRoot,
 }: {
   cell: HistoryCellState;
   isActive?: boolean;
   onStopExecution?: () => void;
   isTranscriptMode?: boolean;
+  conversationId?: string;
+  workspaceRoot?: string;
 }) {
   switch (cell.kind) {
     case "user_message":
-      return <UserMessageCell cell={cell} isTranscriptMode={isTranscriptMode} />;
+      return <UserMessageCell cell={cell} isTranscriptMode={isTranscriptMode} conversationId={conversationId} />;
 
     case "status_notice":
       return <StatusNoticeCell cell={cell} />;
@@ -97,7 +111,7 @@ export function HistoryCellRenderer({
       return <CollaborationCell cell={cell} />;
 
     case "activity":
-      return <ActivityCell cell={cell} isActive={isActive} />;
+      return <ActivityCell cell={cell} isActive={isActive} conversationId={conversationId} />;
 
     case "exec":
       return <ExecCell cell={cell} isActive={isActive} onStop={isTranscriptMode ? undefined : onStopExecution} />;
@@ -109,7 +123,12 @@ export function HistoryCellRenderer({
       return <ErrorCell cell={cell} />;
 
     case "assistant_markdown":
-      return <AssistantMarkdownCell cell={cell} isTranscriptMode={isTranscriptMode} />;
+      return <AssistantMarkdownCell
+        cell={cell}
+        isTranscriptMode={isTranscriptMode}
+        conversationId={conversationId}
+        workspaceRoot={workspaceRoot}
+      />;
 
     default:
       // Live assistant text never reaches this renderer: the turn projection

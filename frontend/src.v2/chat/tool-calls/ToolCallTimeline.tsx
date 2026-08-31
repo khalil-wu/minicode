@@ -4,6 +4,7 @@ import { getToolCallsFromMessage } from "../../lib/content-blocks";
 import type { CSSProperties } from "react";
 import type { AgentProgressEntry, ChatMessage } from "../../stores/types";
 import { readableToolLabel } from "../toolDisplayName";
+import { providerProgressLabel } from "../../lib/provider-progress";
 
 export type TimelinePhase = "context" | "model" | "tool" | "approval" | "subagent" | "cache" | "recovery" | "final";
 
@@ -201,8 +202,15 @@ export function buildRunTimelineItems(
     .map((entry) => ({
       id: `progress:${entry.id}`,
       phase: phaseForProgress(entry),
-      label: readableToolLabel(entry.label || entry.message || PHASE_LABELS[phaseForProgress(entry)]),
-      summary: entry.summary || entry.detail,
+      label: readableToolLabel(
+        providerProgressLabel(entry)
+          || (entry.id.startsWith("provider:")
+            ? entry.message || entry.label || PHASE_LABELS[phaseForProgress(entry)]
+            : entry.label || entry.message || PHASE_LABELS[phaseForProgress(entry)]),
+      ),
+      summary: entry.id.startsWith("provider:")
+        ? entry.detail || entry.summary
+        : entry.summary || entry.detail,
       status: entry.status === "info" ? "info" : entry.status,
       startedAt: entry.timestamp || Date.now(),
       toolName: entry.toolName,

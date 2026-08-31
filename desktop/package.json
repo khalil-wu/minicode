@@ -64,6 +64,7 @@
       "window-manager.js",
       "updater.js",
       "startup-error.html",
+      "startup-error.js",
       "startup-error-preload.js",
       "package.json",
       "!node_modules/node-pty/prebuilds/darwin-*/**",

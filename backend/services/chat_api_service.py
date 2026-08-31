@@ -13,9 +13,11 @@ from backend.agent.conversation_query_guard import (
     ConversationQueryClaim,
     conversation_query_guards,
 )
+from backend.api.models import ToolCallRecord
 from backend.agent.execution_journal import execution_journal_owner
 from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
 from backend.agent.runtime import default_runtime
+from backend.agent.run_context import RunContext
 from backend.agent.state import AgentState
 from backend.artifact.store import ArtifactStore
 from backend.config import load_config
@@ -153,10 +155,14 @@ async def run_owned_rest_chat(
     ]
     tool_registry = bootstrap.create_tool_registry(
         artifact_store,
+        workspace_root=workspace_root,
         config=config,
         mcp_manager=mcp_manager,
     )
-    permission_checker = bootstrap.create_permission_checker(config=config)
+    permission_checker = bootstrap.create_permission_checker(
+        config=config,
+        workspace_root=workspace_root,
+    )
 
     try:
         llm = bootstrap.create_llm(config=config)
@@ -196,6 +202,8 @@ async def run_owned_rest_chat(
         conversation_id or "rest",
         journal_turn_id,
     )
+    agent_runtime = default_runtime()
+    session_id = f"scheduled:{run_id}" if run_id else "rest_api"
     runtime = AgentLoopSessionContext(
         permission_context=PermissionContext(
             mode=normalized_permission_mode if normalized_permission_mode in {"plan", "confirm", "bypass", "auto"} else "confirm",
@@ -203,16 +211,20 @@ async def run_owned_rest_chat(
             source="scheduled_task" if run_id else "rest_api",
         ),
         workspace_root=workspace_root,
-        session_id=f"scheduled:{run_id}" if run_id else "rest_api",
+        session_id=session_id,
         metadata={
             "source": "scheduled_task" if run_id else "rest_api",
             "conversation_id": conversation_id,
             "run_id": run_id,
-            "requires_explicit_workspace": bool(workspace_root),
-            "_execution_journal": default_runtime().execution_journal(journal_owner),
-            "_mcp_manager": mcp_manager,
-            "connected_mcp_servers": connected_mcp_servers,
         },
+        run_context=RunContext(
+            execution_journal=agent_runtime.execution_journal(journal_owner),
+            mcp_manager=mcp_manager,
+            agent_runtime=agent_runtime,
+            cost_session_id=session_id,
+            requires_explicit_workspace=bool(workspace_root),
+            connected_mcp_servers=tuple(connected_mcp_servers),
+        ),
     )
     state.conversation_id = conversation_id
     engine = query_engine or QueryEngine()
@@ -269,19 +281,7 @@ async def run_owned_rest_chat(
         "errors": error_messages,
         "iterations": state.iterations,
         "tool_calls": [
-            {
-                "tool_name": tool_call.tool_name,
-                "tool_input": tool_call.tool_input,
-                "tool_output": tool_call.tool_output,
-                "artifact_id": tool_call.artifact_id,
-                "status": tool_call.status,
-                "error_kind": tool_call.error_kind,
-                "user_summary": tool_call.user_summary,
-                "developer_detail": tool_call.developer_detail,
-                "recoverable": tool_call.recoverable,
-                "projection": tool_call.projection,
-                "model_observation": tool_call.model_observation,
-            }
+            ToolCallRecord.from_internal(tool_call).model_dump()
             for tool_call in state.tool_calls
         ],
     }
@@ -323,7 +323,7 @@ def reserve_attachment_upload_context(
         fixed_conversation_id = str(getattr(conversation, "id", "") or "").strip()
         if not fixed_conversation_id:
             raise ChatApiServiceError(500, "Failed to reserve an attachment conversation.")
-        workspace_root = session._workspace_root_for_conversation(conversation)
+        workspace_root = session.session_lifecycle.workspace_root_for_conversation(conversation)
         reserve_upload = getattr(ws_manager, "reserve_attachment_upload", None)
         release_upload: Callable[[], None] | None = None
         if callable(reserve_upload):
@@ -435,7 +435,9 @@ def _session_attachment_payload(
     conversation = session.conversation_repo.get_conversation(fixed_conversation_id)
     if conversation is None or bool(getattr(conversation, "archived", False)):
         raise ChatApiServiceError(404, "The attachment conversation is not available.")
-    workspace_root = str(session._workspace_root_for_conversation(conversation) or "")
+    workspace_root = str(
+        session.session_lifecycle.workspace_root_for_conversation(conversation) or ""
+    )
     payload = attachment_store.get_payload(
         artifact_id,
         conversation_id=fixed_conversation_id,
@@ -536,7 +538,9 @@ def generated_artifact_native_payload(
     artifact_store = getattr(session, "artifact_store", None)
     if artifact_store is None:
         raise ChatApiServiceError(500, "The artifact store is unavailable.")
-    workspace_root = str(session._workspace_root_for_conversation(conversation) or "")
+    workspace_root = str(
+        session.session_lifecycle.workspace_root_for_conversation(conversation) or ""
+    )
     content = artifact_store.get(
         artifact_id,
         conversation_id=fixed_conversation_id,
@@ -576,4 +580,3 @@ def generated_artifact_native_payload(
 
     extension = GENERATED_IMAGE_EXTENSIONS[media_type]
     return body, media_type, f"generated-{artifact_id}.{extension}"
-

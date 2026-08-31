@@ -143,10 +143,11 @@ class ManagedPluginPolicy:
         self,
         plugin_name: str,
         *,
+        version: str = "",
         trusted_marketplace: bool = False,
     ) -> None:
         self.assert_policy_valid()
-        state = self.managed_state(plugin_name)
+        state = self.managed_state(plugin_name, version)
         if state is True and trusted_marketplace:
             return
         if state is not False and state is None:

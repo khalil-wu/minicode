@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -11,7 +10,6 @@ from typing import Any
 from backend.agent.first_byte_waiter import (
     ProviderStreamFailure,
 )
-from backend.agent.loop_preflight import PhaseDeadlineExceeded
 from backend.agent.loop_runtime_helpers import (
     epoch_ms,
 )
@@ -38,10 +36,11 @@ from backend.agent.provider_stream_settlement import (
     settle_provider_stream,
 )
 from backend.agent.provider_stream_failures import (
-    fail_provider_runtime,
-    recover_provider_failure,
-    recover_stream_timeout,
+    ProviderStreamExceptionResult,
+    close_provider_stream,
+    handle_provider_stream_exception,
 )
+from backend.agent.provider_attempt import provider_progress_id
 from backend.agent.provider_stream_transport import (
     ProviderTransportFailureResult,
     handle_provider_transport_failure,
@@ -50,18 +49,12 @@ from backend.agent.stream_attempt import StreamAttemptState, StreamTextState
 from backend.agent.policies.stream_retry import StreamRetryState
 from backend.agent.stream_sanitizer import ThinkingStreamSanitizer
 from backend.agent.terminal_projection import TurnTerminalProjection
-from backend.agent.tool_events import (
-    abandoned_tool_announcement_events,
-    cancelled_pending_tool_events,
-)
-from backend.agent.tool_execution import StreamingToolExecutor
+from backend.agent.tool_stream_tracker import StreamingToolTracker
 from backend.llm.base import (
     UsageInfo,
     safe_stream_chat_with_request_metadata,
 )
 
-
-logger = logging.getLogger(__name__)
 
 Degrade = Callable[..., AsyncIterator[AgentEvent | TurnTerminalProjection]]
 ErrorRecovery = Callable[..., Awaitable[AgentEvent | None]]
@@ -72,7 +65,7 @@ class ProviderStreamResult:
     action: ProviderStreamAction
     stream_state: StreamAttemptState
     stream_text: StreamTextState
-    tool_executor: StreamingToolExecutor
+    tool_tracker: StreamingToolTracker
     turn_usage: UsageInfo
     usage: UsageInfo
     finish_reason: str
@@ -118,34 +111,31 @@ async def stream_provider_response(
     finish_reason = ""
     provider_raw_done = stream_state.raw_done
     stream_attempt = 0
-    retry_state = StreamRetryState()
-    query_source = str(
-        llm_request_metadata.get("query_source")
-        or llm_request_metadata.get("minicode_source")
-        or "user"
+    max_retries = max(
+        0,
+        int(getattr(settings, "stream_max_attempts", 0) or 0),
+    )
+    # A loop iteration id is local to a turn.  Include the durable run id in
+    # the provider operation identity so a later turn cannot overwrite this
+    # retry row during reconnect/hydration.
+    progress_owner = str(
+        getattr(getattr(turn_kernel, "run_record", None), "run_id", "")
+        or getattr(turn_kernel, "metadata", {}).get("turn_id", "")
+        or ""
     ).strip()
+    provider_progress_key = provider_progress_id(
+        iteration_id_value,
+        progress_owner,
+    )
+    retry_state = StreamRetryState()
+    query_source = str(llm_request_metadata.get("query_source") or "user").strip()
     stream_recovery_attempted = False
     retry_budget_boundary = None
     rebuild_context_and_retry = False
     provider_response_phase = ""
     provider_stream_steered = False
     awaiting_trailing_tool_done = False
-    tool_executor = StreamingToolExecutor(
-        state=state,
-        tool_registry=tool_registry,
-        permission_checker=permission_checker,
-        permission_context=effective_permission_context,
-        tool_ctx=tool_context,
-        execution_limit=(
-            max(
-                0,
-                settings.max_tool_calls
-                - (len(state.tool_calls) - turn_start_tool_call_count),
-            )
-            if settings.max_tool_calls > 0
-            else None
-        ),
-    )
+    tool_tracker = StreamingToolTracker()
     thinking_chars = 0
     provider_attempt = None
     stream_iter: Any | None = None
@@ -154,12 +144,7 @@ async def stream_provider_response(
         nonlocal stream_iter
         stream = stream_iter
         stream_iter = None
-        close = getattr(stream, "aclose", None) if stream is not None else None
-        if callable(close):
-            try:
-                await close()
-            except Exception:
-                logger.debug("Provider stream close failed", exc_info=True)
+        await close_provider_stream(stream)
 
     try:
         while True:
@@ -171,9 +156,8 @@ async def stream_provider_response(
                 iteration_id=iteration_id_value,
                 retry_index=stream_attempt,
                 started_at=epoch_ms(),
-                total_attempts=(
-                    int(getattr(settings, "stream_max_attempts", 0) or 0) + 1
-                ),
+                max_retries=max_retries,
+                progress_id=provider_progress_key,
             )
             stream_iter = safe_stream_chat_with_request_metadata(
                 llm,
@@ -215,7 +199,7 @@ async def stream_provider_response(
                         iteration_id_value=iteration_id_value,
                         stream_iter=stream_iter,
                         cancel_event=tool_context.cancel_event,
-                        tool_executor=tool_executor,
+                        tool_tracker=tool_tracker,
                         state=state,
                         context_builder=context_builder,
                         turn_usage=turn_usage,
@@ -223,6 +207,9 @@ async def stream_provider_response(
                         degrade_and_finish=degrade_and_finish,
                         query_source=query_source,
                         retry_state=retry_state,
+                        progress_id=provider_progress_key,
+                        max_retries=max_retries,
+                        close_stream=_close_stream,
                     ):
                         if isinstance(
                             transport_update,
@@ -237,9 +224,7 @@ async def stream_provider_response(
                         )
                     usage = transport_result.usage
                     stream_attempt = transport_result.stream_attempt
-                    retry_budget_boundary = (
-                        transport_result.retry_budget_boundary
-                    )
+                    retry_budget_boundary = transport_result.retry_budget_boundary
                     if transport_result.action == "retry":
                         finish_reason = ""
                         provider_response_phase = ""
@@ -247,11 +232,13 @@ async def stream_provider_response(
                         should_retry = True
                     break
                 if wait_result is None:
-                    if should_retry or retry_budget_boundary is not None or state.stopped_reason:
+                    if (
+                        should_retry
+                        or retry_budget_boundary is not None
+                        or state.stopped_reason
+                    ):
                         break
-                    raise RuntimeError(
-                        "provider wait returned without a result"
-                    )
+                    raise RuntimeError("provider wait returned without a result")
                 if wait_result.finish_reason:
                     finish_reason = wait_result.finish_reason
                 if wait_result.response_phase:
@@ -260,9 +247,7 @@ async def stream_provider_response(
                     break
                 event = wait_result.event
                 if event is None:
-                    raise RuntimeError(
-                        "provider wait produced an empty event"
-                    )
+                    raise RuntimeError("provider wait produced an empty event")
                 first_event = False
                 dispatch_result = None
                 async for dispatch_update in dispatch_provider_event(
@@ -277,7 +262,8 @@ async def stream_provider_response(
                     stream_iter=stream_iter,
                     stream_state=stream_state,
                     stream_text=stream_text,
-                    tool_executor=tool_executor,
+                    tool_tracker=tool_tracker,
+                    tool_registry=tool_registry,
                     settings=settings,
                     provider_completion=provider_completion,
                     prompt_cache_safe_params=prompt_cache_safe_params,
@@ -304,9 +290,7 @@ async def stream_provider_response(
                 awaiting_trailing_tool_done = (
                     dispatch_result.awaiting_trailing_tool_done
                 )
-                visible_text_sanitizer = (
-                    dispatch_result.visible_text_sanitizer
-                )
+                visible_text_sanitizer = dispatch_result.visible_text_sanitizer
                 thinking_chars = dispatch_result.thinking_chars
                 if dispatch_result.provider_stream_steered:
                     provider_stream_steered = True
@@ -331,14 +315,14 @@ async def stream_provider_response(
                         budget_runtime=budget_runtime,
                         error_controller=error_controller,
                         iteration_id_value=iteration_id_value,
-                        total_attempts=(
-                            int(getattr(settings, "stream_max_attempts", 0) or 0) + 1
-                        ),
+                        max_retries=max_retries,
                         cancel_event=tool_context.cancel_event,
                         degrade_and_finish=degrade_and_finish,
                         recover_withheld_error=recover_withheld_error,
                         query_source=query_source,
                         retry_state=retry_state,
+                        progress_id=provider_progress_key,
+                        close_stream=_close_stream,
                     ):
                         if isinstance(error_update, ProviderErrorEventResult):
                             error_result = error_update
@@ -350,9 +334,7 @@ async def stream_provider_response(
                         )
                     stream_attempt = error_result.stream_attempt
                     retry_budget_boundary = error_result.retry_budget_boundary
-                    stream_recovery_attempted = (
-                        error_result.stream_recovery_attempted
-                    )
+                    stream_recovery_attempted = error_result.stream_recovery_attempted
                     if error_result.action == "retry":
                         # A same-provider retry replaces the interrupted
                         # response. Discard the
@@ -364,7 +346,7 @@ async def stream_provider_response(
                         async for reset_update in reset_for_provider_retry(
                             stream_text=stream_text,
                             stream_state=stream_state,
-                            tool_executor=tool_executor,
+                            tool_tracker=tool_tracker,
                         ):
                             if isinstance(reset_update, ProviderRetryReset):
                                 retry_reset = reset_update
@@ -392,90 +374,62 @@ async def stream_provider_response(
             await _close_stream()
             break
 
-    except asyncio.CancelledError:
-        await _close_stream()
-        # A TOOL_CALL_START has already been projected to the client, but the
-        # provider stream can be cancelled before it produces a complete call.
-        # Close that public lifecycle before propagating cancellation so the
-        # query journal can persist the same call/result pair as the UI.
-        for abandoned in abandoned_tool_announcement_events(
-            stream_state,
-            iteration_id=iteration_id_value,
-        ):
-            yield abandoned
-        for cancelled in cancelled_pending_tool_events(
-            stream_state,
-            tool_executor,
-            iteration_id=iteration_id_value,
-        ):
-            yield cancelled
-        tool_executor.cancel_remaining()
-        await turn_kernel.close_provider_attempt(
-            provider_attempt,
-            status="cancelled",
-            summary="Provider request cancelled",
-            data={"reason": "turn_cancelled"},
-        )
-        raise
-    except PhaseDeadlineExceeded:
-        await _close_stream()
-        tool_executor.cancel_remaining()
-        boundary = budget_runtime.phase_deadline_boundary()
-        logger.warning("%s: %s", boundary.label, boundary.detail)
-        await turn_kernel.close_provider_attempt(
-            provider_attempt,
-            status="failed",
-            summary="Turn wall-clock deadline reached",
-            data={"error_type": "max_turn_seconds"},
-        )
-        retry_budget_boundary = boundary
-    except asyncio.TimeoutError:
-        await _close_stream()
-        tool_executor.cancel_remaining()
-        logger.warning(
-            "LLM stream timeout: %ss",
-            settings.stream_timeout_seconds,
-        )
-        async for recovery_event in recover_stream_timeout(
-            turn_kernel=turn_kernel,
-            provider_attempt=provider_attempt,
-            state=state,
-            context_builder=context_builder,
-            turn_usage=turn_usage,
-            usage=usage,
-            stream_state=stream_state,
-            stream_text=stream_text,
-            pending_tool_calls=pending_tool_calls,
-            degrade_and_finish=degrade_and_finish,
-        ):
-            yield recovery_event
-    except ProviderStreamFailure as stream_failure:
-        await _close_stream()
-        tool_executor.cancel_remaining()
-        async for recovery_event in recover_provider_failure(
-            stream_failure.cause,
-            turn_kernel=turn_kernel,
-            provider_attempt=provider_attempt,
-            state=state,
-            context_builder=context_builder,
-            turn_usage=turn_usage,
-            usage=usage,
-            stream_state=stream_state,
-            stream_text=stream_text,
-            pending_tool_calls=pending_tool_calls,
-            degrade_and_finish=degrade_and_finish,
-        ):
-            yield recovery_event
-    except Exception as exc:
-        await _close_stream()
-        tool_executor.cancel_remaining()
-        async for failure_event in fail_provider_runtime(
+    except asyncio.CancelledError as exc:
+        exception_result = None
+        async for exception_update in handle_provider_stream_exception(
             exc,
+            close_stream=_close_stream,
+            tool_tracker=tool_tracker,
+            stream_state=stream_state,
+            iteration_id_value=iteration_id_value,
             turn_kernel=turn_kernel,
             provider_attempt=provider_attempt,
+            budget_runtime=budget_runtime,
+            settings=settings,
             state=state,
+            context_builder=context_builder,
+            turn_usage=turn_usage,
+            usage=usage,
+            stream_text=stream_text,
+            pending_tool_calls=pending_tool_calls,
+            degrade_and_finish=degrade_and_finish,
         ):
-            yield failure_event
+            if isinstance(exception_update, ProviderStreamExceptionResult):
+                exception_result = exception_update
+            else:
+                yield exception_update
+        if exception_result is None or not exception_result.cancelled:
+            raise RuntimeError(
+                "provider exception handler returned without cancellation"
+            )
+        raise
+    except Exception as exc:
+        exception_result = None
+        async for exception_update in handle_provider_stream_exception(
+            exc,
+            close_stream=_close_stream,
+            tool_tracker=tool_tracker,
+            stream_state=stream_state,
+            iteration_id_value=iteration_id_value,
+            turn_kernel=turn_kernel,
+            provider_attempt=provider_attempt,
+            budget_runtime=budget_runtime,
+            settings=settings,
+            state=state,
+            context_builder=context_builder,
+            turn_usage=turn_usage,
+            usage=usage,
+            stream_text=stream_text,
+            pending_tool_calls=pending_tool_calls,
+            degrade_and_finish=degrade_and_finish,
+        ):
+            if isinstance(exception_update, ProviderStreamExceptionResult):
+                exception_result = exception_update
+            else:
+                yield exception_update
+        if exception_result is None:
+            raise RuntimeError("provider exception handler returned without a result")
+        retry_budget_boundary = exception_result.retry_budget_boundary
 
     settlement = None
     async for settlement_update in settle_provider_stream(
@@ -512,7 +466,7 @@ async def stream_provider_response(
         action=action,
         stream_state=stream_state,
         stream_text=stream_text,
-        tool_executor=tool_executor,
+        tool_tracker=tool_tracker,
         turn_usage=turn_usage,
         usage=usage,
         finish_reason=finish_reason,

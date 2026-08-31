@@ -6,6 +6,7 @@ import type {
   ToolOutputDeltaEvent,
   ToolResultEvent,
 } from "../protocol/events";
+import { isReplayedEvent as isReplayedChatEvent } from "../protocol/events";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { applyUserMessageQueueUpdate } from "./sessionEvents";
 import type { StreamBuffer } from "../lib/stream-buffer";
@@ -137,6 +138,7 @@ const recoverMissingConversation = (conversationId?: string) => {
   if (!missingId) return;
   useAppStore.getState().finishAgentProgress(missingId, "failed");
   useAppStore.getState().finishStreaming(missingId, undefined, "failed");
+  useAppStore.getState().clearPendingProviderProgress(missingId);
   useAppStore.setState((state) => {
     const remaining = state.conversations.filter((conversation) => conversation.id !== missingId);
     const { [missingId]: _messages, ...conversationMessages } = state.conversationMessages;
@@ -179,6 +181,20 @@ const CHAT_SCOPED_EVENT_TYPES = new Set<string>([
 
 type ToolCallScope = { turnId?: string; iterationId?: string; stepId?: string };
 
+type ToolCallResolution = {
+  record?: ToolCallRecord;
+  /** Scope used to locate the record in the store update. */
+  matchScope?: ToolCallScope;
+  migrated?: boolean;
+  reason?: string;
+};
+
+const scopeFields: Array<[keyof ToolCallScope, keyof ToolCallRecord]> = [
+  ["turnId", "turnId"],
+  ["iterationId", "iterationId"],
+  ["stepId", "stepId"],
+];
+
 const toolCallScopeFromEvent = (event: { turn_id?: string; iteration_id?: string; step_id?: string }): ToolCallScope | undefined => {
   const scope: ToolCallScope = {};
   if (event.turn_id) scope.turnId = event.turn_id;
@@ -192,10 +208,49 @@ const toolCallMatchesScope = (
   scope?: ToolCallScope,
 ): boolean => {
   if (!scope) return true;
-  if (scope.turnId && candidate.turnId && candidate.turnId !== scope.turnId) return false;
-  if (scope.iterationId && candidate.iterationId && candidate.iterationId !== scope.iterationId) return false;
-  if (scope.stepId && candidate.stepId && candidate.stepId !== scope.stepId) return false;
-  return true;
+  // A supplied scope field is an assertion, not a hint. A candidate that does
+  // not carry that field cannot satisfy the assertion (the one explicit
+  // lifecycle migration is resolved below before this matcher is used).
+  return scopeFields.every(([incomingKey, recordKey]) => {
+    const incoming = scope[incomingKey];
+    return !incoming || candidate[recordKey] === incoming;
+  });
+};
+
+const toolCallScopeFromRecord = (record: ToolCallRecord): ToolCallScope | undefined => {
+  const scope: ToolCallScope = {};
+  if (record.turnId) scope.turnId = record.turnId;
+  if (record.iterationId) scope.iterationId = record.iterationId;
+  if (record.stepId) scope.stepId = record.stepId;
+  return scope.turnId || scope.iterationId || scope.stepId ? scope : undefined;
+};
+
+const finiteEventSeq = (event: unknown): number | undefined => {
+  const value = Number((event as { seq?: unknown }).seq);
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+};
+
+const canMigrateToolCallScope = (
+  record: ToolCallRecord,
+  incoming: ToolCallScope,
+  messageId?: string,
+): boolean => {
+  if (!messageId || isTerminalToolCallStatus(record.status)) return false;
+  if ((record.scopeMigrationCount ?? 0) >= 1) return false;
+  let conflicts = 0;
+  let additions = 0;
+  for (const [incomingKey, recordKey] of scopeFields) {
+    const next = incoming[incomingKey];
+    if (!next) continue;
+    const previous = record[recordKey];
+    if (!previous) additions += 1;
+    else if (previous !== next) conflicts += 1;
+  }
+  // Adding missing lifecycle metadata is harmless; changing one identity
+  // field is the compatibility bridge for pre-refactor streams whose first
+  // event used run_id and later events used the assistant turn id. Two or
+  // more conflicting fields are a different call and must not be projected.
+  return conflicts <= 1 && (conflicts > 0 || additions > 0);
 };
 
 const eventMessageId = (event: unknown): string | undefined => {
@@ -240,9 +295,6 @@ const eventTurnId = (event: unknown): string | undefined => {
     ?? (event as { turn_id?: unknown; turnId?: unknown }).turnId;
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 };
-
-const isReplayedChatEvent = (event: ServerEvent): boolean =>
-  (event as ServerEvent & { __replayed?: boolean }).__replayed === true;
 
 const isLegacyRawProviderReasoningEvent = (event: unknown): boolean => {
   if (!event || typeof event !== "object") return false;
@@ -304,21 +356,66 @@ const clearStreamingFlagIfNoLiveAssistant = (conversationId?: string) => {
   });
 };
 
-const findToolCall = (id: string, conversationId?: string, scope?: ToolCallScope, messageId?: string) => {
+const resolveToolCall = (
+  id: string,
+  conversationId?: string,
+  scope?: ToolCallScope,
+  messageId?: string,
+  incomingSeq?: number,
+): ToolCallResolution => {
   const state = useAppStore.getState();
   const targetId = conversationId?.trim();
-  if (!targetId) return undefined;
+  if (!targetId) return { reason: "missing_conversation_owner" };
   const allMessages = targetId === state.conversationId
       ? state.messages
       : state.sideChats[targetId]?.messages ?? state.conversationMessages[targetId] ?? [];
   const messages = messageId ? allMessages.filter((message) => message.id === messageId) : allMessages;
-  for (const message of messages) {
-    const toolCall = getToolCallsFromMessage(message).find((candidate) =>
-      candidate.id === id && (messageId ? true : toolCallMatchesScope(candidate, scope)),
-    );
-    if (toolCall) return toolCall;
+  const candidates = messages.flatMap((message) => getToolCallsFromMessage(message))
+    .filter((candidate) => candidate.id === id);
+  if (candidates.length === 0) return { reason: "tool_call_not_found" };
+  const freshCandidates = incomingSeq === undefined
+    ? candidates
+    : candidates.filter((candidate) => {
+        const previous = typeof candidate.seq === "number" && Number.isSafeInteger(candidate.seq)
+          ? candidate.seq
+          : undefined;
+        return previous === undefined || incomingSeq > previous;
+      });
+  if (freshCandidates.length === 0) return { reason: "stale_event_seq" };
+  if (!scope) {
+    if (freshCandidates.length !== 1) return { reason: "ambiguous_unscoped_tool_call" };
+    return { record: freshCandidates[0] };
   }
-  return undefined;
+  const exact = freshCandidates.filter((candidate) => toolCallMatchesScope(candidate, scope));
+  if (exact.length === 1) return { record: exact[0], matchScope: scope };
+  if (exact.length > 1) return { reason: "ambiguous_scoped_tool_call" };
+  if (freshCandidates.length === 1 && canMigrateToolCallScope(freshCandidates[0], scope, messageId)) {
+    return {
+      record: freshCandidates[0],
+      matchScope: toolCallScopeFromRecord(freshCandidates[0]),
+      migrated: true,
+    };
+  }
+  return { reason: "tool_call_scope_mismatch" };
+};
+
+const recordToolProjectionRejection = (
+  id: string,
+  event: ServerEvent,
+  resolution: ToolCallResolution,
+): void => {
+  if (resolution.record) return;
+  addInspectorPayload("tool_call", id || "unknown", {
+    event: event.type,
+    projected: false,
+    projection_reason: resolution.reason || "unresolved_tool_call",
+    conversation_id: (event as unknown as { conversation_id?: unknown }).conversation_id,
+    message_id: eventMessageId(event),
+    turn_id: eventTurnId(event),
+    iteration_id: (event as unknown as { iteration_id?: unknown }).iteration_id,
+    step_id: (event as unknown as { step_id?: unknown }).step_id,
+    seq: finiteEventSeq(event),
+  });
 };
 
 const latestRunningCommandTool = (conversationId?: string, messageId?: string) => {
@@ -782,14 +879,21 @@ export const handleChatStreamEvent = (
       if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
       flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
       const scope = toolCallScopeFromEvent(e);
-      const existing = findToolCall(e.id, conversationId, scope, messageId);
+      const resolution = resolveToolCall(
+        e.id,
+        conversationId,
+        scope,
+        messageId,
+        finiteEventSeq(e),
+      );
+      const existing = resolution.record;
       if (existing) {
         const nextStatus = isTerminalToolCallStatus(existing.status)
           ? existing.status
           : e.status === "pending"
             ? "pending"
             : "running";
-        s.updateToolCall(e.id, {
+        const patch: Partial<ToolCallRecord> = {
           args: e.args ?? {},
           status: nextStatus,
           displayHint: e.display_hint ?? existing.displayHint,
@@ -803,10 +907,17 @@ export const handleChatStreamEvent = (
           iterationId: e.iteration_id ?? existing.iterationId,
           phase: e.phase ?? existing.phase,
           diff: normalizeToolDiff(e.diff) ?? existing.diff,
-        }, conversationId, scope, messageId);
-      } else {
+          seq: e.seq ?? existing.seq,
+          ...(resolution.migrated
+            ? { scopeMigrationCount: (existing.scopeMigrationCount ?? 0) + 1 }
+            : {}),
+        };
+        s.updateToolCall(e.id, patch, conversationId, resolution.matchScope, messageId);
+      } else if (resolution.reason === "tool_call_not_found") {
         const record = reduceToolCallStart(new Map(), e).get(e.id);
         if (record) s.appendToolCallBlock(record, conversationId, messageId);
+      } else {
+        recordToolProjectionRejection(e.id, e, resolution);
       }
       addInspectorPayload("tool_call", e.id, {
         event: "tool_call",
@@ -820,6 +931,11 @@ export const handleChatStreamEvent = (
         turn_id: e.turn_id,
         iteration_id: e.iteration_id,
         phase: e.phase,
+        seq: e.seq,
+        projected: Boolean(existing) || resolution.reason === "tool_call_not_found",
+        ...(resolution.reason && resolution.reason !== "tool_call_not_found"
+          ? { projection_reason: resolution.reason }
+          : {}),
       });
       return true;
     }
@@ -830,14 +946,41 @@ export const handleChatStreamEvent = (
       flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
       if (delta.id && delta.output) {
         const scope = toolCallScopeFromEvent(delta);
-        const existing = findToolCall(delta.id, conversationId, scope, messageId);
-        s.updateToolCall(delta.id, outputPreviewUpdates(existing, delta.output, delta.stream), conversationId, scope, messageId);
+        const resolution = resolveToolCall(
+          delta.id,
+          conversationId,
+          scope,
+          messageId,
+          finiteEventSeq(delta),
+        );
+        const existing = resolution.record;
+        if (existing) {
+          const patch: Partial<ToolCallRecord> = {
+            ...outputPreviewUpdates(existing, delta.output, delta.stream),
+            ...(resolution.migrated
+              ? {
+                  ...(delta.turn_id ? { turnId: delta.turn_id } : {}),
+                  ...(delta.iteration_id ? { iterationId: delta.iteration_id } : {}),
+                  ...(delta.step_id ? { stepId: delta.step_id } : {}),
+                  scopeMigrationCount: (existing.scopeMigrationCount ?? 0) + 1,
+                }
+              : {}),
+            ...(finiteEventSeq(delta) !== undefined ? { seq: finiteEventSeq(delta) } : {}),
+          };
+          s.updateToolCall(delta.id, patch, conversationId, resolution.matchScope, messageId);
+        } else {
+          recordToolProjectionRejection(delta.id, delta, resolution);
+        }
         addInspectorPayload("tool_call", delta.id, {
           event: "tool_output_delta",
           stream: delta.stream ?? "stdout",
           output: delta.output,
           turn_id: delta.turn_id,
           iteration_id: delta.iteration_id,
+          step_id: delta.step_id,
+          seq: finiteEventSeq(delta),
+          projected: Boolean(existing),
+          ...(resolution.reason ? { projection_reason: resolution.reason } : {}),
         });
       }
       return true;
@@ -849,17 +992,28 @@ export const handleChatStreamEvent = (
       flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
       const toolCallId = String(ev.tool_call_id || ev.id || "").trim();
       const scope = toolCallScopeFromEvent(ev);
+      const commandResolution = toolCallId
+        ? resolveToolCall(toolCallId, conversationId, scope, messageId, finiteEventSeq(ev))
+        : undefined;
       const commandTool = toolCallId
-        ? findToolCall(toolCallId, conversationId, scope, messageId)
+        ? commandResolution?.record
         : latestRunningCommandTool(conversationId, messageId);
       if (commandTool && ev.content) {
         s.updateToolCall(
           commandTool.id,
           outputPreviewUpdates(commandTool, ev.content, ev.stream),
           conversationId,
-          scope,
+          // With no tool_call_id the selected latest running command is the
+          // compatibility identity.  Its persisted record may predate the
+          // turn/iteration scope fields, so applying the event's scope here
+          // would reject an otherwise unambiguous legacy output chunk.  An
+          // explicit id still uses the resolved scope and remains strict.
+          toolCallId ? commandResolution?.matchScope : undefined,
           messageId,
         );
+      }
+      if (toolCallId && commandResolution && !commandResolution.record) {
+        recordToolProjectionRejection(toolCallId, ev, commandResolution);
       }
       addInspectorPayload(
         toolCallId || commandTool ? "tool_call" : "message",
@@ -874,6 +1028,7 @@ export const handleChatStreamEvent = (
           stream: ev.stream,
           output: ev.content,
           projected: Boolean(commandTool),
+          ...(commandResolution?.reason ? { projection_reason: commandResolution.reason } : {}),
         },
       );
       return true;
@@ -901,10 +1056,27 @@ export const handleChatStreamEvent = (
         );
       }
       const scope = toolCallScopeFromEvent(e);
-      const toolCall = findToolCall(e.id, conversationId, scope, messageId);
+      const resolution = resolveToolCall(
+        e.id,
+        conversationId,
+        scope,
+        messageId,
+        finiteEventSeq(e),
+      );
+      const toolCall = resolution.record;
       if (toolCall) {
         const updated = reduceToolCallResult(new Map([[e.id, toolCall]]), e).get(e.id);
-        if (updated) s.updateToolCall(e.id, updated, conversationId, scope, messageId);
+        if (updated) {
+          if (resolution.migrated) {
+            updated.scopeMigrationCount = (toolCall.scopeMigrationCount ?? 0) + 1;
+            if (e.turn_id) updated.turnId = e.turn_id;
+            if (e.iteration_id) updated.iterationId = e.iteration_id;
+            if (e.step_id) updated.stepId = e.step_id;
+          }
+          s.updateToolCall(e.id, updated, conversationId, resolution.matchScope, messageId);
+        }
+      } else {
+        recordToolProjectionRejection(e.id, e, resolution);
       }
       addInspectorPayload("tool_call", e.id, {
         event: "tool_result",
@@ -913,6 +1085,9 @@ export const handleChatStreamEvent = (
         summary: e.summary,
         display_summary: e.display_summary,
         artifact_id: e.artifact_id,
+        artifact_kind: e.artifact_kind,
+        artifact_media_type: e.artifact_media_type,
+        artifact_bytes: e.artifact_bytes,
         diff: e.diff,
         source_url: e.source_url,
         content_preview: e.content_preview,
@@ -925,6 +1100,10 @@ export const handleChatStreamEvent = (
         removed_file_paths: e.removed_file_paths,
         turn_id: e.turn_id,
         iteration_id: e.iteration_id,
+        step_id: e.step_id,
+        seq: e.seq,
+        projected: Boolean(toolCall),
+        ...(resolution.reason ? { projection_reason: resolution.reason } : {}),
       });
       return true;
     }
@@ -955,7 +1134,8 @@ export const handleChatStreamEvent = (
           ? `${ruleLabel}要求审批`
           : `已被${ruleLabel}阻止`);
       if (ev.tool_call_id) {
-        const existing = findToolCall(ev.tool_call_id, conversationId, undefined, messageId);
+        const resolution = resolveToolCall(ev.tool_call_id, conversationId, undefined, messageId);
+        const existing = resolution.record;
         if (existing && !isTerminalToolCallStatus(existing.status)) {
           const patch = decision === "ask"
             ? {
@@ -976,8 +1156,10 @@ export const handleChatStreamEvent = (
                   transition: "running",
                   waitingOn: undefined,
                   blockingReason: undefined,
-                };
+          };
           s.updateToolCall(ev.tool_call_id, patch, conversationId, undefined, messageId);
+        } else if (!existing) {
+          recordToolProjectionRejection(ev.tool_call_id, e, resolution);
         }
         addInspectorPayload("tool_call", ev.tool_call_id, {
           event: "permission.decision",
@@ -992,6 +1174,8 @@ export const handleChatStreamEvent = (
           risk: ev.risk,
           scope: ev.scope,
           expiry: ev.expiry,
+          projected: Boolean(existing),
+          ...(resolution.reason ? { projection_reason: resolution.reason } : {}),
         });
       }
       return true;

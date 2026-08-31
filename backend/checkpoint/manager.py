@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from backend.atomic_io import atomic_write_bytes, file_mutation_locks
-from backend.checkpoint.store import CheckpointFileSnapshot, CheckpointRecord, CheckpointStore
+from backend.checkpoint.store import (
+    CheckpointFileSnapshot,
+    CheckpointRecord,
+    CheckpointStore,
+    checkpoint_owner_key,
+)
 
 WRITE_TOOL_NAMES = {"write_file", "edit_file", "apply_patch", "notebook_edit"}
 
@@ -35,7 +40,7 @@ class CheckpointManager:
         if not paths:
             return None
 
-        record_id = f"chk_{uuid.uuid4().hex[:12]}"
+        record_id = f"chk_{checkpoint_owner_key(conversation_id)}_{uuid.uuid4().hex[:12]}"
         files: list[CheckpointFileSnapshot] = []
         for raw_path in paths:
             target = self._resolve_under_root(root, raw_path)

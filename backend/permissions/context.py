@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from backend.tools.base import PermissionLevel
 from backend.permissions.profiles import WorkspaceScope
+from backend.agent.run_context import RunContext
 
 if TYPE_CHECKING:
     from backend.agent.turn_diff_tracker import TurnDiffTracker
@@ -91,6 +92,9 @@ class ToolExecutionContext:
     session_id: str = ""
     task_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Process-local owners for the active turn. Durable/transport metadata
+    # remains in ``metadata``; runtime capabilities do not.
+    run_context: RunContext | None = None
     cancel_event: asyncio.Event | None = None
     emit_event: EventEmitter | None = None
     approval_handler: Callable[[str], Any] | None = None
@@ -124,3 +128,21 @@ class ToolExecutionContext:
     # batch-wide fallback result.
     cleanup_receipts: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     cleanup_tasks_by_call: dict[str, asyncio.Task[Any]] = field(default_factory=dict, repr=False)
+    pending_provider_tasks: set[asyncio.Task[Any]] = field(default_factory=set, repr=False)
+    # Stable identity for this concrete invocation. Keep this field last so
+    # adding it does not change the positional ABI of existing constructors.
+    tool_call_id: str = ""
+    tool_registry: Any | None = None
+    # The turn owner supplies the only mutation path for live permission
+    # changes. Subagent contexts leave this unset and therefore cannot commit
+    # a permission transition.
+    permission_context_committer: Callable[[PermissionContext], tuple[PermissionContext, Any]] | None = None
+
+    def __post_init__(self) -> None:
+        # Promote the pre-R1 registry slot once at the context boundary. This
+        # keeps older SDK/test callers working while all runtime writes use the
+        # typed field and the metadata copy no longer carries the live object.
+        if self.tool_registry is None and isinstance(self.metadata, dict):
+            legacy_registry = self.metadata.pop("_tool_registry", None)
+            if legacy_registry is not None:
+                self.tool_registry = legacy_registry

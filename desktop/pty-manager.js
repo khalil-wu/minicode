@@ -21,6 +21,8 @@ const PTY_EXITED_SESSION_TTL_MS = 30 * 60 * 1000;
 const PTY_EXITED_SESSION_MAX = 24;
 const PTY_WRITE_CHUNK_CHARS = 8192;
 const PTY_WRITE_MAX_CHARS = 1024 * 1024;
+const PTY_KILL_EXIT_TIMEOUT_MS = 3000;
+const PTY_FORCE_KILL_EXIT_TIMEOUT_MS = 1000;
 const PTY_LIVE_SESSION_MAX = Math.max(
   1,
   Math.min(Number(process.env.MINICODE_PTY_MAX_LIVE_SESSIONS) || 8, 32),
@@ -32,6 +34,8 @@ let sanitizedPtyEnv = () => ({});
 let appendDesktopLog = () => {};
 let getMainWindow = () => null;
 let assertTrustedPath = null;
+let killExitTimeoutMs = PTY_KILL_EXIT_TIMEOUT_MS;
+let forceKillExitTimeoutMs = PTY_FORCE_KILL_EXIT_TIMEOUT_MS;
 
 // ---------------------------------------------------------------------------
 // Initialization
@@ -43,6 +47,12 @@ function init(deps) {
   if (typeof deps.appendDesktopLog === "function") appendDesktopLog = deps.appendDesktopLog;
   if (typeof deps.getMainWindow === "function") getMainWindow = deps.getMainWindow;
   if (typeof deps.assertTrustedPath === "function") assertTrustedPath = deps.assertTrustedPath;
+  killExitTimeoutMs = Number.isFinite(deps.killExitTimeoutMs)
+    ? Math.max(1, Math.floor(deps.killExitTimeoutMs))
+    : PTY_KILL_EXIT_TIMEOUT_MS;
+  forceKillExitTimeoutMs = Number.isFinite(deps.forceKillExitTimeoutMs)
+    ? Math.max(1, Math.floor(deps.forceKillExitTimeoutMs))
+    : PTY_FORCE_KILL_EXIT_TIMEOUT_MS;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +195,10 @@ function spawnSession(cwd, conversationId) {
   }
 
   const sessionId = `term_${ptyIdCounter++}`;
+  let resolveExit;
+  const exitPromise = new Promise((resolve) => {
+    resolveExit = resolve;
+  });
   const session = {
     process: ptyProcess,
     conversationId: ownerConversationId,
@@ -194,7 +208,12 @@ function spawnSession(cwd, conversationId) {
     outputCursor: 0,
     isAlive: true,
     exitCode: null,
+    exitSignal: null,
     exitedAt: null,
+    exitPromise,
+    resolveExit,
+    exitSettled: false,
+    killPromise: null,
   };
   ptySessions.set(sessionId, session);
 
@@ -203,7 +222,7 @@ function spawnSession(cwd, conversationId) {
   });
 
   ptyProcess.onExit(({ exitCode, signal }) => {
-    if (ptySessions.get(sessionId) !== session || session.isAlive === false) return;
+    if (ptySessions.get(sessionId) !== session || session.exitSettled) return;
     // Never normalize a signal/unknown termination into a fake code 0.
     const hasRealExitCode = Number.isFinite(exitCode);
     const exitLabel = hasRealExitCode
@@ -214,6 +233,8 @@ function spawnSession(cwd, conversationId) {
     session.exitCode = hasRealExitCode ? exitCode : null;
     session.exitSignal = hasRealExitCode ? null : (signal || "unknown");
     session.exitedAt = Date.now();
+    session.exitSettled = true;
+    session.resolveExit();
     const wc = getSendTarget();
     if (wc) {
       wc.send("minicode:pty:exit", {
@@ -291,12 +312,46 @@ function killProcessTreeAndWait(pid, fallback) {
   });
 }
 
+async function waitForSessionExit(session, timeoutMs) {
+  if (session.exitSettled || session.isAlive === false) return true;
+  let timeout;
+  const timedOut = new Promise((resolve) => {
+    timeout = setTimeout(() => resolve(false), timeoutMs);
+  });
+  const exited = await Promise.race([
+    session.exitPromise.then(() => true),
+    timedOut,
+  ]);
+  clearTimeout(timeout);
+  return exited;
+}
+
+async function terminateSession(sessionId, session) {
+  if (session.exitSettled || session.isAlive === false) return;
+  const hasValidPid = Number.isFinite(session.process.pid) && session.process.pid > 0;
+  if (!session.killPromise) {
+    session.killPromise = (async () => {
+      await killProcessTreeAndWait(session.process.pid, () => session.process.kill());
+      // node-pty normally exposes a positive OS pid. Test doubles and a few
+      // embedders may only expose the process-level kill primitive; once that
+      // fallback has been invoked there is no tree handle to wait on or force.
+      if (!hasValidPid) return;
+      if (await waitForSessionExit(session, killExitTimeoutMs)) return;
+
+      appendDesktopLog(`[desktop] pty ${sessionId} did not exit after termination; forcing kill`);
+      session.process.kill();
+      if (!await waitForSessionExit(session, forceKillExitTimeoutMs)) {
+        appendDesktopLog(`[desktop] pty ${sessionId} did not report exit after forced kill`);
+      }
+    })();
+  }
+  await session.killPromise;
+}
+
 async function killSession(sessionId, conversationId) {
   const session = ptySessions.get(sessionId);
   if (isOwnedBy(session, conversationId)) {
-    if (session.isAlive) {
-      await killProcessTreeAndWait(session.process.pid, () => session.process.kill());
-    }
+    await terminateSession(sessionId, session);
     if (ptySessions.get(sessionId) === session) ptySessions.delete(sessionId);
     return true;
   }
@@ -414,21 +469,9 @@ function listActiveSessions() {
 async function killAllSessions() {
   if (ptyCleanupDone) return;
   ptyCleanupDone = true;
-  const terminations = [];
-  for (const [sessionId, session] of ptySessions.entries()) {
-    session.isAlive = false;
-    try {
-      terminations.push(
-        killProcessTreeAndWait(session.process.pid, () => session.process.kill())
-          .catch((error) => {
-            appendDesktopLog(`[desktop] failed to kill pty ${sessionId}: ${error.message}`);
-          }),
-      );
-    } catch (error) {
-      appendDesktopLog(`[desktop] failed to kill pty ${sessionId}: ${error.message}`);
-    }
-  }
-  ptySessions.clear();
+  const terminations = Array.from(ptySessions.entries()).map(([sessionId, session]) =>
+    killSession(sessionId, session.conversationId),
+  );
   await Promise.allSettled(terminations);
 }
 

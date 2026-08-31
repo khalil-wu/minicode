@@ -10,6 +10,7 @@ import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } 
 import { hasVisibleActiveConversation } from '../../chat/activeConversation'
 import { openAutomations } from '../../lib/automations-navigation'
 import { BrandIcon } from '../../components/BrandIcon'
+import { selectActiveConversationPreview } from '../../lib/preview-projection'
 import {
   buildActivitySidebarState,
   type ActivityBrowserAnnotationItem,
@@ -47,11 +48,11 @@ export const ActivityTab = () => {
   const currentProvider = useAppStore((s) => s.currentProvider)
   const workspaceGit = useAppStore((s) => s.workspaceGit)
   const workingDirectory = useAppStore((s) => s.workingDirectory)
-  const livePreviewUrl = useAppStore((s) => s.livePreviewUrl)
-  const previewArtifact = useAppStore((s) => s.previewArtifact)
-  const previewVerification = useAppStore((s) => s.previewVerification)
-  const previewServers = useAppStore((s) => s.previewServers)
-  const previewLaunchProcesses = useAppStore((s) => s.previewLaunchProcesses)
+  const livePreviewUrl = useAppStore((s) => selectActiveConversationPreview(s).livePreviewUrl)
+  const previewArtifact = useAppStore((s) => selectActiveConversationPreview(s).previewArtifact)
+  const previewVerification = useAppStore((s) => selectActiveConversationPreview(s).previewVerification)
+  const previewServers = useAppStore((s) => selectActiveConversationPreview(s).previewServers)
+  const previewLaunchProcesses = useAppStore((s) => selectActiveConversationPreview(s).previewLaunchProcesses)
   const terminalSnapshots = useAppStore((s) => s.terminalSnapshots)
   const terminalSessions = useAppStore((s) => s.terminalSessions)
   const activeTerminalSessionId = useAppStore((s) => s.activeTerminalSessionId)

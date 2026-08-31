@@ -103,6 +103,7 @@ def llm_model_updated_payload(
     workspace_root: Any,
     models_source: str = "",
     provider_metadata: dict[str, Any] | None = None,
+    settings_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     requested_provider = str(provider or "").strip() or "openai"
     extension_metadata = dict(provider_metadata or {})
@@ -117,14 +118,26 @@ def llm_model_updated_payload(
     )
     payload_section: dict[str, Any]
     if not extension_defined and normalized_provider == "anthropic":
-        payload_section = get_anthropic_settings()
+        payload_section = (
+            get_anthropic_settings(settings_data)
+            if settings_data is not None
+            else get_anthropic_settings()
+        )
         provider_id = "anthropic"
     elif not extension_defined and normalized_provider == "custom":
-        payload_section = get_custom_settings()
+        payload_section = (
+            get_custom_settings(settings_data)
+            if settings_data is not None
+            else get_custom_settings()
+        )
         wire_api = str(payload_section.get("wire_api") or "chat").strip()
         provider_id = "custom_anthropic" if wire_api == "anthropic" else "custom"
     elif not extension_defined and normalized_provider == "openai":
-        payload_section = get_openai_settings()
+        payload_section = (
+            get_openai_settings(settings_data)
+            if settings_data is not None
+            else get_openai_settings()
+        )
         provider_id = "openai"
     else:
         payload_section = extension_metadata

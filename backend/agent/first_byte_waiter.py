@@ -6,7 +6,7 @@ import asyncio
 from contextlib import suppress
 from typing import Any
 
-from backend.async_cleanup import cancel_and_drain
+from backend.async_cleanup import cancel_and_drain, cancel_and_drain_receipt
 
 
 class ProviderStreamFailure(RuntimeError):
@@ -22,6 +22,7 @@ async def wait_for_provider_event(
     *,
     timeout_seconds: float | None,
     cancel_event: asyncio.Event | None,
+    owner: set[asyncio.Task[Any]],
 ) -> Any:
     """Wait for one provider event with bounded cancellation cleanup."""
     event_task = asyncio.create_task(stream_iter.__anext__())
@@ -44,17 +45,19 @@ async def wait_for_provider_event(
             return_when=asyncio.FIRST_COMPLETED,
         )
         if cancel_task is not None and cancel_task in done_tasks:
-            await cancel_and_drain(
+            await cancel_and_drain_receipt(
                 [event_task],
                 timeout=0.25,
                 label="provider stream cancellation",
+                owner=owner,
             )
             raise asyncio.CancelledError
         if event_task not in done_tasks:
-            await cancel_and_drain(
+            await cancel_and_drain_receipt(
                 [event_task],
                 timeout=0.25,
                 label="provider stream timeout",
+                owner=owner,
             )
             raise asyncio.TimeoutError
         try:

@@ -16,6 +16,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from backend.agent.run_context import RunContext
+
 
 logger = logging.getLogger(__name__)
 _EXTENSION_CLONE_MAX_DEPTH = 64
@@ -209,6 +211,7 @@ class ExtensionLifecycleObserver:
     runner: Any | None
     user_message: str
     metadata: Mapping[str, Any] | None = None
+    run_context: RunContext | None = None
     images: Sequence[Any] | None = None
     _started: bool = False
     _finished: bool = False
@@ -268,7 +271,11 @@ class ExtensionLifecycleObserver:
 
     def _runtime_value(self, *keys: str, default: str = "") -> str:
         metadata = self.metadata if isinstance(self.metadata, Mapping) else {}
-        runtime = metadata.get("_subagent_parent_runtime")
+        runtime = (
+            self.run_context.subagent_parent_runtime
+            if self.run_context is not None
+            else {}
+        )
         runtime_mapping = runtime if isinstance(runtime, Mapping) else {}
         for key in keys:
             value = metadata.get(key)
@@ -1154,6 +1161,7 @@ def lifecycle_observer_factory(
     runner: Any | None,
     user_message: str,
     metadata: Mapping[str, Any] | None = None,
+    run_context: RunContext | None = None,
     images: Sequence[Any] | None = None,
 ) -> ExtensionLifecycleObserver:
     """Create the MiniCode extension observer for one agent query."""
@@ -1161,6 +1169,7 @@ def lifecycle_observer_factory(
         runner=runner,
         user_message=user_message,
         metadata=metadata,
+        run_context=run_context,
         images=images,
     )
 

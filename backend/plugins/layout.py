@@ -14,10 +14,6 @@ def plugin_manifest_path(plugin_root: Path) -> Path:
     return plugin_root / PLUGIN_MANIFEST_DIRECTORY / PLUGIN_MANIFEST_FILENAME
 
 
-def marketplace_manifest_path(marketplace_root: Path) -> Path:
-    return marketplace_root / PLUGIN_MANIFEST_DIRECTORY / MARKETPLACE_MANIFEST_FILENAME
-
-
 def plugin_install_root() -> Path:
     from backend.config import STATE_ROOT
 

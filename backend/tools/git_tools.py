@@ -21,13 +21,14 @@ from typing import Any
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.subprocesses import (
     SubprocessOutputLimitError,
+    decode_process_output,
     spawn_exec,
 )
 
 logger = logging.getLogger(__name__)
+_WORKSPACE_ROOT_UNSET = object()
 from backend.tools.git_support import (
     _communicate_git,
-    _decode_process_output,
     _is_denied_path,
     _raise_if_cancelled,
     _resolve_work_dir,
@@ -59,8 +60,14 @@ class GitStatusTool(BaseTool):
     workspace_path_fields = ("path",)
     allow_workspace_root_path = True
 
-    def __init__(self, workspace_root: Path | None = None):
-        self._workspace_root = workspace_root or Path.cwd()
+    def __init__(self, workspace_root: Path | None | object = _WORKSPACE_ROOT_UNSET):
+        self._workspace_root = (
+            Path.cwd()
+            if workspace_root is _WORKSPACE_ROOT_UNSET
+            else Path(workspace_root).expanduser().resolve()
+            if workspace_root is not None
+            else None
+        )
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -81,6 +88,8 @@ class GitStatusTool(BaseTool):
     async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
         path_str = args.get("path", ".")
         root = _workspace_root(context, self._workspace_root)
+        if root is None:
+            return self._error_result("Git status requires an open workspace.")
         work_dir = _resolve_work_dir(root, path_str)
 
         if not work_dir.exists():
@@ -100,12 +109,12 @@ class GitStatusTool(BaseTool):
             stdout, stderr = await _communicate_git(proc)
 
             if proc.returncode != 0:
-                error_msg = _decode_process_output(stderr).strip()
+                error_msg = decode_process_output(stderr).strip()
                 if "not a git repository" in error_msg.lower():
                     return self._success_result(f"{path_str} 不是 Git 仓库；跳过 Git 状态检查。")
                 return self._error_result(f"Git 命令失败: {error_msg}")
 
-            output = _decode_process_output(stdout).strip()
+            output = decode_process_output(stdout).strip()
             if not output:
                 output = "工作区干净，没有未提交的更改"
 
@@ -142,8 +151,14 @@ class GitDiffTool(BaseTool):
     permission = PermissionLevel.AUTO
     workspace_path_fields = ("file_path",)
 
-    def __init__(self, workspace_root: Path | None = None):
-        self._workspace_root = workspace_root or Path.cwd()
+    def __init__(self, workspace_root: Path | None | object = _WORKSPACE_ROOT_UNSET):
+        self._workspace_root = (
+            Path.cwd()
+            if workspace_root is _WORKSPACE_ROOT_UNSET
+            else Path(workspace_root).expanduser().resolve()
+            if workspace_root is not None
+            else None
+        )
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -176,6 +191,8 @@ class GitDiffTool(BaseTool):
         staged = args.get("staged", False)
         context_lines = args.get("context_lines", 3)
         root = _workspace_root(context, self._workspace_root)
+        if root is None:
+            return self._error_result("Git diff requires an open workspace.")
 
         cmd = ["git", "diff", f"--unified={context_lines}"]
         if staged:
@@ -211,12 +228,12 @@ class GitDiffTool(BaseTool):
             stdout, stderr = await _communicate_git(proc)
 
             if proc.returncode != 0:
-                error_msg = _decode_process_output(stderr).strip()
+                error_msg = decode_process_output(stderr).strip()
                 if "not a git repository" in error_msg.lower():
                     return self._success_result("当前工作区不是 Git 仓库；没有 Git diff。")
                 return self._error_result(f"Git 命令失败: {error_msg}")
 
-            output = _decode_process_output(stdout).strip()
+            output = decode_process_output(stdout).strip()
             if not output:
                 area = "暂存区" if staged else "工作区"
                 output = f"{area}没有变更"
@@ -254,13 +271,13 @@ class GitDiffTool(BaseTool):
         )
         stdout, stderr = await _communicate_git(proc)
         if proc.returncode != 0:
-            error_msg = _decode_process_output(stderr).strip()
+            error_msg = decode_process_output(stderr).strip()
             if "not a git repository" in error_msg.lower():
                 return self._success_result("当前工作区不是 Git 仓库；没有 Git diff。")
             return self._error_result(f"Git 命令失败: {error_msg}")
 
         denied: list[str] = []
-        for line in _decode_process_output(stdout).splitlines():
+        for line in decode_process_output(stdout).splitlines():
             candidate = line.strip()
             if candidate and _is_denied_path(context, candidate) and candidate not in denied:
                 denied.append(candidate)
@@ -289,8 +306,14 @@ class GitLogTool(BaseTool):
     permission = PermissionLevel.AUTO
     workspace_path_fields = ("file_path",)
 
-    def __init__(self, workspace_root: Path | None = None):
-        self._workspace_root = workspace_root or Path.cwd()
+    def __init__(self, workspace_root: Path | None | object = _WORKSPACE_ROOT_UNSET):
+        self._workspace_root = (
+            Path.cwd()
+            if workspace_root is _WORKSPACE_ROOT_UNSET
+            else Path(workspace_root).expanduser().resolve()
+            if workspace_root is not None
+            else None
+        )
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -323,6 +346,8 @@ class GitLogTool(BaseTool):
         file_path = args.get("file_path")
         oneline = args.get("oneline", False)
         root = _workspace_root(context, self._workspace_root)
+        if root is None:
+            return self._error_result("Git log requires an open workspace.")
 
         cmd = ["git", "log", f"-{limit}"]
 
@@ -345,12 +370,12 @@ class GitLogTool(BaseTool):
             stdout, stderr = await _communicate_git(proc)
 
             if proc.returncode != 0:
-                error_msg = _decode_process_output(stderr).strip()
+                error_msg = decode_process_output(stderr).strip()
                 if "not a git repository" in error_msg.lower():
                     return self._success_result("当前工作区不是 Git 仓库；没有 Git 提交历史。")
                 return self._error_result(f"Git 命令失败: {error_msg}")
 
-            output = _decode_process_output(stdout).strip()
+            output = decode_process_output(stdout).strip()
             if not output:
                 output = "没有提交历史"
 
@@ -386,8 +411,14 @@ class GitCommitTool(BaseTool):
     )
     permission = PermissionLevel.CONFIRM
 
-    def __init__(self, workspace_root: Path | None = None):
-        self._workspace_root = workspace_root or Path.cwd()
+    def __init__(self, workspace_root: Path | None | object = _WORKSPACE_ROOT_UNSET):
+        self._workspace_root = (
+            Path.cwd()
+            if workspace_root is _WORKSPACE_ROOT_UNSET
+            else Path(workspace_root).expanduser().resolve()
+            if workspace_root is not None
+            else None
+        )
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -414,6 +445,8 @@ class GitCommitTool(BaseTool):
         message = args.get("message", "")
         add_all = args.get("add_all", False)
         root = _workspace_root(context, self._workspace_root)
+        if root is None:
+            return self._error_result("Git commit requires an open workspace.")
 
         if not message:
             return self._error_result("缺少提交信息")
@@ -431,7 +464,7 @@ class GitCommitTool(BaseTool):
                 )
                 _add_stdout, add_stderr = await _communicate_git(add_proc)
                 if add_proc.returncode != 0:
-                    error_msg = _decode_process_output(add_stderr).strip()
+                    error_msg = decode_process_output(add_stderr).strip()
                     return self._error_result(f"暂存失败，未创建提交: {error_msg}")
 
                 # git add and git commit are one user-approved operation. An
@@ -452,12 +485,12 @@ class GitCommitTool(BaseTool):
             stdout, stderr = await _communicate_git(proc)
 
             if proc.returncode != 0:
-                error_msg = _decode_process_output(stderr).strip()
+                error_msg = decode_process_output(stderr).strip()
                 if "nothing to commit" in error_msg.lower():
                     return self._error_result("没有需要提交的更改")
                 return self._error_result(f"提交失败: {error_msg}")
 
-            output = _decode_process_output(stdout).strip()
+            output = decode_process_output(stdout).strip()
 
             return self._success_result(f"提交成功:\n{output}")
 

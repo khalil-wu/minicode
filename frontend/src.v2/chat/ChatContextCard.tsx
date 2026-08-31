@@ -5,7 +5,7 @@ import {
   ListChecks,
   PanelRightOpen,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { BrandIcon } from "../components/BrandIcon";
 import {
@@ -16,11 +16,24 @@ import {
   type EmbeddedBrowserState,
 } from "../desktop/runtime";
 import { projectAgentViews } from "../lib/agent-view-model";
+import { getToolCallsFromMessage } from "../lib/content-blocks";
+import type { ToolCallRecord } from "../lib/tool-call-reducer";
+import {
+  artifactMediaTypeForProjection,
+  artifactSummaryForRecord,
+  canonicalArtifactKind,
+  cleanArtifactLabel,
+  normalizeArtifactPreview,
+} from "../lib/artifact-projection";
+import {
+  artifactImageResourceUrl,
+  inlineImageResourceUrl,
+  withPreviewCacheBust,
+} from "../lib/artifact-resource";
 import { useAppStore } from "../stores";
 import type { ChatMessage, RightStackTab } from "../stores/types";
-import { artifactRawResourceUrlWithToken } from "../protocol/api";
 import { getWebSocket } from "../hooks/useWebSocket";
-import { openAttachmentPreview, openWorkspaceFilePreview } from "./openAttachmentPreview";
+import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } from "./openAttachmentPreview";
 import { openWebTarget } from "./openWebTarget";
 import "./ChatContextCard.css";
 
@@ -36,6 +49,7 @@ interface ContextAttachment {
   id: string;
   label: string;
   kind: "image" | "file" | "document";
+  source: "artifact" | "attachment" | "workspace";
   messageId: string;
   artifactId?: string;
   docId?: string;
@@ -43,6 +57,8 @@ interface ContextAttachment {
   mediaType?: string;
   previewUrl?: string;
   generated?: boolean;
+  /** Conversation that owns the artifact/attachment. */
+  conversationId?: string;
   relatedCount: number;
 }
 
@@ -90,61 +106,93 @@ const collectSources = (messages: ChatMessage[]): ContextSource[] => {
   return items.slice(-6).reverse();
 };
 
-const collectAttachments = (
+export const collectAttachments = (
   messages: ChatMessage[],
-  generatedImageOwner?: { sessionId: string; conversationId: string },
+  ownerConversationId?: string,
 ): ContextAttachment[] => {
   const items: Omit<ContextAttachment, "relatedCount">[] = [];
-  const seen = new Set<string>();
+  const indexes = new Map<string, number>();
+  const conversationId = String(ownerConversationId || "").trim() || undefined;
+  const upsert = (item: Omit<ContextAttachment, "relatedCount">): void => {
+    const existingIndex = indexes.get(item.id);
+    if (existingIndex === undefined) {
+      indexes.set(item.id, items.length);
+      items.push(item);
+      return;
+    }
+    const existing = items[existingIndex];
+    const mergedKind = existing.kind === "image" || item.kind === "image"
+      ? "image"
+      : existing.kind || item.kind;
+    items[existingIndex] = {
+      ...existing,
+      kind: mergedKind,
+      label: isPlaceholderAttachmentLabel(existing.label) ? item.label : existing.label,
+      artifactId: existing.artifactId || item.artifactId,
+      docId: existing.docId || item.docId,
+      path: existing.path || item.path,
+      mediaType: existing.mediaType || item.mediaType,
+      previewUrl: existing.previewUrl || item.previewUrl,
+      generated: Boolean(existing.generated || item.generated),
+      source: existing.source || item.source,
+      conversationId: existing.conversationId || item.conversationId,
+    };
+  };
   for (const message of messages) {
     for (const attachment of message.attachmentRefs ?? []) {
-      const id = attachment.artifactId || attachment.docId || attachment.id || `${message.id}:${attachment.name}`;
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      items.push({
-        id,
+      const resourceId = attachment.artifactId || attachment.docId || attachment.id || `${message.id}:${attachment.name}`;
+      if (!resourceId) continue;
+      upsert({
+        id: `attachment:${resourceId}`,
         label: attachment.name || "附件",
         kind: attachment.kind,
+        source: "attachment",
         messageId: message.id,
         artifactId: attachment.artifactId,
         docId: attachment.docId,
         mediaType: attachment.mediaType,
+        previewUrl: inlineImageResourceUrl(attachment.dataUrl),
+        conversationId,
       });
     }
     for (const attachment of message.replyAttachments ?? []) {
-      const id = attachment.path || `${message.id}:reply:${items.length}`;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      items.push({
+      const id = `reply:${attachment.path || `${message.id}:${items.length}`}`;
+      upsert({
         id,
         label: shortPath(attachment.path),
         kind: attachment.isImage ? "image" : "file",
+        source: "workspace",
         messageId: message.id,
         path: attachment.path,
         mediaType: attachment.isImage ? "image/*" : undefined,
+        conversationId,
       });
     }
-    for (const artifact of message.artifacts ?? []) {
-      const id = artifact.artifactId || `${message.id}:artifact:${items.length}`;
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      items.push({
-        id,
-        label: artifact.summary || (artifact.kind === "image" ? "生成图片" : "生成文件"),
-        kind: artifact.kind === "image" ? "image" : "file",
+    for (const rawArtifact of message.artifacts ?? []) {
+      const artifact = normalizeArtifactPreview(rawArtifact);
+      const resourceId = artifact.artifactId || `${message.id}:${items.length}`;
+      if (!resourceId) continue;
+      const kind = canonicalArtifactKind(artifact.kind, artifact.mediaType);
+      const mediaType = artifactMediaTypeForProjection(artifact.mediaType, kind);
+      upsert({
+        id: `artifact:${resourceId}`,
+        label: cleanArtifactLabel(artifact.summary) || (kind === "image" ? "生成图片" : "生成文件"),
+        kind: kind === "image" ? "image" : "file",
+        source: "artifact",
         messageId: message.id,
         artifactId: artifact.artifactId,
-        mediaType: artifact.mediaType,
-        previewUrl: inlineImagePreviewUrl(artifact.url)
-          || (artifact.kind === "image" && generatedImageOwner
-            ? artifactRawResourceUrlWithToken(
-                artifact.artifactId,
-                generatedImageOwner.sessionId,
-                generatedImageOwner.conversationId,
-              )
-            : ""),
+        mediaType,
+        previewUrl: inlineImageResourceUrl(artifact.url),
         generated: true,
+        conversationId,
       });
+    }
+    // Older transcripts keep browser screenshots only on the tool record.
+    // Project those records through the same canonical artifact path so the
+    // context card does not disagree with Activity/Artifacts/LiveArtifacts.
+    for (const record of getToolCallsFromMessage(message)) {
+      const item = contextAttachmentFromToolRecord(message.id, record, conversationId);
+      if (item) upsert(item);
     }
   }
   const groupCounts = new Map<string, number>();
@@ -155,18 +203,152 @@ const collectAttachments = (
   }));
 };
 
-const inlineImagePreviewUrl = (value?: string): string => {
-  const url = String(value || "").trim();
-  if (!url || url.length > 16 * 1024 * 1024) return "";
-  return /^data:image\/(?:png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=\s]+$/i.test(url) ? url : "";
+const contextAttachmentFromToolRecord = (
+  messageId: string,
+  record: ToolCallRecord,
+  conversationId?: string,
+): Omit<ContextAttachment, "relatedCount"> | null => {
+  const artifactId = String(record.artifactId || "").trim();
+  if (!artifactId) return null;
+  const kind = canonicalArtifactKind(record.artifactKind, record.artifactMediaType, record);
+  const mediaType = artifactMediaTypeForProjection(record.artifactMediaType, kind);
+  return {
+    id: `artifact:${artifactId}`,
+    label: artifactSummaryForRecord(record),
+    kind: kind === "image" ? "image" : "file",
+    source: "artifact",
+    messageId,
+    artifactId,
+    mediaType,
+    previewUrl: "",
+    generated: true,
+    conversationId: String(conversationId || "").trim() || undefined,
+  };
 };
+
+const isPlaceholderAttachmentLabel = (value: string): boolean => {
+  const label = cleanArtifactLabel(value);
+  return !label || ["附件", "生成图片", "生成文件", "未命名产物"].includes(label);
+};
+
+const artifactDomTarget = (
+  artifactId: string,
+  conversationId?: string,
+): HTMLElement | undefined => {
+  const candidates = Array.from(document.querySelectorAll<HTMLElement>("[data-artifact-id]"))
+    .filter((element) => element.dataset.artifactId === artifactId);
+  if (!candidates.length) return undefined;
+  const owner = conversationId?.trim() || "";
+  if (!owner) return candidates.length === 1 ? candidates[0] : undefined;
+
+  const scoped = candidates.find((element) =>
+    element.dataset.artifactConversationId === owner,
+  );
+  if (scoped) return scoped;
+
+  // Old transcript DOM nodes did not carry an owner. Keep that compatibility
+  // path only when no owner-tagged candidate exists and the id is unambiguous.
+  const hasOwnerTaggedCandidate = candidates.some((element) =>
+    Boolean(element.dataset.artifactConversationId),
+  );
+  const unscoped = candidates.filter((element) => !element.dataset.artifactConversationId);
+  return !hasOwnerTaggedCandidate && unscoped.length === 1 ? unscoped[0] : undefined;
+};
+
+function ContextAttachmentThumbnail({ attachment }: { attachment: ContextAttachment }) {
+  const isConnected = useAppStore((state) => state.isConnected);
+  const sessionId = isConnected ? String(getWebSocket()?.sessionId || "").trim() : "";
+  const artifactId = String(attachment.artifactId || "").trim();
+  const ownerConversationId = String(attachment.conversationId || "").trim();
+  const [reloadNonce, setReloadNonce] = useState(0);
+  const [loadState, setLoadState] = useState<"loading" | "loaded" | "error">("loading");
+  const ownerScoped = attachment.source === "artifact" || attachment.source === "attachment";
+  const baseUrl = useMemo(() => ownerScoped
+    ? artifactImageResourceUrl({
+        artifactId,
+        conversationId: ownerConversationId,
+        sessionId,
+        source: attachment.source,
+        originalUrl: attachment.previewUrl,
+        isConnected,
+      })
+    : String(attachment.previewUrl || "").trim(), [
+      artifactId,
+      attachment.previewUrl,
+      attachment.source,
+      isConnected,
+      ownerConversationId,
+      ownerScoped,
+      sessionId,
+    ]);
+
+  useEffect(() => {
+    setReloadNonce(0);
+    setLoadState("loading");
+  }, [artifactId, attachment.id, baseUrl, isConnected, ownerConversationId, sessionId]);
+
+  const imageUrl = withPreviewCacheBust(baseUrl, reloadNonce);
+
+  const retry = (event: MouseEvent<HTMLSpanElement>) => {
+    event.stopPropagation();
+    setLoadState("loading");
+    setReloadNonce((value) => value + 1);
+  };
+  const retryWithKeyboard = (event: KeyboardEvent<HTMLSpanElement>) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    event.stopPropagation();
+    setLoadState("loading");
+    setReloadNonce((value) => value + 1);
+  };
+
+  if (!imageUrl || loadState === "error") {
+    const unavailableLabel = !ownerConversationId && ownerScoped
+      ? "未关联会话"
+      : ownerScoped && (!isConnected || !sessionId)
+        ? "重连后载入"
+        : loadState === "error"
+          ? "加载失败"
+          : "暂无预览";
+    return (
+      <span className="mc-chat-context-image-fallback" role={loadState === "error" ? "status" : undefined}>
+        <FileImage size={15} aria-hidden="true" />
+        <span className="mc-chat-context-image-error-label">{unavailableLabel}</span>
+        {loadState === "error" && (
+          <>
+            <span
+              className="mc-chat-context-image-retry"
+              role="button"
+              tabIndex={0}
+              aria-label="重试图片"
+              onClick={retry}
+              onKeyDown={retryWithKeyboard}
+            >
+              重试
+            </span>
+          </>
+        )}
+      </span>
+    );
+  }
+
+  return (
+    <img
+      key={`${imageUrl}:${reloadNonce}`}
+      src={imageUrl}
+      alt={attachment.label}
+      data-load-state={loadState}
+      onLoad={() => setLoadState("loaded")}
+      onError={() => setLoadState("error")}
+    />
+  );
+}
 
 export const ChatContextCard = () => {
   const messages = useAppStore((state) => state.messages);
   const subagents = useAppStore((state) => state.subagents);
   const backgroundTasks = useAppStore((state) => state.backgroundTasks);
   const conversationId = useAppStore((state) => state.conversationId);
-  const isConnected = useAppStore((state) => state.isConnected);
   const rightPanelOpen = useAppStore((state) => state.rightPanelOpen);
   const setRightStackTab = useAppStore((state) => state.setRightStackTab);
   const setFocusedSubagentId = useAppStore((state) => state.setFocusedSubagentId);
@@ -178,13 +360,9 @@ export const ChatContextCard = () => {
   const previousRightPanelOpenRef = useRef(rightPanelOpen);
   const agentViews = useMemo(() => projectAgentViews(subagents), [subagents]);
   const sources = useMemo(() => collectSources(messages), [messages]);
-  const sessionId = isConnected ? String(getWebSocket()?.sessionId || "").trim() : "";
   const attachments = useMemo(
-    () => collectAttachments(
-      messages,
-      sessionId && conversationId ? { sessionId, conversationId } : undefined,
-    ),
-    [conversationId, messages, sessionId],
+    () => collectAttachments(messages, conversationId || undefined),
+    [conversationId, messages],
   );
 
   useEffect(() => {
@@ -281,9 +459,9 @@ export const ChatContextCard = () => {
   };
   const openAttachment = (attachment: ContextAttachment) => {
     const store = useAppStore.getState();
-    if (attachment.generated && attachment.artifactId) {
-      const target = Array.from(document.querySelectorAll<HTMLElement>("[data-artifact-id]"))
-        .find((element) => element.dataset.artifactId === attachment.artifactId);
+    const attachmentConversationId = attachment.conversationId?.trim() || undefined;
+    if (attachment.source === "artifact" && attachment.artifactId) {
+      const target = artifactDomTarget(attachment.artifactId, attachmentConversationId);
       if (target) {
         target.scrollIntoView?.({ behavior: "smooth", block: "center" });
         target.classList.add("assistant-cell-artifact-context-target");
@@ -298,17 +476,33 @@ export const ChatContextCard = () => {
         mediaType: attachment.mediaType,
         kind: attachment.kind,
         workspaceRoot: store.workingDirectory || "",
-        conversationId: store.conversationId || undefined,
+        conversationId: attachmentConversationId || store.conversationId || undefined,
       });
       return;
     }
     if (attachment.artifactId) {
+      // Generated artifacts are stored in ArtifactStore and must be read via
+      // the artifact endpoint.  Treating them as uploads sends the request to
+      // `/api/attachments/raw`, which cannot resolve browser screenshots.
+      if (attachment.source === "artifact") {
+        if (!attachmentConversationId) return;
+        openArtifactPreview({
+          artifactId: attachment.artifactId,
+          name: attachment.label,
+          summary: attachment.label,
+          mediaType: attachment.mediaType,
+          kind: attachment.kind,
+          conversationId: attachmentConversationId,
+        });
+        return;
+      }
+      if (!attachmentConversationId) return;
       openAttachmentPreview({
         artifactId: attachment.artifactId,
         name: attachment.label,
         mediaType: attachment.mediaType,
         kind: attachment.kind,
-        conversationId: store.conversationId || undefined,
+        conversationId: attachmentConversationId,
       });
       return;
     }
@@ -390,8 +584,8 @@ export const ChatContextCard = () => {
                   onClick={() => openAttachment(attachment)}
                 >
                   <span>
-                    {attachment.kind === "image" && attachment.previewUrl
-                      ? <img src={attachment.previewUrl} alt="" />
+                    {attachment.kind === "image"
+                      ? <ContextAttachmentThumbnail attachment={attachment} />
                       : <Icon size={15} />}
                   </span>
                   <span className="mc-chat-context-source-content">

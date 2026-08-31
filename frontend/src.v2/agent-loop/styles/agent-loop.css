@@ -208,7 +208,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 
 /* ── Process-cell 对 cells 类的 scoped 覆盖（拉平时间线 / 统一表面）─────
    cells.css 以 (0,1,0) 非 !important 定义基值，本文件 (0,2,0) 非 !important 且加载
-   更晚，故无需 !important 即生效。 */
+   更晚，故无需 !important 即生效。工具行保持 transcript 平铺，展开证据才有外框。 */
 
 .agent-loop-process-cell .activity-cell,
 .agent-loop-process-cell .exec-cell {
@@ -222,28 +222,106 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 .agent-loop-process-cell .exec-cell-header-button {
   flex-wrap: nowrap;
   overflow: hidden;
-  min-height: 38px;
-  padding: 6px 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: var(--surface-raised);
+  min-height: 30px;
+  padding: 4px 2px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   font-size: var(--text-md);
   white-space: nowrap;
   transition:
-    border-color var(--transition-fast),
     background-color var(--transition-fast);
 }
 
 .agent-loop-process-cell .activity-cell-main-button:disabled {
-  border-color: var(--border-subtle);
-  background: var(--surface-raised);
+  border: 0;
+  background: transparent;
   opacity: 1;
 }
 
 .agent-loop-process-cell .activity-cell-main-button[data-clickable="true"]:hover,
 .agent-loop-process-cell .exec-cell-header-button:hover {
-  border-color: var(--border-soft);
-  background: var(--surface-soft);
+  border: 0;
+  background: var(--surface-hover);
+  border-radius: var(--radius-sm);
+}
+
+/* Provider retry rows are transcript status text as well. Keep their icon and
+   typed 1/N label intact while applying the same flat geometry as every tool. */
+.agent-loop-process-cell .activity-cell[data-provider-retry="true"] .activity-cell-main-button {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-loop-process-cell .activity-cell[data-provider-retry="true"] .activity-cell-main-button[data-clickable="true"]:hover,
+.agent-loop-process-cell .activity-cell[data-provider-retry="true"] .activity-cell-main-button:disabled {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-loop-process-cell .activity-cell[data-provider-retry="true"] .activity-cell-name {
+  color: var(--text-muted);
+  font-weight: var(--fw-regular);
+  background: none;
+  background-image: none;
+  background-clip: border-box;
+  -webkit-background-clip: border-box;
+  -webkit-text-fill-color: currentColor;
+  animation: none;
+}
+
+.agent-loop-process-cell .activity-cell[data-provider-retry="true"] .activity-cell-name[data-failed="true"] {
+  color: var(--state-danger);
+}
+
+.agent-loop-process-cell .activity-cell-provider-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: var(--text-muted);
+}
+
+.agent-loop-process-cell .activity-cell-provider-icon[data-failed="true"] {
+  color: var(--state-danger);
+}
+
+/* Nested record cards do not add hierarchy once the cell owns the single
+   disclosure frame. Keep separators in the content itself only where a
+   command/output or diff needs them. */
+.agent-loop-process-cell .activity-cell-expanded {
+  margin: 4px 0 8px 22px;
+}
+
+.agent-loop-process-cell .activity-cell-tool-detail-card,
+.agent-loop-process-cell .activity-cell-change-card,
+.agent-loop-process-cell .activity-cell-artifact-card {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.agent-loop-process-cell .activity-cell-artifact-button {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.agent-loop-process-cell .activity-cell-error-detail {
+  padding-left: 0;
+}
+
+.agent-loop-process-cell .activity-cell-error-pre {
+  border-left-width: 2px;
+  border-radius: 0;
+  background: transparent;
 }
 
 .agent-loop-process-cell .exec-cell-header-row {
@@ -324,8 +402,8 @@ html[data-theme="light"] .agent-loop-process-summary-status {
   overflow-wrap: normal;
 }
 
-.agent-loop-process-cell .activity-cell-running .activity-cell-name,
-.agent-loop-process-cell .activity-cell-running .activity-cell-detail,
+.agent-loop-process-cell .activity-cell-running:not([data-provider-retry="true"]) .activity-cell-name,
+.agent-loop-process-cell .activity-cell-running:not([data-provider-retry="true"]) .activity-cell-detail,
 .agent-loop-process-cell .exec-cell-running .exec-cell-title,
 .agent-loop-process-cell .exec-cell-running .exec-cell-command-preview {
   background-image: linear-gradient(
@@ -420,30 +498,29 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 .agent-loop-timeline-group-title {
   display: flex;
   align-items: center;
-  min-height: 38px;
+  min-height: 30px;
   width: 100%;
   gap: 8px;
-  padding: 6px 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: var(--surface-raised);
+  padding: 4px 2px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--text-secondary);
   font-size: var(--text-md);
   font-weight: var(--fw-medium);
   text-align: left;
   cursor: pointer;
   transition:
-    border-color var(--transition-fast),
     background-color var(--transition-fast);
 }
 
 .agent-loop-timeline-group-title:hover {
-  border-color: var(--border-soft);
   background: var(--surface-soft);
+  border-radius: var(--radius-sm);
 }
 
 .agent-loop-timeline-group[data-group-expanded="true"] > .agent-loop-timeline-group-title {
-  border-color: var(--border-soft);
+  border: 0;
 }
 
 .agent-loop-timeline-group-title svg {

@@ -14,7 +14,6 @@ from __future__ import annotations
 import base64
 import binascii
 import asyncio
-import hashlib
 import json
 import logging
 import math
@@ -22,7 +21,6 @@ import re
 import time
 from dataclasses import replace
 from contextlib import asynccontextmanager
-from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 from urllib.parse import urljoin, urlparse
@@ -32,8 +30,11 @@ import httpx
 
 from backend.config import LLMSettings
 from backend.agent.lifecycle_errors import LifecycleStaleError
-from backend.agent.lifecycle_observer import LIFECYCLE_RUNTIME_METADATA_KEY
-from backend.agent.prompting import SYSTEM_PROMPT_DYNAMIC_BOUNDARY, split_sys_prompt_prefix
+from backend.agent.provider_lifecycle import LIFECYCLE_RUNTIME_METADATA_KEY
+from backend.agent.prompting import (
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    split_sys_prompt_prefix,
+)
 from backend.llm.errors import (
     classify_llm_error,
     llm_error_raw as _adapter_error_raw,
@@ -44,6 +45,7 @@ from backend.llm.errors import (
 from backend.llm.base import (
     emit_provider_lifecycle_request,
     LLMAdapter,
+    LLMSideCallContext,
     LLMMessage,
     ProviderActivityEvent,
     SideQueryOptions,
@@ -67,10 +69,7 @@ from backend.llm.openai_trace import (
     _CHAT_TOOL_FINISH_REASONS,
     _RESPONSES_MAX_OUTPUT_REASONS,
     _append_provider_timeline,
-    _contains_turn_aborted_marker,
-    _count_prompt_cache_breakpoints,
     _get_attr_or_item,
-    _instruction_text_from_messages,
     _is_instruction_role,
     _json_fingerprint,
     _message_content_text,
@@ -78,18 +77,9 @@ from backend.llm.openai_trace import (
     _response_finish_reason,
     _response_timeline_fields,
     _responses_reasoning_summary,
-    _responses_safe_provider_string,
     _responses_safe_provider_value,
-    _safe_input_item_content_hash,
-    _safe_input_item_label,
-    _safe_input_size_summary,
-    _safe_request_param_keys,
-    _safe_request_params,
     _safe_request_summary,
     _safe_timeline_string,
-    _safe_tool_names,
-    _safe_tool_schema_hashes,
-    _safe_tool_schema_size_summary,
     _short_sha256,
 )
 
@@ -251,7 +241,9 @@ def _clamped_responses_max_output_tokens(
 
 def _chat_max_tokens_field(settings: LLMSettings, *, model: str | None = None) -> str:
     base_url = str(getattr(settings, "base_url", "") or "").lower()
-    model_id = str(model if model is not None else getattr(settings, "model", "") or "").lower()
+    model_id = str(
+        model if model is not None else getattr(settings, "model", "") or ""
+    ).lower()
     if any(mark in base_url for mark in _USE_LEGACY_MAX_TOKENS_BASEMARKS):
         return "max_tokens"
     if model_id.startswith(("o1", "o3", "o4", "gpt-5")):
@@ -389,6 +381,7 @@ def _responses_reasoning_effort(
         getattr(settings, "default_reasoning_effort", ""),
     )
 
+
 def _chat_reasoning_effort(
     settings: LLMSettings,
     *,
@@ -406,9 +399,9 @@ def _chat_reasoning_effort(
         return ""
     requested = str(settings.reasoning_effort or "").strip().lower()
     if not requested:
-        requested = str(
-            getattr(settings, "default_reasoning_effort", "") or ""
-        ).strip().lower()
+        requested = (
+            str(getattr(settings, "default_reasoning_effort", "") or "").strip().lower()
+        )
     return requested if requested in levels else ""
 
 
@@ -470,6 +463,7 @@ def _responses_include_request(
     """
     del settings, has_tools, reasoning_request
     return ["reasoning.encrypted_content"]
+
 
 def _chat_tool_protocol_error(
     finish_reason: str,
@@ -600,25 +594,6 @@ def _truncate_provider_body(body: str) -> str:
     if len(compact) > _PROVIDER_ERROR_BODY_LOG_LIMIT:
         return compact[:_PROVIDER_ERROR_BODY_LOG_LIMIT] + "..."
     return compact
-
-
-def _log_chat_provider_error(
-    settings: LLMSettings, context: str, exc: Exception
-) -> None:
-    body = _provider_response_body(exc)
-    code, error_type = _provider_error_fields(exc, body)
-    logger.error(
-        "%s failed provider_host=%s model=%s wire_api=%s status=%s provider_error_type=%s provider_error_code=%s response_body=%s",
-        context,
-        _provider_host(settings.base_url),
-        settings.model,
-        settings.wire_api,
-        _error_status_code(exc) or "",
-        error_type or "",
-        code or "",
-        _truncate_provider_body(body),
-        exc_info=True,
-    )
 
 
 def _provider_error_hint(exc: Exception) -> str:
@@ -769,6 +744,7 @@ def _responses_function_call_output_item(message: LLMMessage) -> dict[str, Any]:
         payload["status"] = status
     return payload
 
+
 def _instruction_text_from_responses_input(
     input_items: list[dict[str, Any]] | None,
 ) -> str:
@@ -798,11 +774,7 @@ def _instruction_text_from_responses_input(
                 if isinstance(block, dict) and isinstance(block.get("text"), str)
             ]
             text = "\n".join(text_parts).strip()
-            if (
-                explicit_breakpoint_seen
-                and parts
-                and not explicit_boundary_inserted
-            ):
+            if explicit_breakpoint_seen and parts and not explicit_boundary_inserted:
                 parts.append(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
                 explicit_boundary_inserted = True
         else:
@@ -815,6 +787,7 @@ def _instruction_text_from_responses_input(
         ):
             explicit_breakpoint_seen = True
     return "\n\n".join(parts)
+
 
 def _openai_chat_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
     """Build Chat Completions messages without replayed instruction snapshots."""
@@ -852,7 +825,9 @@ def _instruction_text_from_chat_payload(messages: list[dict[str, Any]] | None) -
     explicit_breakpoint_seen = False
     explicit_boundary_inserted = False
     for message in messages:
-        if not isinstance(message, dict) or not _is_instruction_role(message.get("role")):
+        if not isinstance(message, dict) or not _is_instruction_role(
+            message.get("role")
+        ):
             break
         content = message.get("content")
         text = _message_content_text(content).strip()
@@ -862,11 +837,7 @@ def _instruction_text_from_chat_payload(messages: list[dict[str, Any]] | None) -
             isinstance(block, dict) and "prompt_cache_breakpoint" in block
             for block in content
         )
-        if (
-            explicit_breakpoint_seen
-            and parts
-            and not explicit_boundary_inserted
-        ):
+        if explicit_breakpoint_seen and parts and not explicit_boundary_inserted:
             parts.append(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
             explicit_boundary_inserted = True
         parts.append(text)
@@ -885,6 +856,7 @@ def _chat_payload_input_items(
         for message in messages
         if isinstance(message, dict) and not _is_instruction_role(message.get("role"))
     ]
+
 
 def _split_responses_instructions(
     messages: list[LLMMessage],
@@ -1017,9 +989,7 @@ def _chat_explicit_prompt_cache_messages(
         result.append(
             {
                 "role": "system",
-                "content": [
-                    {"type": "text", "text": split.dynamic_suffix}
-                ],
+                "content": [{"type": "text", "text": split.dynamic_suffix}],
             }
         )
     result.extend(non_instruction_messages)
@@ -1064,6 +1034,7 @@ def _valid_http_header_value(value: Any) -> str | None:
     if not candidate or any(ord(char) < 32 or ord(char) == 127 for char in candidate):
         return None
     return candidate[:512]
+
 
 def _responses_side_client_metadata(
     options: SideQueryOptions | None,
@@ -1113,9 +1084,13 @@ def _responses_client_metadata(
         or agent_role.startswith("subagent:")
         or bool(first("x-openai-subagent", "subagent_kind"))
     )
-    session_id = first("session_id") or conversation_id or first(
-        "minicode_app_session_id",
-        "minicode_session_id",
+    session_id = (
+        first("session_id")
+        or conversation_id
+        or first(
+            "minicode_app_session_id",
+            "minicode_session_id",
+        )
     )
     thread_id = first("thread_id")
     if not thread_id:
@@ -1149,9 +1124,7 @@ def _responses_client_metadata(
             "minicode_window_id",
             "window_id",
         ),
-        "x-minicode-parent-thread-id": (
-            "parent_thread_id",
-        ),
+        "x-minicode-parent-thread-id": ("parent_thread_id",),
         "x-minicode-turn-metadata": ("x-minicode-turn-metadata",),
         "x-openai-subagent": ("x-openai-subagent", "subagent_kind"),
         "ws_request_header_traceparent": (
@@ -1197,7 +1170,10 @@ def _responses_function_call_input_item(tc: ToolCallEvent) -> dict[str, Any]:
         "arguments": _responses_normalize_function_arguments(tc.arguments),
     }
 
-def _responses_detach_provider_json(value: Any, *, _seen: set[int] | None = None) -> Any:
+
+def _responses_detach_provider_json(
+    value: Any, *, _seen: set[int] | None = None
+) -> Any:
     """Detach authoritative Responses continuation data without rewriting it.
 
     Provider continuation is replay input, not a diagnostic projection.  In
@@ -1217,8 +1193,7 @@ def _responses_detach_provider_json(value: Any, *, _seen: set[int] | None = None
     try:
         if isinstance(value, (list, tuple)):
             return [
-                _responses_detach_provider_json(child, _seen=seen)
-                for child in value
+                _responses_detach_provider_json(child, _seen=seen) for child in value
             ]
         if isinstance(value, dict):
             detached: dict[str, Any] = {}
@@ -1242,9 +1217,7 @@ def _responses_detach_provider_json(value: Any, *, _seen: set[int] | None = None
     finally:
         seen.remove(value_id)
 
-    raise TypeError(
-        f"unsupported provider continuation value: {type(value).__name__}"
-    )
+    raise TypeError(f"unsupported provider continuation value: {type(value).__name__}")
 
 
 def _responses_error_details(
@@ -1299,8 +1272,7 @@ def _responses_error_event_raw(
 ) -> tuple[str, dict[str, Any]]:
     message, details = _responses_error_details(error, fallback=fallback)
     classification_parts = [
-        str(details.get(key) or "")
-        for key in ("message", "code", "type")
+        str(details.get(key) or "") for key in ("message", "code", "type")
     ]
     for key in ("status", "status_code"):
         value = details.get(key)
@@ -1488,6 +1460,7 @@ def _responses_message_text_from_item(item: Any) -> str:
             text_parts.append(text)
     return "".join(text_parts)
 
+
 def _json_to_namespace(value: Any) -> Any:
     """Recursively expose raw HTTP JSON with SDK-like attributes."""
     if isinstance(value, dict):
@@ -1633,8 +1606,12 @@ async def _download_remote_image(
         for redirect_index in range(_REMOTE_IMAGE_MAX_REDIRECTS + 1):
             assessment = await asyncio.to_thread(assess_network_url, current)
             if not assessment.allowed:
-                raise ValueError(f"Images API remote image URL was blocked: {assessment.reason}")
-            async with client.stream("GET", current, headers={"Accept": "image/*"}) as response:
+                raise ValueError(
+                    f"Images API remote image URL was blocked: {assessment.reason}"
+                )
+            async with client.stream(
+                "GET", current, headers={"Accept": "image/*"}
+            ) as response:
                 peer_error = actual_peer_network_error(
                     response,
                     current,
@@ -1645,29 +1622,47 @@ async def _download_remote_image(
                 if response.status_code in {301, 302, 303, 307, 308}:
                     location = str(response.headers.get("location") or "").strip()
                     if not location:
-                        raise ValueError("Images API remote image redirect had no location")
+                        raise ValueError(
+                            "Images API remote image redirect had no location"
+                        )
                     if redirect_index >= _REMOTE_IMAGE_MAX_REDIRECTS:
-                        raise ValueError("Images API remote image exceeded the redirect limit")
+                        raise ValueError(
+                            "Images API remote image exceeded the redirect limit"
+                        )
                     current = urljoin(current, location)
                     continue
                 response.raise_for_status()
-                declared_length = str(response.headers.get("content-length") or "").strip()
-                if declared_length.isdigit() and int(declared_length) > _REMOTE_IMAGE_MAX_BYTES:
+                declared_length = str(
+                    response.headers.get("content-length") or ""
+                ).strip()
+                if (
+                    declared_length.isdigit()
+                    and int(declared_length) > _REMOTE_IMAGE_MAX_BYTES
+                ):
                     raise ValueError("Images API remote image exceeds the size limit")
                 body = bytearray()
                 async for chunk in response.aiter_bytes():
                     body.extend(chunk)
                     if len(body) > _REMOTE_IMAGE_MAX_BYTES:
-                        raise ValueError("Images API remote image exceeds the size limit")
+                        raise ValueError(
+                            "Images API remote image exceeds the size limit"
+                        )
                 decoded = bytes(body)
                 if not decoded:
                     raise ValueError("Images API remote image was empty")
                 media_type = _generated_image_media_type(decoded)
-                declared_type = str(response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+                declared_type = (
+                    str(response.headers.get("content-type") or "")
+                    .split(";", 1)[0]
+                    .strip()
+                    .lower()
+                )
                 if declared_type == "image/jpg":
                     declared_type = "image/jpeg"
                 if declared_type and declared_type != media_type:
-                    raise ValueError("Images API remote image Content-Type does not match its bytes")
+                    raise ValueError(
+                        "Images API remote image Content-Type does not match its bytes"
+                    )
                 return base64.b64encode(decoded).decode("ascii"), media_type
     raise ValueError("Images API remote image could not be downloaded")
 
@@ -1736,7 +1731,7 @@ def _image_prompt_from_messages(messages: list[LLMMessage]) -> str:
             stripped = content.lstrip()
             for wrapper in wrappers:
                 if stripped.startswith(wrapper):
-                    stripped = stripped[len(wrapper):].lstrip("\r\n ")
+                    stripped = stripped[len(wrapper) :].lstrip("\r\n ")
                     break
             content = stripped
         if content.strip():
@@ -1810,7 +1805,9 @@ def _response_output_item_activity_metadata(item: Any) -> dict[str, Any]:
 
     metadata: dict[str, Any] = {}
     for field_name in ("type", "id", "name", "server_label", "status"):
-        value = _safe_timeline_string(_get_attr_or_item(item, field_name, ""), limit=256)
+        value = _safe_timeline_string(
+            _get_attr_or_item(item, field_name, ""), limit=256
+        )
         if value:
             metadata[field_name] = value
     tools = _get_attr_or_item(item, "tools", None)
@@ -1836,28 +1833,100 @@ def _unsupported_response_output_item_types(response: Any) -> list[str]:
 
 
 _OPENAI_PROVIDER_ACTIVITY_EVENTS: dict[str, tuple[str, str, str]] = {
-    "response.web_search_call.in_progress": ("Web search", "running", "Searching the web"),
-    "response.web_search_call.searching": ("Web search", "running", "Searching the web"),
-    "response.web_search_call.completed": ("Web search", "completed", "Web search completed"),
-    "response.file_search_call.in_progress": ("File search", "running", "Searching connected files"),
-    "response.file_search_call.searching": ("File search", "running", "Searching connected files"),
-    "response.file_search_call.completed": ("File search", "completed", "File search completed"),
-    "response.code_interpreter_call.in_progress": ("Code execution", "running", "Preparing provider code execution"),
-    "response.code_interpreter_call_code.delta": ("Code execution", "running", "Preparing provider code"),
-    "response.code_interpreter_call_code.done": ("Code execution", "running", "Provider code prepared"),
-    "response.code_interpreter_call.interpreting": ("Code execution", "running", "Running provider code"),
-    "response.code_interpreter_call.completed": ("Code execution", "completed", "Provider code execution completed"),
-    "response.image_generation_call.in_progress": ("Image generation", "running", "Preparing image generation"),
-    "response.image_generation_call.generating": ("Image generation", "running", "Generating an image"),
-    "response.image_generation_call.completed": ("Image generation", "completed", "Image generation completed"),
+    "response.web_search_call.in_progress": (
+        "Web search",
+        "running",
+        "Searching the web",
+    ),
+    "response.web_search_call.searching": (
+        "Web search",
+        "running",
+        "Searching the web",
+    ),
+    "response.web_search_call.completed": (
+        "Web search",
+        "completed",
+        "Web search completed",
+    ),
+    "response.file_search_call.in_progress": (
+        "File search",
+        "running",
+        "Searching connected files",
+    ),
+    "response.file_search_call.searching": (
+        "File search",
+        "running",
+        "Searching connected files",
+    ),
+    "response.file_search_call.completed": (
+        "File search",
+        "completed",
+        "File search completed",
+    ),
+    "response.code_interpreter_call.in_progress": (
+        "Code execution",
+        "running",
+        "Preparing provider code execution",
+    ),
+    "response.code_interpreter_call_code.delta": (
+        "Code execution",
+        "running",
+        "Preparing provider code",
+    ),
+    "response.code_interpreter_call_code.done": (
+        "Code execution",
+        "running",
+        "Provider code prepared",
+    ),
+    "response.code_interpreter_call.interpreting": (
+        "Code execution",
+        "running",
+        "Running provider code",
+    ),
+    "response.code_interpreter_call.completed": (
+        "Code execution",
+        "completed",
+        "Provider code execution completed",
+    ),
+    "response.image_generation_call.in_progress": (
+        "Image generation",
+        "running",
+        "Preparing image generation",
+    ),
+    "response.image_generation_call.generating": (
+        "Image generation",
+        "running",
+        "Generating an image",
+    ),
+    "response.image_generation_call.completed": (
+        "Image generation",
+        "completed",
+        "Image generation completed",
+    ),
     "response.mcp_call.in_progress": ("MCP tool", "running", "Calling an MCP tool"),
-    "response.mcp_call_arguments.delta": ("MCP tool", "running", "Preparing an MCP tool call"),
-    "response.mcp_call_arguments.done": ("MCP tool", "running", "MCP tool call prepared"),
+    "response.mcp_call_arguments.delta": (
+        "MCP tool",
+        "running",
+        "Preparing an MCP tool call",
+    ),
+    "response.mcp_call_arguments.done": (
+        "MCP tool",
+        "running",
+        "MCP tool call prepared",
+    ),
     "response.mcp_call.completed": ("MCP tool", "completed", "MCP tool completed"),
     "response.mcp_call.failed": ("MCP tool", "failed", "MCP tool failed"),
-    "response.mcp_list_tools.in_progress": ("MCP tools", "running", "Loading MCP tools"),
+    "response.mcp_list_tools.in_progress": (
+        "MCP tools",
+        "running",
+        "Loading MCP tools",
+    ),
     "response.mcp_list_tools.completed": ("MCP tools", "completed", "MCP tools loaded"),
-    "response.mcp_list_tools.failed": ("MCP tools", "failed", "Loading MCP tools failed"),
+    "response.mcp_list_tools.failed": (
+        "MCP tools",
+        "failed",
+        "Loading MCP tools failed",
+    ),
 }
 
 _OPENAI_OUTPUT_ITEM_ACTIVITY_PREFIXES = {
@@ -1897,36 +1966,39 @@ _OPENAI_UNSUPPORTED_RESPONSE_STREAM_EVENTS = frozenset(
     }
 )
 
-_OPENAI_RESPONSE_STREAM_EVENT_TYPES = frozenset(
-    {
-        "error",
-        # Compatibility gateways have emitted this alias even though the
-        # installed OpenAI SDK currently models the event as plain `error`.
-        "response.error",
-        "response.completed",
-        "response.content_part.added",
-        "response.content_part.done",
-        "response.failed",
-        "response.function_call_arguments.delta",
-        "response.function_call_arguments.done",
-        "response.image_generation_call.partial_image",
-        "response.incomplete",
-        "response.output_item.added",
-        "response.output_item.done",
-        "response.output_text.annotation.added",
-        "response.output_text.delta",
-        "response.output_text.done",
-        "response.reasoning_summary_part.added",
-        "response.reasoning_summary_part.done",
-        "response.reasoning_summary_text.delta",
-        "response.reasoning_summary_text.done",
-        "response.reasoning_text.delta",
-        "response.reasoning_text.done",
-        "response.refusal.delta",
-        "response.refusal.done",
-    }
-) | _OPENAI_PASSIVE_RESPONSE_STREAM_EVENTS | _OPENAI_UNSUPPORTED_RESPONSE_STREAM_EVENTS | frozenset(
-    _OPENAI_PROVIDER_ACTIVITY_EVENTS
+_OPENAI_RESPONSE_STREAM_EVENT_TYPES = (
+    frozenset(
+        {
+            "error",
+            # Compatibility gateways have emitted this alias even though the
+            # installed OpenAI SDK currently models the event as plain `error`.
+            "response.error",
+            "response.completed",
+            "response.content_part.added",
+            "response.content_part.done",
+            "response.failed",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.image_generation_call.partial_image",
+            "response.incomplete",
+            "response.output_item.added",
+            "response.output_item.done",
+            "response.output_text.annotation.added",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.reasoning_summary_part.added",
+            "response.reasoning_summary_part.done",
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_summary_text.done",
+            "response.reasoning_text.delta",
+            "response.reasoning_text.done",
+            "response.refusal.delta",
+            "response.refusal.done",
+        }
+    )
+    | _OPENAI_PASSIVE_RESPONSE_STREAM_EVENTS
+    | _OPENAI_UNSUPPORTED_RESPONSE_STREAM_EVENTS
+    | frozenset(_OPENAI_PROVIDER_ACTIVITY_EVENTS)
 )
 
 
@@ -2039,9 +2111,7 @@ def _openai_output_item_activity(
     # dedicated streaming event in the installed SDK. Keep that failure
     # visible instead of silently dropping the provider-managed operation.
     if status in {"failed", "incomplete"}:
-        completed_spec = _OPENAI_PROVIDER_ACTIVITY_EVENTS.get(
-            f"{prefix}.completed"
-        )
+        completed_spec = _OPENAI_PROVIDER_ACTIVITY_EVENTS.get(f"{prefix}.completed")
         label = (
             completed_spec[0]
             if completed_spec is not None
@@ -2053,9 +2123,7 @@ def _openai_output_item_activity(
             name=label,
             status="failed",
             message=(
-                f"{label} incomplete"
-                if status == "incomplete"
-                else f"{label} failed"
+                f"{label} incomplete" if status == "incomplete" else f"{label} failed"
             ),
         )
     return None
@@ -2068,9 +2136,7 @@ def _openai_terminal_output_activities(
     output = _get_attr_or_item(response, "output", []) or []
     if not isinstance(output, list):
         return []
-    response_status = str(
-        _get_attr_or_item(response, "status", "") or ""
-    ).strip()
+    response_status = str(_get_attr_or_item(response, "status", "") or "").strip()
     activities: list[ProviderActivityEvent] = []
     for output_index, item in enumerate(output):
         activity = _openai_output_item_activity(
@@ -2217,10 +2283,6 @@ class OpenAIAdapter(LLMAdapter):
         # Optional chat fields this gateway answered 400 for. Remembered so the
         # rejection is paid once per adapter, not on every turn.
         self._chat_unsupported_fields: set[str] = set()
-        self._simple_max_tokens: ContextVar[int | None] = ContextVar(
-            "openai_simple_max_tokens",
-            default=None,
-        )
         if http_client is None:
             proxy_url = _proxy_url_for_base_url(
                 settings.base_url,
@@ -2294,7 +2356,32 @@ class OpenAIAdapter(LLMAdapter):
         max_tokens: int | None = None,
     ) -> str:
         """非流式调用，用于摘要、压缩等内部任务。"""
-        side_options = self.current_side_query_options()
+        return await self._simple_chat_with_context(
+            messages,
+            max_tokens=max_tokens,
+            context=None,
+        )
+
+    async def _side_query_chat(
+        self,
+        messages: list[LLMMessage],
+        *,
+        context: LLMSideCallContext,
+    ) -> str:
+        return await self._simple_chat_with_context(
+            messages,
+            max_tokens=context.options.max_tokens,
+            context=context,
+        )
+
+    async def _simple_chat_with_context(
+        self,
+        messages: list[LLMMessage],
+        *,
+        max_tokens: int | None,
+        context: LLMSideCallContext | None,
+    ) -> str:
+        side_options = context.options if context is not None else None
         side_model = (
             self.small_fast_model_id()
             if side_options is not None and side_options.use_small_fast_model
@@ -2302,13 +2389,22 @@ class OpenAIAdapter(LLMAdapter):
         )
         _reject_dedicated_image_agent_model(side_model)
         self.annotate_side_call(
+            context,
             provider=str(self._settings.provider or "openai"),
             model_id=side_model,
         )
         if self._settings.wire_api == "responses":
-            return await self._simple_responses_api(messages, max_tokens=max_tokens)
+            return await self._simple_responses_api(
+                messages,
+                max_tokens=max_tokens,
+                context=context,
+            )
         else:
-            return await self._simple_chat_completions(messages, max_tokens=max_tokens)
+            return await self._simple_chat_completions(
+                messages,
+                max_tokens=max_tokens,
+                context=context,
+            )
 
     def supports_hosted_web_search(self) -> bool:
         return (
@@ -2384,12 +2480,7 @@ class OpenAIAdapter(LLMAdapter):
         extra_headers = request_payload.pop("extra_headers", None)
         headers: dict[str, Any] = dict(base_headers)
         if isinstance(extra_headers, dict):
-            headers.update(
-                {
-                    str(key): value
-                    for key, value in extra_headers.items()
-                }
-            )
+            headers.update({str(key): value for key, value in extra_headers.items()})
         headers = await emit_provider_lifecycle_headers(metadata, headers)
         return _strip_openai_unsupported_fields(request_payload), headers
 
@@ -2448,9 +2539,7 @@ class OpenAIAdapter(LLMAdapter):
         if not clean_prompt:
             raise ValueError("Image prompt is required")
         image_model = str(
-            getattr(self._settings, "image_model", "")
-            or self._settings.model
-            or ""
+            getattr(self._settings, "image_model", "") or self._settings.model or ""
         ).strip()
         if not image_model:
             raise ValueError("Image model is required")
@@ -2458,11 +2547,17 @@ class OpenAIAdapter(LLMAdapter):
             "model": image_model,
             "prompt": clean_prompt,
             "n": 1,
-            "size": str(size or getattr(self._settings, "image_size", "1024x1024") or "1024x1024"),
+            "size": str(
+                size
+                or getattr(self._settings, "image_size", "1024x1024")
+                or "1024x1024"
+            ),
             "response_format": "b64_json",
         }
         requested_quality = str(
-            quality if quality is not None else getattr(self._settings, "image_quality", "") or ""
+            quality
+            if quality is not None
+            else getattr(self._settings, "image_quality", "") or ""
         ).strip()
         if requested_quality:
             payload["quality"] = requested_quality
@@ -2626,8 +2721,7 @@ class OpenAIAdapter(LLMAdapter):
             raw={
                 "provider": "openai_images",
                 "model": str(
-                    getattr(self._settings, "image_model", "")
-                    or self._settings.model
+                    getattr(self._settings, "image_model", "") or self._settings.model
                 ),
                 "finish_reason": "stop",
                 "request_summary": {
@@ -2731,6 +2825,7 @@ class OpenAIAdapter(LLMAdapter):
                     continue
                 malformed_budget.accept()
                 yield event
+
     # ══════════════════════════════════════════════════════════════
     #  Responses API 实现（wire_api="responses"）
     # ══════════════════════════════════════════════════════════════
@@ -2755,12 +2850,9 @@ class OpenAIAdapter(LLMAdapter):
 
         model = self._settings.model
         request_metadata = sanitize_llm_request_metadata(metadata)
-        side_options = self.current_side_query_options()
         client_metadata = _responses_client_metadata(request_metadata)
         prompt_cache_key = _responses_prompt_cache_key(client_metadata)
-        prompt_cache_enabled = (
-            side_options is None or side_options.enable_prompt_cache
-        )
+        prompt_cache_enabled = True
         explicit_prompt_cache = bool(
             prompt_cache_enabled
             and prompt_cache_key
@@ -2815,8 +2907,6 @@ class OpenAIAdapter(LLMAdapter):
         # agent conversation while still marking the stable system prefix
         # explicitly.  ``mode=explicit`` disables the provider's implicit
         # breakpoint, so reserve it for genuinely standalone side queries.
-        if explicit_prompt_cache and side_options is not None:
-            kwargs["prompt_cache_options"] = {"mode": "explicit"}
         identity_headers = _responses_identity_headers(client_metadata)
         if identity_headers:
             kwargs["extra_headers"] = identity_headers
@@ -2961,9 +3051,7 @@ class OpenAIAdapter(LLMAdapter):
                 or _get_attr_or_item(value, "id", "")
                 or ""
             ).strip()
-            event_call_id = str(
-                _get_attr_or_item(value, "call_id", "") or ""
-            ).strip()
+            event_call_id = str(_get_attr_or_item(value, "call_id", "") or "").strip()
             slot = (
                 response_tool_items.get(event_call_id)
                 or response_tool_items.get(item_id)
@@ -2977,9 +3065,7 @@ class OpenAIAdapter(LLMAdapter):
                     item_id=item_id,
                 )
             name = str(
-                _get_attr_or_item(value, "name", "")
-                or slot.get("name", "")
-                or ""
+                _get_attr_or_item(value, "name", "") or slot.get("name", "") or ""
             ).strip()
             if not name:
                 return None, _responses_tool_protocol_error(
@@ -3069,12 +3155,9 @@ class OpenAIAdapter(LLMAdapter):
                 sequence_number, bool
             ):
                 return True
-            if (
-                sequence_number in seen_response_sequence_numbers
-                or (
-                    last_response_sequence_number is not None
-                    and sequence_number < last_response_sequence_number
-                )
+            if sequence_number in seen_response_sequence_numbers or (
+                last_response_sequence_number is not None
+                and sequence_number < last_response_sequence_number
             ):
                 raw_done.setdefault("dropped_sequence_events", []).append(
                     {
@@ -3091,9 +3174,7 @@ class OpenAIAdapter(LLMAdapter):
                 raw_done.setdefault("sequence_gaps", []).append(
                     {
                         "event_type": event_type,
-                        "expected_sequence_number": (
-                            last_response_sequence_number + 1
-                        ),
+                        "expected_sequence_number": (last_response_sequence_number + 1),
                         "received_sequence_number": sequence_number,
                     }
                 )
@@ -3185,7 +3266,7 @@ class OpenAIAdapter(LLMAdapter):
                 response_text_last_source[key] = "snapshot"
                 if terminal:
                     terminal_response_text_keys.add(key)
-                return text[len(existing):]
+                return text[len(existing) :]
             raw_done.setdefault("text_reconciliation_mismatches", []).append(
                 {
                     "event_type": event_type,
@@ -3274,7 +3355,7 @@ class OpenAIAdapter(LLMAdapter):
                 response_reasoning_last_source[key] = "snapshot"
                 if terminal:
                     terminal_response_reasoning_keys.add(key)
-                return text[len(existing):]
+                return text[len(existing) :]
             raw_done.setdefault("reasoning_reconciliation_mismatches", []).append(
                 {
                     "scope": "reasoning_summary_done",
@@ -3306,9 +3387,7 @@ class OpenAIAdapter(LLMAdapter):
                     if not isinstance(content, list):
                         continue
                     for content_index, part in enumerate(content):
-                        part_type = str(
-                            _get_attr_or_item(part, "type", "") or ""
-                        )
+                        part_type = str(_get_attr_or_item(part, "type", "") or "")
                         if part_type in {"output_text", "text"}:
                             text = _get_attr_or_item(part, "text", "")
                             content_kind = "text"
@@ -3450,17 +3529,13 @@ class OpenAIAdapter(LLMAdapter):
             if not segments:
                 return []
 
-            terminal_summary = "".join(
-                str(segment["text"]) for segment in segments
-            )
+            terminal_summary = "".join(str(segment["text"]) for segment in segments)
             if terminal_summary == full_reasoning_summary:
                 return []
             if full_reasoning_summary and not terminal_summary.startswith(
                 full_reasoning_summary
             ):
-                raw_done.setdefault(
-                    "reasoning_reconciliation_mismatches", []
-                ).append(
+                raw_done.setdefault("reasoning_reconciliation_mismatches", []).append(
                     {
                         "scope": recovered_from,
                         "streamed_chars": len(full_reasoning_summary),
@@ -3521,9 +3596,7 @@ class OpenAIAdapter(LLMAdapter):
                     if not accept_response_sequence(str(event_type), event):
                         continue
                     if saw_terminal_response_event:
-                        post_terminal: dict[str, Any] = {
-                            "event_type": str(event_type)
-                        }
+                        post_terminal: dict[str, Any] = {"event_type": str(event_type)}
                         sequence_number = _get_attr_or_item(
                             event, "sequence_number", None
                         )
@@ -3681,15 +3754,11 @@ class OpenAIAdapter(LLMAdapter):
                             content=emitted_delta,
                             raw=raw_text,
                             phase=message_phase,
-                            item_id=str(
-                                _get_attr_or_item(event, "item_id", "") or ""
-                            ),
+                            item_id=str(_get_attr_or_item(event, "item_id", "") or ""),
                             content_index=(
                                 _get_attr_or_item(event, "content_index", None)
                                 if isinstance(
-                                    _get_attr_or_item(
-                                        event, "content_index", None
-                                    ),
+                                    _get_attr_or_item(event, "content_index", None),
                                     int,
                                 )
                                 else None
@@ -3734,9 +3803,7 @@ class OpenAIAdapter(LLMAdapter):
                     "response.content_part.done",
                 }:
                     part = _get_attr_or_item(event, "part", None)
-                    part_type = str(
-                        _get_attr_or_item(part, "type", "") or ""
-                    ).strip()
+                    part_type = str(_get_attr_or_item(part, "type", "") or "").strip()
                     merge_citations(_extract_url_citations(part))
                     if part_type in {"output_text", "text"}:
                         terminal_text = _get_attr_or_item(part, "text", "")
@@ -3769,15 +3836,11 @@ class OpenAIAdapter(LLMAdapter):
                                 event,
                                 response_message_phases,
                             ),
-                            item_id=str(
-                                _get_attr_or_item(event, "item_id", "") or ""
-                            ),
+                            item_id=str(_get_attr_or_item(event, "item_id", "") or ""),
                             content_index=(
                                 _get_attr_or_item(event, "content_index", None)
                                 if isinstance(
-                                    _get_attr_or_item(
-                                        event, "content_index", None
-                                    ),
+                                    _get_attr_or_item(event, "content_index", None),
                                     int,
                                 )
                                 else None
@@ -3800,9 +3863,7 @@ class OpenAIAdapter(LLMAdapter):
                         yield StreamEvent(
                             type=StreamEventType.THINKING_CHUNK,
                             content=delta_text,
-                            raw={
-                                "provider_reasoning_type": "reasoning_summary_text"
-                            },
+                            raw={"provider_reasoning_type": "reasoning_summary_text"},
                             item_id=str(_get_attr_or_item(event, "item_id", "") or ""),
                             content_index=(
                                 _get_attr_or_item(event, "summary_index", None)
@@ -3830,18 +3891,12 @@ class OpenAIAdapter(LLMAdapter):
                         yield StreamEvent(
                             type=StreamEventType.THINKING_CHUNK,
                             content=missing_summary,
-                            raw={
-                                "provider_reasoning_type": "reasoning_summary_text"
-                            },
-                            item_id=str(
-                                _get_attr_or_item(event, "item_id", "") or ""
-                            ),
+                            raw={"provider_reasoning_type": "reasoning_summary_text"},
+                            item_id=str(_get_attr_or_item(event, "item_id", "") or ""),
                             content_index=(
                                 _get_attr_or_item(event, "summary_index", None)
                                 if isinstance(
-                                    _get_attr_or_item(
-                                        event, "summary_index", None
-                                    ),
+                                    _get_attr_or_item(event, "summary_index", None),
                                     int,
                                 )
                                 else None
@@ -3854,10 +3909,9 @@ class OpenAIAdapter(LLMAdapter):
                     "response.reasoning_summary_part.done",
                 }:
                     part = _get_attr_or_item(event, "part", None)
-                    terminal_text = (
-                        _get_attr_or_item(event, "text", "")
-                        or _get_attr_or_item(part, "text", "")
-                    )
+                    terminal_text = _get_attr_or_item(
+                        event, "text", ""
+                    ) or _get_attr_or_item(part, "text", "")
                     missing_summary = reconcile_reasoning_summary(
                         event,
                         terminal_text,
@@ -3873,15 +3927,11 @@ class OpenAIAdapter(LLMAdapter):
                                 "provider_reasoning_type": "reasoning_summary_text",
                                 "recovered_from": event_type,
                             },
-                            item_id=str(
-                                _get_attr_or_item(event, "item_id", "") or ""
-                            ),
+                            item_id=str(_get_attr_or_item(event, "item_id", "") or ""),
                             content_index=(
                                 _get_attr_or_item(event, "summary_index", None)
                                 if isinstance(
-                                    _get_attr_or_item(
-                                        event, "summary_index", None
-                                    ),
+                                    _get_attr_or_item(event, "summary_index", None),
                                     int,
                                 )
                                 else None
@@ -3905,9 +3955,7 @@ class OpenAIAdapter(LLMAdapter):
 
                 elif event_type == "response.output_item.added":
                     item = _get_attr_or_item(event, "item", None)
-                    item_type = str(
-                        _get_attr_or_item(item, "type", "") or ""
-                    ).strip()
+                    item_type = str(_get_attr_or_item(item, "type", "") or "").strip()
                     output_index = _get_attr_or_item(event, "output_index", None)
                     output_index_value = (
                         output_index if isinstance(output_index, int) else None
@@ -3948,12 +3996,8 @@ class OpenAIAdapter(LLMAdapter):
                                 provider_activity=activity,
                             )
                     if item_type == "message":
-                        item_id = str(
-                            _get_attr_or_item(item, "id", "") or ""
-                        ).strip()
-                        phase = str(
-                            _get_attr_or_item(item, "phase", "") or ""
-                        ).strip()
+                        item_id = str(_get_attr_or_item(item, "id", "") or "").strip()
+                        phase = str(_get_attr_or_item(item, "phase", "") or "").strip()
                         _record_response_message_phase(
                             response_message_phases,
                             item_id=item_id,
@@ -3969,15 +4013,11 @@ class OpenAIAdapter(LLMAdapter):
                             lifecycle="start",
                         )
                     elif item_type == "function_call":
-                        item_id = str(
-                            _get_attr_or_item(item, "id", "") or ""
-                        ).strip()
+                        item_id = str(_get_attr_or_item(item, "id", "") or "").strip()
                         call_id = str(
                             _get_attr_or_item(item, "call_id", "") or item_id
                         ).strip()
-                        name = str(
-                            _get_attr_or_item(item, "name", "") or ""
-                        ).strip()
+                        name = str(_get_attr_or_item(item, "name", "") or "").strip()
                         key = call_id or item_id
                         if not key:
                             yield _responses_tool_protocol_error(
@@ -3986,13 +4026,13 @@ class OpenAIAdapter(LLMAdapter):
                                 item_id=item_id,
                             )
                             return
-                        existing_slot = (
-                            response_tool_items.get(call_id)
-                            or response_tool_items.get(item_id)
-                        )
-                        if existing_slot is not None and existing_slot.get(
-                            "started"
-                        ) == "true":
+                        existing_slot = response_tool_items.get(
+                            call_id
+                        ) or response_tool_items.get(item_id)
+                        if (
+                            existing_slot is not None
+                            and existing_slot.get("started") == "true"
+                        ):
                             yield _responses_tool_protocol_error(
                                 "duplicate_function_call_start",
                                 event_type=event_type,
@@ -4000,9 +4040,7 @@ class OpenAIAdapter(LLMAdapter):
                                 call_id=call_id or item_id,
                             )
                             return
-                        initial_arguments = _get_attr_or_item(
-                            item, "arguments", ""
-                        )
+                        initial_arguments = _get_attr_or_item(item, "arguments", "")
                         slot = existing_slot or {
                             "id": call_id or item_id,
                             "item_id": item_id,
@@ -4037,9 +4075,7 @@ class OpenAIAdapter(LLMAdapter):
 
                 elif event_type == "response.output_item.done":
                     item = _get_attr_or_item(event, "item", None)
-                    item_type = str(
-                        _get_attr_or_item(item, "type", "") or ""
-                    ).strip()
+                    item_type = str(_get_attr_or_item(item, "type", "") or "").strip()
                     output_index = _get_attr_or_item(event, "output_index", None)
                     output_index_value = (
                         output_index if isinstance(output_index, int) else None
@@ -4243,12 +4279,8 @@ class OpenAIAdapter(LLMAdapter):
                     usage_obj = getattr(response_obj, "usage", None)
                     if usage_obj:
                         usage = UsageInfo(
-                            input_tokens=_get_usage_field(
-                                usage_obj, "input_tokens"
-                            ),
-                            output_tokens=_get_usage_field(
-                                usage_obj, "output_tokens"
-                            ),
+                            input_tokens=_get_usage_field(usage_obj, "input_tokens"),
+                            output_tokens=_get_usage_field(usage_obj, "output_tokens"),
                             cache_read_input_tokens=_get_cached_prompt_tokens(
                                 usage_obj
                             ),
@@ -4283,9 +4315,7 @@ class OpenAIAdapter(LLMAdapter):
                         }
                     )
                     if response_id:
-                        raw_done["response_id_hash"] = _short_sha256(
-                            response_id
-                        )
+                        raw_done["response_id_hash"] = _short_sha256(response_id)
                     if output_items:
                         raw_done["output_items"] = output_items
                     if completed_response_provider_items:
@@ -4404,8 +4434,7 @@ class OpenAIAdapter(LLMAdapter):
                     yield StreamEvent(
                         type=StreamEventType.ERROR,
                         content=(
-                            "Incomplete response returned, reason: "
-                            f"{finish_reason}"
+                            f"Incomplete response returned, reason: {finish_reason}"
                         ),
                         raw={
                             "provider": "openai_responses",
@@ -4428,9 +4457,11 @@ class OpenAIAdapter(LLMAdapter):
                                 type=StreamEventType.PROVIDER_ACTIVITY,
                                 provider_activity=activity,
                             )
-                    error = _get_attr_or_item(event, "error", None) or _get_attr_or_item(
-                        response_obj, "error", None
-                    ) or event
+                    error = (
+                        _get_attr_or_item(event, "error", None)
+                        or _get_attr_or_item(response_obj, "error", None)
+                        or event
+                    )
                     message, error_raw = _responses_error_event_raw(
                         event_type,
                         error,
@@ -4572,25 +4603,22 @@ class OpenAIAdapter(LLMAdapter):
         messages: list[LLMMessage],
         *,
         max_tokens: int | None = None,
+        context: LLMSideCallContext | None = None,
     ) -> str:
         """Collect one standalone Responses stream through response.completed."""
         instructions, input_messages = _split_responses_instructions(messages)
         api_input = self._build_responses_input(input_messages)
 
-        side_options = self.current_side_query_options()
+        side_options = context.options if context is not None else None
         model = (
             self.small_fast_model_id()
             if side_options is not None and side_options.use_small_fast_model
             else self._settings.model
         )
         client_metadata = _responses_side_client_metadata(side_options)
-        prompt_cache_enabled = (
-            side_options is None or side_options.enable_prompt_cache
-        )
+        prompt_cache_enabled = side_options is None or side_options.enable_prompt_cache
         prompt_cache_key = (
-            _responses_prompt_cache_key(client_metadata)
-            if prompt_cache_enabled
-            else ""
+            _responses_prompt_cache_key(client_metadata) if prompt_cache_enabled else ""
         )
         explicit_prompt_cache = bool(
             prompt_cache_enabled
@@ -4623,9 +4651,13 @@ class OpenAIAdapter(LLMAdapter):
             }
         if side_options is not None and side_options.hosted_web_search:
             if not self.supports_hosted_web_search():
-                raise RuntimeError("Hosted web search requires the OpenAI Responses API")
+                raise RuntimeError(
+                    "Hosted web search requires the OpenAI Responses API"
+                )
             if side_options.web_search_blocked_domains:
-                raise ValueError("OpenAI hosted web search does not support blocked_domains")
+                raise ValueError(
+                    "OpenAI hosted web search does not support blocked_domains"
+                )
             hosted_tool: dict[str, Any] = {
                 "type": "web_search",
                 "external_web_access": True,
@@ -4677,9 +4709,16 @@ class OpenAIAdapter(LLMAdapter):
                 kwargs["reasoning"] = reasoning_request
 
         try:
-            stream = await self._create_responses_request(kwargs)
+            stream = await self._create_responses_request(
+                kwargs,
+                metadata=context.request_metadata() if context is not None else None,
+            )
             try:
-                return await self._collect_simple_responses_stream(stream, model=model)
+                return await self._collect_simple_responses_stream(
+                    stream,
+                    model=model,
+                    context=context,
+                )
             finally:
                 await _close_async_iterator(stream)
         except LifecycleStaleError:
@@ -4693,6 +4732,7 @@ class OpenAIAdapter(LLMAdapter):
         stream: Any,
         *,
         model: str,
+        context: LLMSideCallContext | None = None,
     ) -> str:
         """Collect text/citations/usage and reject every non-completed terminal."""
 
@@ -4775,6 +4815,7 @@ class OpenAIAdapter(LLMAdapter):
             provider=str(self._settings.provider or "openai"),
             model_id=model,
             input_includes_cache_read=True,
+            context=context,
         )
 
         text = (completed_text or "".join(delta_parts) or "".join(done_parts)).strip()
@@ -4928,9 +4969,13 @@ class OpenAIAdapter(LLMAdapter):
             # makeStrictJsonSchema. A schema that cannot be expressed strictly
             # falls back to non-strict instead of a deterministic 400.
             strict = bool(function_def.get("strict", False))
-            parameters = _normalize_schema_for_openai(function_def.get("parameters", {}))
+            parameters = _normalize_schema_for_openai(
+                function_def.get("parameters", {})
+            )
             if strict:
-                strict_parameters = strict_schema_for_openai(function_def.get("parameters", {}))
+                strict_parameters = strict_schema_for_openai(
+                    function_def.get("parameters", {})
+                )
                 if strict_parameters is not None:
                     parameters = strict_parameters
                 else:
@@ -5086,7 +5131,9 @@ class OpenAIAdapter(LLMAdapter):
                         input_tokens=_get_chat_prompt_tokens(usage_obj),
                         output_tokens=_get_usage_field(usage_obj, "completion_tokens"),
                         cache_read_input_tokens=_get_cached_prompt_tokens(usage_obj),
-                        cache_creation_input_tokens=_get_cache_creation_prompt_tokens(usage_obj),
+                        cache_creation_input_tokens=_get_cache_creation_prompt_tokens(
+                            usage_obj
+                        ),
                         reasoning_output_tokens=_get_reasoning_output_tokens(usage_obj),
                         cost_usd=_get_usage_cost_usd(usage_obj),
                     )
@@ -5103,7 +5150,11 @@ class OpenAIAdapter(LLMAdapter):
 
                 reasoning_content = ""
                 reasoning_field = ""
-                for candidate_field in ("reasoning_content", "reasoning", "reasoning_text"):
+                for candidate_field in (
+                    "reasoning_content",
+                    "reasoning",
+                    "reasoning_text",
+                ):
                     candidate = delta.get(candidate_field)
                     if isinstance(candidate, str) and candidate:
                         reasoning_content = candidate
@@ -5117,6 +5168,19 @@ class OpenAIAdapter(LLMAdapter):
                         "chat.reasoning_content.delta",
                         delta_chars=len(reasoning_content),
                         field=reasoning_field,
+                    )
+                    # OpenAI-compatible Chat endpoints stream reasoning in
+                    # provider-specific delta fields. Project the delta at the
+                    # same boundary as Responses/Anthropic thinking events;
+                    # the accumulated provider item below is still retained
+                    # for wire replay of the completed assistant message.
+                    yield StreamEvent(
+                        type=StreamEventType.THINKING_CHUNK,
+                        content=reasoning_content,
+                        raw={
+                            "provider_reasoning_type": reasoning_field,
+                        },
+                        content_kind="thinking",
                     )
 
                 content = delta.get("content")
@@ -5246,7 +5310,9 @@ class OpenAIAdapter(LLMAdapter):
             self._settings.model,
             sse_event_count,
             content_delta_count,
-            "" if first_sse_at is None else f"{(first_sse_at - stream_started_at) * 1000:.1f}",
+            ""
+            if first_sse_at is None
+            else f"{(first_sse_at - stream_started_at) * 1000:.1f}",
             (time.monotonic() - stream_started_at) * 1000,
             max_sse_gap_ms,
         )
@@ -5315,7 +5381,6 @@ class OpenAIAdapter(LLMAdapter):
         *,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamEvent]:
-
         def build_payload_request_summary(payload: dict[str, Any]) -> dict[str, Any]:
             payload_messages = (
                 payload.get("messages")
@@ -5388,7 +5453,9 @@ class OpenAIAdapter(LLMAdapter):
         except LifecycleStaleError:
             raise
         except Exception as exc:
-            logger.error("Chat Completions API request or stream parsing failed: %s", exc)
+            logger.error(
+                "Chat Completions API request or stream parsing failed: %s", exc
+            )
             yield StreamEvent(
                 type=StreamEventType.ERROR,
                 content=_adapter_error_content("LLM API call failed", exc),
@@ -5404,28 +5471,27 @@ class OpenAIAdapter(LLMAdapter):
         messages: list[LLMMessage],
         tools: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
+        *,
+        context: LLMSideCallContext | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """使用 Chat Completions API 流式调用。"""
         openai_messages = _openai_chat_messages(messages)
         request_metadata = sanitize_llm_request_metadata(metadata)
-        side_options = self.current_side_query_options()
+        side_options = context.options if context is not None else None
         model = (
             self.small_fast_model_id()
             if side_options is not None and side_options.use_small_fast_model
             else self._settings.model
         )
-        prompt_cache_enabled = (
-            side_options is None or side_options.enable_prompt_cache
-        )
+        prompt_cache_enabled = side_options is None or side_options.enable_prompt_cache
         cache_identity = (
             _responses_side_client_metadata(side_options)
             if side_options is not None
             else _responses_client_metadata(request_metadata)
         )
         prompt_cache_key = (
-            _responses_prompt_cache_key(cache_identity)
-            if prompt_cache_enabled
-            else ""
+            _responses_prompt_cache_key(cache_identity) if prompt_cache_enabled else ""
         )
         explicit_prompt_cache = bool(
             prompt_cache_key
@@ -5438,9 +5504,13 @@ class OpenAIAdapter(LLMAdapter):
             openai_messages, explicit_prompt_cache = (
                 _chat_explicit_prompt_cache_messages(openai_messages)
             )
-        requested_max_tokens = self._simple_max_tokens.get()
-        if requested_max_tokens is None and side_options is not None:
-            requested_max_tokens = side_options.max_tokens
+        requested_max_tokens = (
+            max_tokens
+            if max_tokens is not None
+            else side_options.max_tokens
+            if side_options is not None
+            else None
+        )
 
         kwargs: dict[str, Any] = {
             "model": model,
@@ -5497,7 +5567,6 @@ class OpenAIAdapter(LLMAdapter):
             kwargs["tools"] = self._normalize_chat_tools(tools)
             kwargs["tool_choice"] = "auto"
 
-
         def build_chat_request_summary(payload: dict[str, Any]) -> dict[str, Any]:
             payload_messages = (
                 payload.get("messages")
@@ -5524,34 +5593,37 @@ class OpenAIAdapter(LLMAdapter):
         ):
             yield event
         return
+
     async def _simple_chat_completions(
         self,
         messages: list[LLMMessage],
         *,
         max_tokens: int | None = None,
+        context: LLMSideCallContext | None = None,
     ) -> str:
         """Consume the normal Chat Completions stream to its terminal event."""
-        side_options = self.current_side_query_options()
+        side_options = context.options if context is not None else None
         model = (
             self.small_fast_model_id()
             if side_options is not None and side_options.use_small_fast_model
             else self._settings.model
         )
-        max_tokens_token = self._simple_max_tokens.set(max_tokens)
         text_parts: list[str] = []
         usage = UsageInfo()
         saw_done = False
-        try:
-            async for event in self._stream_chat_completions(messages):
-                if event.type == StreamEventType.TEXT_CHUNK and event.content:
-                    text_parts.append(event.content)
-                elif event.type == StreamEventType.DONE:
-                    usage = event.usage
-                    saw_done = True
-                elif event.type == StreamEventType.ERROR:
-                    raise RuntimeError(event.content or "Chat completion stream failed")
-        finally:
-            self._simple_max_tokens.reset(max_tokens_token)
+        async for event in self._stream_chat_completions(
+            messages,
+            metadata=context.request_metadata() if context is not None else None,
+            context=context,
+            max_tokens=max_tokens,
+        ):
+            if event.type == StreamEventType.TEXT_CHUNK and event.content:
+                text_parts.append(event.content)
+            elif event.type == StreamEventType.DONE:
+                usage = event.usage
+                saw_done = True
+            elif event.type == StreamEventType.ERROR:
+                raise RuntimeError(event.content or "Chat completion stream failed")
 
         if not saw_done:
             raise RuntimeError("Chat completion stream ended before DONE")
@@ -5561,6 +5633,7 @@ class OpenAIAdapter(LLMAdapter):
             provider=str(self._settings.provider or "openai"),
             model_id=model,
             input_includes_cache_read=True,
+            context=context,
         )
         text = "".join(text_parts).strip()
         if text:

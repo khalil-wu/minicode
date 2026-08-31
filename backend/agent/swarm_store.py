@@ -9,6 +9,7 @@ import time
 from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
+from backend.agent.runtime_records import _string_list, epoch_ms
 from typing import Any, Iterator
 from uuid import uuid4
 from backend.agent.swarm_migrations import (
@@ -182,23 +183,10 @@ SCHEMA_MIGRATIONS = (
 )
 
 
-def _epoch_ms() -> int:
-    return int(time.time() * 1000)
-
-
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:12]}"
 
 
-def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    result: list[str] = []
-    for item in value:
-        text = str(item or "").strip()
-        if text and text not in result:
-            result.append(text)
-    return result
 
 
 def _json(value: Any) -> str:
@@ -553,7 +541,7 @@ class FileSwarmStore:
                     str(record.get("parent_run_id") or ""),
                     str(record.get("task_id") or ""),
                     str(record.get("status") or "running"),
-                    _epoch_ms(),
+                    epoch_ms(),
                     _json(record),
                     owner_token,
                     expected_owner_token,
@@ -631,7 +619,7 @@ class FileSwarmStore:
                     str(record.get("task_id") or ""),
                     str(record.get("workflow_id") or ""),
                     str(record.get("status") or "running"),
-                    _epoch_ms(),
+                    epoch_ms(),
                     _json(record),
                     owner_token,
                     agent_path,
@@ -727,7 +715,7 @@ class FileSwarmStore:
                 (
                     subagent_id,
                     str(record.get("status") or ""),
-                    int(record.get("completed_at") or _epoch_ms()),
+                    int(record.get("completed_at") or epoch_ms()),
                     _json(record),
                     owner_token,
                     expected_path,
@@ -987,7 +975,7 @@ class FileSwarmStore:
                     for key, value in (payload.get("recipient_mailbox_epochs") or {}).items()
                     if str(key).strip()
                 } if isinstance(payload.get("recipient_mailbox_epochs"), dict) else {},
-                "created_at": int(payload.get("created_at") or _epoch_ms()),
+                "created_at": int(payload.get("created_at") or epoch_ms()),
                 "seq": self._next_seq(connection, conversation_id),
             }
             self._insert_message(connection, message)
@@ -1020,7 +1008,7 @@ class FileSwarmStore:
         epoch = max(0, int(mailbox_epoch or 0))
         if not kind or not participant or not request or epoch <= 0:
             return ""
-        now = _epoch_ms()
+        now = epoch_ms()
         expires_at = now + max(1_000, int(lease_ms or 0))
         token = _new_id("lifecycle")
         with self._write() as connection:
@@ -1098,7 +1086,7 @@ class FileSwarmStore:
                   AND status = 'reserved' AND reservation_token = ?
                 """,
                 (
-                    _epoch_ms(), str(response_kind or "").strip(),
+                    epoch_ms(), str(response_kind or "").strip(),
                     str(participant_id or "").strip(),
                     max(0, int(mailbox_epoch or 0)), str(request_id or "").strip(),
                     str(reservation_token or "").strip(),
@@ -1237,7 +1225,7 @@ class FileSwarmStore:
         if not participant or not owner:
             raise ValueError("mailbox claim requires participant_id and claim_owner")
         epoch = max(0, int(mailbox_epoch or 0))
-        now = int(now_ms if now_ms is not None else _epoch_ms())
+        now = int(now_ms if now_ms is not None else epoch_ms())
         expires_at = now + max(1_000, int(lease_ms))
         bounded_limit = max(1, min(int(limit or 100), 100))
         clauses = ["(recipient_id = ? OR recipient_id IN ('all', '*'))"]
@@ -1248,7 +1236,6 @@ class FileSwarmStore:
         if since_seq > 0:
             clauses.append("seq > ?")
             values.append(max(0, int(since_seq)))
-        where = " AND ".join(clauses)
 
         claimed: list[dict[str, Any]] = []
         with self._write() as connection:
@@ -1350,7 +1337,7 @@ class FileSwarmStore:
         owner = str(claim_owner or "").strip()
         if not owner or not claims:
             return 0
-        now = int(acked_at if acked_at is not None else _epoch_ms())
+        now = int(acked_at if acked_at is not None else epoch_ms())
         count = 0
         with self._write() as connection:
             for claim in claims:
@@ -1386,7 +1373,7 @@ class FileSwarmStore:
         owner = str(claim_owner or "").strip()
         if not owner or not claims:
             return 0
-        now = int(now_ms if now_ms is not None else _epoch_ms())
+        now = int(now_ms if now_ms is not None else epoch_ms())
         expires_at = now + max(1_000, int(lease_ms))
         count = 0
         with self._write() as connection:
@@ -1455,7 +1442,7 @@ class FileSwarmStore:
 
     @staticmethod
     def _new_task(payload: dict[str, Any], seq: int) -> dict[str, Any]:
-        now = _epoch_ms()
+        now = epoch_ms()
         return {
             "task_id": str(payload.get("task_id") or _new_id("swarm_task")),
             "title": str(payload.get("title") or ""),
@@ -1666,8 +1653,8 @@ class FileSwarmStore:
                 status = str(patch.get("status") or "").strip()
                 if status:
                     task["status"] = status
-                    task["completed_at"] = _epoch_ms() if status in {"completed", "cancelled"} else None
-            task["updated_at"] = _epoch_ms()
+                    task["completed_at"] = epoch_ms() if status in {"completed", "cancelled"} else None
+            task["updated_at"] = epoch_ms()
             task["seq"] = self._next_seq(connection, task["conversation_id"])
             connection.execute(
                 """
@@ -1770,7 +1757,7 @@ class FileSwarmStore:
                 "output_id": str(payload.get("output_id") or _new_id("task_output")),
                 "author_id": str(payload.get("author_id") or ""),
                 "content": str(payload.get("content") or ""),
-                "created_at": int(payload.get("created_at") or _epoch_ms()),
+                "created_at": int(payload.get("created_at") or epoch_ms()),
                 "seq": self._next_seq(connection, task["conversation_id"]),
             }
             connection.execute(
@@ -1786,7 +1773,7 @@ class FileSwarmStore:
                     _json(output),
                 ),
             )
-            task["updated_at"] = _epoch_ms()
+            task["updated_at"] = epoch_ms()
             task["seq"] = self._next_seq(connection, task["conversation_id"])
             connection.execute(
                 """
@@ -1810,7 +1797,7 @@ class FileSwarmStore:
         conversation_id = str(payload.get("conversation_id") or "").strip()
         team_name = str(payload.get("team_name") or "").strip()
         with self._write() as connection:
-            now = _epoch_ms()
+            now = epoch_ms()
             existing = connection.execute(
                 "SELECT team_id FROM teams WHERE conversation_id = ? AND team_name = ?",
                 (conversation_id, team_name),
@@ -1861,7 +1848,7 @@ class FileSwarmStore:
                 raise ValueError(f"team member already exists: {new_member['id']}")
             members.append(new_member)
             team["members"] = members
-            team["updated_at"] = _epoch_ms()
+            team["updated_at"] = epoch_ms()
             team["seq"] = self._next_seq(connection, team["conversation_id"])
             connection.execute(
                 "UPDATE teams SET updated_at = ?, seq = ?, payload_json = ? WHERE team_id = ?",
@@ -1932,7 +1919,7 @@ class FileSwarmStore:
                 return None
             removed = json.loads(row["payload_json"])
             removed["deleted_seq"] = self._next_seq(connection, conversation_id)
-            removed["deleted_at"] = _epoch_ms()
+            removed["deleted_at"] = epoch_ms()
             connection.execute("DELETE FROM teams WHERE team_id = ?", (row["team_id"],))
             return removed
 
@@ -1954,7 +1941,7 @@ class FileSwarmStore:
                     str(row["owner_token"] or "")
                     for row in connection.execute(
                         "SELECT owner_token FROM runtime_leases WHERE expires_at > ?",
-                        (_epoch_ms(),),
+                    (epoch_ms(),),
                     ).fetchall()
                     if str(row["owner_token"] or "")
                 }
@@ -2235,7 +2222,7 @@ class FileSwarmStore:
                     "conversation_id": str(record.get("conversation_id") or fallback_scope),
                     "team_name": str(record.get("team_name") or ""),
                     "task_id": str(record.get("task_id") or ""),
-                    "created_at": int(record.get("created_at") or _epoch_ms()),
+                "created_at": int(record.get("created_at") or epoch_ms()),
                     "seq": int(record.get("seq") or 0),
                 },
             )
@@ -2273,7 +2260,7 @@ class FileSwarmStore:
                     "output_id": str(output_raw.get("output_id") or _new_id("task_output")),
                     "author_id": str(output_raw.get("author_id") or ""),
                     "content": str(output_raw.get("content") or ""),
-                    "created_at": int(output_raw.get("created_at") or _epoch_ms()),
+                "created_at": int(output_raw.get("created_at") or epoch_ms()),
                     "seq": int(output_raw.get("seq") or 0),
                 }
                 existing_output = connection.execute(
@@ -2329,8 +2316,8 @@ class FileSwarmStore:
                 "description": str(payload.get("description") or ""),
                 "conversation_id": payload["conversation_id"],
                 "created_by": str(payload.get("created_by") or ""),
-                "created_at": int(payload.get("created_at") or _epoch_ms()),
-                "updated_at": int(payload.get("updated_at") or _epoch_ms()),
+                "created_at": int(payload.get("created_at") or epoch_ms()),
+                "updated_at": int(payload.get("updated_at") or epoch_ms()),
                 "members": self._normalize_members(payload.get("members")),
                 "seq": int(payload.get("seq") or 0),
             }

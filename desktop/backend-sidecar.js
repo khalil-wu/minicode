@@ -12,13 +12,15 @@ let backendManagedByApp = false;
 let backendStopRequested = false;
 let backendRestartAttempt = 0;
 let backendRestartTimer = null;
+let backendLaunchPromise = null;
 
 // Dependencies injected via init()
 let writeStdout = () => {};
 let writeStderr = () => {};
 let getAppRoot = () => process.cwd();
 let sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-let onStart = null;
+let spawnProcess = spawn;
+let restartBackend = null;
 
 // Configuration injected via init()
 let config = {};
@@ -32,7 +34,8 @@ function init(deps) {
   if (typeof deps.writeStderr === "function") writeStderr = deps.writeStderr;
   if (typeof deps.getAppRoot === "function") getAppRoot = deps.getAppRoot;
   if (typeof deps.sleep === "function") sleep = deps.sleep;
-  if (typeof deps.onStart === "function") onStart = deps.onStart;
+  if (typeof deps.spawnProcess === "function") spawnProcess = deps.spawnProcess;
+  if (typeof deps.restartBackend === "function") restartBackend = deps.restartBackend;
   config = deps.config || {};
 }
 
@@ -73,7 +76,13 @@ function scheduleBackendRestart(reason) {
   writeStderr(`[backend] scheduling restart in ${delay}ms (${reason})\n`);
   backendRestartTimer = setTimeout(() => {
     backendRestartTimer = null;
-    startBackendSidecar();
+    const restart = restartBackend || (() => startBackendSidecar());
+    Promise.resolve()
+      .then(() => restart(reason))
+      .catch((error) => {
+        writeStderr(`[backend] restart failed: ${error.message}\n`);
+        scheduleBackendRestart("restart attempt failed");
+      });
   }, delay);
 }
 
@@ -83,7 +92,8 @@ function scheduleBackendRestart(reason) {
 
 function startBackendSidecar() {
   const { manageBackend = true } = config;
-  if (!manageBackend || backendStopRequested || backendProcess) return;
+  if (!manageBackend || backendStopRequested) return null;
+  if (backendProcess) return backendProcess;
 
   clearBackendRestartTimer();
 
@@ -101,7 +111,7 @@ function startBackendSidecar() {
     downloadsDir = "",
   } = config;
 
-  const child = spawn(pythonCommand, ["-m", "backend"], {
+  const child = spawnProcess(pythonCommand, ["-m", "backend"], {
     cwd: getAppRoot(),
     env: {
       ...process.env,
@@ -151,6 +161,7 @@ function startBackendSidecar() {
   child.on("exit", (code, signal) => {
     const reason = signal ? `signal=${signal}` : `code=${code}`;
     writeStderr(`[backend] exited (${reason})\n`);
+    if (backendProcess !== child) return;
     const shouldRestart = backendManagedByApp && !backendStopRequested;
     backendProcess = null;
     backendManagedByApp = false;
@@ -161,10 +172,61 @@ function startBackendSidecar() {
 
   child.on("error", (error) => {
     writeStderr(`[backend] failed to start: ${error.message}\n`);
+    if (backendProcess !== child) return;
+    const shouldRestart = backendManagedByApp && !backendStopRequested;
     backendProcess = null;
     backendManagedByApp = false;
-    scheduleBackendRestart("spawn error");
+    if (shouldRestart) scheduleBackendRestart("spawn error");
   });
+
+  return child;
+}
+
+function childHasExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function waitForChildExit(child, timeoutMs) {
+  if (childHasExited(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let timer = null;
+    const finish = (exited) => {
+      if (timer !== null) clearTimeout(timer);
+      child.removeListener("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    child.once("exit", onExit);
+    timer = setTimeout(() => finish(false), timeoutMs);
+    if (childHasExited(child)) finish(true);
+  });
+}
+
+async function terminateProcessTree(child) {
+  if (childHasExited(child)) return;
+  if (process.platform === "win32") {
+    await new Promise((resolve) => {
+      spawnProcess("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true })
+        .once("exit", resolve)
+        .once("error", resolve);
+    });
+    return;
+  }
+  child.kill("SIGTERM");
+}
+
+async function retireBackendSidecar(child, reason = "readiness failure") {
+  if (backendProcess !== child || !backendManagedByApp) return false;
+  writeStderr(`[backend] retiring unready process (${reason})\n`);
+  await terminateProcessTree(child);
+  if (!await waitForChildExit(child, 3000) && !childHasExited(child)) {
+    child.kill("SIGKILL");
+    await waitForChildExit(child, 1000);
+  }
+  if (backendProcess === child) {
+    throw new Error("Backend process did not exit after retirement.");
+  }
+  return true;
 }
 
 async function stopBackendSidecar() {
@@ -175,27 +237,6 @@ async function stopBackendSidecar() {
 
   const child = backendProcess;
   const { resolvedApiBaseUrl = "", runtimeToken = "" } = config;
-  const exited = new Promise((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      resolve();
-      return;
-    }
-    child.once("exit", resolve);
-  });
-
-  const terminateTree = async () => {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    if (process.platform === "win32") {
-      await new Promise((resolve) => {
-        spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true })
-          .once("exit", resolve)
-          .once("error", resolve);
-      });
-      return;
-    }
-    child.kill("SIGTERM");
-  };
-
   try {
     if (resolvedApiBaseUrl) {
       await fetch(`${resolvedApiBaseUrl}/api/runtime/shutdown`, {
@@ -204,14 +245,16 @@ async function stopBackendSidecar() {
         signal: AbortSignal.timeout(2000),
       });
     }
-    await Promise.race([
-      exited,
-      sleep(5000),
-    ]);
-    await terminateTree();
+    if (!await waitForChildExit(child, 5000)) {
+      await terminateProcessTree(child);
+    }
   } catch (error) {
     writeStderr(`[backend] failed to stop: ${error.message}\n`);
-    await terminateTree();
+    await terminateProcessTree(child);
+  }
+  if (!await waitForChildExit(child, 3000) && !childHasExited(child)) {
+    child.kill("SIGKILL");
+    await waitForChildExit(child, 1000);
   }
 }
 
@@ -219,27 +262,96 @@ async function stopBackendSidecar() {
 // Health check
 // ---------------------------------------------------------------------------
 
-async function waitForBackendReady(apiBaseUrl, timeoutMs = 30000) {
+async function waitForBackendReady(apiBaseUrl, timeoutMs = 30000, { signal } = {}) {
   const deadline = Date.now() + timeoutMs;
-  const healthUrl = `${apiBaseUrl}/health`;
+  // `/readyz` is the canonical MiniCode readiness contract.  A desktop may
+  // also attach to an already-running compatible backend from an older build
+  // which only exposes `/health`; accept that explicit legacy endpoint when
+  // the canonical route is absent, while retaining the same readiness loop.
+  const readinessUrl = `${apiBaseUrl}/readyz`;
+  const legacyHealthUrl = `${apiBaseUrl}/health`;
+  let endpointUrl = readinessUrl;
 
   while (Date.now() < deadline) {
-    try {
-      const response = await fetch(healthUrl);
-      if (response.ok) {
-        const payload = await response.json().catch(() => null);
-        if (payload?.ready === true && ["ok", "degraded"].includes(payload.status)) {
-          backendRestartAttempt = 0;
-          return;
-        }
-      }
-    } catch {
-      // Retry until timeout.
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new Error(`Backend readiness check aborted: ${readinessUrl}`);
     }
-    await sleep(400);
+    const remainingMs = Math.max(1, deadline - Date.now());
+    const deadlineSignal = AbortSignal.timeout(remainingMs);
+    const requestSignal = signal
+      ? AbortSignal.any([signal, deadlineSignal])
+      : deadlineSignal;
+    try {
+      const response = await fetch(endpointUrl, { signal: requestSignal });
+      if (response.ok) {
+        backendRestartAttempt = 0;
+        return;
+      }
+      if (endpointUrl === readinessUrl && response.status === 404) {
+        endpointUrl = legacyHealthUrl;
+      }
+    } catch (error) {
+      if (signal?.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : error;
+      }
+    }
+    const retryDelayMs = Math.min(400, Math.max(0, deadline - Date.now()));
+    if (retryDelayMs > 0) await sleep(retryDelayMs);
   }
 
-  throw new Error(`Backend health check timed out: ${healthUrl}`);
+  throw new Error(`Backend readiness check timed out: ${endpointUrl}`);
+}
+
+async function waitForOwnedBackendReady(child, runtime, timeoutMs) {
+  const controller = new AbortController();
+  const abortForExit = () => {
+    controller.abort(new Error("Backend sidecar exited before becoming ready."));
+  };
+  child.once("exit", abortForExit);
+  child.once("error", abortForExit);
+  if (childHasExited(child)) abortForExit();
+  try {
+    await waitForBackendReady(runtime.apiBaseUrl, timeoutMs, {
+      signal: controller.signal,
+    });
+    if (backendProcess !== child) {
+      throw new Error("Backend sidecar changed while readiness was being checked.");
+    }
+  } finally {
+    child.removeListener("exit", abortForExit);
+    child.removeListener("error", abortForExit);
+  }
+}
+
+async function launchBackendSidecar({ resolveRuntime, getRuntime, timeoutMs = 30000 }) {
+  if (backendLaunchPromise) return backendLaunchPromise;
+
+  const launch = (async () => {
+    let child = backendProcess;
+    const runtime = child ? getRuntime() : await resolveRuntime();
+    child = child || startBackendSidecar();
+    if (!child) {
+      throw new Error("Backend sidecar did not start.");
+    }
+    try {
+      await waitForOwnedBackendReady(child, runtime, timeoutMs);
+      return runtime;
+    } catch (error) {
+      await retireBackendSidecar(child, "readiness check failed");
+      throw error;
+    }
+  })();
+
+  backendLaunchPromise = launch;
+  try {
+    return await launch;
+  } finally {
+    if (backendLaunchPromise === launch) {
+      backendLaunchPromise = null;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -269,8 +381,10 @@ function resetStopRequested() {
 module.exports = {
   init,
   startBackendSidecar,
+  retireBackendSidecar,
   stopBackendSidecar,
   waitForBackendReady,
+  launchBackendSidecar,
   getBackendProcess,
   isBackendManagedByApp,
   getBackendRestartAttempt,

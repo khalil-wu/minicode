@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import time
 from typing import Any, cast, get_args
 
 from backend.agent.state import AgentState, TerminalReason
 from backend.llm.errors import classify_llm_error, sanitize_llm_error_message
+from backend.agent.runtime_records import epoch_ms
 
 
 logger = logging.getLogger(__name__)
@@ -54,8 +54,6 @@ def iteration_id(state: AgentState) -> str:
     return f"iter:{max(1, state.iterations)}"
 
 
-def epoch_ms() -> int:
-    return int(time.time() * 1000)
 
 
 async def sleep_or_cancel(

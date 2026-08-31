@@ -58,10 +58,30 @@ logger = logging.getLogger(__name__)
 _MAX_PAGES = 100
 _MAX_CATALOG_ITEMS = 2_048
 _MAX_PAGINATION_CURSOR_BYTES = 64 * 1024
+_MAX_MCP_RESPONSE_BYTES = 8 * 1024 * 1024
 
 # MiniCode's own contract with a user-configured `headers_helper`: the helper is
 # told which server it is being asked to authenticate.
 _HEADERS_HELPER_ENV = ("MINICODE_MCP_SERVER_NAME", "MINICODE_MCP_SERVER_URL")
+
+
+class _LifecycleClientSession(ClientSession):
+    """Expose the SDK receive-loop close as a transport lifecycle event."""
+
+    def __init__(
+        self,
+        *args: Any,
+        transport_closed: asyncio.Event,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._transport_closed = transport_closed
+
+    async def _receive_loop(self) -> None:
+        try:
+            await super()._receive_loop()
+        finally:
+            self._transport_closed.set()
 
 
 @asynccontextmanager
@@ -224,6 +244,27 @@ def _model_dict(value: Any) -> dict[str, Any]:
     if callable(dump):
         return dump(by_alias=True, mode="json", exclude_none=True)
     return {}
+
+
+def _payload_size_bytes(value: dict[str, Any]) -> int:
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+
+def _bounded_response(server_name: str, method: str, value: Any) -> dict[str, Any]:
+    payload = _model_dict(value)
+    size = _payload_size_bytes(payload)
+    if size > _MAX_MCP_RESPONSE_BYTES:
+        raise ConnectionError(
+            f"MCP server '{server_name}' returned {size} bytes for {method}, "
+            f"exceeding the {_MAX_MCP_RESPONSE_BYTES}-byte response limit"
+        )
+    return payload
 
 
 def _prompt_content_to_text(content: Any) -> str:
@@ -456,15 +497,17 @@ class MCPClient:
             transport_context = await self._sdk_transport_context()
             async with transport_context as streams:
                 read_stream, write_stream = streams[0], streams[1]
+                transport_closed = asyncio.Event()
                 elicitation_callback = (
                     self._sdk_elicitation_callback
                     if feature_enabled("mcp_elicitation") and self._elicitation_handler is not None
                     else None
                 )
                 roots_callback = self._sdk_list_roots if feature_enabled("mcp_roots") else None
-                async with ClientSession(
+                async with _LifecycleClientSession(
                     read_stream,
                     write_stream,
+                    transport_closed=transport_closed,
                     read_timeout_seconds=timedelta(seconds=self._request_timeout),
                     elicitation_callback=elicitation_callback,
                     list_roots_callback=roots_callback,
@@ -477,7 +520,26 @@ class MCPClient:
                     self._connected = True
                     if not ready.done():
                         ready.set_result(None)
-                    await close_event.wait()
+                    close_waiter = asyncio.create_task(close_event.wait())
+                    transport_waiter = asyncio.create_task(transport_closed.wait())
+                    try:
+                        await asyncio.wait(
+                            (close_waiter, transport_waiter),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if transport_closed.is_set() and not close_event.is_set():
+                            raise ConnectionError(
+                                f"MCP server '{self.server_name}' transport closed"
+                            )
+                    finally:
+                        for waiter in (close_waiter, transport_waiter):
+                            if not waiter.done():
+                                waiter.cancel()
+                        await asyncio.gather(
+                            close_waiter,
+                            transport_waiter,
+                            return_exceptions=True,
+                        )
         except asyncio.CancelledError:
             if not ready.done():
                 ready.cancel()
@@ -487,6 +549,7 @@ class MCPClient:
             if not ready.done():
                 ready.set_exception(mapped)
             elif not self._closing:
+                self._connected = False
                 logger.warning("[MCP:%s] session ended: %s", self.server_name, mapped)
                 await self._notify_disconnect()
         finally:
@@ -697,15 +760,22 @@ class MCPClient:
             result = await session.get_prompt(str(params.get("name") or ""), arguments)
         else:
             raise ValueError(f"Unsupported MCP facade operation: {method}")
-        return _model_dict(result)
+        return _bounded_response(self.server_name, method, result)
 
     async def _paged(self, method: str, result_key: str) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         cursor: str | None = None
         seen: set[str] = set()
+        total_bytes = 0
         for _ in range(_MAX_PAGES):
             params = {"cursor": cursor} if cursor else None
             result = await self._request(method, params)
+            total_bytes += _payload_size_bytes(result)
+            if total_bytes > _MAX_MCP_RESPONSE_BYTES:
+                raise ConnectionError(
+                    f"MCP server '{self.server_name}' returned a {method} catalog "
+                    f"exceeding the {_MAX_MCP_RESPONSE_BYTES}-byte aggregate limit"
+                )
             page_items = [
                 item for item in result.get(result_key, []) if isinstance(item, dict)
             ]

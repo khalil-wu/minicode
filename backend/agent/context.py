@@ -80,6 +80,7 @@ def clone_context_builder(builder: "ContextBuilder") -> "ContextBuilder":
         "_tool_result_budget_seen_ids",
         "_tool_result_budget_replacements",
         "_invoked_skill_payloads",
+        "_consecutive_autocompact_failures",
     ):
         if hasattr(builder, name):
             setattr(cloned, name, deepcopy(getattr(builder, name)))
@@ -451,10 +452,6 @@ def _message_content_text(content: Any) -> str:
     return str(content or "")
 
 
-def _build_static_environment_info(workspace_root: Path | None = None) -> str:
-    return build_static_environment_info(workspace_root)
-
-
 def _detect_project_type(cwd: Path) -> str:
     return detect_project_type(cwd)
 
@@ -476,29 +473,6 @@ def _strip_leading_runtime_context(content: str) -> str:
         return text
     stripped = _RUNTIME_BLOCK_RE.sub("", text, count=1).lstrip()
     return stripped
-
-
-def _strip_runtime_context(content: str) -> str:
-    """Remove MiniCode's old and current reminder forms.
-
-    Current turns use a leading ``<system-reminder>`` prefix. Older
-    snapshots from the previous implementation placed that same block after
-    the user's text, so the trailing compatibility pass is intentionally
-    limited to reminders containing a runtime marker. User-authored XML is
-    therefore not treated as runtime state merely because it uses the same
-    tag name.
-    """
-    text = str(content or "")
-    stripped = _strip_leading_runtime_context(text)
-    if stripped != text:
-        return stripped
-    match = _TRAILING_RUNTIME_BLOCK_RE.search(text)
-    if not match:
-        return text
-    block = match.group(0).lower()
-    if not any(marker in block for marker in _RUNTIME_REMINDER_MARKERS):
-        return text
-    return text[: match.start()].rstrip()
 
 
 def _has_leading_runtime_context(content: str) -> bool:
@@ -597,6 +571,8 @@ class ContextBuilder:
         self._skill_manager = skill_manager
         self._memory_manager = memory_manager
         self._llm = llm
+        self._llm_turn_context: Any | None = None
+        self._hook_manager: Any | None = None
         # Persisted tool-result references are durable data, so their owner is
         # part of the context builder rather than inferred from process-global
         # active conversation state.  This keeps resumed/side-agent prompts
@@ -636,6 +612,7 @@ class ContextBuilder:
         # Keep exact invoked-skill content outside ordinary
         # transcript compaction and restores it after resume/compaction.
         self._invoked_skill_payloads: dict[str, dict[str, str]] = {}
+        self._consecutive_autocompact_failures = 0
         # Capture session-level environment defaults once.  Explicit values in
         # a state snapshot still override these values, but a missing value no
         # longer causes datetime/TZ drift on every provider iteration.
@@ -650,6 +627,16 @@ class ContextBuilder:
     def bind_llm(self, llm: Any) -> None:
         """Bind the session's active adapter for compaction and side queries."""
         self._llm = llm
+
+    def bind_llm_turn_context(self, turn_context: Any) -> None:
+        self._llm_turn_context = turn_context
+
+    def bind_hook_manager(self, hook_manager: Any) -> None:
+        self._hook_manager = hook_manager
+
+    @property
+    def hook_manager(self) -> Any | None:
+        return self._hook_manager
 
     def configure_project_instructions(self, config: dict[str, Any] | None) -> None:
         """Bind project-document settings from the turn config snapshot."""
@@ -728,6 +715,7 @@ class ContextBuilder:
             project_root_markers=self._project_root_markers,
             project_doc_fallback_filenames=self._project_doc_fallback_filenames,
             project_doc_max_bytes=self._project_doc_max_bytes,
+            hook_manager=self._hook_manager,
         )
 
     def _consume_skill_injections(self, state: AgentState) -> list[str]:
@@ -747,12 +735,10 @@ class ContextBuilder:
             content = str(payload.get("content") or "").strip()
             if not name or not path or not content:
                 continue
-            payload = {"name": name, "path": path, "content": content}
-            # Reinsert so dict order tracks most-recent invocation without a
-            # second clock or threshold.
+            normalized = {"name": name, "path": path, "content": content}
             self._invoked_skill_payloads.pop(path, None)
-            self._invoked_skill_payloads[path] = payload
-            current_payloads.append(payload)
+            self._invoked_skill_payloads[path] = normalized
+            current_payloads.append(normalized)
         return [
             self._render_skill_payload(payload)
             for payload in self._bounded_skill_payloads(current_payloads)
@@ -787,14 +773,9 @@ class ContextBuilder:
         insert_at = 1 if (
             self._history
             and self._history[0].role == "user"
-            and _extract_compaction_summary(
-                str(self._history[0].content or "")
-            )
+            and _extract_compaction_summary(str(self._history[0].content or ""))
             is not None
         ) else 0
-        # Inserting a restored skill before an already-sent prefix changes the
-        # serialized prompt.  Start a fresh cache segment instead of keeping a
-        # stale absolute boundary.
         if insert_at < self._history_frozen_count:
             self._history_frozen_count = 0
             self._pending_hydration_frozen_prefix_count = 0
@@ -1359,6 +1340,7 @@ class ContextBuilder:
                 self._recent_workspace_file_paths(state, resolved_workspace_root),
                 project_root_markers=self._project_root_markers,
                 project_doc_fallback_filenames=self._project_doc_fallback_filenames,
+                hook_manager=self._hook_manager,
             )
             if matched_rules:
                 project_guidelines = "\n\n".join(
@@ -1523,6 +1505,7 @@ class ContextBuilder:
         )
         self._history_store.rebuild_token_cache()
         self._last_actual_prompt_tokens = 0
+        self._last_estimated_prompt_tokens = 0
         return True
 
     @staticmethod
@@ -2267,6 +2250,7 @@ class ContextBuilder:
             )
             self._history_store.rebuild_token_cache()
             self._last_actual_prompt_tokens = 0
+            self._last_estimated_prompt_tokens = 0
         return changed
 
     def _enforce_per_message_tool_budget(
@@ -2432,6 +2416,7 @@ class ContextBuilder:
         if content_changed:
             self._history_store.rebuild_token_cache()
             self._last_actual_prompt_tokens = 0
+            self._last_estimated_prompt_tokens = 0
         if newly_persisted > 0:
             logger.info(
                 "[PerMessageBudget] Persisted %d tool results to disk (budget: %d chars)",
@@ -2665,6 +2650,7 @@ class ContextBuilder:
             self._history_frozen_count = 0
             self._history_store.rebuild_token_cache()
             self._last_actual_prompt_tokens = 0
+            self._last_estimated_prompt_tokens = 0
             logger.info(
                 "[MediaSizeRecovery] stripped_messages=%d images=%d documents=%d",
                 stripped_messages,
@@ -2739,6 +2725,7 @@ class ContextBuilder:
             self._history_frozen_count = 0
             self._history_store.rebuild_token_cache()
             self._last_actual_prompt_tokens = 0
+            self._last_estimated_prompt_tokens = 0
             logger.info("[ContentFilterRecovery] quarantined_web_results=%d", changed)
         return changed
 
@@ -3118,6 +3105,7 @@ class ContextBuilder:
                         enable_prompt_cache=False,
                         query_source="side_question",
                     ),
+                    turn_context=self._llm_turn_context,
                 )
             ).strip()
         return str(await self._llm.simple_chat(messages)).strip()
@@ -3209,6 +3197,7 @@ class ContextBuilder:
         )
         recent = self._history[recent_start:]
         self._compaction_count = next_compaction_count
+        self._consecutive_autocompact_failures = 0
         self._history = [summary_message] + recent
         # Compaction intentionally rewrites the prefix; a provider must create
         # a new cache segment from the compacted summary.
@@ -3220,6 +3209,7 @@ class ContextBuilder:
         self._ensure_invoked_skill_messages()
         self._history_store.rebuild_token_cache()
         self._last_actual_prompt_tokens = 0
+        self._last_estimated_prompt_tokens = 0
         self._restore_recent_files_after_compaction(restore_state)
         return compressed_summary
 
@@ -3270,6 +3260,7 @@ class ContextBuilder:
                     await side_query(
                         messages,
                         options=compaction_options,
+                        turn_context=self._llm_turn_context,
                     )
                 )
             simple_chat = getattr(self._llm, "simple_chat")
@@ -3401,6 +3392,7 @@ class ContextBuilder:
         self._tool_result_budget_seen_ids.clear()
         self._tool_result_budget_replacements.clear()
         self._invoked_skill_payloads.clear()
+        self._consecutive_autocompact_failures = 0
         # Provider-observed measurements describe the conversation being
         # discarded. A ContextBuilder is reused across conversation switches
         # (load_snapshot_partial calls clear), and token_usage takes the max of
@@ -3548,8 +3540,12 @@ class ContextBuilder:
             "git_status_context": self._git_status_context,
             "git_status_workspace": self._git_status_workspace,
             "invoked_skills": [
-                dict(payload) for payload in self._invoked_skill_payloads.values()
+                dict(payload)
+                for payload in self._bounded_skill_payloads(
+                    list(self._invoked_skill_payloads.values())
+                )
             ],
+            "consecutive_autocompact_failures": self._consecutive_autocompact_failures,
             "context_ledger": self.context_ledger(),
         }
 
@@ -3641,7 +3637,8 @@ class ContextBuilder:
             (int(message.timestamp_ms or 0) for message in self._history),
             default=0,
         )
-        self._ensure_invoked_skill_messages()
+        if not pending_history:
+            self._ensure_invoked_skill_messages()
         self._history_store.rebuild_token_cache()
         self._reconstruct_tool_result_budget_state()
         return pending_history
@@ -3670,6 +3667,11 @@ class ContextBuilder:
     def prepend_history_messages(self, messages: list[LLMMessage]) -> None:
         """Prepend hydrated prefix messages via ConversationHistory."""
         self._history_store.prepend(messages)
+        self._ensure_invoked_skill_messages()
+        # ConversationHistory rebuilds before durable Skill messages are
+        # restored. Rebuild once more so accounting matches the final prompt.
+        self._history_store.rebuild_token_cache()
+        self._reconstruct_tool_result_budget_state()
 
     @staticmethod
     def sanitize_snapshot_history(
@@ -3845,6 +3847,10 @@ class ContextBuilder:
                         "path": path,
                         "content": content,
                     }
+        self._consecutive_autocompact_failures = max(
+            0,
+            int(snapshot.get("consecutive_autocompact_failures", 0) or 0),
+        )
         raw_hashes = snapshot.get("read_file_hashes")
         if isinstance(raw_hashes, dict):
             from backend.atomic_io import canonical_file_path_key
@@ -3858,6 +3864,17 @@ class ContextBuilder:
     def read_file_hashes(self) -> dict[str, str]:
         """Return the session-owned optimistic read state used by file tools."""
         return self._read_file_hashes
+
+    @property
+    def consecutive_autocompact_failures(self) -> int:
+        return self._consecutive_autocompact_failures
+
+    def record_autocompact_failure(self) -> int:
+        self._consecutive_autocompact_failures += 1
+        return self._consecutive_autocompact_failures
+
+    def reset_autocompact_failures(self) -> None:
+        self._consecutive_autocompact_failures = 0
 
     def _get_history_within_budget_indices(self) -> list[int]:
         # Compact the session before the provider call; do not silently

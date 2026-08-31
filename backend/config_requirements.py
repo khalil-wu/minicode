@@ -579,13 +579,67 @@ def _validate_string_list(
     value = payload.get(field_name)
     if value is None:
         return
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise ConfigRequirementsError(f"{field_name} in {source} must be a string array")
-    unknown = [item for item in value if item not in accepted]
+    values = parse_string_array(value, field_name=field_name, source=source)
+    unknown = [item for item in values if item not in accepted]
     if unknown:
         raise ConfigRequirementsError(
             f"{field_name} in {source} contains unsupported values: {unknown!r}"
         )
+
+
+def parse_string_array(
+    value: Any,
+    *,
+    field_name: str,
+    source: object | None = None,
+) -> list[str]:
+    """Parse one external string-array field at its configuration boundary.
+
+    Configuration readers should reject a scalar or mixed-type value instead
+    of silently coercing or dropping entries.  Callers that need presentation
+    normalization (trimming, case folding, or de-duplication) do that after
+    this type check, once and in the owning boundary.
+    """
+
+    source_label = str(source) if source is not None else "<unspecified>"
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ConfigRequirementsError(
+            f"{field_name} in {source_label} must be a string array"
+        )
+    return list(value)
+
+
+def normalize_string_array(
+    value: Any,
+    *,
+    field_name: str,
+    source: object | None = None,
+    lowercase: bool = False,
+    reject_empty: bool = False,
+) -> list[str]:
+    """Return one validated string array in its canonical list form."""
+
+    values = parse_string_array(value, field_name=field_name, source=source)
+    source_label = str(source) if source is not None else "<unspecified>"
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = value.strip()
+        if not item:
+            if reject_empty:
+                raise ConfigRequirementsError(
+                    f"{field_name} in {source_label} must contain non-empty strings"
+                )
+            continue
+        if lowercase:
+            item = item.lower()
+        if item in seen:
+            continue
+        seen.add(item)
+        normalized.append(item)
+    return normalized
 
 
 def _normalize_network_requirements(

@@ -42,6 +42,10 @@ export const HeaderBar = ({
   onToggleRightPanel,
 }: HeaderBarProps) => {
   const isConnected = useAppStore((s) => s.isConnected);
+  const connectionPhase = useAppStore((s) => s.connectionPhase);
+  const reconnectAttempt = useAppStore((s) => s.reconnectAttempt);
+  const reconnectMaxAttempts = useAppStore((s) => s.reconnectMaxAttempts);
+  const connectionError = useAppStore((s) => s.connectionError);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
   const dockCollapsed = useAppStore((s) => s.dockCollapsed);
@@ -53,6 +57,10 @@ export const HeaderBar = ({
     isConnected,
     isDesktop: isDesktop(),
     hasRuntimeToken: Boolean(runtime()?.runtimeToken?.trim()),
+    connectionPhase,
+    reconnectAttempt,
+    reconnectMaxAttempts,
+    connectionError,
   });
   const projectName = workingDirectory.split(/[\\/]/).filter(Boolean).pop() || "MiniCode";
 
@@ -118,8 +126,8 @@ export const HeaderBar = ({
         >
           {connection.kind === "connected" && <Wifi aria-hidden="true" />}
           {connection.kind === "preview" && <Monitor aria-hidden="true" />}
-          {connection.kind === "connecting" && <LoaderCircle className="mc-connection-status-spinner" aria-hidden="true" />}
-          {connection.kind === "warning" && <WifiOff aria-hidden="true" />}
+          {(connection.kind === "connecting" || connection.kind === "reconnecting") && <LoaderCircle className="mc-connection-status-spinner" aria-hidden="true" />}
+          {(connection.kind === "warning" || connection.kind === "failed") && <WifiOff aria-hidden="true" />}
           {connection.shortLabel && <span className="mc-connection-label">{connection.shortLabel}</span>}
         </span>
 

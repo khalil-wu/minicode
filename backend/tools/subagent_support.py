@@ -8,8 +8,10 @@ independent of the tool class that consumes it.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
 from backend.agent.context import ContextBuilder
+from backend.agent.run_context import RunContext
 from backend.agent.prompt_cache import prompt_cache_fork_diagnostic
 from backend.agents.loader import (
     discover_agents,
@@ -20,6 +22,7 @@ from backend.config import (
     AppConfig,
     load_config,
 )
+from backend.config_requirements import normalize_string_array
 from backend.llm.model_selection import (
     REASONING_LEVEL_ORDER,
     apply_model_thinking_level,
@@ -51,7 +54,7 @@ from pathlib import (
     Path,
     PurePosixPath,
 )
-from typing import Any
+from typing import Any, Literal
 import asyncio
 import inspect
 import os
@@ -380,6 +383,7 @@ async def _resolve_subagent_llm(
     inherited_llm: Any,
     *,
     parent_metadata: dict[str, Any] | None,
+    run_context: RunContext | None = None,
     agent_type: str,
     model_override: str = "",
     effort_override: str = "",
@@ -393,8 +397,12 @@ async def _resolve_subagent_llm(
     """
 
     metadata = parent_metadata if isinstance(parent_metadata, dict) else {}
-    snapshot = metadata.get("_subagent_parent_runtime")
-    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    snapshot = (
+        run_context.subagent_parent_runtime
+        if run_context is not None
+        else {}
+    )
+    snapshot = snapshot if isinstance(snapshot, Mapping) else {}
     inherited_llm = snapshot.get("llm") or inherited_llm
     if inherited_llm is None:
         raise ValueError("Subagent runtime has no parent LLM to inherit.")
@@ -408,10 +416,7 @@ async def _resolve_subagent_llm(
             and hasattr(parent_config, "token_budget")
         )
     ):
-        try:
-            parent_config = load_config(cwd=workspace_root)
-        except TypeError:
-            parent_config = load_config()
+        parent_config = load_config(cwd=workspace_root)
 
     inferred_provider, inferred_model = _adapter_provider_model(inherited_llm)
     parent_provider = str(snapshot.get("provider") or inferred_provider).strip()
@@ -684,17 +689,12 @@ async def _resolve_subagent_llm(
 
 
 def _string_list(raw: Any) -> list[str]:
-    if isinstance(raw, str):
-        text = raw.strip()
-        return [text] if text else []
-    if not isinstance(raw, list):
-        return []
-    result: list[str] = []
-    for item in raw:
-        text = str(item or "").strip()
-        if text and text not in result:
-            result.append(text)
-    return result
+    return normalize_string_array(
+        raw,
+        field_name="write_scope",
+        source="task input",
+        reject_empty=False,
+    )
 
 
 def _bool_field(raw: Any, default: bool = False) -> bool:
@@ -943,47 +943,21 @@ def _is_team_subagent(metadata: dict[str, Any] | None) -> bool:
     ) or bool(raw.get("team_mode") or raw.get("is_teammate"))
 
 
-async def _run_subagent_start_hook(subagent_id: str, agent_type: str) -> Any | None:
-    from backend.hooks import get_hook_manager
-
-    hook_mgr = get_hook_manager()
-    if not hook_mgr:
-        return None
-    try:
-        return await hook_mgr.run_subagent_start(
-            subagent_id=subagent_id,
-            agent_type=agent_type,
-        )
-    except Exception as exc:
-        logger.warning("subagent_start hook failed: %s", exc)
-        return None
-
-
-async def _run_subagent_stop_hook(
+async def _run_subagent_start_hook(
+    hook_manager: Any | None,
     subagent_id: str,
-    status: str,
-    summary: str = "",
-    *,
-    agent_type: str = "",
+    agent_type: str,
 ) -> Any | None:
-    from backend.hooks import get_hook_manager
-
-    hook_mgr = get_hook_manager()
-    if not hook_mgr:
+    if hook_manager is None:
         return None
-    try:
-        return await hook_mgr.run_subagent_stop(
-            subagent_id=subagent_id,
-            agent_type=agent_type,
-            status=status,
-            summary=summary,
-        )
-    except Exception as exc:
-        logger.warning("subagent_stop hook failed: %s", exc)
-        return None
+    return await hook_manager.run_subagent_start(
+        subagent_id=subagent_id,
+        agent_type=agent_type,
+    )
 
 
 async def _run_task_created_hook(
+    hook_manager: Any | None,
     *,
     task_id: str,
     subject: str,
@@ -991,25 +965,19 @@ async def _run_task_created_hook(
     teammate_name: str = "",
     team_name: str = "",
 ) -> Any | None:
-    from backend.hooks import get_hook_manager
-
-    hook_mgr = get_hook_manager()
-    if not hook_mgr:
+    if hook_manager is None:
         return None
-    try:
-        return await hook_mgr.run_task_created(
-            task_id=task_id,
-            subject=subject,
-            description=description,
-            teammate_name=teammate_name,
-            team_name=team_name,
-        )
-    except Exception as exc:
-        logger.warning("task_created hook failed: %s", exc)
-        return None
+    return await hook_manager.run_task_created(
+        task_id=task_id,
+        subject=subject,
+        description=description,
+        teammate_name=teammate_name,
+        team_name=team_name,
+    )
 
 
 async def _run_task_completed_hook(
+    hook_manager: Any | None,
     *,
     task_id: str,
     subject: str,
@@ -1017,86 +985,184 @@ async def _run_task_completed_hook(
     teammate_name: str = "",
     team_name: str = "",
 ) -> Any | None:
-    from backend.hooks import get_hook_manager
-
-    hook_mgr = get_hook_manager()
-    if not hook_mgr:
+    if hook_manager is None:
         return None
-    try:
-        return await hook_mgr.run_task_completed(
-            task_id=task_id,
-            subject=subject,
-            description=description,
-            teammate_name=teammate_name,
-            team_name=team_name,
-        )
-    except Exception as exc:
-        logger.warning("task_completed hook failed: %s", exc)
-        return None
+    return await hook_manager.run_task_completed(
+        task_id=task_id,
+        subject=subject,
+        description=description,
+        teammate_name=teammate_name,
+        team_name=team_name,
+    )
 
 
 async def _run_teammate_idle_hook(
+    hook_manager: Any | None,
     *,
     teammate_name: str = "",
     team_name: str = "",
 ) -> Any | None:
-    from backend.hooks import get_hook_manager
-
-    hook_mgr = get_hook_manager()
-    if not hook_mgr:
+    if hook_manager is None:
         return None
-    try:
-        return await hook_mgr.run_teammate_idle(
-            teammate_name=teammate_name,
-            team_name=team_name,
-        )
-    except Exception as exc:
-        logger.warning("teammate_idle hook failed: %s", exc)
-        return None
+    return await hook_manager.run_teammate_idle(
+        teammate_name=teammate_name,
+        team_name=team_name,
+    )
 
 
-async def _run_terminal_lifecycle_hooks(
-    *,
-    subagent_id: str,
-    status: str,
-    summary: str,
-    subject: str,
-    agent_type: str,
-    run_completion: bool = True,
-    run_idle: bool = True,
-    team_mode: bool = False,
-) -> tuple[bool, str]:
-    """Run terminal hooks in MiniCode's stop → completed → idle order.
+_SubagentLifecycleAction = Literal["continue", "idle", "terminal"]
 
-    A veto short-circuits later lifecycle events.  Callers use the returned
-    decision to preserve hook feedback in cancellation/error records instead
-    of silently discarding a HookResult.
+
+@dataclass(frozen=True, slots=True)
+class _SubagentLifecycleDecision:
+    """One post-SubagentStop transition owned by the child lifecycle."""
+
+    action: _SubagentLifecycleAction
+    gate: str
+    prompt: str = ""
+    task_id: str = ""
+
+
+@dataclass(slots=True)
+class _SubagentLifecycleOwner:
+    """Own the child turn-exit gates without committing durable terminal state.
+
+    ``QueryEngine`` owns the SubagentStop gate before it commits the child turn.
+    Once that gate passes, this owner checks only the teammate-specific gates.
+    The caller may seal the durable subagent record only after ``terminal``;
+    ``continue`` must become the next model prompt and ``idle`` remains live.
     """
 
-    stop_result = await _run_subagent_stop_hook(
-        subagent_id,
-        status,
-        summary,
-        agent_type=agent_type,
-    )
-    blocked, message = _hook_veto(stop_result)
-    if blocked:
-        return True, message
-    if run_completion:
-        completed_result = await _run_task_completed_hook(
-            task_id=subagent_id,
-            subject=subject,
-            description=summary,
-            teammate_name=agent_type,
+    subagent_id: str
+    agent_type: str
+    runtime: Any
+    hook_manager: Any | None = None
+    team_mode: bool = False
+    teammate_name: str = ""
+    team_name: str = ""
+    conversation_id: str = ""
+    subject: str = ""
+
+    def __post_init__(self) -> None:
+        self.subagent_id = str(self.subagent_id or "").strip()
+        self.agent_type = str(self.agent_type or "").strip()
+        self.teammate_name = str(self.teammate_name or "").strip()
+        self.team_name = str(self.team_name or "").strip()
+        self.conversation_id = str(self.conversation_id or "").strip()
+        self.subject = str(self.subject or "").strip()
+        if not self.subagent_id or not self.agent_type:
+            raise ValueError("Subagent lifecycle owner requires an id and agent type")
+        if self.team_mode and (not self.teammate_name or not self.team_name):
+            raise ValueError("Teammate lifecycle owner requires teammate and team names")
+
+    def bind_turn_state(self, state: Any) -> None:
+        """Mark one AgentState so answer acceptance dispatches SubagentStop."""
+
+        state.prompt_context["subagent"] = self.agent_type
+        state.prompt_context["subagent_id"] = self.subagent_id
+        state.prompt_context.pop("subagent_stop_prevented_continuation", None)
+
+    def _owned_in_progress_tasks(self) -> tuple[Any, ...]:
+        records = self.runtime.list_swarm_tasks(
+            assignee=self.teammate_name,
+            status="in_progress",
+            team_name=self.team_name,
+            conversation_id=self.conversation_id,
+            limit=100,
         )
-        blocked, message = _hook_veto(completed_result)
+        owned = (
+            record
+            for record in records
+            if str(getattr(record, "assignee", "") or "") == self.teammate_name
+            and str(getattr(record, "status", "") or "") == "in_progress"
+            and str(getattr(record, "team_name", "") or "") == self.team_name
+            and str(getattr(record, "conversation_id", "") or "")
+            == self.conversation_id
+        )
+        return tuple(
+            sorted(
+                owned,
+                key=lambda record: (
+                    int(getattr(record, "created_at", 0) or 0),
+                    str(getattr(record, "task_id", "") or ""),
+                ),
+            )
+        )
+
+    def _current_owned_task(self, task_id: str) -> Any | None:
+        task = self.runtime.get_swarm_task(
+            task_id,
+            conversation_id=self.conversation_id,
+        )
+        if task is None:
+            return None
+        if (
+            str(getattr(task, "assignee", "") or "") != self.teammate_name
+            or str(getattr(task, "status", "") or "") != "in_progress"
+            or str(getattr(task, "team_name", "") or "") != self.team_name
+            or str(getattr(task, "conversation_id", "") or "")
+            != self.conversation_id
+        ):
+            return None
+        return task
+
+    @staticmethod
+    def _gate_decision(result: Any, *, gate: str, task_id: str = "") -> _SubagentLifecycleDecision | None:
+        if result is None:
+            return None
+        if bool(getattr(result, "prevent_continuation", False)):
+            return _SubagentLifecycleDecision(
+                "terminal",
+                gate,
+                str(
+                    getattr(result, "stop_reason", "")
+                    or getattr(result, "message", "")
+                    or f"{gate} hook prevented continuation"
+                ).strip(),
+                task_id,
+            )
+        blocked, prompt = _hook_veto(result)
         if blocked:
-            return True, message
-    if run_idle:
-        idle_result = await _run_teammate_idle_hook(teammate_name=agent_type)
-        blocked, message = _hook_veto(idle_result)
-        if blocked:
-            return True, message
-    return False, ""
+            return _SubagentLifecycleDecision("continue", gate, prompt, task_id)
+        return None
+
+    async def after_subagent_stop(self, state: Any) -> _SubagentLifecycleDecision:
+        """Advance task/idle gates after QueryEngine accepted SubagentStop."""
+
+        if bool(state.prompt_context.get("subagent_stop_prevented_continuation")):
+            return _SubagentLifecycleDecision("terminal", "subagent_stop")
+        if not self.team_mode:
+            return _SubagentLifecycleDecision("terminal", "subagent_stop")
+
+        for snapshot in self._owned_in_progress_tasks():
+            task_id = str(getattr(snapshot, "task_id", "") or "")
+            task = self._current_owned_task(task_id)
+            if task is None:
+                continue
+            result = await _run_task_completed_hook(
+                self.hook_manager,
+                task_id=task.task_id,
+                subject=task.title,
+                description=task.description,
+                teammate_name=self.teammate_name,
+                team_name=self.team_name,
+            )
+            decision = self._gate_decision(
+                result,
+                gate="task_completed",
+                task_id=task.task_id,
+            )
+            if decision is not None:
+                return decision
+
+        result = await _run_teammate_idle_hook(
+            self.hook_manager,
+            teammate_name=self.teammate_name,
+            team_name=self.team_name,
+        )
+        decision = self._gate_decision(result, gate="teammate_idle")
+        if decision is not None:
+            return decision
+        return _SubagentLifecycleDecision("idle", "teammate_idle")
 
 

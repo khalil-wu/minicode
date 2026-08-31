@@ -14,6 +14,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from backend.config import DATA_ROOT, TokenBudget
+from backend.config_requirements import normalize_string_array
 
 SWARM_DIR = DATA_ROOT / "swarm"
 
@@ -34,6 +35,7 @@ from backend.agent.public_projection import (
 
 AgentRunStatus = Literal["running", "completed", "partial", "failed", "cancelled", "interrupted"]
 AgentRunPhase = Literal["plan", "execute", "recover", "final"]
+AgentRole = Literal["primary", "subagent", "side_query", "background"]
 SwarmTaskStatus = Literal["pending", "in_progress", "blocked", "completed", "cancelled"]
 
 
@@ -429,14 +431,12 @@ def _swarm_task_output_from_dict(data: dict[str, Any]) -> SwarmTaskOutputRecord:
 
 
 def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    result: list[str] = []
-    for item in value:
-        text = str(item or "").strip()
-        if text and text not in result:
-            result.append(text)
-    return result
+    return normalize_string_array(
+        value,
+        field_name="runtime string list",
+        source="durable agent record",
+        reject_empty=False,
+    )
 
 
 def _swarm_task_from_dict(data: dict[str, Any]) -> SwarmTaskRecord:

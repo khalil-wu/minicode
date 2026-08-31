@@ -89,6 +89,9 @@ def is_raw_provider_reasoning_event(payload: Any) -> bool:
     visibility = str(payload.get("visibility") or "").strip().lower()
     if visibility in {"hidden", "internal", "redacted"}:
         return True
+    # The camelCase variant only exists to catch raw reasoning persisted by
+    # pre-alignment builds; drop it once the oldest supported replay log is
+    # snake_case-only.
     reasoning_type = str(
         payload.get("provider_reasoning_type")
         or payload.get("providerReasoningType")
@@ -325,7 +328,10 @@ class WebSocketReplayEventStore:
                     self.session_id,
                     self.read_status.to_payload(),
                 )
-                return removed
+                raise RuntimeError(
+                    f"Replay log for session {self.session_id} is degraded; "
+                    "conversation events were not deleted"
+                )
             if removed or should_rewrite:
                 self._rewrite_unlocked(retained)
             return removed
@@ -420,7 +426,8 @@ def delete_replay_events_for_conversation(
         try:
             removed += store.delete_for_conversation(owner)
         except OSError as exc:
-            logger.debug("Failed to purge deleted conversation from %s: %s", path, exc)
+            logger.warning("Failed to purge deleted conversation from %s: %s", path, exc)
+            raise
     return removed
 
 

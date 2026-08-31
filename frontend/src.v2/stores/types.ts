@@ -2,6 +2,7 @@ import type { GoalInfo, McpTransport, RuntimeSessionSnapshot, TurnPlanStep } fro
 import type { AgentCapabilitiesPayload } from "../protocol/capabilities";
 import type {
   AgentProgressPhase,
+  AgentProgressProviderState,
   AgentProgressStage,
   AgentProgressStatus,
 } from "../protocol/streaming-types";
@@ -281,6 +282,10 @@ export interface ConversationWorkbenchState {
   diffReview: DiffReviewState | null;
   previewArtifact: ArtifactContentState | null;
   livePreviewUrl: string | null;
+  previewServers: PreviewServerInfo[];
+  previewLaunchConfigs: PreviewLaunchConfigInfo[];
+  previewLaunchProcesses: PreviewLaunchProcessInfo[];
+  previewVerification: PreviewVerificationInfo | null;
   terminalSessions?: TerminalSessionInfo[];
   activeTerminalSessionId: string | null;
   rightStackTab: RightStackTab;
@@ -425,6 +430,7 @@ export interface UISlice {
   previewLaunchConfigs: PreviewLaunchConfigInfo[];
   previewLaunchProcesses: PreviewLaunchProcessInfo[];
   previewVerification: PreviewVerificationInfo | null;
+  previewOwnerConversationId: string | null;
   fileChanges: { path: string; event: string; timestamp: number }[];
   fileTreeVersion: number;
   fileTreeRevealRequests: FileTreeRevealRequest[];
@@ -486,16 +492,18 @@ export interface UISlice {
   submitPartialApproval: () => Promise<void>;
   setPreviewArtifact: (artifact: ArtifactContentState | null) => void;
   setConversationPreviewArtifact: (conversationId: string, artifact: ArtifactContentState | null) => void;
-  setLivePreviewUrl: (url: string | null) => void;
-  openLivePreview: (url: string) => void;
-  setPreviewServers: (servers: PreviewServerInfo[]) => void;
-  addPreviewServer: (server: PreviewServerInfo) => void;
-  removePreviewServer: (port: number) => void;
-  setPreviewLaunchConfigs: (configs: PreviewLaunchConfigInfo[]) => void;
-  setPreviewLaunchProcesses: (processes: PreviewLaunchProcessInfo[]) => void;
-  upsertPreviewLaunchProcess: (process: PreviewLaunchProcessInfo) => void;
-  removePreviewLaunchProcess: (id: string) => void;
-  setPreviewVerification: (verification: PreviewVerificationInfo | null) => void;
+  setPreviewOwnerConversationId: (conversationId: string | null) => void;
+  restorePreviewState: (conversationId?: string) => void;
+  setLivePreviewUrl: (url: string | null, conversationId?: string) => void;
+  openLivePreview: (url: string, conversationId?: string) => void;
+  setPreviewServers: (servers: PreviewServerInfo[], conversationId?: string) => void;
+  addPreviewServer: (server: PreviewServerInfo, conversationId?: string) => void;
+  removePreviewServer: (port: number, conversationId?: string) => void;
+  setPreviewLaunchConfigs: (configs: PreviewLaunchConfigInfo[], conversationId?: string) => void;
+  setPreviewLaunchProcesses: (processes: PreviewLaunchProcessInfo[], conversationId?: string) => void;
+  upsertPreviewLaunchProcess: (process: PreviewLaunchProcessInfo, conversationId?: string) => void;
+  removePreviewLaunchProcess: (id: string, conversationId?: string) => void;
+  setPreviewVerification: (verification: PreviewVerificationInfo | null, conversationId?: string) => void;
   setQuickOpenResults: (results: QuickOpenResult[]) => void;
   setQuickOpenLoading: (loading: boolean) => void;
   addFileChange: (change: { path: string; event: string; timestamp: number }) => void;
@@ -798,6 +806,13 @@ export interface MessageAttachmentRef {
   sourceCharCount?: number;
 }
 
+/** Origin metadata for a transcript message supplied by the backend. */
+export interface ChatMessageSource {
+  kind: "scheduled_task";
+  taskId?: string;
+  runId?: string;
+}
+
 export interface ThinkingContentBlock {
   type: "thinking";
   content: string;
@@ -1089,6 +1104,12 @@ export interface ProgressContentBlock {
   count?: number;
   iterationId?: string;
   ephemeral?: boolean;
+  retryAttempt?: number;
+  maxRetries?: number;
+  retryAfterMs?: number;
+  errorMessage?: string;
+  operationId?: string;
+  providerState?: AgentProgressProviderState;
   timestamp: number;
 }
 export interface AgentProgressEntry extends ProgressContentBlock {
@@ -1101,6 +1122,7 @@ export interface ChatMessage {
   turnId?: string;
   role: MessageRole;
   content: string;
+  messageSource?: ChatMessageSource;
   contextRefs?: MessageContextRef[];
   attachmentRefs?: MessageAttachmentRef[];
   blocks?: ContentBlock[];
@@ -1112,7 +1134,6 @@ export interface ChatMessage {
   durationMs?: number;
   isStreaming?: boolean;
   isThinkingStreaming?: boolean;
-  resumeState?: "resumed";
   terminalStatus?: "completed" | "partial" | "failed" | "interrupted";
   terminationReason?: string;
   failureMessage?: string;
@@ -1202,6 +1223,15 @@ export interface PRMonitorState {
   failedChecks?: string[];
 }
 
+export type ConnectionPhase = "connecting" | "connected" | "reconnecting" | "failed";
+
+export interface ConnectionStateDetails {
+  phase: ConnectionPhase;
+  attempt: number;
+  maxAttempts: number | null;
+  error: string | null;
+}
+
 export interface SideChatThread {
   id: string;
   messages: ChatMessage[];
@@ -1220,10 +1250,16 @@ export interface ChatSlice {
   messages: ChatMessage[];
   conversationMessages: Record<string, ChatMessage[]>;
   conversationStreaming: Record<string, boolean>;
+  /** Provider retry frames that arrived before their exact assistant owner. */
+  pendingProviderProgress: Record<string, ProgressContentBlock[]>;
   conversationRecallTruncations: Record<string, { removedIds: string[]; retainedIds: string[]; updatedAt: number }>;
   isStreaming: boolean;
   isPaused: boolean;
   isConnected: boolean;
+  connectionPhase: ConnectionPhase;
+  reconnectAttempt: number;
+  reconnectMaxAttempts: number | null;
+  connectionError: string | null;
   lastUsage: { input: number; ordinaryInput?: number; inputIncludesCacheRead?: boolean; inputIncludesCacheWrite?: boolean; output: number; cacheRead: number; cacheWrite: number; cacheDeleted?: number; promptCacheTotal?: number; promptCacheHitRate?: number; reasoning?: number } | null;
   usageTotals: { input: number; ordinaryInput?: number; output: number; cacheRead: number; cacheWrite: number; promptCacheTotal?: number; reasoning?: number; turns: number };
   sideChats: Record<string, SideChatThread>;
@@ -1278,6 +1314,8 @@ export interface ChatSlice {
     conversationId?: string,
     messageId?: string,
   ) => void;
+  flushPendingProviderProgress: (conversationId: string, messageId: string) => void;
+  clearPendingProviderProgress: (conversationId?: string, messageId?: string) => void;
   removeProcessItem: (
     itemId: string,
     conversationId?: string,
@@ -1309,6 +1347,10 @@ export interface ChatSlice {
     snapshotBlocks?: ContentBlock[],
   ) => void;
   setConnected: (c: boolean) => void;
+  setConnectionState: (
+    phase: ConnectionPhase,
+    details?: Partial<Omit<ConnectionStateDetails, "phase">>,
+  ) => void;
   setLastUsage: (u: ChatSlice["lastUsage"]) => void;
   ensureSideChat: (id: string) => void;
   removeSideChat: (id: string) => void;

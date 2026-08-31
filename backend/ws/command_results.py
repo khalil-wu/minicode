@@ -20,7 +20,7 @@ async def emit_command_error(
                 details.setdefault(key, error.data[key])
     else:
         message = str(error) or "Command failed"
-    await session._send_event(
+    await session.send_event(
         AgentEvent.command_result(
             command,
             message,

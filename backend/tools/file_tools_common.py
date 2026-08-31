@@ -315,7 +315,7 @@ async def _emit_write_diff(
     if not isinstance(tracker, TurnDiffTracker):
         tracker = TurnDiffTracker()
         context.turn_diff_tracker = tracker
-    tool_call_id = str((context.metadata or {}).get("_current_tool_call_id") or "file-write")
+    tool_call_id = str(context.tool_call_id or "file-write")
     old_path = old_display_path or display_path or file_path
     new_path = display_path or file_path
     try:

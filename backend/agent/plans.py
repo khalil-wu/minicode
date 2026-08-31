@@ -44,14 +44,6 @@ class PlanFileError(ValueError):
     """Raised when a plan owner/path cannot be represented safely."""
 
 
-def _path_is_within(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
 def _resolved_without_following_leaf(path: Path) -> Path:
     """Resolve the parent while retaining an absent/non-symlink leaf."""
 
@@ -87,7 +79,7 @@ def get_plans_directory(
     if configured and workspace_root:
         root = Path(workspace_root).expanduser().resolve()
         candidate = (root / configured).resolve()
-        if _path_is_within(candidate, root):
+        if candidate.is_relative_to(root):
             plans_dir = candidate
     if create:
         plans_dir.mkdir(parents=True, exist_ok=True)
@@ -188,7 +180,7 @@ def get_plan_file_path(
     candidate = _resolved_without_following_leaf(
         plans_dir / f"{normalized_slug}{suffix}.md"
     )
-    if not _path_is_within(candidate, plans_dir.resolve()):
+    if not candidate.is_relative_to(plans_dir.resolve()):
         raise PlanFileError("Plan path escapes plans directory")
     if candidate.exists() and candidate.is_symlink():
         raise PlanFileError("Plan files may not be symbolic links")

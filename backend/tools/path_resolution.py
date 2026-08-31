@@ -136,8 +136,9 @@ def _resolve_path(
     if _is_windows_device_path(path_str) or is_windows_reserved_path(path_str):
         raise PathTraversalError(f"Windows device paths are not allowed: {path_str}")
 
+    workspace_bound_context = context is not None and hasattr(context, "workspace_root")
     workspace_root: Path | None = None
-    if context and hasattr(context, 'workspace_root') and context.workspace_root:
+    if workspace_bound_context and context.workspace_root:
         workspace_root = Path(context.workspace_root).resolve()
 
     path = Path(path_str)
@@ -169,7 +170,10 @@ def _resolve_path(
                 f"Path escapes workspace boundary: {path_str}"
             )
     elif not workspace_root and not allow_workspace_escape:
-        # No workspace_root: restrict to CWD as a safety fallback
+        # A live session explicitly carrying ``workspace_root=None`` is a
+        # projectless owner.  It must not borrow the process CWD (or another
+        # active project) for workspace file operations.  Standalone callers
+        # without an execution context retain the historical CWD default.
         # Persisted tool results live in MiniCode's state directory, which can
         # be outside a repository/evaluation cwd (subagents commonly run with
         # an isolated cwd).  ``read_file`` explicitly opts into this read-only
@@ -188,6 +192,10 @@ def _resolve_path(
                 return resolved
         if allow_declared_read_root and _is_declared_readable_path(resolved, context):
             return resolved
+        if workspace_bound_context:
+            raise PathTraversalError(
+                "Path operations require an open workspace for this conversation"
+            )
         cwd = Path.cwd().resolve()
         try:
             resolved.relative_to(cwd)
