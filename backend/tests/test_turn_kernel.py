@@ -406,8 +406,7 @@ def test_provider_attempts_reset_first_byte_and_close_exactly_once(tmp_path: Pat
         "responding",
         "completed",
     ]
-    assert progress_events[-1]["visibility"] == "debug"
-    assert all(payload["visibility"] == "timeline" for payload in progress_events[:-1])
+    assert all(payload["visibility"] == "debug" for payload in progress_events)
     assert progress_events[3]["retry_attempt"] == 1
     assert progress_events[3]["max_retries"] == 1
 

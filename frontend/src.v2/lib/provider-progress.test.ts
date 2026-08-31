@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isProviderCompletionProgress, providerProgressLabel } from "./provider-progress";
+import {
+  isProviderCompletionProgress,
+  isProviderRequestProgress,
+  providerProgressLabel,
+} from "./provider-progress";
 
 describe("providerProgressLabel", () => {
   it("uses the reconnect ladder only while the provider is reconnecting", () => {
@@ -63,5 +67,28 @@ describe("providerProgressLabel", () => {
       status: "completed",
       message: "MCP tool completed: lookup",
     })).toBe(false);
+  });
+
+  it("classifies the complete provider request ladder but not provider-owned tools", () => {
+    for (const providerState of ["connecting", "responding", "reconnecting", "failed", "completed"] as const) {
+      expect(isProviderRequestProgress({
+        id: "provider:connection:run:iteration",
+        status: providerState === "failed" ? "failed" : providerState === "completed" ? "completed" : "running",
+        providerState,
+        retryAttempt: 1,
+        maxRetries: 5,
+        message: providerState,
+      })).toBe(true);
+    }
+    expect(isProviderRequestProgress({
+      id: "provider:mcp-1",
+      status: "completed",
+      message: "MCP tool completed",
+    })).toBe(false);
+    expect(isProviderRequestProgress({
+      id: "provider-request:legacy-1",
+      status: "completed",
+      message: "Provider request completed",
+    })).toBe(true);
   });
 });

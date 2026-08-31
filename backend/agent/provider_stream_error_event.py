@@ -191,6 +191,7 @@ async def handle_provider_error_event(
                 error_message=classification_input[:320],
                 operation_id=progress_id,
                 provider_state="reconnecting",
+                visibility="debug",
             )
             if classification.provider_error_type == "rate_limit":
                 yield AgentEvent.rate_limit(
@@ -264,6 +265,7 @@ async def handle_provider_error_event(
                 error_message=classification_input[:400],
                 operation_id=progress_id,
                 provider_state="reconnecting",
+                visibility="debug",
             )
             yield ProviderErrorEventResult(
                 action="rebuild_context",

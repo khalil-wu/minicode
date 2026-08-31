@@ -348,7 +348,7 @@ describe("projectTurn explicit event contract", () => {
     expect(projection.finalAnswer).toBe("");
   });
 
-  it("does not project successful provider request completion as a work item", () => {
+  it("does not project any provider request lifecycle as a work item", () => {
     const projection = projectTurn([
       {
         type: "progress",
@@ -362,6 +362,32 @@ describe("projectTurn explicit event contract", () => {
         maxRetries: 3,
         visibility: "timeline",
         timestamp: 100,
+      },
+      {
+        type: "progress",
+        id: "provider:request-2",
+        stage: "status",
+        phase: "model",
+        status: "running",
+        message: "模型正在响应",
+        providerState: "responding",
+        retryAttempt: 0,
+        maxRetries: 3,
+        visibility: "timeline",
+        timestamp: 105,
+      },
+      {
+        type: "progress",
+        id: "provider:request-3",
+        stage: "status",
+        phase: "recover",
+        status: "running",
+        message: "连接中断，正在重连",
+        providerState: "reconnecting",
+        retryAttempt: 1,
+        maxRetries: 3,
+        visibility: "timeline",
+        timestamp: 107,
       },
       {
         type: "progress",

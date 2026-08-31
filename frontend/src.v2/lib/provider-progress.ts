@@ -72,19 +72,30 @@ export function isProviderRetryProgress(
 }
 
 /**
- * A successful provider request is an internal lifecycle boundary, not a
- * user-facing work item. Codex treats its raw response completion the same
- * way: the turn completion owns the visible terminal state.
+ * Identify the provider-request retry ladder, as opposed to provider-owned
+ * tool activity such as an MCP call or image-generation progress.  The latter
+ * has a `provider:` id but does not carry retry/provider-state fields.
+ */
+export function isProviderRequestProgress(
+  progress: ProviderProgressSnapshot | undefined,
+): boolean {
+  const id = String(progress?.id || "");
+  return id.startsWith("provider-request:") || isProviderRetryProgress(progress);
+}
+
+/**
+ * Provider request/retry lifecycle belongs to the transient status surface,
+ * not the conversation transcript. Codex keeps the corresponding raw response
+ * and retry notifications out of its user-facing item projection.
  *
  * Keep the semantic check independent of `visibility` so old transcripts that
- * persisted the row as `timeline` are repaired by the current projection too.
+ * persisted these rows as `timeline` are repaired by the current projection.
  */
 export function isProviderCompletionProgress(
   progress: ProviderProgressSnapshot | undefined,
 ): boolean {
   const id = String(progress?.id || "");
-  const legacyProviderRequest = id.startsWith("provider-request:");
-  if (!legacyProviderRequest && !isProviderRetryProgress(progress)) return false;
+  if (!isProviderRequestProgress(progress)) return false;
   const status = String(progress?.status || "").toLowerCase();
   const providerState = String(progress?.providerState || "").toLowerCase();
   return status === "completed"

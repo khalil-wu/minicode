@@ -193,6 +193,7 @@ async def handle_provider_transport_failure(
             error_message=error_message[:320],
             operation_id=progress_id,
             provider_state="reconnecting",
+            visibility="debug",
         )
         if close_stream is not None:
             await close_stream()

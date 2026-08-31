@@ -504,7 +504,7 @@ describe("buildActivitySidebarState", () => {
     expect(state.isEmpty).toBe(false);
   });
 
-  it("shows provider reconnect progress while running but omits successful request completion", () => {
+  it("keeps provider request lifecycle out of the user progress sidebar", () => {
     const state = buildActivitySidebarState({
       conversationId: "conv-1",
       messages: [],
@@ -576,12 +576,7 @@ describe("buildActivitySidebarState", () => {
       previewLaunchProcesses: [],
     });
 
-    expect(state.progress).toMatchObject([
-      { id: "provider:running", label: "正在重新连接 2/5", status: "running", retryAttempt: 2, maxRetries: 5 },
-      { id: "provider:failed", label: "连接失败（重试 5/5 后）", status: "failed" },
-      { id: "provider:partial", label: "连接中断（重试 3/5）", status: "failed" },
-    ]);
-    expect(state.progress.map((item) => item.id)).not.toContain("provider:completed");
+    expect(state.progress).toEqual([]);
   });
 
   it("does not show restored stale running progress as live", () => {
@@ -804,13 +799,11 @@ describe("buildActivitySidebarState", () => {
       previewLaunchProcesses: [],
     });
 
-    expect(state.progress).toMatchObject([
-      {
-        id: "status-visible",
-        label: "测试通过",
-        detail: "1.3 秒 · 3 checks",
-      },
-    ]);
+    expect(state.progress).toMatchObject([{
+      id: "status-visible",
+      label: "测试通过",
+      detail: "1.3 秒 · 3 checks",
+    }]);
     expect(state.progress.map((item) => item.id)).not.toContain("provider-request:iteration-1");
   });
 

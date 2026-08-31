@@ -1,7 +1,7 @@
 import { extractInlineCitationIndexes } from "../chat/citationProjection";
 import { getContentBlocks, getToolCallsFromMessage } from "../lib/content-blocks";
 import { planStepProgressStatus, shouldSurfacePlanProgress } from "../lib/planVisibility";
-import { isProviderCompletionProgress, providerProgressLabel } from "../lib/provider-progress";
+import { isProviderRequestProgress, providerProgressLabel } from "../lib/provider-progress";
 import {
   artifactFallbackLabel as projectionArtifactFallbackLabel,
   artifactMediaTypeForProjection,
@@ -337,7 +337,7 @@ function buildProgress(input: ActivitySidebarStateInput): ActivityProgressItem[]
     .filter((entry) => Boolean(conversationKey)
       && entry.conversationId === conversationKey
       && entry.visibility !== "debug"
-      && !isProviderCompletionProgress(entry));
+      && !isProviderRequestProgress(entry));
   const compactProgress = serializeMainAgentProgress(
     scopedProgress.slice(-8),
   ).slice(-4);

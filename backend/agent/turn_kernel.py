@@ -505,7 +505,7 @@ class TurnKernel:
         retry_after_ms: int | None = None,
         error_message: str = "",
         provider_state: str | None = None,
-        visibility: str = "timeline",
+        visibility: str = "debug",
     ) -> None:
         """Project provider liveness through the single typed UI event path."""
         if self.emit_event is None:
@@ -750,10 +750,9 @@ class TurnKernel:
                 retry_attempt=retry_attempt,
                 max_retries=max_retries,
                 provider_state=provider_state,
-                # A successful upstream request is an internal lifecycle
-                # boundary.  The user-facing turn completion is emitted by
-                # the normal `done` event; keep this row out of the timeline.
-                visibility="debug" if status == "completed" else "timeline",
+                # Provider request lifecycle is internal. The user-facing turn
+                # state is carried by normal model/tool/turn events instead.
+                visibility="debug",
             )
         return True
 

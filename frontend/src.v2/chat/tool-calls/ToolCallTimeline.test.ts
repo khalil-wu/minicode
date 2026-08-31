@@ -186,7 +186,7 @@ describe("ToolCallTimeline helpers", () => {
     expect(runTimelineExportJsonl([message], [])).toContain('"tool_name":"web_fetch"');
   });
 
-  it("shows the reconnect ladder only for a running provider retry", () => {
+  it("does not project provider request lifecycle rows", () => {
     const items = buildRunTimelineItems([], [
       progress({
         id: "provider:running",
@@ -230,11 +230,7 @@ describe("ToolCallTimeline helpers", () => {
       }),
     ]);
 
-    expect(items.map((item) => item.label)).toEqual([
-      "正在重新连接 2/5",
-      "连接失败（重试 5/5 后）",
-      "连接中断（重试 3/5）",
-    ]);
+    expect(items).toEqual([]);
     expect(items.slice(1).map((item) => item.label).join(" ")).not.toContain("正在重新连接");
   });
 });
