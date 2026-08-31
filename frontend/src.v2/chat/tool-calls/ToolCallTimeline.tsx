@@ -4,7 +4,7 @@ import { getToolCallsFromMessage } from "../../lib/content-blocks";
 import type { CSSProperties } from "react";
 import type { AgentProgressEntry, ChatMessage } from "../../stores/types";
 import { readableToolLabel } from "../toolDisplayName";
-import { providerProgressLabel } from "../../lib/provider-progress";
+import { isProviderCompletionProgress, providerProgressLabel } from "../../lib/provider-progress";
 
 export type TimelinePhase = "context" | "model" | "tool" | "approval" | "subagent" | "cache" | "recovery" | "final";
 
@@ -198,6 +198,7 @@ export function buildRunTimelineItems(
   );
 
   const progressItems = progress
+    .filter((entry) => !isProviderCompletionProgress(entry))
     .filter((entry) => entry.visibility !== "debug" || (options.includeDebugCache === true && entry.phase === "cache"))
     .map((entry) => ({
       id: `progress:${entry.id}`,

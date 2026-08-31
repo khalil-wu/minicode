@@ -864,13 +864,26 @@ def _project_agent_progress(state: dict[str, Any], data: dict[str, Any]) -> dict
     status = str(data.get("status") or "").strip()
     progress_id = str(data.get("id") or "").strip()
     message = str(data.get("message") or "").strip()
-    if (
-        not progress_id
-        or not message
-        or stage not in _PROGRESS_STAGES
-        or status not in _PROGRESS_STATUSES
-        or data.get("visibility") == "debug"
-    ):
+    if not progress_id or not message or stage not in _PROGRESS_STAGES or status not in _PROGRESS_STATUSES:
+        return None
+    if data.get("visibility") == "debug":
+        # Debug provider completion closes the internal retry row without
+        # leaving a stale running item in the durable UI snapshot. Other debug
+        # progress remains non-persisted as before.
+        provider_state = str(data.get("provider_state") or data.get("providerState") or "").strip().lower()
+        if (
+            progress_id.startswith("provider:")
+            and (status == "completed" or provider_state == "completed")
+        ):
+            previous = list(state.get("agentProgress") or [])
+            next_progress = [
+                item for item in previous
+                if not (isinstance(item, dict) and str(item.get("id") or "") == progress_id)
+            ]
+            if len(next_progress) != len(previous):
+                next_state = dict(state)
+                next_state["agentProgress"] = next_progress
+                return next_state
         return None
     existing_progress = next(
         (item for item in state.get("agentProgress", [])

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { providerProgressLabel } from "./provider-progress";
+import { isProviderCompletionProgress, providerProgressLabel } from "./provider-progress";
 
 describe("providerProgressLabel", () => {
   it("uses the reconnect ladder only while the provider is reconnecting", () => {
@@ -39,5 +39,29 @@ describe("providerProgressLabel", () => {
       maxRetries: 5,
       message: "提供商请求已取消",
     })).toBe("连接中断（重试 2/5）");
+  });
+
+  it("identifies successful provider completion as internal lifecycle data", () => {
+    expect(isProviderCompletionProgress({
+      id: "provider:connection:run:iteration",
+      status: "completed",
+      providerState: "responding",
+      retryAttempt: 0,
+      maxRetries: 5,
+      message: "模型正在响应",
+    })).toBe(true);
+    expect(isProviderCompletionProgress({
+      id: "provider:connection:run:iteration",
+      status: "failed",
+      providerState: "failed",
+      retryAttempt: 5,
+      maxRetries: 5,
+      message: "连接失败",
+    })).toBe(false);
+    expect(isProviderCompletionProgress({
+      id: "provider:mcp-1",
+      status: "completed",
+      message: "MCP tool completed: lookup",
+    })).toBe(false);
   });
 });

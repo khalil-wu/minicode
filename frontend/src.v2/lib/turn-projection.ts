@@ -5,7 +5,7 @@ import {
 } from "./content-blocks";
 import type { ToolCallRecord } from "./tool-call-reducer";
 import { isBrowserScreenshotRecord } from "./artifact-projection";
-import { providerProgressLabel } from "./provider-progress";
+import { isProviderCompletionProgress, providerProgressLabel } from "./provider-progress";
 
 export type TurnActivityKind =
   | "reasoning"
@@ -380,6 +380,7 @@ export function projectTurn(
       // Older persisted turns can contain an agent.progress mirror for a
       // typed tool call. The tool lifecycle is authoritative.
       if (block.toolCallId && typedToolIds.has(block.toolCallId)) return;
+      if (isProviderCompletionProgress(block)) return;
       if (!isVisibleActivity(block, Boolean(options.includeHiddenActivity))) return;
       activityItems.push(progressItem(block, segment));
       return;

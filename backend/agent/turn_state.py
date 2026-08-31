@@ -301,6 +301,9 @@ class AgentTurnState:
         progress_id = str(data.get('id') or fallback_id).strip()
         if not progress_id or not message:
             return None
+        if str(data.get('visibility') or '').strip().lower() == 'debug':
+            self._remove_progress(progress_id)
+            return None
         progress: dict[str, Any] = {
             'type': 'progress',
             'id': progress_id,
@@ -367,6 +370,19 @@ class AgentTurnState:
                 self._blocks[index] = progress
                 return
         self._blocks.append(progress)
+
+    def _remove_progress(self, progress_id: str) -> None:
+        target_id = str(progress_id or '').strip()
+        if not target_id:
+            return
+        self._blocks[:] = [
+            block
+            for block in self._blocks
+            if not (
+                block.get('type') == 'progress'
+                and str(block.get('id') or '').strip() == target_id
+            )
+        ]
 
     def record_process_item(self, data: dict[str, Any]) -> dict[str, Any] | None:
         item_id = str(data.get('item_id') or data.get('id') or '').strip()

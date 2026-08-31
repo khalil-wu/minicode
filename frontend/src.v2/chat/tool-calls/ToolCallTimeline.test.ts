@@ -232,7 +232,6 @@ describe("ToolCallTimeline helpers", () => {
 
     expect(items.map((item) => item.label)).toEqual([
       "正在重新连接 2/5",
-      "提供商已连接（重试 2/5）",
       "连接失败（重试 5/5 后）",
       "连接中断（重试 3/5）",
     ]);

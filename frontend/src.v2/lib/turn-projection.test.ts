@@ -348,6 +348,35 @@ describe("projectTurn explicit event contract", () => {
     expect(projection.finalAnswer).toBe("");
   });
 
+  it("does not project successful provider request completion as a work item", () => {
+    const projection = projectTurn([
+      {
+        type: "progress",
+        id: "provider:request-1",
+        stage: "status",
+        phase: "model",
+        status: "completed",
+        message: "提供商响应完成",
+        providerState: "completed",
+        retryAttempt: 0,
+        maxRetries: 3,
+        visibility: "timeline",
+        timestamp: 100,
+      },
+      {
+        type: "progress",
+        id: "provider:mcp-tool",
+        stage: "tool",
+        phase: "tool",
+        status: "completed",
+        message: "MCP tool completed",
+        timestamp: 110,
+      },
+    ]);
+
+    expect(projection.activityItems.map((item) => item.id)).toEqual(["provider:mcp-tool"]);
+  });
+
   it("does not infer a final answer from an untyped text block", () => {
     const projection = projectTurn([{ type: "text", content: "Legacy answer" }]);
 

@@ -457,6 +457,29 @@ def test_ui_agent_snapshot_preserves_typed_progress() -> None:
     assert state["agentProgress"][0]["message"] == "Running read_file"
 
 
+def test_ui_agent_snapshot_removes_debug_provider_completion() -> None:
+    state = _ui_agent_state_for_event(None, "agent.progress", {
+        "id": "provider:request-1",
+        "stage": "status",
+        "status": "running",
+        "message": "模型正在响应",
+        "provider_state": "responding",
+    })
+    assert state is not None
+
+    next_state = _ui_agent_state_for_event(state, "agent.progress", {
+        "id": "provider:request-1",
+        "stage": "status",
+        "status": "completed",
+        "message": "提供商响应完成",
+        "provider_state": "completed",
+        "visibility": "debug",
+    })
+
+    assert next_state is not None
+    assert next_state["agentProgress"] == []
+
+
 def test_ui_agent_snapshot_preserves_image_and_cache_progress_contract() -> None:
     image_state = _ui_agent_state_for_event(None, "agent.progress", {
         "id": "provider:image-generation-1",

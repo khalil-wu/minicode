@@ -369,6 +369,27 @@ def test_turn_state_marks_running_blocks_terminal_status() -> None:
     assert tool['record']['finishedAt'] == 1000
 
 
+def test_turn_state_drops_debug_progress_from_durable_blocks() -> None:
+    state = AgentTurnState(now_ms=lambda: 1000)
+    state.record_progress({
+        'id': 'provider:request-1',
+        'stage': 'status',
+        'status': 'running',
+        'message': '模型正在响应',
+        'provider_state': 'responding',
+    })
+
+    assert state.record_progress({
+        'id': 'provider:request-1',
+        'stage': 'status',
+        'status': 'completed',
+        'message': '提供商响应完成',
+        'provider_state': 'completed',
+        'visibility': 'debug',
+    }) is None
+    assert state.finalize(terminal_status='completed').blocks == []
+
+
 def test_turn_state_records_done_usage_and_error_message() -> None:
     state = AgentTurnState(now_ms=lambda: 100)
 
