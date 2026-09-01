@@ -40,7 +40,7 @@ jobs:
       - name: Run backend and root tests
         run: |
           set -o pipefail
-          python -m pytest "${{ matrix.test_path }}" 2>&1 | tee "pytest-${{ matrix.suite }}.log"
+          python -m pytest "${{ matrix.test_path }}" --maxfail=1 2>&1 | tee "pytest-${{ matrix.suite }}.log"
       - name: Surface backend test failure
         if: failure()
         run: |
