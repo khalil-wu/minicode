@@ -101,7 +101,7 @@ jobs:
         working-directory: frontend
         run: npx playwright install --with-deps chromium
       - name: Install Xvfb
-        run: sudo apt-get update && sudo apt-get install -y xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb xauth
       - name: Run Electron-facing frontend tests
         working-directory: frontend
         run: xvfb-run -a npm run test:e2e:electron
