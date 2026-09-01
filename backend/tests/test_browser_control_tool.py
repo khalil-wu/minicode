@@ -305,7 +305,7 @@ def test_embedded_screenshot_persists_owner_scoped_typed_image_artifact(monkeypa
     assert captured["type"] == "image"
     assert captured["media_type"] == "image/png"
     assert captured["conversation_id"] == "conv-screen"
-    assert str(captured["workspace_root"]) == "C:\\workspace"
+    assert str(captured["workspace_root"]) == str(Path("C:/workspace"))
 
 
 def test_cdp_screenshot_persists_pure_base64_image_artifact(monkeypatch) -> None:
