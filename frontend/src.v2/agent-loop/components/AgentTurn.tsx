@@ -99,6 +99,19 @@ export const AgentTurn = memo(function AgentTurn({
   const timelineCells = turn.processCells.filter((cell) => cell.kind !== "diff");
   const diffCells = turn.processCells.filter((cell) => cell.kind === "diff");
   const hasTimelineItems = turn.processCells.length > 0;
+  const hasActiveTimelineItem = timelineCells.some((cell) => {
+    if (cell.kind === "activity") return cell.status === "running";
+    if (cell.kind === "exec") {
+      return cell.status === "running" || cell.status === "pending_approval";
+    }
+    if (cell.kind === "thinking") return Boolean(cell.isStreaming);
+    if (cell.kind === "collaboration") return cell.status === "running";
+    return false;
+  });
+  const showIdleProcessingStatus =
+    turn.status === "running"
+    && !turn.answerIsStreaming
+    && !hasActiveTimelineItem;
   const failureIsTimelineEvidence = turn.processCells.some((cell) => cell.kind === "error");
   const showProcessStack =
     turn.hasProcessContent &&
@@ -149,7 +162,7 @@ export const AgentTurn = memo(function AgentTurn({
             />
           )}
 
-          {turn.status === "running" && processSummary}
+          {showIdleProcessingStatus && processSummary}
 
         </section>
       )}

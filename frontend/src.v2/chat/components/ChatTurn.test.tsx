@@ -152,6 +152,38 @@ describe("ChatTurn live answer", () => {
     expect(container.querySelector('[data-zone="work"]')).toBeNull();
   });
 
+  it("does not append processing status below prior work while the answer is streaming", () => {
+    const turn: ChatTurnState = {
+      id: "turn-live-answer-after-tool",
+      userCell: null,
+      committedCells: [{
+        kind: "activity",
+        id: "search-complete",
+        activityKind: "webSearch",
+        title: "搜索网页",
+        status: "done",
+        collapsed: true,
+        startedAt: 1,
+        completedAt: 2,
+      }],
+      activeCell: {
+        kind: "streaming_assistant_tail",
+        id: "answer-live",
+        partialMarkdown: "这是正在流式输出的答案。",
+        updatedAt: 3,
+      },
+      finalAnswerCell: null,
+      status: "streaming",
+      startedAt: 1,
+    };
+
+    render(<ChatTurn turn={turn} />);
+
+    expect(screen.getByText("这是正在流式输出的答案。")).toBeTruthy();
+    expect(screen.getByText("搜索网页", { selector: ".activity-cell-name" })).toBeTruthy();
+    expect(screen.queryByRole("status", { name: "正在处理" })).toBeNull();
+  });
+
   it("shows provisional narration in the work zone while the turn is still running", () => {
     // Unphased providers (chat-completions, Anthropic Messages) cannot label
     // text as commentary or answer while it streams. That provisional text has
@@ -179,6 +211,7 @@ describe("ChatTurn live answer", () => {
     expect(screen.getByText("我先检查相关文件。")).toBeTruthy();
     expect(container.querySelector('[data-zone="work"]')).toBeTruthy();
     expect(container.querySelector('[data-zone="reply"]')).toBeNull();
+    expect(screen.queryByRole("status", { name: "正在处理" })).toBeNull();
   });
 });
 
@@ -490,7 +523,7 @@ describe("ChatTurn", () => {
     expect(screen.queryByLabelText("Assistant response")).toBeNull();
   });
 
-  it("keeps live work expanded and collapses the same turn after completion", () => {
+  it("uses the running tool row instead of a duplicate processing status", () => {
     const runningTurn: ChatTurnState = {
       id: "turn-lifecycle",
       userCell: null,
@@ -511,15 +544,13 @@ describe("ChatTurn", () => {
     const { rerender } = render(<ChatTurn turn={runningTurn} />);
 
     expect(screen.queryByRole("button", { name: "收起处理步骤" })).toBeNull();
-    expect(screen.getByRole("status", { name: "正在处理" })).toBeTruthy();
+    expect(screen.queryByRole("status", { name: "正在处理" })).toBeNull();
     expect(screen.getByText("正在执行工具", { selector: ".activity-cell-name" })).toBeTruthy();
     const workArea = screen.getByLabelText("Agent 处理进度");
     const summary = workArea.querySelector('[data-position="bottom"]');
     const timeline = workArea.querySelector(".agent-loop-timeline");
-    expect(summary).toBeTruthy();
+    expect(summary).toBeNull();
     expect(timeline).toBeTruthy();
-    expect(Array.from(workArea.children).indexOf(timeline as Element))
-      .toBeLessThan(Array.from(workArea.children).indexOf(summary as Element));
 
     rerender(<ChatTurn turn={{
       ...runningTurn,
@@ -546,6 +577,39 @@ describe("ChatTurn", () => {
     expect(screen.getByRole("button", { name: "展开处理步骤" }).getAttribute("aria-expanded")).toBe("false");
     expect(screen.getByText("已处理 2 秒")).toBeTruthy();
     expect(screen.queryByText("Inspecting projection", { selector: ".activity-cell-name" })).toBeNull();
+  });
+
+  it("shows processing only after the tool completes and before the next output", () => {
+    const turn: ChatTurnState = {
+      id: "turn-between-tool-and-output",
+      userCell: null,
+      committedCells: [{
+        kind: "activity",
+        id: "search-complete",
+        activityKind: "webSearch",
+        title: "搜索网页",
+        status: "done",
+        collapsed: true,
+        startedAt: 1,
+        completedAt: 2,
+      }],
+      activeCell: null,
+      finalAnswerCell: null,
+      status: "streaming",
+      startedAt: 1,
+    };
+
+    render(<ChatTurn turn={turn} />);
+
+    const workArea = screen.getByLabelText("Agent 处理进度");
+    const timeline = workArea.querySelector(".agent-loop-timeline");
+    const summary = workArea.querySelector('[data-position="bottom"]');
+    expect(screen.getByText("搜索网页", { selector: ".activity-cell-name" })).toBeTruthy();
+    expect(screen.getByRole("status", { name: "正在处理" })).toBeTruthy();
+    expect(timeline).toBeTruthy();
+    expect(summary).toBeTruthy();
+    expect(Array.from(workArea.children).indexOf(timeline as Element))
+      .toBeLessThan(Array.from(workArea.children).indexOf(summary as Element));
   });
 
   it("applies transcript defaults until the user chooses a disclosure state", () => {
