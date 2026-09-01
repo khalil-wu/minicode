@@ -71,7 +71,7 @@ function realProviderEnv({
 async function launchRealProvider(userDataDir: string, backendPort: number) {
   return electron.launch({
     executablePath: electronExecutable,
-    args: [desktopMain],
+    args: process.platform === "win32" ? [desktopMain] : ["--no-sandbox", desktopMain],
     cwd: desktopEntry,
     env: realProviderEnv({ userDataDir, backendPort, frontendPort }),
   });

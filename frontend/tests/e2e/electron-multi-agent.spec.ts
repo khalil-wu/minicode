@@ -606,10 +606,9 @@ async function cleanupStaleUserDataDirs() {
 
 async function launchDesktop(backend: MultiAgentBackend, userDataDir: string) {
   const { ELECTRON_RUN_AS_NODE: _electronRunAsNode, ...cleanEnv } = process.env;
-  const electronArgs =
-    typeof process.getuid === "function" && process.getuid() === 0
-      ? ["--no-sandbox", desktopMain]
-      : [desktopMain];
+  const electronArgs = process.platform === "win32"
+    ? [desktopMain]
+    : ["--no-sandbox", desktopMain];
   return electron.launch({
     executablePath: electronExecutable,
     args: electronArgs,
