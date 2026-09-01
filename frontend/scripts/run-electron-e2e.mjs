@@ -1,11 +1,29 @@
 import { spawn } from "node:child_process";
 import http from "node:http";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const host = "127.0.0.1";
-const port = Number(process.env.MINICODE_E2E_PORT ?? "43173");
+const configuredPort = process.env.MINICODE_E2E_PORT?.trim();
+
+function allocateLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, host, () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close((error) => error ? reject(error) : resolve(port));
+    });
+  });
+}
+
+const port = configuredPort ? Number(configuredPort) : await allocateLoopbackPort();
+if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
+  throw new Error(`Invalid MINICODE_E2E_PORT: ${configuredPort}`);
+}
 const baseUrl = `http://${host}:${port}/`;
 const testFile = process.argv[2] ?? "tests/e2e/electron-multi-agent.spec.ts";
 const playwrightArgs = process.argv.slice(3);
@@ -99,7 +117,11 @@ try {
     ...playwrightArgs,
   ], {
     cwd: frontendRoot,
-    env: { ...env, MINICODE_E2E_EXTERNAL_SERVER: "1" },
+    env: {
+      ...env,
+      MINICODE_E2E_EXTERNAL_SERVER: "1",
+      MINICODE_E2E_PORT: String(port),
+    },
     stdio: "inherit",
     windowsHide: true,
   });
