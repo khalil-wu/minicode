@@ -102,6 +102,14 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Install Xvfb
         run: sudo apt-get update && sudo apt-get install -y xvfb xauth
+      - name: Verify Electron test runtime
+        run: |
+          set -eux
+          node --version
+          command -v xvfb-run
+          command -v xauth
+          test -x desktop/node_modules/electron/dist/electron
+          node -e "console.log(require('./desktop/node_modules/electron'))"
       - name: Run Electron-facing frontend tests
         working-directory: frontend
         run: |
