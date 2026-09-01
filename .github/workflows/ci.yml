@@ -10,9 +10,17 @@ permissions:
 
 jobs:
   backend:
-    name: Backend protocol and tests
+    name: Backend protocol and tests (${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: backend
+            test_path: backend/tests
+          - suite: root
+            test_path: tests
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,13 +32,13 @@ jobs:
       - name: Compile Python
         run: python -m compileall -q backend scripts
       - name: Collect backend and root tests
-        run: python -m pytest --collect-only -q
+        run: python -m pytest "${{ matrix.test_path }}" --collect-only -q
       - name: Check agent kernel boundaries
         run: python scripts/check-agent-kernel-boundaries.py
       - name: Check protocol sync
         run: python scripts/check-protocol-sync.py
       - name: Run backend and root tests
-        run: python -m pytest
+        run: python -m pytest "${{ matrix.test_path }}"
 
   frontend:
     name: Frontend tests and budgets
