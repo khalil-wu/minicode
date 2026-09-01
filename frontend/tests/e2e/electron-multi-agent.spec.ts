@@ -576,7 +576,14 @@ class MultiAgentBackend {
 }
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
-const electronExecutable = path.join(repoRoot, "desktop", "node_modules", "electron", "dist", "electron.exe");
+const electronExecutable = path.join(
+  repoRoot,
+  "desktop",
+  "node_modules",
+  "electron",
+  "dist",
+  process.platform === "win32" ? "electron.exe" : "electron",
+);
 const desktopEntry = path.join(repoRoot, "desktop");
 const desktopMain = path.join(desktopEntry, "main.js");
 const frontendPort = Number(process.env.MINICODE_E2E_PORT ?? "43173");
