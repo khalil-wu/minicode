@@ -215,6 +215,43 @@ describe("ChatTurn live answer", () => {
   });
 });
 
+describe("ChatTurn reasoning summary", () => {
+  it("renders a completed provider summary in the expanded work trace", () => {
+    const turn: ChatTurnState = {
+      id: "turn-summary",
+      userCell: null,
+      committedCells: [{
+        kind: "thinking",
+        id: "reasoning-summary",
+        content: "已核对提交链路并定位重复请求。",
+        source: "provider",
+        providerReasoningType: "reasoning_summary_text",
+        isStreaming: false,
+        createdAt: 1,
+      }],
+      activeCell: null,
+      finalAnswerCell: {
+        kind: "assistant_markdown",
+        id: "answer-summary",
+        messageId: "answer-summary",
+        markdownSource: "修复完成。",
+        phase: "final",
+        copyable: true,
+        createdAt: 2,
+      },
+      status: "completed",
+      startedAt: 1,
+      completedAt: 2,
+    };
+
+    render(<ChatTurn turn={turn} defaultProcessExpanded />);
+
+    expect(screen.getByText("已核对提交链路并定位重复请求。")).toBeTruthy();
+    expect(screen.getByText("修复完成。")).toBeTruthy();
+    expect(document.querySelector(".thinking-cell-summary")).toBeTruthy();
+  });
+});
+
 describe("ChatTurn message interactions", () => {
   it("does not open a duplicate message context menu on right click", () => {
     const turn: ChatTurnState = {

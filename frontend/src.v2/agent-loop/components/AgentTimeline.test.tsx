@@ -181,4 +181,46 @@ describe("AgentTimeline", () => {
 
     expect(activeIds).toEqual(["latest"]);
   });
+
+  it("keeps completed reasoning summaries while hiding completed raw reasoning", () => {
+    const raw: AgentLoopProcessCell = {
+      kind: "thinking",
+      id: "raw-reasoning",
+      content: "Temporary detailed reasoning",
+      source: "provider",
+      providerReasoningType: "reasoning_content",
+      isStreaming: false,
+      createdAt: 1,
+    };
+    const summary: AgentLoopProcessCell = {
+      kind: "thinking",
+      id: "reasoning-summary",
+      content: "已核对提交链路并定位重复请求。",
+      source: "provider",
+      providerReasoningType: "reasoning_summary_text",
+      isStreaming: false,
+      createdAt: 2,
+    };
+
+    render(<AgentTimeline cells={[raw, summary]} renderCell={renderCell} />);
+
+    expect(screen.queryByText("Temporary detailed reasoning")).toBeNull();
+    expect(screen.getByText("已核对提交链路并定位重复请求。")).toBeTruthy();
+  });
+
+  it("continues showing raw reasoning only while it is streaming", () => {
+    const raw: AgentLoopProcessCell = {
+      kind: "thinking",
+      id: "raw-reasoning-live",
+      content: "Live detailed reasoning",
+      source: "provider",
+      providerReasoningType: "reasoning_content",
+      isStreaming: true,
+      createdAt: 1,
+    };
+
+    render(<AgentTimeline cells={[raw]} renderCell={renderCell} />);
+
+    expect(screen.getByText("Live detailed reasoning")).toBeTruthy();
+  });
 });

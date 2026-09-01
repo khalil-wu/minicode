@@ -12,6 +12,7 @@ import {
   shortCommand,
 } from "../../chat/cells/activityCellHelpers";
 import { isBrowserScreenshotRecord } from "../../lib/artifact-projection";
+import { isProviderReasoningSummary } from "../../lib/provider-reasoning";
 
 type TimelineGroupKind = "work" | "thinking" | "narration" | "context" | "notice";
 type TimelineGroup = {
@@ -209,7 +210,10 @@ export function AgentTimeline({ cells, renderCell, showAllOpenWork = false }: { 
         const keyed = withStableRenderKeys(group.cells);
         if (group.kind === "thinking") {
           return group.cells
-            .filter((cell) => cell.kind === "thinking" && cell.isStreaming)
+            .filter((cell) => (
+              cell.kind === "thinking"
+              && (cell.isStreaming || isProviderReasoningSummary(cell))
+            ))
             .map((cell) => renderCell({ key: cell.id, cell, className: "chat-turn-process-cell agent-loop-process-cell" }));
         }
         if (group.kind === "work" && group.closed) {
