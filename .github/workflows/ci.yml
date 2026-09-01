@@ -104,4 +104,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y xvfb xauth
       - name: Run Electron-facing frontend tests
         working-directory: frontend
-        run: xvfb-run -a npm run test:e2e:electron
+        run: |
+          set -o pipefail
+          xvfb-run -a npm run test:e2e:electron 2>&1 | tee electron-e2e.log
+      - name: Upload Electron E2E log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: electron-e2e-log-${{ github.run_id }}
+          path: frontend/electron-e2e.log
+          if-no-files-found: error
