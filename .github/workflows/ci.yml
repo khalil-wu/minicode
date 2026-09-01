@@ -102,31 +102,6 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Install Xvfb
         run: sudo apt-get update && sudo apt-get install -y xvfb xauth
-      - name: Verify Electron test runtime
-        continue-on-error: true
-        run: |
-          set -x
-          node --version || true
-          command -v xvfb-run || true
-          command -v xauth || true
-          ls -l desktop/node_modules/electron/dist/electron || true
-          node -e "console.log(require('./desktop/node_modules/electron'))" || true
       - name: Run Electron-facing frontend tests
         working-directory: frontend
-        run: |
-          set -o pipefail
-          xvfb-run -a npm run test:e2e:electron 2>&1 | tee electron-e2e.log
-      - name: Upload Electron E2E log
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: electron-e2e-log-${{ github.run_id }}
-          path: frontend/electron-e2e.log
-          if-no-files-found: error
-      - name: Surface Electron E2E failure
-        if: failure()
-        working-directory: frontend
-        run: |
-          while IFS= read -r line; do
-            echo "::error file=electron-e2e.log::${line}"
-          done < <(tail -80 electron-e2e.log)
+        run: xvfb-run -a npm run test:e2e:electron

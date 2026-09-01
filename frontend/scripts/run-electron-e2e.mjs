@@ -129,9 +129,6 @@ try {
     runner.once("error", reject);
     runner.once("exit", (exitCode, signal) => resolve(exitCode ?? (signal ? 1 : 0)));
   });
-  if (Number(code) !== 0) {
-    console.error(`[electron-e2e] Playwright exited with code ${code}`);
-  }
   process.exitCode = Number(code);
 } finally {
   if (runner && !runner.killed) runner.kill();
