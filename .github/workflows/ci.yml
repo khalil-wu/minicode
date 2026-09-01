@@ -114,3 +114,10 @@ jobs:
           name: electron-e2e-log-${{ github.run_id }}
           path: frontend/electron-e2e.log
           if-no-files-found: error
+      - name: Surface Electron E2E failure
+        if: failure()
+        working-directory: frontend
+        run: |
+          while IFS= read -r line; do
+            echo "::error file=electron-e2e.log::${line}"
+          done < <(tail -80 electron-e2e.log)
