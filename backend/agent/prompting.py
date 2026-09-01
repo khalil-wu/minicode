@@ -445,7 +445,7 @@ def build_static_environment_info(workspace_root: Path | None = None) -> str:
     del workspace_root
     import platform
 
-    is_windows = os.name == "nt"
+    is_windows = sys.platform == "win32"
     os_name = "Windows" if is_windows else (sys.platform or os.name)
     # OS name/version are machine-static: constant for the process lifetime and
     # identical across turns and workspaces, so they are cache-safe here. The

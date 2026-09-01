@@ -46,6 +46,12 @@ def test_cost_tracker_module_is_ascii_safe_and_importable() -> None:
 
 
 def test_websocket_surfaces_unexpected_agent_run_failure(monkeypatch) -> None:
+    # The production turn boundary requires an explicit model; keep this
+    # transport-level failure test independent of a developer's local
+    # settings.json (which is intentionally absent on CI runners).
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
+    monkeypatch.setenv("OPENAI_AVAILABLE_MODELS", "gpt-5.4")
+
     async def _failing_agent_loop(*args, **kwargs):
         if False:
             yield None
