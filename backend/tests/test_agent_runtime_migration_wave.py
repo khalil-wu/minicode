@@ -331,11 +331,21 @@ async def test_reasoning_deadline_flushes_without_a_followup_event_and_closes_cl
 
 def test_reasoning_batcher_flushes_old_stream_before_metadata_change() -> None:
     batcher = ReasoningEventBatcher(max_chars=100, max_delay_seconds=1.0)
-    raw = AgentEvent.thinking_chunk("raw", source="provider", phase="model")
+    raw = AgentEvent.thinking_chunk(
+        "raw",
+        source="provider",
+        phase="model",
+        provider_reasoning_type="reasoning_content",
+    )
     assert batcher.push(raw, now=1.0) == [raw]
 
     emitted = batcher.push(
-        AgentEvent.thinking_chunk("summary", source="provider", phase="final"),
+        AgentEvent.thinking_chunk(
+            "summary",
+            source="provider",
+            phase="model",
+            provider_reasoning_type="reasoning_summary_text",
+        ),
         now=1.1,
     )
 

@@ -1885,10 +1885,9 @@ def _normalize_loaded_transcript(
         ]
         next_message = dict(message) if len(visible_blocks) != len(blocks) else message
         if next_message is not message:
-            # Codex keeps raw reasoning behind an explicit opt-in that defaults
-            # to false.  Older MiniCode transcripts persisted that provider
-            # material in the public block list, so fail closed when loading
-            # those records while leaving provider replay items untouched.
+            # Raw provider reasoning is a live-only surface. Older MiniCode
+            # transcripts persisted it in the public block list, so remove it
+            # on load while retaining durable reasoning summaries.
             next_message["blocks"] = visible_blocks
         typed_text_blocks = [
             block
@@ -1926,12 +1925,10 @@ def _is_legacy_raw_provider_reasoning_block(block: Any) -> bool:
 
     if not isinstance(block, dict) or str(block.get("type") or "") != "thinking":
         return False
-    if bool(
-        block.get("is_raw_provider_reasoning")
-    ):
+    if bool(block.get("is_raw_provider_reasoning") or block.get("isRawProviderReasoning")):
         return True
     visibility = str(block.get("visibility") or "").strip().lower()
-    if visibility in {"hidden", "internal", "redacted"}:
+    if visibility in {"hidden", "internal", "redacted", "debug"}:
         return True
     # The camelCase variant only exists to catch raw reasoning persisted by
     # pre-alignment builds, whose block casing predates this repo's history;
@@ -1941,14 +1938,19 @@ def _is_legacy_raw_provider_reasoning_block(block: Any) -> bool:
         or block.get("providerReasoningType")
         or ""
     ).strip().lower()
-    return reasoning_type in {
+    if reasoning_type == "reasoning_summary_text":
+        return False
+    if reasoning_type in {
         "reasoning_text",
         "reasoning_content",
         "raw_reasoning",
         "raw_provider_reasoning",
         "thinking",
         "thinking_delta",
-    }
+    }:
+        return True
+    source = str(block.get("source") or "").strip().lower()
+    return source in {"provider", "reasoning"}
 
 
 def _derive_title(content: str) -> str:

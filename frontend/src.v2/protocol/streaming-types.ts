@@ -212,6 +212,7 @@ export interface ThinkingDeltaEvent {
   source?: "provider" | "model_preamble" | "post_tool" | "runtime" | string;
   visibility?: "debug" | "timeline" | "compact" | string;
   phase?: string;
+  provider_reasoning_type?: string;
   item_id?: string;
   content_index?: number;
   lifecycle?: "start" | "delta" | "end" | string;

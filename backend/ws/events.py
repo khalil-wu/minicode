@@ -494,6 +494,11 @@ class ThinkingDeltaData(TypedDict, total=False):
     content: str
     source: Literal["provider", "model_preamble", "post_tool", "runtime"]
     visibility: Literal["debug", "timeline", "compact"]
+    phase: str
+    provider_reasoning_type: str
+    item_id: str
+    content_index: int
+    lifecycle: Literal["start", "delta", "end"]
 
 
 class ToolCallData(TypedDict, total=False):

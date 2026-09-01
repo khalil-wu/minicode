@@ -328,9 +328,26 @@ def _project_block(value: Any) -> dict[str, Any] | None:
         return block
     if block_type == "thinking":
         visibility = public_text(value.get("visibility"), max_chars=64, single_line=True).lower()
+        source = public_text(value.get("source"), max_chars=128, single_line=True).lower()
+        reasoning_type = public_text(
+            value.get("provider_reasoning_type", value.get("providerReasoningType")),
+            max_chars=128,
+            single_line=True,
+        ).lower()
         if visibility in {"hidden", "internal", "redacted", "debug"} or bool(
-            value.get("is_raw_provider_reasoning")
+            value.get("is_raw_provider_reasoning", value.get("isRawProviderReasoning"))
         ):
+            return None
+        if reasoning_type in {
+            "reasoning_text",
+            "reasoning_content",
+            "raw_reasoning",
+            "raw_provider_reasoning",
+            "thinking",
+            "thinking_delta",
+        }:
+            return None
+        if source in {"provider", "reasoning"} and reasoning_type != "reasoning_summary_text":
             return None
         content = public_text(value.get("content"), max_chars=262_144)
         if not content:
@@ -340,6 +357,8 @@ def _project_block(value: Any) -> dict[str, Any] | None:
             text = public_text(value.get(key), max_chars=maximum, single_line=True)
             if text:
                 block[key] = text
+        if reasoning_type:
+            block["provider_reasoning_type"] = reasoning_type
         content_index = _nonnegative_int(value.get("content_index"))
         if content_index is not None:
             block["content_index"] = content_index

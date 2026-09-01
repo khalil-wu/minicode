@@ -2156,7 +2156,8 @@
   padding: 0;
 }
 
-.thinking-cell-live {
+.thinking-cell-live,
+.thinking-cell-summary {
   padding: 6px 0;
   color: var(--text-secondary);
   font-size: var(--text-sm);
@@ -2164,11 +2165,13 @@
   word-break: break-word;
 }
 
-.thinking-cell-live p {
+.thinking-cell-live p,
+.thinking-cell-summary p {
   margin: 0;
 }
 
-.thinking-cell-live p + p {
+.thinking-cell-live p + p,
+.thinking-cell-summary p + p {
   margin-top: 7px;
 }
 

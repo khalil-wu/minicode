@@ -186,6 +186,7 @@ export interface ThinkingCellState {
   content: string;
   source: "commentary" | "model_preamble" | "post_tool" | "provider" | "reasoning" | "runtime";
   phase?: string; // Optional phase indicator (e.g., "analyzing", "planning")
+  providerReasoningType?: string;
   isStreaming?: boolean;
   createdAt: number;
   segment?: number;

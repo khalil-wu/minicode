@@ -27,6 +27,7 @@ import { addInspectorPayload } from "./inspectorEntries";
 import { providerTracePayloadFromDone, type ProviderUsageSummary } from "./providerTrace";
 import { normalizeContentBlocks } from "./transcriptHydration";
 import { projectArtifactPreviewEvent } from "./artifactEvents";
+import { isHiddenProviderReasoning } from "../lib/provider-reasoning";
 
 interface ChatStreamHandlers {
   textStreamBuffer: StreamBuffer;
@@ -296,26 +297,11 @@ const eventTurnId = (event: unknown): string | undefined => {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 };
 
-const isLegacyRawProviderReasoningEvent = (event: unknown): boolean => {
+const isHiddenReasoningEvent = (event: unknown): boolean => {
   if (!event || typeof event !== "object") return false;
   const payload = event as Record<string, unknown>;
   if (payload.type !== "thinking" && payload.type !== "thinking_delta") return false;
-  if (payload.is_raw_provider_reasoning === true || payload.isRawProviderReasoning === true) {
-    return true;
-  }
-  const visibility = String(payload.visibility ?? "").trim().toLowerCase();
-  if (["hidden", "internal", "redacted"].includes(visibility)) return true;
-  const reasoningType = String(
-    payload.provider_reasoning_type ?? payload.providerReasoningType ?? "",
-  ).trim().toLowerCase();
-  return new Set([
-    "reasoning_text",
-    "reasoning_content",
-    "raw_reasoning",
-    "raw_provider_reasoning",
-    "thinking",
-    "thinking_delta",
-  ]).has(reasoningType);
+  return isHiddenProviderReasoning(payload);
 };
 
 const messagesForConversation = (conversationId?: string, messageId?: string): ChatMessage[] => {
@@ -714,25 +700,23 @@ export const handleChatStreamEvent = (
   switch (e.type) {
     case "thinking_delta":
     case "thinking": {
-      // Upgrade safety for reconnects from pre-alignment builds. Raw provider
-      // reasoning was once persisted as a public thinking event; acknowledge
-      // the ordered event without rendering or storing its content.
-      if (isLegacyRawProviderReasoningEvent(e)) return true;
       const ev = e as unknown as {
         content?: string;
         source?: string;
         visibility?: string;
         phase?: string;
+        provider_reasoning_type?: string;
         item_id?: string;
         content_index?: number;
         lifecycle?: "start" | "delta" | "end" | string;
       };
       const messageId = eventMessageId(e);
       if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
-      if (ev.lifecycle === "start" || ev.lifecycle === "end") {
+      if (ev.lifecycle === "start") {
         flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
+        s.settleThinking(conversationId, messageId);
       }
-      if (ev.content) {
+      if (!isHiddenReasoningEvent(e) && ev.content) {
         // Don't force-flush the text buffer here: thinking is a parallel visual
         // channel, not a sequence boundary. The text buffer flushes on its own
         // rAF (≤16ms); flushing here defeated coalescing during interleaved
@@ -745,6 +729,7 @@ export const handleChatStreamEvent = (
           source: ev.source,
           visibility: ev.visibility,
           phase: ev.phase,
+          providerReasoningType: ev.provider_reasoning_type,
           item_id: ev.item_id,
           content_index: ev.content_index,
           lifecycle: ev.lifecycle,
@@ -754,6 +739,10 @@ export const handleChatStreamEvent = (
         } else {
           useAppStore.getState().appendThinkingChunk(ev.content, conversationId, thinkingMeta, messageId);
         }
+      }
+      if (ev.lifecycle === "end") {
+        flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
+        useAppStore.getState().settleThinking(conversationId, messageId);
       }
       return true;
     }
@@ -847,6 +836,8 @@ export const handleChatStreamEvent = (
       }
       if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
       if (!("image_data" in ev) || typeof ev.image_data !== "string") return true;
+      flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
+      s.settleThinking(conversationId, messageId);
       const imageData = ev.image_data;
       const imageFormat = ev.media_type.replace(/^image\//, "").toUpperCase();
       const projected = projectArtifactPreviewEvent({

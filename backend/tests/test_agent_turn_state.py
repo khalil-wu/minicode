@@ -24,6 +24,23 @@ def _running_state() -> AgentTurnState:
     return state
 
 
+def test_provider_progress_state_remains_a_string_in_snapshot() -> None:
+    state = AgentTurnState(now_ms=lambda: 1234)
+    state.record_progress({
+        "id": "provider:request-1",
+        "stage": "status",
+        "status": "running",
+        "message": "模型正在响应",
+        "provider_state": "responding",
+        "retry_attempt": 1,
+    })
+
+    progress = state.finalize(terminal_status="partial").blocks[0]
+
+    assert progress["providerState"] == "responding"
+    assert progress["retryAttempt"] == 1
+
+
 def test_cancelled_turn_persists_unfinished_work_as_partial() -> None:
     snapshot = _running_state().finalize(terminal_status="cancelled")
 

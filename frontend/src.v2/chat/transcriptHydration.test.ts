@@ -411,6 +411,49 @@ describe("hydrateMessages", () => {
     ]);
   });
 
+  it("restores provider reasoning summaries but drops untyped legacy provider thinking", () => {
+    const messages = hydrateMessages([{
+      id: "assistant-provider-summary",
+      role: "assistant",
+      content: "最终答案。",
+      blocks: [
+        {
+          type: "thinking",
+          content: "legacy raw body",
+          source: "provider",
+        },
+        {
+          type: "thinking",
+          content: "持久摘要",
+          source: "provider",
+          provider_reasoning_type: "reasoning_summary_text",
+          visibility: "timeline",
+        },
+        {
+          type: "text",
+          content: "最终答案。",
+          source: "model_final",
+          visibility: "final",
+          phase: "final",
+        },
+      ],
+      timestamp: "2026-05-27T00:00:00Z",
+    }]);
+
+    expect(messages[0].blocks).toEqual([
+      expect.objectContaining({
+        type: "thinking",
+        content: "持久摘要",
+        providerReasoningType: "reasoning_summary_text",
+      }),
+      expect.objectContaining({
+        type: "text",
+        content: "最终答案。",
+        source: "model_final",
+      }),
+    ]);
+  });
+
   it("preserves assistant completion timestamps from transcripts", () => {
     const messages = hydrateMessages([{
       id: "assistant-completed-at",

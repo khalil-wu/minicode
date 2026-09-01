@@ -108,6 +108,36 @@ def test_whitespace_only_reasoning_delta_is_consumed_without_runtime_failure() -
     assert updates == [ProviderProjectionResult(True)]
 
 
+def test_provider_reasoning_projection_preserves_raw_and_summary_types() -> None:
+    async def collect(reasoning_type: str):
+        event = StreamEvent(
+            type=StreamEventType.THINKING_CHUNK,
+            content=f"{reasoning_type} body",
+            raw={"provider_reasoning_type": reasoning_type},
+            content_kind="thinking",
+            lifecycle="delta",
+        )
+        return [
+            item
+            async for item in project_non_text_provider_event(
+                event,
+                stream_state=StreamAttemptState(),
+                stream_text=StreamTextState(iteration_id=f"iter:{reasoning_type}"),
+                live_text_streaming=True,
+                tool_tracker=SimpleNamespace(),
+                tool_registry=SimpleNamespace(),
+                tool_context=None,
+                process_event_factory=lambda *_args, **_kwargs: None,
+            )
+        ]
+
+    for reasoning_type in ("reasoning_content", "reasoning_summary_text"):
+        updates = asyncio.run(collect(reasoning_type))
+        assert updates[0].data["provider_reasoning_type"] == reasoning_type
+        assert updates[0].data["visibility"] == "timeline"
+        assert updates[1] == ProviderProjectionResult(True)
+
+
 def test_provider_activity_terminal_snapshots_keep_safe_code_and_argument_counts() -> (
     None
 ):

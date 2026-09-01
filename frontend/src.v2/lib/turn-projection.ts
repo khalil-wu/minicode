@@ -6,6 +6,12 @@ import {
 import type { ToolCallRecord } from "./tool-call-reducer";
 import { isBrowserScreenshotRecord } from "./artifact-projection";
 import { isProviderRequestProgress, providerProgressLabel } from "./provider-progress";
+import {
+  isProviderReasoning,
+  isProviderReasoningSummary,
+  isTransientProviderReasoning,
+  providerReasoningType,
+} from "./provider-reasoning";
 
 export type TurnActivityKind =
   | "reasoning"
@@ -44,6 +50,7 @@ export interface TurnActivityItem {
   content?: string;
   source?: string;
   phase?: string;
+  providerReasoningType?: string;
   itemKind?: string;
   records?: ToolCallRecord[];
   progress?: Extract<ContentBlock, { type: "progress" }>[];
@@ -226,7 +233,7 @@ const progressItem = (
 const thinkingKind = (
   block: Extract<ContentBlock, { type: "thinking" }>,
 ): Extract<TurnActivityKind, "reasoning" | "processNote" | "providerReasoning"> => {
-  if (block.source === "provider") return "providerReasoning";
+  if (isProviderReasoning(block)) return "providerReasoning";
   if (["model_preamble", "post_tool", "runtime"].includes(String(block.source || ""))) {
     return "processNote";
   }
@@ -391,10 +398,11 @@ export function projectTurn(
     if (block.type === "thinking") {
       if (!block.content.trim() || !isVisibleActivity(block, Boolean(options.includeHiddenActivity))) return;
       if (isToolProtocolSummary(block.content, typedToolNames)) return;
-      const isLiveProviderReasoning = ["provider", "reasoning"].includes(String(block.source || ""))
-        && index === activeThinkingIndex;
+      const isActiveReasoning = index === activeThinkingIndex;
+      const summary = isProviderReasoningSummary(block);
+      const transient = isTransientProviderReasoning(block);
       segment += 1;
-      if (isLiveProviderReasoning) {
+      if (summary || (transient && isActiveReasoning)) {
         activityItems.push({
           id: `thinking-${index}`,
           kind: thinkingKind(block),
@@ -402,7 +410,8 @@ export function projectTurn(
           content: block.content,
           source: block.source,
           phase: block.phase,
-          status: "running",
+          providerReasoningType: providerReasoningType(block) || undefined,
+          status: isActiveReasoning ? "running" : "completed",
           hasFailure: false,
           hasPendingUserAction: false,
           segment,

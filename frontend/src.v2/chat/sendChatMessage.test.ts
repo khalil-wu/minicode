@@ -1409,6 +1409,47 @@ describe("sendChatMessage attachment feedback", () => {
     expect(assistant.isStreaming).toBe(false);
     expect(assistant.isThinkingStreaming).toBe(false);
     expect(assistant.terminalStatus).toBe("completed");
+    expect(assistant.blocks).toEqual([
+      expect.objectContaining({ type: "text", content: "Hi!" }),
+    ]);
+  });
+
+  it("finishStreaming retains a provider reasoning summary", () => {
+    useAppStore.setState({
+      conversationId: "conv-test",
+      messages: [{
+        id: "assistant-summary",
+        role: "assistant",
+        content: "Done.",
+        artifacts: [],
+        blocks: [
+          {
+            type: "thinking",
+            source: "provider",
+            providerReasoningType: "reasoning_summary_text",
+            content: "Checked the implementation.",
+          },
+          { type: "text", content: "Done.", source: "model_final" },
+        ],
+        timestamp: 1,
+        isStreaming: true,
+        isThinkingStreaming: true,
+      }],
+      conversationStreaming: { "conv-test": true },
+      isStreaming: true,
+      isConnected: true,
+    });
+
+    useAppStore.getState().finishStreaming("conv-test", undefined, "completed", "assistant-summary");
+
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([
+      expect.objectContaining({
+        type: "thinking",
+        content: "Checked the implementation.",
+        providerReasoningType: "reasoning_summary_text",
+      }),
+      expect.objectContaining({ type: "text", content: "Done." }),
+    ]);
   });
 
   it("marks unfinished tools cancelled when the user interrupts a turn", () => {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from backend.conversations import public_projection
+from backend.conversations.repository import _normalize_loaded_transcript
 
 
 def test_arbitrary_public_json_uses_one_message_wide_text_budget(monkeypatch) -> None:
@@ -32,3 +33,56 @@ def test_transcript_projection_drops_obsolete_added_tool_names() -> None:
 
     assert "added_tool_names" not in projected
     assert "addedToolNames" not in projected
+
+
+def test_transcript_projection_keeps_summary_and_drops_raw_provider_reasoning() -> None:
+    projected = public_projection.project_public_transcript_message({
+        "id": "assistant-1",
+        "role": "assistant",
+        "content": "done",
+        "blocks": [
+            {
+                "type": "thinking",
+                "content": "raw body",
+                "source": "provider",
+                "provider_reasoning_type": "reasoning_content",
+            },
+            {
+                "type": "thinking",
+                "content": "durable summary",
+                "source": "provider",
+                "provider_reasoning_type": "reasoning_summary_text",
+            },
+        ],
+    })
+
+    assert projected["blocks"] == [{
+        "type": "thinking",
+        "content": "durable summary",
+        "source": "provider",
+        "provider_reasoning_type": "reasoning_summary_text",
+    }]
+
+
+def test_loaded_transcript_treats_untyped_provider_thinking_as_legacy_raw() -> None:
+    normalized = _normalize_loaded_transcript([{
+        "id": "assistant-legacy",
+        "role": "assistant",
+        "content": "done",
+        "blocks": [
+            {"type": "thinking", "content": "legacy raw", "source": "provider"},
+            {
+                "type": "thinking",
+                "content": "summary",
+                "source": "provider",
+                "providerReasoningType": "reasoning_summary_text",
+            },
+        ],
+    }])
+
+    assert normalized[0]["blocks"] == [{
+        "type": "thinking",
+        "content": "summary",
+        "source": "provider",
+        "provider_reasoning_type": "reasoning_summary_text",
+    }]

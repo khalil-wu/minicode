@@ -21,6 +21,7 @@ _STREAM_KEYS = (
     "source",
     "visibility",
     "phase",
+    "provider_reasoning_type",
     "turn_id",
     "item_id",
     "content_index",

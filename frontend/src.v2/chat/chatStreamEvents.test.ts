@@ -241,7 +241,7 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     });
   });
 
-  it("settles the pending reasoning batch before an agent message item starts", () => {
+  it("flushes and removes pending raw reasoning before an agent message starts", () => {
     let pendingThinking: (() => void) | undefined;
     const delayedThinkingBuffer: StreamBuffer = {
       push: (chunk, conversationId, _source, metadata, messageId) => {
@@ -267,6 +267,7 @@ describe("handleChatStreamEvent typed lifecycle", () => {
       type: "thinking_delta",
       content: "The date is 2026-08-02.",
       source: "provider",
+      provider_reasoning_type: "reasoning_content",
       message_id: "assistant-stream",
     } as ServerEvent, "conv-stream", delayedHandlers);
     handleChatStreamEvent({
@@ -283,16 +284,40 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     expect(delayedThinkingBuffer.flush).toHaveBeenCalledOnce();
     expect(useAppStore.getState().messages[0]?.blocks).toEqual([
       expect.objectContaining({
-        type: "thinking",
-        content: "The date is 2026-08-02.",
-        source: "provider",
-      }),
-      expect.objectContaining({
         type: "text",
         itemId: "final-message",
       }),
     ]);
-    expect(useAppStore.getState().messages[0]?.blocks[1]).toHaveProperty("source", "model_final");
+    expect(useAppStore.getState().messages[0]?.blocks[0]).toHaveProperty("source", "model_final");
+  });
+
+  it("keeps a public reasoning summary when the final message starts", () => {
+    handle({
+      type: "thinking_delta",
+      content: "Checked the request and selected the minimal fix.",
+      source: "provider",
+      provider_reasoning_type: "reasoning_summary_text",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "item.started",
+      item: {
+        id: "final-message",
+        type: "agent_message",
+        source: "model_final",
+        status: "in_progress",
+      },
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([
+      expect.objectContaining({
+        type: "thinking",
+        content: "Checked the request and selected the minimal fix.",
+        providerReasoningType: "reasoning_summary_text",
+      }),
+      expect.objectContaining({ type: "text", itemId: "final-message" }),
+    ]);
   });
 
   it("routes interleaved reasoning deltas by provider item identity", () => {
@@ -333,6 +358,7 @@ describe("handleChatStreamEvent typed lifecycle", () => {
       type: "thinking_delta",
       content: "Inspecting the repository",
       source: "provider",
+      provider_reasoning_type: "reasoning_content",
       message_id: "assistant-stream",
     } as ServerEvent);
 
@@ -350,6 +376,36 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     } as ServerEvent);
 
     expect(useAppStore.getState().messages[0]?.isThinkingStreaming).toBe(false);
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([
+      expect.objectContaining({ type: "tool_call", record: expect.objectContaining({ id: "read-1" }) }),
+    ]);
+  });
+
+  it("removes raw reasoning on its explicit lifecycle end", () => {
+    handle({
+      type: "thinking_delta",
+      content: "Temporary raw reasoning",
+      source: "provider",
+      provider_reasoning_type: "reasoning_content",
+      item_id: "reasoning-raw",
+      lifecycle: "delta",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]?.blocks).toHaveLength(1);
+
+    handle({
+      type: "thinking_delta",
+      content: "",
+      source: "provider",
+      provider_reasoning_type: "reasoning_content",
+      item_id: "reasoning-raw",
+      lifecycle: "end",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]?.isThinkingStreaming).toBe(false);
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([]);
   });
 
   it("does not add permission decisions as generic transcript progress", () => {

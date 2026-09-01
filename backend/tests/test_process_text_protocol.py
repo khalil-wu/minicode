@@ -47,6 +47,11 @@ class _ProviderReasoningThenFinalLLM(LLMAdapter):
     async def stream_chat(self, messages, tools=None):
         yield StreamEvent(
             type=StreamEventType.THINKING_CHUNK,
+            content="厂家 raw reasoning",
+            raw={"provider_reasoning_type": "reasoning_content"},
+        )
+        yield StreamEvent(
+            type=StreamEventType.THINKING_CHUNK,
             content="厂家 reasoning summary",
             raw={"provider_reasoning_type": "reasoning_summary_text"},
         )
@@ -933,7 +938,7 @@ def test_streamed_tool_boundary_preserves_split_preamble_order_without_duplicati
     )
 
 
-def test_provider_reasoning_summary_is_visible_in_timeline():
+def test_provider_raw_and_summary_reasoning_are_public_thinking_events():
     events = _run(_ProviderReasoningThenFinalLLM())
 
     thinking_events = [
@@ -942,10 +947,19 @@ def test_provider_reasoning_summary_is_visible_in_timeline():
 
     assert [event.data for event in thinking_events] == [
         {
+            "content": "厂家 raw reasoning",
+            "source": "provider",
+            "visibility": "timeline",
+            "phase": "model",
+            "provider_reasoning_type": "reasoning_content",
+            "lifecycle": "delta",
+        },
+        {
             "content": "厂家 reasoning summary",
             "source": "provider",
             "visibility": "timeline",
             "phase": "model",
+            "provider_reasoning_type": "reasoning_summary_text",
             "lifecycle": "delta",
         }
     ]

@@ -1201,6 +1201,7 @@ const hasValidSemanticPayload = (
         "redacted",
       ].includes(String(value.visibility)))
       && (!("phase" in value) || isBoundedString(value.phase, 64))
+      && (!("provider_reasoning_type" in value) || isBoundedString(value.provider_reasoning_type, 128))
       && (!("item_id" in value) || isBoundedString(value.item_id, 1_024))
       && (!("content_index" in value) || isNonNegativeSafeInteger(value.content_index));
   }

@@ -443,6 +443,25 @@ describe("normalizeInboundServerEvent", () => {
     expect(warn).toHaveBeenCalled();
   });
 
+  it("preserves the provider reasoning type on public thinking events", () => {
+    const event = {
+      type: "thinking_delta",
+      conversation_id: "conversation-1",
+      message_id: "assistant-1",
+      content: "Checked the implementation.",
+      source: "provider",
+      visibility: "timeline",
+      provider_reasoning_type: "reasoning_summary_text",
+      lifecycle: "delta",
+    };
+
+    expect(normalizeInboundServerEvent(event)).toMatchObject(event);
+    expect(normalizeInboundServerEvent({
+      ...event,
+      provider_reasoning_type: "x".repeat(129),
+    })).toBeNull();
+  });
+
   it("accepts explainable permission decision events", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 

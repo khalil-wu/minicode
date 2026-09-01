@@ -465,6 +465,7 @@ class AgentEvent:
         source: str = "",
         visibility: str = "",
         phase: str = "",
+        provider_reasoning_type: str = "",
         item_id: str = "",
         content_index: int | None = None,
         lifecycle: str = "delta",
@@ -499,6 +500,11 @@ class AgentEvent:
             field_name="phase",
             maximum=64,
         )
+        clean_provider_reasoning_type = _optional_event_text(
+            provider_reasoning_type,
+            field_name="provider_reasoning_type",
+            maximum=128,
+        ).lower()
         clean_item_id = _optional_event_text(
             item_id,
             field_name="item_id",
@@ -514,6 +520,8 @@ class AgentEvent:
             data["visibility"] = clean_visibility
         if clean_phase:
             data["phase"] = clean_phase
+        if clean_provider_reasoning_type:
+            data["provider_reasoning_type"] = clean_provider_reasoning_type
         if clean_item_id:
             data["item_id"] = clean_item_id
         if content_index is not None:

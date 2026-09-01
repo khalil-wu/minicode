@@ -428,7 +428,8 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 }
 
 /* thinking 正文在进程区内放大一档（cells 默认 text-sm）。 */
-.agent-loop-process-cell > .thinking-cell-live {
+.agent-loop-process-cell > .thinking-cell-live,
+.agent-loop-process-cell > .thinking-cell-summary {
   color: var(--text-secondary);
   font-size: var(--text-md);
   line-height: var(--leading-relaxed);

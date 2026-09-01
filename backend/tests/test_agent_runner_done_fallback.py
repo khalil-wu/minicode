@@ -23,6 +23,7 @@ from backend.ws.agent_runner import (
     _llm_settings_identity,
     _reconcile_ui_agent_state_with_runtime,
     _reply_attachments_from_tool_calls,
+    _is_persistent_reasoning_event,
     _ui_agent_state_for_event,
 )
 from backend.ws.run_manager import SessionRunManager
@@ -37,6 +38,85 @@ class _NoopLLM(LLMAdapter):
 
     async def simple_chat(self, messages):
         return ""
+
+
+def test_only_provider_reasoning_summary_is_persistent() -> None:
+    raw = AgentEvent.thinking_chunk(
+        "raw",
+        source="provider",
+        provider_reasoning_type="reasoning_content",
+    )
+    summary = AgentEvent.thinking_chunk(
+        "summary",
+        source="provider",
+        provider_reasoning_type="reasoning_summary_text",
+    )
+
+    assert _is_persistent_reasoning_event(raw) is False
+    assert _is_persistent_reasoning_event(summary) is True
+
+
+def test_runner_streams_raw_reasoning_but_persists_only_summary(tmp_path, monkeypatch) -> None:
+    events: list[dict] = []
+    runner_events = [
+        AgentEvent.thinking_chunk(
+            "raw body",
+            source="provider",
+            visibility="timeline",
+            provider_reasoning_type="reasoning_content",
+        ),
+        AgentEvent.thinking_chunk(
+            "durable summary",
+            source="provider",
+            visibility="timeline",
+            provider_reasoning_type="reasoning_summary_text",
+        ),
+        AgentEvent.agent_message_completed("Done.", source="model_final"),
+    ]
+    session = _Session(tmp_path, events, runner_events=runner_events)
+    monkeypatch.setattr(
+        "backend.ws.agent_runner.load_config",
+        lambda cwd=None: AppConfig(llm=LLMSettings(api_key="test-key")),
+    )
+    monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
+    monkeypatch.setattr(
+        "backend.ws.agent_runner.get_available_models",
+        lambda provider="openai": ["gpt-test"],
+    )
+    monkeypatch.setattr(
+        "backend.llm.model_registry.create_session_llm",
+        lambda config, model_override=None, **_kwargs: _NoopLLM(),
+    )
+
+    asyncio.run(session._run_agent_locked(
+        "Inspect reasoning lifecycle",
+        conversation_id="conv_runnerdone",
+        metadata={
+            "agent_runtime": default_runtime(),
+            "assistant_message_id": "assistant-reasoning",
+            "user_message_id": "user-reasoning",
+        },
+    ))
+
+    thinking_events = [event for event in events if event.get("type") == "thinking_delta"]
+    assert [event["provider_reasoning_type"] for event in thinking_events] == [
+        "reasoning_content",
+        "reasoning_summary_text",
+    ]
+    saved = session.conversation_repo.get_conversation("conv_runnerdone")
+    assert saved is not None
+    thinking_blocks = [
+        block
+        for block in saved.transcript[-1]["blocks"]
+        if block.get("type") == "thinking"
+    ]
+    assert thinking_blocks == [{
+        "type": "thinking",
+        "content": "durable summary",
+        "source": "provider",
+        "visibility": "timeline",
+        "provider_reasoning_type": "reasoning_summary_text",
+    }]
 
 
 async def _admit_runner_turn(kwargs) -> None:

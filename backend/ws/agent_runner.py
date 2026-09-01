@@ -88,6 +88,18 @@ _UI_AGENT_STATE_EVENT_TYPES = {
     "agent.progress",
 }
 logger = logging.getLogger(__name__)
+
+
+def _is_persistent_reasoning_event(event: AgentEvent) -> bool:
+    source = str(event.data.get("source") or "").strip().lower()
+    if source != "provider":
+        return True
+    return (
+        str(event.data.get("provider_reasoning_type") or "").strip().lower()
+        == "reasoning_summary_text"
+    )
+
+
 _GENERATED_IMAGE_MEDIA_TYPES = frozenset(
     {"image/png", "image/jpeg", "image/webp", "image/gif"}
 )
@@ -5037,7 +5049,8 @@ class SessionAgentRunnerMixin:
                 pending = reasoning_batcher.flush_if_pending()
                 if pending is not None:
                     await self.send_event(pending)
-                    await _persist_partial_turn()
+                    if _is_persistent_reasoning_event(pending):
+                        await _persist_partial_turn()
 
         async def _flush_reasoning_at_deadline() -> None:
             await _flush_pending_reasoning(from_deadline=True)
@@ -5053,11 +5066,13 @@ class SessionAgentRunnerMixin:
             metadata: dict[str, Any],
         ) -> None:
             async with reasoning_flush_lock:
-                turn_state.append_thinking(content, metadata)
+                if _is_persistent_reasoning_event(event):
+                    turn_state.append_thinking(content, metadata)
                 emitted = reasoning_batcher.push(event)
                 for reasoning_event in emitted:
                     await self.send_event(reasoning_event)
-                    await _persist_partial_turn()
+                    if _is_persistent_reasoning_event(reasoning_event):
+                        await _persist_partial_turn()
 
                 if reasoning_batcher.has_pending:
                     # An emitted batch followed by another pending batch means
@@ -5154,7 +5169,14 @@ class SessionAgentRunnerMixin:
                     thinking_chunk = str(event.data.get("content", ""))
                     thinking_metadata = {
                         key: event.data[key]
-                        for key in ("source", "visibility", "phase")
+                        for key in (
+                            "source",
+                            "visibility",
+                            "phase",
+                            "provider_reasoning_type",
+                            "item_id",
+                            "content_index",
+                        )
                         if key in event.data
                     }
                     await _push_reasoning(event, thinking_chunk, thinking_metadata)

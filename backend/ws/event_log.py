@@ -66,14 +66,7 @@ def _is_data_url(value: str) -> bool:
 
 
 def is_raw_provider_reasoning_event(payload: Any) -> bool:
-    """Identify pre-alignment websocket events that exposed provider reasoning.
-
-    Current MiniCode only projects provider ``reasoning_summary_text`` frames.
-    Older builds persisted raw Responses/Anthropic/MiniCode reasoning deltas in the
-    reconnect log, including some with timeline visibility.  Treat only their
-    explicit legacy markers as raw so ordinary reasoning-summary events remain
-    replayable.
-    """
+    """Keep transient raw reasoning out of the reconnect replay log."""
 
     if not isinstance(payload, dict):
         return False
@@ -82,12 +75,10 @@ def is_raw_provider_reasoning_event(payload: Any) -> bool:
         "thinking_delta",
     }:
         return False
-    if bool(
-        payload.get("is_raw_provider_reasoning")
-    ):
+    if bool(payload.get("is_raw_provider_reasoning") or payload.get("isRawProviderReasoning")):
         return True
     visibility = str(payload.get("visibility") or "").strip().lower()
-    if visibility in {"hidden", "internal", "redacted"}:
+    if visibility in {"hidden", "internal", "redacted", "debug"}:
         return True
     # The camelCase variant only exists to catch raw reasoning persisted by
     # pre-alignment builds; drop it once the oldest supported replay log is
@@ -97,7 +88,12 @@ def is_raw_provider_reasoning_event(payload: Any) -> bool:
         or payload.get("providerReasoningType")
         or ""
     ).strip().lower()
-    return reasoning_type in _RAW_PROVIDER_REASONING_TYPES
+    if reasoning_type == "reasoning_summary_text":
+        return False
+    if reasoning_type in _RAW_PROVIDER_REASONING_TYPES:
+        return True
+    source = str(payload.get("source") or "").strip().lower()
+    return source in {"provider", "reasoning"}
 
 
 def _truncate_replay_string(value: str, path: str, truncated_fields: list[str]) -> str:

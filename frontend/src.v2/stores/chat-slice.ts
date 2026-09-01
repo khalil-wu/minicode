@@ -53,6 +53,7 @@ import {
   type ToolCallRecord,
 } from "../lib/tool-call-reducer";
 import { providerProgressLifecycleRegressed } from "../lib/provider-progress";
+import { isTransientProviderReasoning } from "../lib/provider-reasoning";
 
 function stripDisplayContextSuffix(content: string, refs: MessageContextRef[]): string {
   const suffixItems = refs
@@ -71,6 +72,11 @@ function findAgentMessageBlockIndex(blocks: ContentBlock[], itemId: string): num
   }
   return -1;
 }
+
+const settleThinkingBlocks = (blocks: ContentBlock[]): ContentBlock[] =>
+  blocks.filter((block) =>
+    block.type !== "thinking" || !isTransientProviderReasoning(block),
+  );
 
 function mergeToolCallIds(left: string[] | undefined, right: string[] | undefined): string[] | undefined {
   const ids = [...(left || []), ...(right || [])].filter(Boolean);
@@ -788,8 +794,8 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         if (idx < 0) return null;
         const next = messages.slice();
         const msg = next[idx];
-        const blocks = (msg.blocks ? msg.blocks.slice() : []).filter((block) =>
-          block.type !== "text" || block.itemId !== itemId,
+        const blocks = settleThinkingBlocks(msg.blocks ? msg.blocks.slice() : []).filter(
+          (block) => block.type !== "text" || block.itemId !== itemId,
         );
         blocks.push({
           type: "text",
@@ -822,7 +828,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       }
       const next = messages.slice();
       const msg = next[idx];
-      const blocks = msg.blocks ? msg.blocks.slice() : [];
+      const blocks = settleThinkingBlocks(msg.blocks ? msg.blocks.slice() : []);
       const blockIndex = findAgentMessageBlockIndex(blocks, itemId);
       if (blockIndex >= 0) {
         const block = blocks[blockIndex];
@@ -873,7 +879,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         }
         const next = messages.slice();
         const msg = next[idx];
-        const blocks: ContentBlock[] = msg.blocks ? msg.blocks.slice() : [];
+        const blocks = settleThinkingBlocks(msg.blocks ? msg.blocks.slice() : []);
         const targetIndex = findAgentMessageBlockIndex(blocks, item.id);
         const completed: ContentBlock = {
           type: "text",
@@ -948,6 +954,18 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         return next;
       });
     }),
+  settleThinking: (conversationId, messageId) =>
+    set((s) => updateMessagesForConversation(s, conversationId, (messages) => {
+      const idx = findStreamingIndexForMessage(messages, messageId);
+      if (idx < 0) return null;
+      const message = messages[idx];
+      const currentBlocks = message.blocks ?? [];
+      const blocks = settleThinkingBlocks(currentBlocks);
+      if (!message.isThinkingStreaming && blocks.length === currentBlocks.length) return null;
+      const next = messages.slice();
+      next[idx] = { ...message, isThinkingStreaming: false, blocks };
+      return next;
+    })),
   appendProcessItem: (item, conversationId, messageId) =>
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
@@ -955,7 +973,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         if (idx < 0) return null;
         const next = messages.slice();
         const msg = next[idx];
-        const blocks = msg.blocks ? msg.blocks.slice() : [];
+        const blocks = settleThinkingBlocks(msg.blocks ? msg.blocks.slice() : []);
         const processBlock = {
           ...item,
           type: "process" as const,
@@ -1110,7 +1128,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         if (idx < 0) return null;
         const next = messages.slice();
         const msg = next[idx];
-        const blocks = msg.blocks ? msg.blocks.slice() : [];
+        const blocks = settleThinkingBlocks(msg.blocks ? msg.blocks.slice() : []);
         blocks.push({ type: "tool_call", record: tc });
         const baseMsg = stripLegacyContentFields(msg);
         next[idx] = { ...baseMsg, isThinkingStreaming: false, blocks };
@@ -1202,7 +1220,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
             }
             matchedStreamingMessage = true;
             const baseMessage = stripLegacyContentFields(m);
-            const blocks = getContentBlocks(m);
+            const blocks = settleThinkingBlocks(getContentBlocks(m));
             const terminalBlocks = blocks.map((block) => {
               if (block.type === "text" && block.isStreaming === true) {
                 const hasContent = Boolean(block.content.trim());

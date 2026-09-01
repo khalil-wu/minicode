@@ -22,7 +22,7 @@ class ProviderProjectionResult:
     awaiting_trailing_done: bool = False
 
 
-_DISPLAYABLE_PROVIDER_REASONING_TYPES = frozenset(
+_PUBLIC_PROVIDER_REASONING_TYPES = frozenset(
     {
         "reasoning_summary_text",  # OpenAI Responses reasoning summaries
         "reasoning_content",  # OpenAI-compatible Chat reasoning deltas
@@ -56,15 +56,10 @@ async def project_non_text_provider_event(
         reasoning_type = str(
             (getattr(event, "raw", {}) or {}).get("provider_reasoning_type") or ""
         )
-        # Only surfaces the provider itself intends for display. Raw
-        # chain-of-thought stays internal (OpenAI's response.reasoning_text.* is
-        # already dropped at the adapter, and MiniCode has no opt-in for it).
-        # The excluded thinking frames are not content either: signature_delta
-        # carries a cryptographic signature and redacted thinking is an opaque
-        # blob. Anthropic's thinking_delta *is* the displayable surface, and
-        # dropping it meant a user paying for a thinking budget saw nothing
-        # even though ThinkingCell renders exactly this shape.
-        displayable = reasoning_type in _DISPLAYABLE_PROVIDER_REASONING_TYPES
+        # Summary and raw reasoning are both public live events. The WS runner
+        # persists only reasoning_summary_text; raw provider reasoning remains
+        # an ephemeral stream that disappears when its reasoning item settles.
+        displayable = reasoning_type in _PUBLIC_PROVIDER_REASONING_TYPES
         # Untagged block boundaries open/close the cell for the tagged deltas.
         boundary_only = (
             not reasoning_type
@@ -74,6 +69,7 @@ async def project_non_text_provider_event(
         if not displayable and not boundary_only:
             yield ProviderProjectionResult(True)
             return
+        projected_reasoning_type = reasoning_type or "thinking"
         # Provider streams may split reasoning into whitespace-only deltas.
         # They carry no visible content and must not cross the strict event
         # constructor, which rejects empty delta bodies. Lifecycle boundaries
@@ -84,6 +80,7 @@ async def project_non_text_provider_event(
                 source="provider",
                 visibility="timeline",
                 phase="model",
+                provider_reasoning_type=projected_reasoning_type,
                 item_id=event.item_id,
                 content_index=event.content_index,
                 lifecycle=event.lifecycle,

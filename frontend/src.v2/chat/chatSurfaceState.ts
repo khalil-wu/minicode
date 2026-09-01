@@ -335,6 +335,7 @@ const processCells = (
         content: item.content,
         source: thinkingSource(item),
         phase: item.phase,
+        providerReasoningType: item.providerReasoningType,
         isStreaming: item.status === "running",
         createdAt: item.startedAt ?? message.timestamp,
         segment: item.segment,

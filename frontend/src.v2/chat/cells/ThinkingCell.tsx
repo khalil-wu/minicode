@@ -2,6 +2,10 @@ import { memo } from "react";
 import { MarkdownRenderer } from "../messages/MarkdownRenderer";
 import { readableToolLabel } from "../toolDisplayName";
 import type { ThinkingCellState } from "./cellTypes";
+import {
+  isProviderReasoningSummary,
+  isTransientProviderReasoning,
+} from "../../lib/provider-reasoning";
 import "./cells.css";
 
 export const ThinkingCell = memo(function ThinkingCell({
@@ -14,15 +18,15 @@ export const ThinkingCell = memo(function ThinkingCell({
   const streaming = Boolean(isStreaming || cell.isStreaming);
   const content = readableToolLabel(cell.content).trim();
   if (!content) return null;
-  const providerReasoning = ["provider", "reasoning"].includes(cell.source);
-  // Provider reasoning is ephemeral. Model commentary is durable process
-  // narration: it stays in sequence, has no label/rail/card, and closes the
-  // preceding tool segment as soon as it arrives.
-  if (providerReasoning && !streaming) return null;
+  const summary = isProviderReasoningSummary(cell);
+  const transient = isTransientProviderReasoning(cell);
+  if (transient && !streaming) return null;
+  const variant = summary ? "summary" : transient ? "live" : "commentary";
   return (
     <div
-      className={`thinking-cell ${providerReasoning ? "thinking-cell-live" : "thinking-cell-commentary"}`}
+      className={`thinking-cell thinking-cell-${variant}`}
       data-source={cell.source}
+      data-reasoning-type={cell.providerReasoningType}
       data-streaming={streaming ? "true" : "false"}
     >
       <MarkdownRenderer content={content} isStreaming={streaming} />

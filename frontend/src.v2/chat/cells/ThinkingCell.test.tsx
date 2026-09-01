@@ -45,7 +45,12 @@ describe("ThinkingCell", () => {
 
   it("shows provider reasoning immediately while streaming and removes it when settled", () => {
     const { rerender } = render(<ThinkingCell
-      cell={thinkingCell({ source: "provider", content: "Provider reasoning preview", isStreaming: true })}
+      cell={thinkingCell({
+        source: "provider",
+        providerReasoningType: "reasoning_content",
+        content: "Provider reasoning preview",
+        isStreaming: true,
+      })}
       isStreaming
     />);
 
@@ -54,7 +59,12 @@ describe("ThinkingCell", () => {
     expect(document.querySelector(".thinking-cell-live")).toBeTruthy();
 
     rerender(<ThinkingCell
-      cell={thinkingCell({ source: "provider", content: "Provider reasoning preview", isStreaming: false })}
+      cell={thinkingCell({
+        source: "provider",
+        providerReasoningType: "reasoning_content",
+        content: "Provider reasoning preview",
+        isStreaming: false,
+      })}
     />);
 
     expect(document.body.textContent).not.toContain("Provider reasoning preview");
@@ -62,12 +72,16 @@ describe("ThinkingCell", () => {
   });
 
   it("does not retain completed provider reasoning", () => {
-    render(<ThinkingCell cell={thinkingCell({ source: "provider", content: "Provider reasoning preview" })} />);
+    render(<ThinkingCell cell={thinkingCell({
+      source: "provider",
+      providerReasoningType: "reasoning_content",
+      content: "Provider reasoning preview",
+    })} />);
     expect(document.body.textContent).toBe("");
   });
 
-  it("preserves Markdown while provider reasoning is live", () => {
-    render(<ThinkingCell cell={thinkingCell({
+  it("preserves a provider reasoning summary after streaming settles", () => {
+    const { rerender } = render(<ThinkingCell cell={thinkingCell({
       source: "provider",
       providerReasoningType: "reasoning_summary_text",
       content: "**Fetching Beijing's Weather**\n\nChecking current conditions.",
@@ -77,5 +91,17 @@ describe("ThinkingCell", () => {
     expect(document.body.textContent).toContain("Fetching Beijing's Weather");
     expect(document.body.textContent).toContain("Checking current conditions.");
     expect(document.querySelector("strong")).toBeTruthy();
+    expect(document.querySelector(".thinking-cell-summary")).toBeTruthy();
+
+    rerender(<ThinkingCell cell={thinkingCell({
+      source: "provider",
+      providerReasoningType: "reasoning_summary_text",
+      content: "**Fetching Beijing's Weather**\n\nChecking current conditions.",
+      isStreaming: false,
+    })} />);
+
+    expect(document.body.textContent).toContain("Fetching Beijing's Weather");
+    expect(document.body.textContent).toContain("Checking current conditions.");
+    expect(document.querySelector(".thinking-cell-summary")).toBeTruthy();
   });
 });

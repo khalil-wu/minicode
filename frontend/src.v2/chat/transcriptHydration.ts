@@ -1,6 +1,11 @@
 import { normalizeToolDiff, type ToolCallRecord } from "../lib/tool-call-reducer";
 import { workspacePathComparisonKey } from "../lib/workspace-path";
 import {
+  isHiddenProviderReasoning,
+  isTransientProviderReasoning,
+  providerReasoningType,
+} from "../lib/provider-reasoning";
+import {
   isAgentProgressPhase,
   isAgentProgressProviderState,
 } from "../protocol/streaming-types";
@@ -467,13 +472,15 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
   for (const item of items) {
     const type = String(item.type ?? "").trim();
     if (type === "thinking") {
-      if (isLegacyRawProviderReasoning(item)) continue;
+      if (isHiddenProviderReasoning(item) || isTransientProviderReasoning(item)) continue;
+      const reasoningType = providerReasoningType(item);
       blocks.push({
         type: "thinking",
         content: typeof item.content === "string" ? item.content : "",
         source: stringValue(item.source),
         visibility: stringValue(item.visibility),
         phase: stringValue(item.phase),
+        providerReasoningType: reasoningType || undefined,
       });
       continue;
     }
@@ -665,25 +672,6 @@ const legacyBlocksFor = (
       : { type: "text", content: message.content });
   }
   return blocks.length ? blocks : undefined;
-};
-
-const isLegacyRawProviderReasoning = (item: Record<string, unknown>): boolean => {
-  if (booleanValue(item.is_raw_provider_reasoning ?? item.isRawProviderReasoning) === true) {
-    return true;
-  }
-  const visibility = String(item.visibility ?? "").trim().toLowerCase();
-  if (["hidden", "internal", "redacted"].includes(visibility)) return true;
-  const reasoningType = String(
-    item.provider_reasoning_type ?? item.providerReasoningType ?? "",
-  ).trim().toLowerCase();
-  return [
-    "reasoning_text",
-    "reasoning_content",
-    "raw_reasoning",
-    "raw_provider_reasoning",
-    "thinking",
-    "thinking_delta",
-  ].includes(reasoningType);
 };
 
 const normalizeText = (value: string): string => value.trim().replace(/\s+/g, " ");

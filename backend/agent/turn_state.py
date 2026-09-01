@@ -124,12 +124,26 @@ def append_thinking_block(
     if blocks and blocks[-1].get('type') == 'thinking':
         previous_metadata = {
             key: blocks[-1].get(key)
-            for key in ('source', 'visibility', 'phase')
+            for key in (
+                'source',
+                'visibility',
+                'phase',
+                'provider_reasoning_type',
+                'item_id',
+                'content_index',
+            )
             if key in blocks[-1]
         }
         incoming_metadata = {
             key: normalized.get(key)
-            for key in ('source', 'visibility', 'phase')
+            for key in (
+                'source',
+                'visibility',
+                'phase',
+                'provider_reasoning_type',
+                'item_id',
+                'content_index',
+            )
             if key in normalized
         }
         if previous_metadata == incoming_metadata:
@@ -333,10 +347,11 @@ class AgentTurnState:
             ('retry_attempt', 'retryAttempt'),
             ('max_retries', 'maxRetries'),
             ('retry_after_ms', 'retryAfterMs'),
-            ('provider_state', 'providerState'),
         ):
             if data.get(source_key) is not None:
                 progress[target_key] = max(0, _int_or(data.get(source_key), 0))
+        if data.get('provider_state') is not None:
+            progress['providerState'] = str(data.get('provider_state') or '').strip()
         if data.get('error_message'):
             progress['errorMessage'] = str(data.get('error_message') or '')
         if data.get('operation_id'):

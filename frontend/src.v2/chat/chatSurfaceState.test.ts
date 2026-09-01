@@ -834,6 +834,37 @@ describe("chat surface explicit projection", () => {
     expect(turns[0]?.committedCells.filter((cell) => cell.kind === "thinking").map((cell) => cell.source)).toEqual(["commentary", "commentary"]);
   });
 
+  it("keeps a provider reasoning summary in the completed work trace", () => {
+    const turns = projectMessagesToTurns([
+      message("assistant-summary", "assistant", [
+        {
+          type: "thinking",
+          content: "已核对提交链路并定位重复请求。",
+          source: "provider",
+          providerReasoningType: "reasoning_summary_text",
+        },
+        {
+          type: "text",
+          itemId: "final-1",
+          content: "修复完成。",
+          source: "model_final",
+          status: "completed",
+          isStreaming: false,
+        },
+      ]),
+    ], false);
+
+    expect(turns[0]?.committedCells).toEqual([
+      expect.objectContaining({
+        kind: "thinking",
+        content: "已核对提交链路并定位重复请求。",
+        providerReasoningType: "reasoning_summary_text",
+        isStreaming: false,
+      }),
+    ]);
+    expect(turns[0]?.finalAnswerCell?.markdownSource).toBe("修复完成。");
+  });
+
   it("streams an unclassified preamble as a live process cell, never as the answer", () => {
     const turns = projectMessagesToTurns([
       message("assistant-1", "assistant", [{

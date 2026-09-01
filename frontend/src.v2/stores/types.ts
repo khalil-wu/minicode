@@ -819,6 +819,7 @@ export interface ThinkingContentBlock {
   source?: "provider" | "model_preamble" | "post_tool" | "runtime" | string;
   visibility?: "debug" | "timeline" | "compact" | string;
   phase?: string;
+  providerReasoningType?: string;
   item_id?: string;
   content_index?: number;
   lifecycle?: "start" | "delta" | "end" | string;
@@ -1304,6 +1305,7 @@ export interface ChatSlice {
     metadata?: Partial<Omit<ThinkingContentBlock, "type" | "content">>,
     messageId?: string,
   ) => void;
+  settleThinking: (conversationId?: string, messageId?: string) => void;
   appendProcessItem: (
     item: Omit<ProcessContentBlock, "type" | "timestamp"> & { timestamp?: number },
     conversationId?: string,

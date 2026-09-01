@@ -260,6 +260,34 @@ describe("projectTurn explicit event contract", () => {
     expect(projectTurn(blocks, { includeHiddenActivity: true }).activityItems).toEqual([]);
   });
 
+  it("keeps provider summaries after raw reasoning settles", () => {
+    const blocks: ContentBlock[] = [
+      {
+        type: "thinking",
+        content: "temporary raw body",
+        source: "provider",
+        providerReasoningType: "reasoning_content",
+      },
+      {
+        type: "thinking",
+        content: "durable summary",
+        source: "provider",
+        providerReasoningType: "reasoning_summary_text",
+      },
+    ];
+
+    expect(projectTurn(blocks).activityItems).toEqual([
+      expect.objectContaining({
+        content: "durable summary",
+        providerReasoningType: "reasoning_summary_text",
+        status: "completed",
+      }),
+    ]);
+    expect(projectTurn(blocks, { isThinkingStreaming: true }).activityItems).toEqual([
+      expect.objectContaining({ content: "durable summary", status: "running" }),
+    ]);
+  });
+
   it("marks only the latest reasoning block as streaming", () => {
     const projection = projectTurn([
       { type: "thinking", content: "First reasoning", source: "provider" },

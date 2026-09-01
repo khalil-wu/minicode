@@ -517,6 +517,7 @@ const THINKING_METADATA_KEYS = [
   "source",
   "visibility",
   "phase",
+  "providerReasoningType",
   "item_id",
   "content_index",
 ] as const;
@@ -529,6 +530,9 @@ export const normalizeThinkingMetadata = (
   if (metadata.source !== undefined) normalized.source = metadata.source;
   if (metadata.visibility !== undefined) normalized.visibility = metadata.visibility;
   if (metadata.phase !== undefined) normalized.phase = metadata.phase;
+  if (metadata.providerReasoningType !== undefined) {
+    normalized.providerReasoningType = metadata.providerReasoningType;
+  }
   if (metadata.item_id !== undefined) normalized.item_id = metadata.item_id;
   if (metadata.content_index !== undefined) normalized.content_index = metadata.content_index;
   if (metadata.lifecycle !== undefined) normalized.lifecycle = metadata.lifecycle;
