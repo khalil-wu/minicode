@@ -23,6 +23,7 @@ from backend.ws.agent_runner import (
     _llm_settings_identity,
     _reconcile_ui_agent_state_with_runtime,
     _reply_attachments_from_tool_calls,
+    _attachment_path_key,
     _is_persistent_reasoning_event,
     _ui_agent_state_for_event,
 )
@@ -278,6 +279,12 @@ def test_reply_attachments_are_deduplicated_from_persisted_tool_outputs() -> Non
         {"path": r"C:\Desktop\report.pdf", "size": 4096, "is_image": False},
         {"path": r"C:\Desktop\chart.png", "size": 512, "is_image": True},
     ]
+
+
+def test_attachment_path_key_normalizes_windows_paths_on_unix() -> None:
+    assert _attachment_path_key(r"C:\Desktop\report.pdf") == _attachment_path_key(
+        r"c:\desktop\REPORT.pdf"
+    )
 
 
 def test_runner_marks_external_context_and_disables_memory_generation(tmp_path, monkeypatch):

@@ -329,7 +329,7 @@ def _reply_attachments_from_tool_calls(records: list[dict[str, Any]]) -> list[di
             if not isinstance(item, dict):
                 continue
             path = str(item.get("path") or "").strip()
-            path_key = os.path.normcase(os.path.normpath(path))
+            path_key = _attachment_path_key(path)
             if not path or path_key in seen_paths:
                 continue
             seen_paths.add(path_key)
@@ -343,6 +343,15 @@ def _reply_attachments_from_tool_calls(records: list[dict[str, Any]]) -> list[di
                 "is_image": bool(item.get("isImage", item.get("is_image", False))),
             })
     return attachments
+
+
+def _attachment_path_key(value: str) -> str:
+    """Normalize Windows-style deliverable paths consistently on every host."""
+    normalized = value.replace("\\", "/")
+    drive, separator, remainder = normalized.partition(":/")
+    if separator:
+        normalized = f"{drive.lower()}:/{remainder}"
+    return os.path.normcase(os.path.normpath(normalized)).lower()
 
 
 def _project_agent_message_event(
