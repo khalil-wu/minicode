@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -64,7 +64,9 @@ def test_default_requirements_path_is_owned_by_minicode(monkeypatch) -> None:
     monkeypatch.setattr("backend.config_requirements.sys.platform", "win32")
     monkeypatch.setenv("ProgramData", r"C:\PolicyRoot")
 
-    assert default_requirements_path() == Path(
+    # Compare Windows path semantics explicitly: CI executes this branch on
+    # Linux while simulating ``sys.platform == "win32"``.
+    assert PureWindowsPath(default_requirements_path()) == PureWindowsPath(
         r"C:\PolicyRoot\MiniCode\requirements.toml"
     )
 
