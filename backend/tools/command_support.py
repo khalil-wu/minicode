@@ -344,7 +344,10 @@ def _model_shell_description() -> str:
             "unverified computed path. Launch background helpers with "
             "Start-Process -WindowStyle Hidden unless the user explicitly asked for a visible window."
         )
-    return "Execute a shell command for builds, tests, installs, git, processes, and scripts."
+    return (
+        "Execute a shell command for builds, tests, installs, git, processes, and scripts "
+        "within the workspace sandbox."
+    )
 
 
 # Stderr signatures that typically indicate the OS sandbox (network namespace /
