@@ -102,4 +102,4 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Run Electron-facing frontend tests
         working-directory: frontend
-        run: npm run test:e2e:electron
+        run: xvfb-run -a npm run test:e2e:electron
