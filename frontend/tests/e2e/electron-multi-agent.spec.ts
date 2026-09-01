@@ -1,5 +1,6 @@
 import { _electron as electron, expect, test } from "@playwright/test";
 import { createHash, randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import { createServer, type Server } from "node:http";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -576,16 +577,9 @@ class MultiAgentBackend {
 }
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
-const electronExecutable = path.join(
-  repoRoot,
-  "desktop",
-  "node_modules",
-  "electron",
-  "dist",
-  process.platform === "win32" ? "electron.exe" : "electron",
-);
 const desktopEntry = path.join(repoRoot, "desktop");
 const desktopMain = path.join(desktopEntry, "main.js");
+const electronExecutable = createRequire(path.join(desktopEntry, "package.json"))("electron") as string;
 const frontendPort = Number(process.env.MINICODE_E2E_PORT ?? "43173");
 const userDataPrefix = "minicode-agent-e2e-";
 const isTransientWindowsLock = (error: unknown) =>

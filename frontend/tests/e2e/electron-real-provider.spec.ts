@@ -1,5 +1,6 @@
 import { _electron as electron, expect, test } from "@playwright/test";
 import { createServer } from "node:net";
+import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -23,13 +24,7 @@ const requireCacheRead = process.env.MINICODE_REAL_E2E_REQUIRE_CACHE_READ === "1
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
 const desktopEntry = path.join(repoRoot, "desktop");
 const desktopMain = path.join(desktopEntry, "main.js");
-const electronExecutable = path.join(
-  desktopEntry,
-  "node_modules",
-  "electron",
-  "dist",
-  process.platform === "win32" ? "electron.exe" : "electron",
-);
+const electronExecutable = createRequire(path.join(desktopEntry, "package.json"))("electron") as string;
 const frontendPort = Number(process.env.MINICODE_E2E_PORT ?? "43173");
 const evidenceRoot = path.join(repoRoot, "artifacts", "real-provider-e2e");
 
