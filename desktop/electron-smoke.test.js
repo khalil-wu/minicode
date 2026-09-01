@@ -175,7 +175,15 @@ test("Electron app boots real BrowserWindow with preload runtime and guarded IPC
   const port = await listen(server);
   const baseUrl = `http://127.0.0.1:${port}`;
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-electron-e2e-"));
-  const child = spawn(electronPath, ["--disable-gpu", __dirname], {
+  // Chromium refuses to start as root unless its sandbox is explicitly
+  // disabled. CI smoke runs may use a root container; regular user sessions
+  // keep the sandbox enabled.
+  const electronArgs = ["--disable-gpu"];
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    electronArgs.push("--no-sandbox");
+  }
+  electronArgs.push(__dirname);
+  const child = spawn(electronPath, electronArgs, {
     cwd: __dirname,
     env: {
       ...process.env,

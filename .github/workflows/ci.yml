@@ -94,6 +94,9 @@ jobs:
       - name: Install frontend
         working-directory: frontend
         run: npm ci
+      - name: Install desktop
+        working-directory: desktop
+        run: npm ci
       - name: Install Playwright browser
         working-directory: frontend
         run: npx playwright install --with-deps chromium
