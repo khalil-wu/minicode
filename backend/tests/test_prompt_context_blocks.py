@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime as RealDateTime, timezone
 from pathlib import Path
 
@@ -99,7 +100,12 @@ def test_context_builder_adds_runtime_blocks_as_leading_instructions() -> None:
     assert "<environment_context>" in user
     assert r"<cwd>C:\repo &amp; &lt;unsafe&gt;</cwd>" in user
     assert r"<root>C:\repo &amp; &lt;unsafe&gt;</root>" in user
-    assert "<shell>powershell (Windows host, bypass execution)</shell>" in user
+    expected_shell = (
+        "powershell (Windows host, bypass execution)"
+        if os.name == "nt"
+        else "powershell"
+    )
+    assert f"<shell>{expected_shell}</shell>" in user
     assert "<current_date>2026-06-28</current_date>" in user
     assert "<timezone>Asia/Shanghai</timezone>" in user
     assert 'permission_profile type="bypass" source="unit&lt;test&gt;"' in user

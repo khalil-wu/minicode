@@ -21,6 +21,10 @@ from urllib.parse import quote, urlparse
 
 from backend.sandbox import (
     AdditionalPermissionProfile,
+    FileSystemAccessMode,
+    FileSystemPath,
+    FileSystemPermissions,
+    FileSystemSandboxEntry,
     NetworkPermissions,
     SandboxPolicy,
     SandboxRunner,
@@ -501,11 +505,13 @@ async def _start_preview_config(
     if config.port:
         env_overrides["PORT"] = str(config.port)
     sandbox_root = _safe_workspace_root(workspace_root or config.cwd)
+    runtime_readable_roots = _preview_runtime_readable_roots()
     if sandbox_policy is None:
         # Desktop preview commands are explicit user control-plane operations.
         policy = SandboxPolicy(
             workspace_root=sandbox_root,
             writable_roots=(sandbox_root,),
+            readable_roots=runtime_readable_roots,
             allow_network=True,
             env_overrides=env_overrides,
         )
@@ -519,8 +525,22 @@ async def _start_preview_config(
         # Starting preview_server is a CONFIRM tool action. Represent that
         # approval as an additional network capability while preserving every
         # filesystem deny, writable-root and fail-closed setting from the turn.
+        resolved_policy = sandbox_policy.resolve()
+        runtime_read_entries = tuple(
+            FileSystemSandboxEntry(
+                FileSystemPath.path(root),
+                FileSystemAccessMode.READ,
+            )
+            for root in runtime_readable_roots
+            if resolved_policy.resolve_access(root) is FileSystemAccessMode.DENY
+        )
         policy = sandbox_policy.with_additional_permissions(
             AdditionalPermissionProfile(
+                file_system=(
+                    FileSystemPermissions(entries=runtime_read_entries)
+                    if runtime_read_entries
+                    else None
+                ),
                 network=NetworkPermissions(enabled=True),
             )
         )
@@ -555,6 +575,20 @@ def _allocate_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         return int(listener.getsockname()[1])
+
+
+def _preview_runtime_readable_roots() -> tuple[Path, ...]:
+    """Return the code and interpreter roots needed by the static server."""
+
+    roots: list[Path] = [Path(__file__).resolve().parents[2]]
+    prefixes = [Path(value).resolve() for value in (sys.prefix, sys.base_prefix)]
+    roots.extend(prefixes)
+    if prefixes:
+        # Virtualenv interpreters commonly symlink through a versioned Python
+        # installation. Keep the symlink directory visible without exposing
+        # the user's whole home directory.
+        roots.append(prefixes[-1].parent)
+    return tuple(dict.fromkeys(root for root in roots if root.exists()))
 
 
 async def start_static_preview(
