@@ -4,6 +4,15 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def provide_websocket_regression_model(monkeypatch: pytest.MonkeyPatch, request) -> None:
+    """Give hand-built websocket sessions the same explicit model on CI."""
+
+    if request.path.name == "test_regressions_websocket.py":
+        monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
+        monkeypatch.setenv("OPENAI_AVAILABLE_MODELS", "gpt-5.4")
+
+
+@pytest.fixture(autouse=True)
 def isolate_runtime_data_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """Keep websocket/API tests from writing into the desktop user's data dir."""
     # Checkpoints and background-task records resolve through
