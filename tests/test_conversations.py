@@ -24,6 +24,11 @@ class _ConversationNoopLLM(LLMAdapter):
 
 
 def _install_noop_llm(monkeypatch) -> None:
+    # CI intentionally has no developer settings.json. Keep these transport
+    # tests focused on websocket behavior by selecting an explicit catalog
+    # model at the test boundary.
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
+    monkeypatch.setenv("OPENAI_AVAILABLE_MODELS", "gpt-5.4")
     factory = lambda config, model_override=None, **kwargs: _ConversationNoopLLM()
     monkeypatch.setattr("backend.main._create_session_llm", factory)
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", factory)
