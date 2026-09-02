@@ -417,11 +417,12 @@ def test_run_command_tool_allows_relative_cwd_inside_workspace(tmp_path: Path) -
     nested = workspace / "nested"
     nested.mkdir(parents=True)
     tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    python_command = "python" if sys.platform == "win32" else "python3"
 
     result = asyncio.run(
         tool.execute(
             {
-                "command": 'python -c "import os; print(os.path.basename(os.getcwd()))"',
+                "command": f'{python_command} -c "import os; print(os.path.basename(os.getcwd()))"',
                 "cwd": "nested",
             },
             context=ToolExecutionContext(
