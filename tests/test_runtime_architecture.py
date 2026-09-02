@@ -444,6 +444,8 @@ def test_run_command_tool_allows_relative_cwd_inside_workspace(tmp_path: Path) -
         pytest.skip(
             "MiniCode restricted-token cwd ACL requires an elevated Temp parent on this host"
         )
+    if result.is_error and "workspace sandbox is unavailable on this host" in result.content.lower():
+        pytest.skip("workspace sandbox backend is unavailable on this host")
     assert result.is_error is False
     assert "nested" in result.content
 
