@@ -10,6 +10,7 @@ def provide_websocket_regression_model(monkeypatch: pytest.MonkeyPatch, request)
     if request.path.name in {
         "test_regressions_websocket.py",
         "test_smoke_api.py",
+        "test_smoke_websocket.py",
     }:
         monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
         monkeypatch.setenv("OPENAI_AVAILABLE_MODELS", "gpt-5.4")
