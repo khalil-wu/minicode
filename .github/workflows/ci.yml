@@ -40,13 +40,18 @@ jobs:
       - name: Run backend and root tests
         run: |
           set -o pipefail
-          python -m pytest "${{ matrix.test_path }}" --maxfail=1 2>&1 | tee "pytest-${{ matrix.suite }}.log"
+          python -m pytest "${{ matrix.test_path }}" --maxfail=1 --tb=short 2>&1 | tee "pytest-${{ matrix.suite }}.log"
       - name: Surface backend test failure
         if: failure()
         run: |
+          if grep -q '^=\+ FAILURES =\+' "pytest-${{ matrix.suite }}.log"; then
+            failure_lines=$(sed -n '/^=\+ FAILURES =\+/,/^=\+ short test summary info =\+/p' "pytest-${{ matrix.suite }}.log" | head -160)
+          else
+            failure_lines=$(tail -120 "pytest-${{ matrix.suite }}.log")
+          fi
           while IFS= read -r line; do
             echo "::error file=pytest-${{ matrix.suite }}.log::${line}"
-          done < <(tail -120 "pytest-${{ matrix.suite }}.log")
+          done <<< "$failure_lines"
 
   frontend:
     name: Frontend tests and budgets
