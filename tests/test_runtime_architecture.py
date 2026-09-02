@@ -912,7 +912,8 @@ def test_static_environment_info_does_not_call_blocking_platform_probe(
 
     info = build_static_environment_info(tmp_path)
 
-    assert "Windows" in info
+    expected_os = "Windows" if sys.platform == "win32" else sys.platform
+    assert expected_os in info
     assert str(tmp_path) not in info
 
 
