@@ -333,6 +333,11 @@ def test_unavailable_restricted_sandbox_fails_before_process_creation(
         "_container_runtime",
         lambda: ("", "", "test runtime unavailable"),
     )
+    monkeypatch.setattr(
+        runner_module,
+        "_bubblewrap_capability",
+        lambda: (False, "test bubblewrap unavailable"),
+    )
     runner = SandboxRunner(SandboxPolicy.workspace_default(tmp_path))
 
     result = asyncio.run(runner.run("echo must-not-run", cwd=tmp_path))
