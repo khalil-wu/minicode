@@ -505,7 +505,9 @@ async def _start_preview_config(
     if config.port:
         env_overrides["PORT"] = str(config.port)
     sandbox_root = _safe_workspace_root(workspace_root or config.cwd)
-    runtime_readable_roots = _preview_runtime_readable_roots()
+    runtime_readable_roots = _preview_runtime_readable_roots(
+        include_code_root=config.source == "static-html"
+    )
     if sandbox_policy is None:
         # Desktop preview commands are explicit user control-plane operations.
         policy = SandboxPolicy(
@@ -577,10 +579,14 @@ def _allocate_loopback_port() -> int:
         return int(listener.getsockname()[1])
 
 
-def _preview_runtime_readable_roots() -> tuple[Path, ...]:
-    """Return the code and interpreter roots needed by the static server."""
+def _preview_runtime_readable_roots(
+    *, include_code_root: bool,
+) -> tuple[Path, ...]:
+    """Return the interpreter roots needed by the preview command."""
 
-    roots: list[Path] = [Path(__file__).resolve().parents[2]]
+    roots: list[Path] = []
+    if include_code_root:
+        roots.append(Path(__file__).resolve().parents[2])
     prefixes = [Path(value).resolve() for value in (sys.prefix, sys.base_prefix)]
     roots.extend(prefixes)
     if prefixes:
