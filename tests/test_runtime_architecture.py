@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import shlex
 import subprocess
 import sys
@@ -980,7 +981,12 @@ def test_run_command_tool_uses_context_background_manager_for_background_runs(
     assert len(manager.calls) == 1
     call = manager.calls[0]
     assert call["command"] == "python backend\\server.py --port 8082"
-    assert call["cwd"] == "C:\\workspace"
+    expected_cwd = (
+        "C:\\workspace"
+        if os.name == "nt"
+        else str((Path.cwd() / "C:\\workspace").resolve())
+    )
+    assert call["cwd"] == expected_cwd
     # Background commands are durable tasks.  A zero timeout means the
     # launcher does not kill them after the foreground command default; the
     # background manager still owns cancellation and explicit deadlines.
@@ -990,7 +996,12 @@ def test_run_command_tool_uses_context_background_manager_for_background_runs(
     assert isinstance(policy, SandboxPolicy)
     assert policy.disable_os_sandbox is False
     assert policy.allow_network is False
-    assert policy.writable_roots == (Path("C:\\workspace"),)
+    expected_workspace = (
+        Path("C:\\workspace")
+        if os.name == "nt"
+        else (Path.cwd() / "C:\\workspace").resolve()
+    )
+    assert policy.writable_roots == (expected_workspace,)
 
 
 def test_run_command_tool_background_bypass_uses_bypass_policy() -> None:
