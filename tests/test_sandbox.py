@@ -236,7 +236,24 @@ def test_sandbox_blocks_write_outside_writable_roots(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
 
-    policy = SandboxPolicy(writable_roots=(workspace,), allow_network=True, timeout=10)
+    policy = SandboxPolicy(
+        permission_profile=PermissionProfile.managed(
+            FileSystemSandboxPolicy.restricted(
+                [
+                    FileSystemSandboxEntry(
+                        FileSystemPath.special(FileSystemSpecialPath.MINIMAL),
+                        FileSystemAccessMode.READ,
+                    ),
+                    FileSystemSandboxEntry(
+                        FileSystemPath.path(workspace),
+                        FileSystemAccessMode.WRITE,
+                    ),
+                ]
+            )
+        ),
+        workspace_root=workspace,
+        timeout=10,
+    )
     runner = SandboxRunner(policy)
     if not runner.capability().available:
         pytest.skip(runner.capability().reason)
