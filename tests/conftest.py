@@ -7,7 +7,10 @@ import pytest
 def provide_websocket_regression_model(monkeypatch: pytest.MonkeyPatch, request) -> None:
     """Give hand-built websocket sessions the same explicit model on CI."""
 
-    if request.path.name == "test_regressions_websocket.py":
+    if request.path.name in {
+        "test_regressions_websocket.py",
+        "test_smoke_api.py",
+    }:
         monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
         monkeypatch.setenv("OPENAI_AVAILABLE_MODELS", "gpt-5.4")
 
