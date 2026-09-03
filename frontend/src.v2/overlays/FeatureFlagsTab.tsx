@@ -52,14 +52,6 @@ const GROUP_LABELS: Record<typeof GROUPS[number], string> = {
   SDK: "SDK",
 };
 
-const jsonHeaders = (): HeadersInit => {
-  try {
-    return authHeaders({ "content-type": "application/json" });
-  } catch {
-    return { "content-type": "application/json" };
-  }
-};
-
 const overrideToDraft = (value: boolean | null | undefined): DraftOverride => {
   if (value === true) return "on";
   if (value === false) return "off";
@@ -133,7 +125,7 @@ export const FeatureFlagsTab = () => {
     try {
       const res = await fetchWithTimeout(`${apiBase()}/api/settings/feature-flags`, {
         method: "PUT",
-        headers: jsonHeaders(),
+        headers: authHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ flags: { [flag.name]: draftToOverride(nextDraft) } }),
       }, { timeoutMessage: "保存功能开关超时，请重试。" });
       if (!res.ok) {

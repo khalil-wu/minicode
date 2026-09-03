@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -60,6 +61,96 @@ def test_websocket_envelope_overrides_turn_local_seq(tmp_path: Path) -> None:
 
     assert first["seq"] == 51
     assert second["seq"] == 52
+
+
+def test_event_outbox_marks_partial_replay_log_as_degraded(tmp_path: Path) -> None:
+    replay_path = tmp_path / "session.jsonl"
+    replay_path.write_text(
+        json.dumps({
+            "type": "agent_message.delta",
+            "conversation_id": "conversation-1",
+            "seq": 1,
+            "item_id": "assistant-1",
+            "delta": "hello",
+        })
+        + "\n{\"type\":\"done\",\"conversation_id\":\"conversation-1\",\"seq\":99",
+        encoding="utf-8",
+    )
+
+    class WebSocket:
+        application_state = None
+        client_state = None
+
+        async def send_json(self, _payload) -> None:
+            return None
+
+    outbox = _outbox(tmp_path, WebSocket())
+
+    assert outbox.replay_log_degraded is True
+    assert outbox.current_replay_seq == 1
+
+
+def test_event_outbox_delivers_raw_reasoning_live_but_does_not_replay_it(tmp_path: Path) -> None:
+    class WebSocket:
+        application_state = None
+        client_state = None
+
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+
+        async def send_json(self, payload) -> None:
+            self.sent.append(dict(payload))
+
+    websocket = WebSocket()
+    outbox = _outbox(tmp_path, websocket)
+
+    async def scenario() -> None:
+        assert await outbox.send_payload(
+            {
+                "type": "thinking_delta",
+                "conversation_id": "conversation-1",
+                "message_id": "assistant-1",
+                "content": "live reasoning",
+                "source": "provider",
+                "visibility": "timeline",
+                "provider_reasoning_type": "reasoning_content",
+            },
+            log_context="thinking_delta",
+        ) is True
+        if outbox.persistence_tail is not None:
+            await outbox.persistence_tail
+
+    asyncio.run(scenario())
+
+    assert websocket.sent[0]["content"] == "live reasoning"
+    assert outbox._events == []
+    assert outbox.load_persisted_window(limit=10)[0] == []
+
+
+def test_event_outbox_withholds_explicitly_debug_reasoning_from_live_ui(tmp_path: Path) -> None:
+    class WebSocket:
+        application_state = None
+        client_state = None
+
+        async def send_json(self, _payload) -> None:
+            raise AssertionError("debug reasoning must not reach the websocket")
+
+    outbox = _outbox(tmp_path, WebSocket())
+
+    async def scenario() -> bool:
+        return await outbox.send_payload(
+            {
+                "type": "thinking_delta",
+                "conversation_id": "conversation-1",
+                "content": "private reasoning",
+                "source": "provider",
+                "visibility": "debug",
+                "provider_reasoning_type": "reasoning_content",
+            },
+            log_context="thinking_delta",
+        )
+
+    assert asyncio.run(scenario()) is False
 
 
 def test_file_changed_envelope_uses_rfc3339_transport_timestamp(tmp_path: Path) -> None:

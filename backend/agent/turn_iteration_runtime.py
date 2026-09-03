@@ -82,13 +82,10 @@ class TurnIterationRuntime:
         if active_llm is not None:
             self.llm = active_llm
             self.tool_context.llm = active_llm
-            bind_llm = getattr(self.context, "bind_llm", None)
-            if callable(bind_llm):
-                bind_llm(active_llm)
+            self.context.bind_llm(active_llm)
         active_budget = getattr(owner, "token_budget", None)
         if active_budget is not None:
-            if hasattr(self.context, "_budget"):
-                self.context._budget = active_budget
+            self.context.bind_budget(active_budget)
         active_registry = (
             getattr(owner, "tool_registry", None) if owner is not None else None
         )

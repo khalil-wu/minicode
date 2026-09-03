@@ -26,6 +26,11 @@ import {
 } from "../lib/workspace-path";
 import { isImagePath, isPdfPath, isPreviewableMediaPath } from "../lib/media-types";
 import { formatBytes } from "../lib/format-bytes";
+import {
+  createMarkdownHeadingIdAssigner,
+  decodeMarkdownFragment,
+  markdownHeadingSlug,
+} from "../lib/markdown";
 
 const configureMonacoWorkers = () => {
   const scope = globalThis as typeof globalThis & {
@@ -297,16 +302,12 @@ const createMarkdownPreviewComponents = (
   ownerPath: string,
   workingDirectory: string,
   scopeId: string,
+  headingId: ReturnType<typeof createMarkdownHeadingIdAssigner>,
 ) => {
-  const slugCounts = new Map<string, number>();
-  const headingId = (children: React.ReactNode): string => {
-    const base = markdownHeadingSlug(reactNodeText(children));
-    const count = (slugCounts.get(base) ?? 0) + 1;
-    slugCounts.set(base, count);
-    return `${scopeId}-${base}${count > 1 ? `-${count}` : ""}`;
-  };
-  const heading = (level: 1 | 2 | 3) => (props: React.HTMLAttributes<HTMLHeadingElement>) => {
-    const id = headingId(props.children);
+  const heading = (level: 1 | 2 | 3) => (props: React.HTMLAttributes<HTMLHeadingElement> & {
+    node?: { position?: { start?: { line?: number } } };
+  }) => {
+    const id = headingId(reactNodeText(props.children), props.node?.position?.start?.line);
     const Tag: "h1" | "h2" | "h3" = level === 1 ? "h1" : level === 2 ? "h2" : "h3";
     return <Tag {...props} id={id} style={{ scrollMarginTop: 16, ...props.style }} tabIndex={-1} />;
   };
@@ -314,7 +315,7 @@ const createMarkdownPreviewComponents = (
   a: (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
     const href = typeof props.href === "string" ? props.href : "";
     if (href.startsWith("#")) {
-      const target = `${scopeId}-${markdownHeadingSlug(decodeURIComponent(href.slice(1)))}`;
+      const target = `${scopeId}-${markdownHeadingSlug(decodeMarkdownFragment(href.slice(1)))}`;
       return (
         <a
           {...props}
@@ -422,16 +423,6 @@ const reactNodeText = (node: React.ReactNode): string => {
   return "";
 };
 
-const markdownHeadingSlug = (value: string): string => {
-  const slug = value
-    .trim()
-    .toLocaleLowerCase()
-    .replace(/[^\p{L}\p{N}\s_-]/gu, "")
-    .replace(/[\s_]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || "section";
-};
-
 const readFileSnapshot = async (path: string, workingDirectory: string): Promise<FileSnapshot | null> => {
   if (!isEditablePath(path)) return null;
   if (isDesktop()) {
@@ -501,6 +492,11 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     () => `editor-markdown-${Math.abs(editorPathComparisonKey(activeTab?.path ?? "markdown", workingDirectory).split("").reduce((hash, char) => ((hash * 31) + char.charCodeAt(0)) | 0, 0))}`,
     [activeTab?.path, workingDirectory],
   );
+  const markdownHeadingId = useMemo(
+    () => createMarkdownHeadingIdAssigner(markdownScopeId),
+    [markdownScopeId],
+  );
+  markdownHeadingId.reset();
   const editorSlot = panelSlots.find((slot) => slot.kind === "editor");
   const editorSlotId = editorSlot?.id ?? "editor";
   const chatSlot = panelSlots.find((slot) => slot.kind === "chat");
@@ -513,8 +509,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     [activeTab, canRenderMarkdown],
   );
   const markdownPreviewComponents = useMemo(
-    () => createMarkdownPreviewComponents(activeTab?.path ?? "", workingDirectory, markdownScopeId),
-    [activeTab?.path, activeTab?.content, workingDirectory, markdownScopeId],
+    () => createMarkdownPreviewComponents(activeTab?.path ?? "", workingDirectory, markdownScopeId, markdownHeadingId),
+    [activeTab?.path, activeTab?.content, workingDirectory, markdownScopeId, markdownHeadingId],
   );
   const markdownPreviewTooImageHeavy = markdownImageCount > MAX_MARKDOWN_PREVIEW_IMAGES;
   const showEditorTabs = chrome === "full";

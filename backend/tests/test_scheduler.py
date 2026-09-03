@@ -65,6 +65,33 @@ def test_scheduler_list_tasks_includes_computed_next_run(monkeypatch, tmp_path) 
     assert rows[0]["next_run_at"] is None
 
 
+def test_scheduler_list_keeps_task_with_unusable_persisted_timezone_visible(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    schedule_path = tmp_path / "scheduled_tasks.json"
+    monkeypatch.setattr(scheduler_module, "SCHEDULE_FILE", schedule_path)
+    task = ScheduledTask(
+        id="task-bad-timezone",
+        name="Legacy task",
+        prompt="inspect",
+        schedule="0 9 * * *",
+        timezone="Mars/Phobos",
+    )
+    schedule_path.write_text(
+        json.dumps({"version": 4, "tasks": [task.to_dict()], "runs": []}),
+        encoding="utf-8",
+    )
+
+    scheduler = TaskScheduler()
+
+    rows = scheduler.list_tasks()
+
+    assert [row["id"] for row in rows] == [task.id]
+    assert rows[0]["next_run_at"] is None
+    assert task.id in scheduler._unusable_schedule_ids
+
+
 def test_missed_schedule_points_catches_up_without_repeating_same_minute() -> None:
     task = ScheduledTask(
         name="Every minute",

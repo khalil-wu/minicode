@@ -24,6 +24,7 @@ _ADAPTIVE_THINKING_MODEL_MARKERS = (
 
 
 from backend.agent.prompting import _json_fingerprint, _short_sha256, split_sys_prompt_prefix
+from backend.agent.turn_markers import contains_turn_aborted_marker
 from backend.llm.base import (
     ProviderActivityEvent,
     StreamEvent,
@@ -1198,19 +1199,6 @@ def _strip_excess_anthropic_media(
     return stripped_messages
 
 
-def _contains_turn_aborted_marker(value: Any) -> bool:
-    if isinstance(value, str):
-        return "<turn_aborted>" in value
-    if isinstance(value, dict):
-        return any(_contains_turn_aborted_marker(item) for item in value.values())
-    if isinstance(value, (list, tuple)):
-        return any(_contains_turn_aborted_marker(item) for item in value)
-    content = getattr(value, "content", None)
-    if content is not None:
-        return _contains_turn_aborted_marker(content)
-    return False
-
-
 def _safe_anthropic_request_params(kwargs: dict[str, Any]) -> dict[str, Any]:
     params: dict[str, Any] = {}
     for key in ("model", "max_tokens", "stream", "tool_choice", "thinking"):
@@ -1291,7 +1279,7 @@ def _anthropic_safe_request_summary(
         "prompt_cache_key_present": False,
         "prompt_cache_key_hash": "",
         "request_params": _safe_anthropic_request_params(kwargs),
-        "turn_aborted_marker_present": _contains_turn_aborted_marker(api_messages),
+        "turn_aborted_marker_present": contains_turn_aborted_marker(api_messages),
         "instructions_len": len(system_text),
         "instructions_hash": _short_sha256(stable_system or system_text),
         "instructions_full_hash": _short_sha256(system_text),
@@ -1358,5 +1346,4 @@ def _anthropic_safe_request_summary_from_payload(
         metadata=metadata,
         kwargs=payload,
     )
-
 

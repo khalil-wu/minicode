@@ -39,6 +39,10 @@ from backend.permissions.context import PermissionContext, ToolExecutionContext
 logger = logging.getLogger(__name__)
 
 
+class PermissionContextRefreshError(RuntimeError):
+    """The live policy could not be read or committed for this turn."""
+
+
 def _set_terminal_reason(
     state: AgentState,
     reason: TerminalReason,
@@ -427,23 +431,26 @@ class TurnKernel:
         try:
             current = provider()
         except Exception as exc:
-            logger.debug("Live permission context refresh failed: %s", exc)
-            return False
-        if not isinstance(current, PermissionContext) or current == tool_context.permission:
+            raise PermissionContextRefreshError(
+                "The active permission policy could not be refreshed."
+            ) from exc
+        if not isinstance(current, PermissionContext):
+            raise PermissionContextRefreshError(
+                "The live permission provider returned an invalid policy."
+            )
+        if current == tool_context.permission:
             return False
         committer = tool_context.permission_context_committer
         if not callable(committer):
-            # Subagent tool contexts carry a provider without a committer;
-            # fail closed the same way as a committer that raises.
-            logger.warning(
-                "Managed permission context refresh failed closed: no turn-owned committer"
+            raise PermissionContextRefreshError(
+                "The active permission policy changed, but this turn has no policy owner."
             )
-            return False
         try:
             committer(current)
         except Exception as exc:
-            logger.warning("Managed permission context refresh failed closed: %s", exc)
-            return False
+            raise PermissionContextRefreshError(
+                "The active permission policy changed but could not be applied."
+            ) from exc
         return True
 
     async def emit_runtime_span(

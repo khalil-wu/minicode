@@ -395,6 +395,87 @@ def test_reemit_pending_state_preserves_completed_commentary_source() -> None:
     ]
 
 
+def test_stream_resume_omits_legacy_raw_provider_reasoning_blocks() -> None:
+    streams = {
+        "conv-raw": create_stream_state(
+            "conv-raw",
+            "assistant-raw",
+            "turn-raw",
+        )
+    }
+    streams["conv-raw"]["content_blocks"] = [
+        {
+            "type": "thinking",
+            "content": "private reasoning",
+            "source": "provider",
+            "provider_reasoning_type": "reasoning_content",
+        },
+        {
+            "type": "thinking",
+            "content": "public summary",
+            "source": "provider",
+            "provider_reasoning_type": "reasoning_summary_text",
+        },
+    ]
+
+    from backend.ws.stream_state import get_stream_content_blocks
+
+    blocks = get_stream_content_blocks(streams["conv-raw"])
+    assert [block["content"] for block in blocks] == ["public summary"]
+
+
+def test_stream_resume_keeps_summary_reasoning_from_thinking_events() -> None:
+    streams = {
+        "conv-reasoning": create_stream_state(
+            "conv-reasoning",
+            "assistant-reasoning",
+            "turn-reasoning",
+        )
+    }
+
+    apply_stream_event(
+        streams,
+        "conv-reasoning",
+        "thinking_delta",
+        {
+            "content": "private reasoning",
+            "source": "provider",
+            "visibility": "timeline",
+            "provider_reasoning_type": "reasoning_content",
+            "item_id": "reasoning-item",
+            "content_index": 0,
+        },
+    )
+    apply_stream_event(
+        streams,
+        "conv-reasoning",
+        "thinking_delta",
+        {
+            "content": "public summary",
+            "source": "provider",
+            "visibility": "timeline",
+            "provider_reasoning_type": "reasoning_summary_text",
+            "item_id": "summary-item",
+            "content_index": 1,
+        },
+    )
+
+    from backend.ws.stream_state import get_stream_content_blocks
+
+    blocks = get_stream_content_blocks(streams["conv-reasoning"])
+    assert blocks == [
+        {
+            "type": "thinking",
+            "content": "public summary",
+            "source": "provider",
+            "visibility": "timeline",
+            "provider_reasoning_type": "reasoning_summary_text",
+            "item_id": "summary-item",
+            "content_index": 1,
+        }
+    ]
+
+
 def test_provider_retry_discards_tracked_tools_before_resetting_payload() -> None:
     calls: list[str] = []
 

@@ -119,8 +119,44 @@ _CATASTROPHIC_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bRemove-Item\b(?=[^\n]*-Recurse)(?=[^\n]*[A-Z]:\\Users\\[^\\\s]+\\?\s*$)", re.I), "recursive delete of system directory"),
     (re.compile(r"\bformat\s+[A-Z]:", re.I), "drive format"),
     (re.compile(r"del\s+/[sS].*\\Windows", re.I), "delete Windows system directory"),
+    (
+        re.compile(r"\bdel\s+/[sS](?:\s+/[qQ])?\s+[A-Z]:\\\s*$", re.I),
+        "recursive delete of drive root",
+    ),
     (re.compile(r"rd\s+/[sS]\s+/[qQ]\s+[A-Z]:\\$", re.I), "recursive delete of drive root"),
     (re.compile(r"\b(?:rd|rmdir)\b\s+/[sS]\s+/[qQ]\s+[A-Z]:\\Users\\[^\\\s]+\\?\s*$", re.I), "recursive delete of system directory"),
+    # Git operations that discard durable local state. These patterns are
+    # anchored to one shell segment; compound commands are split below.
+    (re.compile(r"^\s*git\s+reset\s+--hard\b", re.I), "destructive git reset"),
+    (
+        re.compile(
+            r"^\s*git\s+clean\b"
+            r"(?![^\n;&|]*(?:\s(?:-n|--dry-run)(?:\s|$)))"
+            r"(?=[^\n;&|]*(?:\s-[A-Za-z]*f[A-Za-z]*\b|\s--force(?:\s|$)))",
+            re.I,
+        ),
+        "destructive git clean",
+    ),
+    (
+        re.compile(r"^\s*git\s+(?:checkout|restore)\s+(?:--\s+)?\.\s*$", re.I),
+        "destructive git working-tree restore",
+    ),
+    (re.compile(r"^\s*git\s+stash\s+(?:drop|clear)\b", re.I), "destructive git stash removal"),
+    (
+        re.compile(
+            r"^\s*git\s+branch\s+(?:-D\b|--delete\s+--force\b|--force\s+--delete\b)",
+            re.I,
+        ),
+        "destructive git branch deletion",
+    ),
+    (
+        re.compile(r"^\s*git\s+push\b[^\n]*(?:--force(?:-with-lease)?|-f)\b", re.I),
+        "destructive forced git push",
+    ),
+    (re.compile(r"^\s*git\s+commit\b[^\n]*--amend\b", re.I), "destructive git amend"),
+    (re.compile(r"^\s*kubectl\s+delete\b", re.I), "destructive Kubernetes delete"),
+    (re.compile(r"^\s*terraform\s+destroy\b", re.I), "destructive Terraform destroy"),
+    (re.compile(r"^\s*(?:drop|truncate)\s+(?:table|database|schema)\b", re.I), "destructive database operation"),
     # Background process ownership follows Codex/Pi: MiniCode can terminate the
     # exact process tree registered under a command id, but shell-wide matching
     # can kill the backend, editor, or unrelated user work. Exact PID forms such
@@ -195,6 +231,13 @@ _INJECTION_RISK_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
 )
 
+# A command substitution is a nested shell payload. Inspecting it with the
+# same catastrophic blocklist keeps a wrapper from hiding a destructive action.
+_COMMAND_SUBSTITUTION_RE = re.compile(
+    r"\$\(([^()]*)\)|`([^`]*)`|<\(([^()]*)\)|>\(([^()]*)\)",
+    re.DOTALL,
+)
+
 
 def command_injection_risk(command: str) -> str:
     """Return a reason string when a command carries a parser-differential /
@@ -225,6 +268,26 @@ _DESTRUCTIVE_COMPOUND_SEGMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(r"^\s*find\b[^\n]*(?:-delete|-exec(?:dir)?\s+(?:rm|del|erase|rmdir|rd)\b)", re.I),
         "destructive find operation hidden inside a compound command",
+    ),
+    (
+        re.compile(
+            r"^\s*git\s+(?:reset\s+--hard\b|clean\b|"
+            r"(?:checkout|restore)\s+(?:--\s+)?\.\s*$|"
+            r"stash\s+(?:drop|clear)\b|"
+            r"branch\s+(?:-D\b|--delete\s+--force\b|--force\s+--delete\b)|"
+            r"push\b[^\n]*(?:--force(?:-with-lease)?|-f)\b|"
+            r"commit\b[^\n]*--amend\b)",
+            re.I,
+        ),
+        "destructive git operation hidden inside a compound command",
+    ),
+    (
+        re.compile(r"^\s*(?:kubectl\s+delete|terraform\s+destroy)\b", re.I),
+        "destructive external operation hidden inside a compound command",
+    ),
+    (
+        re.compile(r"^\s*(?:drop|truncate)\s+(?:table|database|schema)\b", re.I),
+        "destructive database operation hidden inside a compound command",
     ),
 )
 
@@ -411,6 +474,19 @@ def _check_catastrophic_command(command: str, *, _depth: int = 0) -> tuple[bool,
         return False, f"命令被安全策略拦截: {compound_reason}"
     if _depth >= 4:
         return False, "命令被安全策略拦截: shell wrapper nesting is too deep"
+    for match in _COMMAND_SUBSTITUTION_RE.finditer(stripped):
+        nested = next(
+            (group for group in match.groups() if group is not None),
+            "",
+        ).strip()
+        if not nested:
+            continue
+        nested_allowed, nested_reason = _check_catastrophic_command(
+            nested,
+            _depth=_depth + 1,
+        )
+        if not nested_allowed:
+            return nested_allowed, nested_reason
     payload, parse_error = _shell_wrapper_payload(stripped)
     if parse_error:
         return False, f"命令被安全策略拦截: {parse_error}"
@@ -1102,6 +1178,11 @@ class PermissionChecker:
         if context is not None and context.mode == "bypass":
             if tool_level == PermissionLevel.ALWAYS_DENY:
                 return PermissionLevel.ALWAYS_DENY, "tool", f"{tool_name}.check_permission"
+            # Bypass removes ordinary prompts, not parser-differential risk
+            # signals. A substitution can hide a destructive command from the
+            # token-level classifier, so it remains a confirmation boundary.
+            if injection_reason:
+                return PermissionLevel.CONFIRM, "injection_risk", injection_reason
             if tool is not None:
                 try:
                     side_effect_kind = str(tool.get_side_effect_kind(args) or "").strip().lower()

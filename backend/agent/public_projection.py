@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from backend.secret_redaction import redact_secrets
+from backend.agent.value_utils import nonnegative_int as _public_nonnegative_int
 
 
 _PUBLIC_USAGE_COUNT_FIELDS = (
@@ -37,18 +38,6 @@ def public_text(value: Any, *, max_chars: int = 50_000, single_line: bool = Fals
     if max_chars <= 3:
         return rendered[:max_chars]
     return rendered[: max_chars - 3] + "..."
-
-
-def _public_nonnegative_int(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(numeric) or numeric < 0 or not numeric.is_integer():
-        return None
-    return int(numeric)
 
 
 def project_public_usage(value: Any) -> dict[str, Any]:

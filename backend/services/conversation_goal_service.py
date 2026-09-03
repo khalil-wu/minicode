@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from backend.conversations.models import utc_now_iso
 from backend.services.runtime_control_service import CommandOutcome
+from backend.services.command_target import resolve_conversation_target as resolve_goal_target
 
 GoalEventScope = Literal["none", "active", "always"]
 
@@ -17,14 +18,6 @@ class GoalAction:
     event_goal: dict[str, Any]
     outcome: CommandOutcome
 
-
-
-def resolve_goal_target(conversation_repo: Any, data: dict[str, Any], *, active_conversation_id: str = "") -> tuple[str, Any | None]:
-    explicit_conversation_id = str(data.get("conversation_id") or "").strip()
-    conversation_id = str(explicit_conversation_id or active_conversation_id or "").strip()
-    if not conversation_id:
-        return "", None
-    return conversation_id, conversation_repo.get_conversation(conversation_id)
 
 
 def build_goal_updated_payload(

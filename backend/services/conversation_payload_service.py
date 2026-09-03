@@ -28,6 +28,7 @@ class ConversationCreateRequest:
     git_isolated: bool
     activate: bool
     workspace_required_error: AgentEvent | None = None
+    error_event: AgentEvent | None = None
 
 
 @dataclass(frozen=True)
@@ -199,9 +200,23 @@ def parse_conversation_create_request(data: dict[str, Any]) -> ConversationCreat
     )
     activate = conversation_type == "main"
     workspace_root = str(data.get("workspace_root") or "").strip()
-    permission_mode = normalize_permission_mode(
-        str(data.get("permission_mode") or DEFAULT_CONVERSATION_PERMISSION_MODE)
-    ) or DEFAULT_CONVERSATION_PERMISSION_MODE
+    raw_permission_mode = data.get("permission_mode")
+    permission_mode_error: AgentEvent | None = None
+    if raw_permission_mode is None or (
+        isinstance(raw_permission_mode, str)
+        and not raw_permission_mode.strip()
+    ):
+        permission_mode = DEFAULT_CONVERSATION_PERMISSION_MODE
+    else:
+        permission_mode = normalize_permission_mode(str(raw_permission_mode))
+        if permission_mode is None:
+            permission_mode = DEFAULT_CONVERSATION_PERMISSION_MODE
+            permission_mode_error = AgentEvent.error(
+                "Invalid permission mode. Use one of: plan, confirm, auto, bypass.",
+                recoverable=True,
+                error_type="validation",
+                error_code="invalid_permission_mode",
+            )
     workspace_required_error = None
     if git_isolated and not workspace_root:
         workspace_required_error = AgentEvent.error(
@@ -220,6 +235,7 @@ def parse_conversation_create_request(data: dict[str, Any]) -> ConversationCreat
         git_isolated=git_isolated,
         activate=activate,
         workspace_required_error=workspace_required_error,
+        error_event=permission_mode_error,
     )
 
 

@@ -18,6 +18,7 @@ from backend.hooks.models import (
     normalized_hook_hash,
 )
 from backend.hooks.policy import event_policy
+from backend.hooks.value_utils import coerce_bool as _coerce_bool
 
 logger = logging.getLogger(__name__)
 
@@ -592,18 +593,3 @@ def _nonnegative_int(value: Any) -> int | None:
     except (TypeError, ValueError, OverflowError):
         return None
     return parsed if parsed >= 0 else None
-
-
-def _coerce_bool(value: Any, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value != 0
-    if value is None:
-        return default
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "on", "enabled"}:
-        return True
-    if text in {"0", "false", "no", "off", "disabled"}:
-        return False
-    return default

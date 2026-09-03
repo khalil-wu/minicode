@@ -7,6 +7,7 @@ focused on protocol while trace/redaction helpers are independently testable.
 from __future__ import annotations
 
 from backend.agent.prompting import _json_fingerprint, _short_sha256, split_sys_prompt_prefix
+from backend.agent.turn_markers import contains_turn_aborted_marker
 from backend.config import LLMSettings
 from backend.llm.base import LLMMessage
 from typing import Any
@@ -341,19 +342,6 @@ def _count_prompt_cache_breakpoints(value: Any) -> int:
 
 
 
-def _contains_turn_aborted_marker(value: Any) -> bool:
-    if isinstance(value, str):
-        return "<turn_aborted>" in value
-    if isinstance(value, dict):
-        return any(_contains_turn_aborted_marker(item) for item in value.values())
-    if isinstance(value, (list, tuple)):
-        return any(_contains_turn_aborted_marker(item) for item in value)
-    content = getattr(value, "content", None)
-    if content is not None:
-        return _contains_turn_aborted_marker(content)
-    return False
-
-
 def _instruction_text_from_messages(messages: list[LLMMessage] | None) -> str:
     if not messages:
         return ""
@@ -412,7 +400,7 @@ def _safe_request_summary(
         else "",
         "request_params": _safe_request_params(request_params),
         "request_param_keys": _safe_request_param_keys(request_params),
-        "turn_aborted_marker_present": _contains_turn_aborted_marker(
+        "turn_aborted_marker_present": contains_turn_aborted_marker(
             input_items if input_items is not None else messages or []
         ),
     }

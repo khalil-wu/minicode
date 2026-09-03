@@ -628,6 +628,10 @@ class ContextBuilder:
         """Bind the session's active adapter for compaction and side queries."""
         self._llm = llm
 
+    def bind_budget(self, token_budget: TokenBudget) -> None:
+        """Bind the active turn budget used by prompt and compaction paths."""
+        self._budget = token_budget
+
     def bind_llm_turn_context(self, turn_context: Any) -> None:
         self._llm_turn_context = turn_context
 

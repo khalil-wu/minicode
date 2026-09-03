@@ -1361,11 +1361,11 @@ class SessionAgentRunnerMixin:
             self._conversation_projection_locks[conversation_id] = lock
         return lock
 
-    async def _flush_ui_agent_state_now(self, conversation_id: str) -> None:
+    async def _flush_ui_agent_state_now(self, conversation_id: str) -> bool:
         async with self._conversation_projection_lock(conversation_id):
-            await self._flush_ui_agent_state_now_unlocked(conversation_id)
+            return await self._flush_ui_agent_state_now_unlocked(conversation_id)
 
-    async def _flush_ui_agent_state_now_unlocked(self, conversation_id: str) -> None:
+    async def _flush_ui_agent_state_now_unlocked(self, conversation_id: str) -> bool:
         state_store = self.ui_agent_state_store
         pending = state_store.pending
         tasks = state_store.tasks
@@ -1379,16 +1379,34 @@ class SessionAgentRunnerMixin:
             except asyncio.CancelledError:
                 pass
 
-        item = pending.pop(conversation_id, None)
+        item = pending.get(conversation_id)
         if item is not None:
             revision, state = item
-            await asyncio.to_thread(
-                self.conversation_repo.patch_context_snapshot,
-                conversation_id,
-                {UI_AGENT_STATE_SNAPSHOT_KEY: state},
-                revision=revision,
-                revision_key=UI_AGENT_STATE_REVISION_KEY,
-            )
+            try:
+                await asyncio.to_thread(
+                    self.conversation_repo.patch_context_snapshot,
+                    conversation_id,
+                    {UI_AGENT_STATE_SNAPSHOT_KEY: state},
+                    revision=revision,
+                    revision_key=UI_AGENT_STATE_REVISION_KEY,
+                )
+            except Exception:
+                # Keep the newest pending revision for the next explicit
+                # flush/reconnect. Removing it before the write turned a
+                # transient persistence failure into silent projection loss.
+                logger.error(
+                    "Failed to persist UI agent state for conversation %s",
+                    conversation_id,
+                    exc_info=True,
+                )
+                if (
+                    tasks.get(conversation_id) is current_task
+                    or tasks.get(conversation_id) is scheduled
+                ):
+                    tasks.pop(conversation_id, None)
+                return False
+            if pending.get(conversation_id) == item:
+                pending.pop(conversation_id, None)
 
         if tasks.get(conversation_id) is current_task or tasks.get(conversation_id) is scheduled:
             tasks.pop(conversation_id, None)
@@ -1396,6 +1414,7 @@ class SessionAgentRunnerMixin:
             tasks[conversation_id] = asyncio.create_task(
                 self._flush_ui_agent_state_after_delay(conversation_id)
             )
+        return conversation_id not in pending
 
     async def _flush_ui_agent_state_after_delay(self, conversation_id: str) -> None:
         try:
@@ -1473,6 +1492,11 @@ class SessionAgentRunnerMixin:
                 and not scheduled.done()
             )
             await self._flush_ui_agent_state_now_unlocked(owner)
+            # A failed flush deliberately leaves the newest projection in
+            # ``pending``. Reconcile that in-memory state with runtime data
+            # instead of reloading an older durable snapshot and silently
+            # discarding it.
+            pending_item = pending.get(owner)
             loaded_owner = str(getattr(conversation, "id", "") or "").strip()
             if conversation is None or loaded_owner != owner or must_reload_after_flush:
                 conversation = await asyncio.to_thread(
@@ -1483,19 +1507,33 @@ class SessionAgentRunnerMixin:
                 return None
             snapshot = dict(getattr(conversation, "context_snapshot", {}) or {})
             current_state = snapshot.get(UI_AGENT_STATE_SNAPSHOT_KEY)
+            try:
+                persisted_revision = int(snapshot.get(UI_AGENT_STATE_REVISION_KEY) or 0)
+            except (TypeError, ValueError):
+                persisted_revision = 0
+            if (
+                isinstance(pending_item, tuple)
+                and len(pending_item) == 2
+                and isinstance(pending_item[1], dict)
+                and isinstance(pending_item[0], int)
+                and pending_item[0] >= persisted_revision
+            ):
+                pending_revision, pending_state = pending_item
+                current_state = pending_state
+                persisted_revision = int(pending_revision)
             reconciled_state, changed = _reconcile_ui_agent_state_with_runtime(
                 current_state,
                 runtime=default_runtime(),
                 conversation_id=owner,
             )
-            if not changed:
+            if not changed and pending_item is None:
                 return conversation
 
-            try:
-                current_revision = int(snapshot.get(UI_AGENT_STATE_REVISION_KEY) or 0)
-            except (TypeError, ValueError):
-                current_revision = 0
-            revision = max(current_revision + 1, time.time_ns())
+            revision = (
+                max(persisted_revision + 1, time.time_ns())
+                if changed
+                else persisted_revision
+            )
             updated = await asyncio.to_thread(
                 self.conversation_repo.patch_context_snapshot,
                 owner,
@@ -1504,6 +1542,8 @@ class SessionAgentRunnerMixin:
                 revision_key=UI_AGENT_STATE_REVISION_KEY,
             )
             state_store.cache[owner] = (revision, reconciled_state)
+            if pending_item is not None and pending.get(owner) == pending_item:
+                pending.pop(owner, None)
             return updated or conversation
 
     def _extension_runtime_state(self, conversation_id: str) -> LifecycleGenerationState:
@@ -1780,8 +1820,8 @@ class SessionAgentRunnerMixin:
                 model=selected,
                 model_runtime=runtime,
             )
-            self.context_builder._llm = self.llm
-            self.context_builder._budget = self.config.token_budget
+            self.context_builder.bind_llm(self.llm)
+            self.context_builder.bind_budget(self.config.token_budget)
         send_state = getattr(self, "send_llm_state", None)
         if callable(send_state):
             await send_state()
@@ -2863,7 +2903,7 @@ class SessionAgentRunnerMixin:
             selected_config = getattr(self, "config", None)
             selected_budget = getattr(selected_config, "token_budget", None)
             if selected_budget is not None:
-                run_context_builder._budget = selected_budget
+                run_context_builder.bind_budget(selected_budget)
             active_llm = getattr(self, "llm", None)
             if active_llm is None:
                 return False
@@ -2875,9 +2915,7 @@ class SessionAgentRunnerMixin:
                     "agent",
                     agent_session.agent_settings,
                 )
-            bind_llm = getattr(run_context_builder, "bind_llm", None)
-            if callable(bind_llm):
-                bind_llm(active_llm)
+            run_context_builder.bind_llm(active_llm)
             # Match MiniCode AgentSession._getThinkingLevelForModelSwitch(): a
             # reasoning-capable current model carries its live session level
             # across the switch; a non-reasoning current model restores the
@@ -3145,10 +3183,8 @@ class SessionAgentRunnerMixin:
                 selected_budget = getattr(selected_config, "token_budget", None)
                 if selected_budget is not None:
                     agent_session.token_budget = selected_budget
-                    run_context_builder._budget = selected_budget
-                bind_llm = getattr(run_context_builder, "bind_llm", None)
-                if callable(bind_llm):
-                    bind_llm(self.llm)
+                    run_context_builder.bind_budget(selected_budget)
+                run_context_builder.bind_llm(self.llm)
             tool_registry = (
                 self._extension_runtime_state(conversation_id).get("registry")
                 or tool_registry
@@ -3215,9 +3251,7 @@ class SessionAgentRunnerMixin:
                 if agent_session is not None
                 else getattr(self, "llm", None) or run_llm
             )
-            bind_llm = getattr(run_context_builder, "bind_llm", None)
-            if callable(bind_llm):
-                bind_llm(active_llm)
+            run_context_builder.bind_llm(active_llm)
             _lease_session_llm_for_current_task(self, active_llm)
             llm_turn_context = owner_context.llm_turn_context
             if llm_turn_context is None:
@@ -3930,8 +3964,7 @@ class SessionAgentRunnerMixin:
                 execution_journal,
                 conversation_id=conversation.id,
             )
-            await self._flush_ui_agent_state_now_unlocked(conversation.id)
-            self.ui_agent_state_store.cache.pop(conversation.id, None)
+            flushed_ui_state = await self._flush_ui_agent_state_now_unlocked(conversation.id)
             latest_for_turn = await asyncio.to_thread(
                 self.conversation_repo.get_conversation,
                 conversation.id,
@@ -3941,14 +3974,26 @@ class SessionAgentRunnerMixin:
                     "conversation disappeared while initializing a new turn"
                 )
             conversation = latest_for_turn
-            run_context_snapshot = _reset_ui_agent_state_snapshot(
-                conversation.context_snapshot
-            )
-            await asyncio.to_thread(
-                self.conversation_repo.save_context_snapshot,
-                conversation.id,
-                run_context_snapshot,
-            )
+            if flushed_ui_state:
+                self.ui_agent_state_store.cache.pop(conversation.id, None)
+                run_context_snapshot = _reset_ui_agent_state_snapshot(
+                    conversation.context_snapshot
+                )
+                await asyncio.to_thread(
+                    self.conversation_repo.save_context_snapshot,
+                    conversation.id,
+                    run_context_snapshot,
+                )
+            else:
+                # Keep the durable snapshot and retained pending projection
+                # intact until a later flush can commit it. Resetting here
+                # would make a transient write failure look like a successful
+                # empty UI state and strand the pending revision.
+                run_context_snapshot = (
+                    dict(conversation.context_snapshot)
+                    if isinstance(conversation.context_snapshot, dict)
+                    else {}
+                )
 
         # Track active streaming metadata for reconnection recovery. Prefer
         # the client-created assistant placeholder id so late events from an
@@ -4156,7 +4201,7 @@ class SessionAgentRunnerMixin:
                 self.models_source = run_models_source
                 self.selected_model = run_model
                 self.llm = run_llm
-                self.context_builder._llm = run_llm
+                self.context_builder.bind_llm(run_llm)
                 if not preserve_provider_override:
                     self._provider_override_active = False
         except Exception as exc:
@@ -5612,6 +5657,9 @@ class SessionAgentRunnerMixin:
                 try:
                     async with self._conversation_projection_lock(conversation.id):
                         await self._flush_ui_agent_state_now_unlocked(conversation.id)
+                        pending_ui_state = self.ui_agent_state_store.pending.get(
+                            conversation.id
+                        )
                         for image_context in assistant_image_contexts:
                             try:
                                 run_context_builder.append_generated_image_context(
@@ -5639,6 +5687,30 @@ class SessionAgentRunnerMixin:
                             saved_snapshot,
                             getattr(latest_conversation, "context_snapshot", None),
                         )
+                        latest_snapshot = getattr(latest_conversation, "context_snapshot", None)
+                        latest_snapshot_map = (
+                            latest_snapshot
+                            if isinstance(latest_snapshot, dict)
+                            else {}
+                        )
+                        try:
+                            latest_ui_revision = int(
+                                latest_snapshot_map.get(UI_AGENT_STATE_REVISION_KEY) or 0
+                            )
+                        except (TypeError, ValueError):
+                            latest_ui_revision = 0
+                        pending_ui_state_merged = False
+                        if (
+                            isinstance(pending_ui_state, tuple)
+                            and len(pending_ui_state) == 2
+                            and isinstance(pending_ui_state[1], dict)
+                            and isinstance(pending_ui_state[0], int)
+                            and pending_ui_state[0] > latest_ui_revision
+                        ):
+                            pending_revision, pending_state = pending_ui_state
+                            saved_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY] = pending_state
+                            saved_snapshot[UI_AGENT_STATE_REVISION_KEY] = pending_revision
+                            pending_ui_state_merged = True
                         terminal_journal = run_context.execution_journal
                         append_lifecycle = getattr(
                             terminal_journal,
@@ -5684,6 +5756,19 @@ class SessionAgentRunnerMixin:
                                 "message_id": assistant_message_id,
                             },
                         )
+                        if (
+                            pending_ui_state is not None
+                            and self.ui_agent_state_store.pending.get(conversation.id)
+                            == pending_ui_state
+                        ):
+                            self.ui_agent_state_store.pending.pop(conversation.id, None)
+                        if pending_ui_state_merged:
+                            self.ui_agent_state_store.cache[conversation.id] = (
+                                int(pending_ui_state[0]),
+                                pending_ui_state[1],
+                            )
+                        elif pending_ui_state is not None:
+                            self.ui_agent_state_store.cache.pop(conversation.id, None)
                         if conversation.id == self.active_conversation_id:
                             self.load_active_conversation_snapshot(conversation.id, saved_snapshot)
                         if new_summary is not None:

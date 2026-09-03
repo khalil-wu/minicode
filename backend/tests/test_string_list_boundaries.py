@@ -18,6 +18,7 @@ from backend.config_requirements import (
     normalize_string_array,
     parse_string_array,
 )
+from backend.config import permission_settings_from_config
 from backend.conversations.models import ConversationRecord, ConversationSummary
 from backend.conversations.public_projection import project_public_conversation
 from backend.mcp import project_settings
@@ -303,3 +304,9 @@ def test_public_conversation_projection_bounds_and_deduplicates_pollution_source
         "web_search",
         long_source[:4_093] + "...",
     ]
+
+
+@pytest.mark.parametrize("value", ["run_command", ["run_command", 7], {"run_command": True}])
+def test_user_permission_string_arrays_reject_wrong_types(value: Any) -> None:
+    with pytest.raises(ConfigRequirementsError, match=r"permissions\.auto_allow"):
+        permission_settings_from_config({"permissions": {"auto_allow": value}})

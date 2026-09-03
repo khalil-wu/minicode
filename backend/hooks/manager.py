@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from backend.hooks.models import HookEvent
+from backend.hooks.value_utils import coerce_bool as _coerce_hook_bool
 
 logger = logging.getLogger(__name__)
 
@@ -167,21 +168,6 @@ async def _emit_async_hook_response(
         await emit(response_event.type, dict(response_event.data))
     except Exception as exc:
         logger.debug("Async HookResponse emit failed for %s: %s", process_id, exc)
-
-
-def _coerce_hook_bool(value: Any, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value != 0
-    if value is None:
-        return default
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "on", "enabled"}:
-        return True
-    if text in {"0", "false", "no", "off", "disabled"}:
-        return False
-    return default
 
 
 def _canonical_config_change_source(source: str, file_path: str = "") -> str:

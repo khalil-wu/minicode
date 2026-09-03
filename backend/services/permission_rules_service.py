@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from backend.services.runtime_control_service import CommandOutcome
+from backend.services.command_target import resolve_conversation_target as resolve_permission_rule_target
 from backend.tools.base import PermissionLevel
 from backend.ws.utils import (
     normalize_permission_level,
@@ -22,14 +23,6 @@ class PermissionRuleMutation:
     serialized_overrides: dict[str, str]
     outcome: CommandOutcome
 
-
-
-def resolve_permission_rule_target(conversation_repo: Any, data: dict[str, Any], *, active_conversation_id: str = "") -> tuple[str, Any | None]:
-    explicit_conversation_id = str(data.get("conversation_id") or "").strip()
-    conversation_id = str(explicit_conversation_id or active_conversation_id or "").strip()
-    if not conversation_id:
-        return "", None
-    return conversation_id, conversation_repo.get_conversation(conversation_id)
 
 
 def build_permission_rules_list_outcome(conversation_id: str, rules: dict[str, Any]) -> CommandOutcome:

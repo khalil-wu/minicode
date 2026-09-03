@@ -8,6 +8,7 @@ from backend.agent.message import AgentEvent
 from backend.agent.tool_issues import classify_tool_issue
 from backend.agent.tool_execution import (
     display_summary_for_result,
+    missing_required_tool_argument_reason,
     result_kind_for_tool,
 )
 from backend.agent.tool_projection import projection_for_tool
@@ -47,6 +48,23 @@ class TestToolCallEvent:
         assert "started_at" not in msg
         assert "display_hint" not in msg
         assert "input_summary" not in msg
+
+    def test_malformed_non_object_arguments_report_without_crashing(self):
+        registry = ToolRegistry()
+        registry.register(MCPToolProxy(
+            "test",
+            MCPToolDef(
+                name="lookup",
+                description="lookup",
+                input_schema={"type": "object", "required": ["query"]},
+            ),
+            object(),
+        ))
+        call = ToolCallEvent(id="tc-bad", name="mcp__test__lookup", arguments=["bad"])
+
+        message = missing_required_tool_argument_reason(None, call, registry)
+
+        assert "Received keys: []" in message
 
 
 class TestToolResultEvent:

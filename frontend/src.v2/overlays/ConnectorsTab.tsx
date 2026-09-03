@@ -21,6 +21,7 @@ import { BrandIcon } from "../components/BrandIcon";
 import { pushToast } from "./ToastContainer";
 import { showConfirm } from "./DialogService";
 import { SelectMenu } from "../components/SelectMenu";
+import { reportCommandFailure } from "./commandFeedback";
 import {
   Section,
   inputStyle,
@@ -102,12 +103,6 @@ const inventoryFailureMessage = (result: CommandResultEvent): string => {
   if (code === "cancelled") return "MCP 目录读取已取消。";
   if (code === "transport_error") return "MCP 连接已中断，请检查服务状态后重试。";
   return String(result.message || (code === "protocol_error" ? "MCP 协议错误。" : "MCP 目录读取失败。"));
-};
-
-const reportCommandFailure = (result: CommandResultEvent, action: string): boolean => {
-  if (commandResultSucceeded(result)) return false;
-  pushToast(`${action}失败：${String(result.message || "服务未返回具体原因")}`, "error");
-  return true;
 };
 
 export const ConnectorsTab = () => {
@@ -344,7 +339,7 @@ export const ConnectorsTab = () => {
         commandType,
         { timeoutMs: LONG_COMMAND_RESULT_TIMEOUT_MS },
       );
-      if (reportCommandFailure(result, editingServerName ? "保存 MCP 服务" : "添加 MCP 服务")) return;
+      if (reportCommandFailure(result, editingServerName ? "保存 MCP 服务" : "添加 MCP 服务", "服务未返回具体原因")) return;
       pushToast(commandFeedback(
         result,
         editingServerName ? `已保存 MCP 服务：${name}` : `已添加 MCP 服务：${name}`,
@@ -366,7 +361,7 @@ export const ConnectorsTab = () => {
         "mcp.toggle",
         { timeoutMs: LONG_COMMAND_RESULT_TIMEOUT_MS },
       );
-      if (!reportCommandFailure(result, enabled ? "启用 MCP 服务" : "停用 MCP 服务")) {
+      if (!reportCommandFailure(result, enabled ? "启用 MCP 服务" : "停用 MCP 服务", "服务未返回具体原因")) {
         pushToast(`${enabled ? "已启用" : "已停用"} MCP 服务：${name}`, "success");
       }
     } catch (error) {
@@ -390,7 +385,7 @@ export const ConnectorsTab = () => {
         action,
         { timeoutMs: LONG_COMMAND_RESULT_TIMEOUT_MS },
       );
-      if (!reportCommandFailure(result, successMessage.replace(/^已/, ""))) {
+      if (!reportCommandFailure(result, successMessage.replace(/^已/, ""), "服务未返回具体原因")) {
         pushToast(successMessage, "success");
       }
     } catch (error) {
@@ -438,7 +433,7 @@ export const ConnectorsTab = () => {
         action,
         { timeoutMs: LONG_COMMAND_RESULT_TIMEOUT_MS },
       );
-      if (!reportCommandFailure(result, successMessage)) {
+      if (!reportCommandFailure(result, successMessage, "服务未返回具体原因")) {
         pushToast(commandFeedback(result, successMessage), "success");
       }
     } catch (error) {
@@ -457,7 +452,7 @@ export const ConnectorsTab = () => {
     setRefreshingServers(true);
     try {
       const result = await sendClientCommandAwaitResult({ type: "mcp.list" }, "mcp.list");
-      if (!reportCommandFailure(result, "刷新 MCP 状态")) {
+      if (!reportCommandFailure(result, "刷新 MCP 状态", "服务未返回具体原因")) {
         pushToast("MCP 状态已刷新", "success");
       }
     } catch (error) {

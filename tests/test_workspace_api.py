@@ -171,6 +171,8 @@ def test_workspace_dangerous_files_are_not_readable(monkeypatch, tmp_path) -> No
         )
 
     assert blocked.status_code == 403
+    assert "protected path" in blocked.json()["detail"].lower()
+    assert "credential" not in blocked.json()["detail"].lower()
     assert template_response.status_code == 200
     assert template_response.json()["content"].replace("\r\n", "\n") == "OPENAI_API_KEY=\n"
 

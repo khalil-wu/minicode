@@ -41,7 +41,7 @@ def test_provider_progress_state_remains_a_string_in_snapshot() -> None:
     assert progress["retryAttempt"] == 1
 
 
-def test_cancelled_turn_persists_unfinished_work_as_partial() -> None:
+def test_cancelled_turn_persists_unfinished_tool_as_cancelled() -> None:
     snapshot = _running_state().finalize(terminal_status="cancelled")
 
     progress = next(block for block in snapshot.blocks if block.get("type") == "progress")
@@ -49,6 +49,22 @@ def test_cancelled_turn_persists_unfinished_work_as_partial() -> None:
     tool = snapshot.tool_calls[0]
     assert progress["status"] == "partial"
     assert process["status"] == "partial"
+    assert tool["status"] == "cancelled"
+    assert "terminationReason" not in tool
+
+
+def test_interrupted_turn_uses_the_same_cancelled_tool_status() -> None:
+    snapshot = _running_state().finalize(terminal_status="interrupted")
+
+    tool = snapshot.tool_calls[0]
+    assert tool["status"] == "cancelled"
+    assert "terminationReason" not in tool
+
+
+def test_partial_turn_keeps_unfinished_tool_as_partial() -> None:
+    snapshot = _running_state().finalize(terminal_status="partial")
+
+    tool = snapshot.tool_calls[0]
     assert tool["status"] == "partial"
     assert "terminationReason" not in tool
 

@@ -21,6 +21,7 @@ from backend.agent.context import ContextBuilder
 from backend.agent.loop import AgentLoopSessionContext
 from backend.agent.message import AgentEvent
 from backend.agent.public_projection import project_public_subagent_result
+from backend.agent.provider_protocol import provider_raw_from_event_data
 from backend.agent.prompt_cache import prompt_cache_fork_diagnostic
 from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
 from backend.agent.run_context import RunContext
@@ -3147,8 +3148,9 @@ class TaskTool(BaseTool):
                             terminal_reason = str(event.data.get("reason") or "")
                             if isinstance(event.data.get("usage"), dict):
                                 terminal_usage = dict(event.data["usage"])
-                            if isinstance(event.data.get("providerRaw"), dict):
-                                terminal_provider_raw = dict(event.data["providerRaw"])
+                            provider_raw = provider_raw_from_event_data(event.data)
+                            if provider_raw:
+                                terminal_provider_raw = dict(provider_raw)
                 finally:
                     if pending_consumed is not None:
                         pending_consumed.set()

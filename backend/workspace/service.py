@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
 from backend.atomic_io import atomic_write_bytes, file_mutation_locks
-from backend.security.sensitive_files import is_protected_write_path, is_sensitive_file
+from backend.security.sensitive_files import is_protected_write_path
 from backend.documents.service import parse_document_preview
 
 from .models import (
@@ -538,18 +538,16 @@ class WorkspaceService:
 
     @staticmethod
     def ensure_not_sensitive_file(path: Path, *, operation: str = "read") -> None:
-        if is_sensitive_file(path):
+        if is_protected_write_path(path):
             raise HTTPException(
                 status_code=403,
-                detail=f"Refusing to {operation} sensitive credential file.",
+                detail=f"Refusing to {operation} protected path.",
             )
 
     @staticmethod
     def ensure_write_allowed(path: Path) -> None:
         """Apply the same protected-path chokepoint as agent file tools."""
         WorkspaceService.ensure_not_sensitive_file(path, operation="modify")
-        if is_protected_write_path(path):
-            raise HTTPException(status_code=403, detail="Refusing to modify protected path.")
 
     def workspace_path_payload(self, path: Path) -> WorkspacePathResponse:
         is_symlink = path.is_symlink()

@@ -65,25 +65,14 @@ async def emit_session_usage_snapshot(session: "WebSocketSession") -> Any:
     # Surface MCP tools connected since this session started before snapshotting.
     session.refresh_tool_registry_if_mcp_changed()
 
-    tool_schemas = None
-    try:
-        tool_schemas = session.tool_registry.get_schemas(
-            permission_checker=session.permission_checker,
-            permission_context=session.permission_context,
-        )
-    except Exception as exc:
-        logger.debug("usage tool schema snapshot failed: %s", exc)
-
-    try:
-        budget_snapshot = session.context_builder.get_budget_snapshot(
-            state=state,
-            tool_schemas=tool_schemas,
-        )
-    except Exception as exc:
-        logger.debug("usage budget snapshot failed: %s", exc)
-        used = int(getattr(session.context_builder, "token_usage", 0) or 0)
-        total = int(getattr(getattr(session.context_builder, "_budget", None), "total", 0) or 0)
-        budget_snapshot = {"used": used, "total": total, "breakdown": {}}
+    tool_schemas = session.tool_registry.get_schemas(
+        permission_checker=session.permission_checker,
+        permission_context=session.permission_context,
+    )
+    budget_snapshot = session.context_builder.get_budget_snapshot(
+        state=state,
+        tool_schemas=tool_schemas,
+    )
 
     conversation_id = str(session.active_conversation_id or "").strip()
     budget_event, context_event, outcome = build_usage_inspect_result(
@@ -149,6 +138,7 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
     last_workspace_root = data.get("last_workspace_root")
     requested_last_seq = seq_from_restore_payload(data)
     current_seq = session.event_outbox.current_replay_seq
+    replay_log_degraded = session.event_outbox.replay_log_degraded
     cursor_reset = requested_last_seq > current_seq
     last_seq = current_seq if cursor_reset else requested_last_seq
     missed_by_seq = bool(last_seq and last_seq < current_seq)
@@ -157,7 +147,7 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
         if last_seq
         else ([], False)
     )
-    event_log_gap = bool(event_log_gap or cursor_reset)
+    event_log_gap = bool(event_log_gap or cursor_reset or replay_log_degraded)
     if event_log_gap:
         # A partial replay after an authoritative restore snapshot can regress
         # already-hydrated state. Fall back as one indivisible snapshot instead.
@@ -296,6 +286,7 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
 
     requested_last_seq = seq_from_restore_payload(data)
     current_seq = session.event_outbox.current_replay_seq
+    replay_log_degraded = session.event_outbox.replay_log_degraded
     cursor_reset = requested_last_seq > current_seq
     last_seq = current_seq if cursor_reset else requested_last_seq
     replay_candidates, event_log_gap = (
@@ -303,7 +294,7 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
         if last_seq
         else ([], False)
     )
-    event_log_gap = bool(event_log_gap or cursor_reset)
+    event_log_gap = bool(event_log_gap or cursor_reset or replay_log_degraded)
     if event_log_gap:
         replay_candidates = []
     replay_can_cover_miss = bool(replay_candidates) and not event_log_gap

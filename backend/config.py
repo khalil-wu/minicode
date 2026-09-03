@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from backend.atomic_io import atomic_write_text, file_mutation_locks
+from backend.config_requirements import normalize_string_array
 from backend.feature_flags import FeatureFlags, coerce_feature_bool, load_feature_flags
 from backend.llm.model_catalog import responses_model_catalog_entry
 from backend.llm.proxy_policy import normalize_provider_proxy_mode
@@ -456,14 +457,21 @@ def _coerce_nonnegative_float(value: Any, default: float) -> float:
     return max(0.0, parsed)
 
 
-def _coerce_string_list(value: Any, default: list[str]) -> list[str]:
-    if isinstance(value, str):
-        values = [value]
-    elif isinstance(value, (list, tuple, set)):
-        values = list(value)
-    else:
-        values = list(default)
-    return [item for item in (str(raw).strip() for raw in values) if item]
+def _configured_string_list(
+    value: Any,
+    default: list[str],
+    *,
+    field_name: str,
+) -> list[str]:
+    """Read a user configuration array without silently stringifying bad data."""
+
+    if value is None:
+        return list(default)
+    return normalize_string_array(
+        value,
+        field_name=field_name,
+        source=SETTINGS_FILE,
+    )
 
 
 _SUPPORTED_AGENT_MODES = {"react", "auto"}
@@ -617,8 +625,6 @@ def resolve_provider_image_api_key_for_base_url(provider: str, base_url: str) ->
 def get_config_requirements():
     return load_config_layer_stack().requirements
 
-
-@_serialized_settings_update
 
 @_serialized_settings_update
 def add_permission_content_rule(rule: str, *, deny: bool = False) -> list[str]:
@@ -799,38 +805,68 @@ def permission_settings_from_config(settings_data: Mapping[str, Any]) -> Permiss
     perm_data = raw_perm_data if isinstance(raw_perm_data, Mapping) else {}
     default_permissions = PermissionSettings()
     return PermissionSettings(
-        auto_allow=_coerce_string_list(
-            perm_data.get("auto_allow"), default_permissions.auto_allow
+        auto_allow=_configured_string_list(
+            perm_data.get("auto_allow"),
+            default_permissions.auto_allow,
+            field_name="permissions.auto_allow",
         ),
-        require_confirm=_coerce_string_list(
-            perm_data.get("require_confirm"), default_permissions.require_confirm
+        require_confirm=_configured_string_list(
+            perm_data.get("require_confirm"),
+            default_permissions.require_confirm,
+            field_name="permissions.require_confirm",
         ),
-        require_diff_review=_coerce_string_list(
-            perm_data.get("require_diff_review"), default_permissions.require_diff_review
+        require_diff_review=_configured_string_list(
+            perm_data.get("require_diff_review"),
+            default_permissions.require_diff_review,
+            field_name="permissions.require_diff_review",
         ),
-        always_deny=_coerce_string_list(perm_data.get("always_deny"), []),
-        path_allowlist=_coerce_string_list(
-            perm_data.get("path_allowlist"), default_permissions.path_allowlist
+        always_deny=_configured_string_list(
+            perm_data.get("always_deny"), [], field_name="permissions.always_deny"
+        ),
+        path_allowlist=_configured_string_list(
+            perm_data.get("path_allowlist"),
+            default_permissions.path_allowlist,
+            field_name="permissions.path_allowlist",
         ),
         path_denylist=_merge_unique(
-            _coerce_string_list(
-                perm_data.get("path_denylist"), default_permissions.path_denylist
+            _configured_string_list(
+                perm_data.get("path_denylist"),
+                default_permissions.path_denylist,
+                field_name="permissions.path_denylist",
             ),
             default_permissions.path_denylist,
         ),
         content_allow_rules=_merge_unique(
-            _coerce_string_list(perm_data.get("content_allow_rules"), [])
-            + _coerce_string_list(perm_data.get("allow"), []),
+            _configured_string_list(
+                perm_data.get("content_allow_rules"),
+                [],
+                field_name="permissions.content_allow_rules",
+            )
+            + _configured_string_list(
+                perm_data.get("allow"), [], field_name="permissions.allow"
+            ),
             [],
         ),
         content_ask_rules=_merge_unique(
-            _coerce_string_list(perm_data.get("content_ask_rules"), [])
-            + _coerce_string_list(perm_data.get("ask"), []),
+            _configured_string_list(
+                perm_data.get("content_ask_rules"),
+                [],
+                field_name="permissions.content_ask_rules",
+            )
+            + _configured_string_list(
+                perm_data.get("ask"), [], field_name="permissions.ask"
+            ),
             [],
         ),
         content_deny_rules=_merge_unique(
-            _coerce_string_list(perm_data.get("content_deny_rules"), [])
-            + _coerce_string_list(perm_data.get("deny"), []),
+            _configured_string_list(
+                perm_data.get("content_deny_rules"),
+                [],
+                field_name="permissions.content_deny_rules",
+            )
+            + _configured_string_list(
+                perm_data.get("deny"), [], field_name="permissions.deny"
+            ),
             [],
         ),
     )

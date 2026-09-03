@@ -626,9 +626,6 @@ class QueryEngine:
             agent_settings=settings,
             llm=session.llm,
         )
-        bind_llm = getattr(ctx, "bind_llm", None)
-        if callable(bind_llm):
-            bind_llm(session.llm)
         ctx.bind_llm_turn_context(run_context.llm_turn_context)
         session.context_builder = ctx
 

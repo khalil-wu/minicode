@@ -36,6 +36,7 @@ from backend.ws.handlers.conversation import handle_context_compact
 from backend.ws.handlers.misc import handle_commands_list
 from backend.ws.handlers.preview import handle_preview_refresh
 from backend.ws.session_lifecycle import SessionLifecycle
+from backend.ws.stream_state import create_stream_state, get_stream_content_blocks
 
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\nminimal"
@@ -47,6 +48,32 @@ WEBP_BYTES = b"RIFF\x00\x00\x00\x00WEBPminimal"
 
 def _encoded(payload: bytes) -> str:
     return base64.b64encode(payload).decode("ascii")
+
+
+def test_ask_user_control_payload_preserves_turn_and_message_owner() -> None:
+    session = object.__new__(WebSocketSession)
+    payload = session._build_ws_payload(
+        AgentEvent(
+            type="ask_user",
+            data={
+                "tool_call_id": "ask-1",
+                "question": "Continue?",
+                "conversation_id": "conversation-1",
+                "turn_id": "turn-1",
+                "message_id": "assistant-1",
+            },
+        )
+    )
+
+    assert payload["conversation_id"] == "conversation-1"
+    assert payload["turn_id"] == "turn-1"
+    assert payload["message_id"] == "assistant-1"
+    assert payload["request"] == {
+        "subtype": "elicitation",
+        "tool_use_id": "ask-1",
+        "prompt": "Continue?",
+        "question": "Continue?",
+    }
 
 
 def test_agent_event_factories_enforce_stream_approval_and_queue_contracts() -> None:
@@ -1000,6 +1027,182 @@ def test_send_event_with_complete_owners_reaches_state_hooks_and_wire(
     )
 
 
+def test_send_event_reuses_wire_owner_defaults_for_stream_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _minimal_event_session()
+    session._conversation_streams = {
+        "conversation-1": create_stream_state(
+            "conversation-1",
+            "assistant-current",
+            "turn-current",
+        )
+    }
+    applied: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        "backend.ws.handler.apply_stream_event",
+        lambda *args: applied.append(args),
+    )
+    event = AgentEvent(
+        type="ask_user",
+        data={
+            "conversation_id": "conversation-1",
+            "tool_call_id": "ask-1",
+            "question": "Continue?",
+        },
+    )
+
+    asyncio.run(session.send_event(event))
+
+    assert len(applied) == 1
+    assert applied[0][1:] == (
+        "conversation-1",
+        "ask_user",
+        {
+            "conversation_id": "conversation-1",
+            "tool_call_id": "ask-1",
+            "question": "Continue?",
+            "message_id": "assistant-current",
+        },
+    )
+    assert "message_id" not in event.data
+    wire = session.send_payload.await_args.args[0]
+    assert wire["type"] == "control_request"
+    assert wire["message_id"] == "assistant-current"
+
+
+def test_send_event_replaces_blank_wire_owner_defaults_before_stream_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _minimal_event_session()
+    session._conversation_streams = {
+        "conversation-1": create_stream_state(
+            "conversation-1",
+            "assistant-current",
+            "turn-current",
+        )
+    }
+    applied: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        "backend.ws.handler.apply_stream_event",
+        lambda *args: applied.append(args),
+    )
+    event = AgentEvent(
+        type="ask_user",
+        data={
+            "conversation_id": "conversation-1",
+            "message_id": "",
+            "tool_call_id": "ask-1",
+            "question": "Continue?",
+        },
+    )
+
+    asyncio.run(session.send_event(event))
+
+    assert applied[0][3]["message_id"] == "assistant-current"
+    assert session.send_payload.await_args.args[0]["message_id"] == "assistant-current"
+    assert event.data["message_id"] == ""
+
+
+def test_send_event_rejects_invalid_projection_before_stream_state_mutation() -> None:
+    session = _minimal_event_session()
+    session._conversation_streams = {
+        "conversation-1": create_stream_state(
+            "conversation-1",
+            "assistant-1",
+            "turn-1",
+        )
+    }
+
+    asyncio.run(session.send_event(AgentEvent(
+        type="stream_resume",
+        data={
+            "conversation_id": "conversation-1",
+            "message_id": "assistant-1",
+            "tool_calls_pending": "not-a-list",
+        },
+    )))
+
+    assert session._conversation_streams["conversation-1"]["event_seq"] == 0
+    session.send_payload.assert_not_awaited()
+
+
+def test_send_event_does_not_snapshot_reasoning_withheld_by_transport() -> None:
+    session = _minimal_event_session()
+    session._conversation_streams = {
+        "conversation-1": create_stream_state(
+            "conversation-1",
+            "assistant-1",
+            "turn-1",
+        )
+    }
+
+    asyncio.run(session.send_event(AgentEvent(
+        type="thinking_delta",
+        data={
+            "conversation_id": "conversation-1",
+            "message_id": "assistant-1",
+            "content": "private provider reasoning",
+            "source": "provider",
+            "provider_reasoning_type": "reasoning_content",
+            "visibility": "debug",
+        },
+    )))
+
+    assert session._conversation_streams["conversation-1"]["event_seq"] == 0
+    session.send_payload.assert_not_awaited()
+
+
+def test_send_event_keeps_timeline_reasoning_live_while_excluding_it_from_resume_snapshot() -> None:
+    session = _minimal_event_session()
+    session._conversation_streams = {
+        "conversation-1": create_stream_state(
+            "conversation-1",
+            "assistant-1",
+            "turn-1",
+        )
+    }
+
+    asyncio.run(session.send_event(AgentEvent(
+        type="thinking_delta",
+        data={
+            "conversation_id": "conversation-1",
+            "message_id": "assistant-1",
+            "content": "visible provider reasoning",
+            "source": "provider",
+            "provider_reasoning_type": "reasoning_content",
+            "visibility": "timeline",
+        },
+    )))
+
+    assert session._conversation_streams["conversation-1"]["event_seq"] == 1
+    assert session.send_payload.await_args.args[0]["content"] == "visible provider reasoning"
+    assert session._conversation_streams["conversation-1"]["content_blocks"]
+    assert get_stream_content_blocks(session._conversation_streams["conversation-1"]) == []
+
+
+def test_send_event_does_not_mutate_shared_broadcast_event_owner() -> None:
+    first = _minimal_event_session()
+    second = _minimal_event_session()
+    first.conversation_runtime = SimpleNamespace(active_conversation_id=None)
+    second.conversation_runtime = SimpleNamespace(active_conversation_id=None)
+    first.run_manager = SimpleNamespace(watch_conversation_notifications=lambda _id: None)
+    second.run_manager = SimpleNamespace(watch_conversation_notifications=lambda _id: None)
+    first.active_conversation_id = "conversation-first"
+    second.active_conversation_id = "conversation-second"
+    event = AgentEvent(
+        type="system_notice",
+        data={"content": "notice"},
+    )
+
+    asyncio.run(first.send_event(event))
+    asyncio.run(second.send_event(event))
+
+    assert first.send_payload.await_args.args[0]["conversation_id"] == "conversation-first"
+    assert second.send_payload.await_args.args[0]["conversation_id"] == "conversation-second"
+    assert "conversation_id" not in event.data
+
+
 def test_send_event_projects_before_slow_notification_hook_completes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1078,6 +1281,37 @@ def test_item_completed_transport_removes_pi_tool_metadata_and_defers_provider_r
     assert "provider_timeline" not in wire["provider_raw"]
 
     stored = session.diagnostic_store.get("provider", "trace-item-1")
+    assert stored is not None
+    assert stored.payload["provider_timeline"][0]["raw"] == "x" * 10_000
+
+
+def test_done_transport_defers_canonical_snake_case_provider_raw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _minimal_event_session()
+    monkeypatch.setattr("backend.ws.handler.apply_stream_event", lambda *_args: None)
+    event = AgentEvent(
+        type="done",
+        data={
+            "conversation_id": "conversation-1",
+            "message_id": "assistant-1",
+            "status": "completed",
+            "usage": {},
+            "provider_raw": {
+                "trace_id": "trace-done-1",
+                "provider": "openai",
+                "provider_timeline": [{"event": "delta", "raw": "x" * 10_000}],
+            },
+        },
+    )
+
+    asyncio.run(session.send_event(event))
+
+    wire = session.send_payload.await_args.args[0]
+    assert wire["provider_raw"]["diagnostics_deferred"] is True
+    assert wire["provider_raw"]["trace_id"] == "trace-done-1"
+    assert "provider_timeline" not in wire["provider_raw"]
+    stored = session.diagnostic_store.get("provider", "trace-done-1")
     assert stored is not None
     assert stored.payload["provider_timeline"][0]["raw"] == "x" * 10_000
 

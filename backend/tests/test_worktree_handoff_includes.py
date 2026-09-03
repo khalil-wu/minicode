@@ -3,7 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from backend.services.conversation_payload_service import copy_worktree_includes
-from backend.services.conversation_worktree_handoff_service import build_handoff_preflight
+from backend.services.conversation_worktree_handoff_service import (
+    build_handoff_preflight,
+    stash_workspace_changes,
+)
 
 
 def test_worktree_include_copies_only_allowlisted_non_symlink_files(tmp_path) -> None:
@@ -75,3 +78,19 @@ def test_handoff_preflight_allows_explicit_stash_for_dirty_source(tmp_path, monk
         "head": "abc123",
     }
     assert any(check["code"] == "source.dirty.stash" for check in preflight["checks"])
+
+
+def test_stash_workspace_changes_treats_clean_checkout_as_noop(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_git(_root, *args):
+        calls.append(args)
+        return True, "No local changes to save"
+
+    monkeypatch.setattr(
+        "backend.services.conversation_worktree_handoff_service._git",
+        fake_git,
+    )
+
+    assert stash_workspace_changes(tmp_path, label="handoff") == (True, "")
+    assert calls == [("stash", "push", "--include-untracked", "--message", "handoff")]

@@ -9,13 +9,13 @@ from backend.agent.provider_activity import (
     provider_progress_lifecycle_regressed,
 )
 from backend.agent.turn_state import (
-    COMMAND_OUTPUT_PREVIEW_LIMIT,
     _append_bounded_output,
     append_agent_message_delta,
     append_thinking_block,
     complete_agent_message_block,
     start_agent_message_block,
 )
+from backend.ws.event_log import is_raw_provider_reasoning_event
 
 
 _TERMINAL_TOOL_STATUSES = {
@@ -209,8 +209,16 @@ def _stream_content_blocks(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def get_stream_content_blocks(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return the ordered authoritative snapshot for reconnect."""
-    return copy.deepcopy(_stream_content_blocks(state))
+    """Return the ordered, renderer-safe snapshot for reconnect."""
+    blocks = copy.deepcopy(_stream_content_blocks(state))
+    return [
+        block
+        for block in blocks
+        if isinstance(block, dict)
+        if not is_raw_provider_reasoning_event(
+            {"type": block.get("type"), **block}
+        )
+    ]
 
 
 def _replace_tool_block(state: dict[str, Any], record: dict[str, Any]) -> None:
@@ -524,6 +532,9 @@ def apply_stream_event(
                         "source",
                         "visibility",
                         "phase",
+                        "provider_reasoning_type",
+                        "item_id",
+                        "content_index",
                     )
                     if payload.get(key) is not None
                 },

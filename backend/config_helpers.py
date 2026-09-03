@@ -819,20 +819,6 @@ def _write_settings_json(data: dict[str, Any]) -> None:
                 json.dumps(data, ensure_ascii=False, indent=2) + "\n",
             )
 
-
-
-def _serialized_settings_update(function: Callable[..., Any]) -> Callable[..., Any]:
-    """Keep synchronous whole-settings updates from overwriting each other."""
-
-    @wraps(function)
-    def wrapped(*args: Any, **kwargs: Any) -> Any:
-        with _SETTINGS_WRITE_LOCK:
-            with file_mutation_locks([SETTINGS_FILE]):
-                return function(*args, **kwargs)
-
-    return wrapped
-
-
 def _get_llm_section(settings_data: dict[str, Any] | None = None) -> dict[str, Any]:
     raw = settings_data if settings_data is not None else _load_effective_settings_json()
     llm_data = raw.get("llm", {}) if isinstance(raw, dict) else {}

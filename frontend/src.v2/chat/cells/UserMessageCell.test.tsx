@@ -67,6 +67,28 @@ afterEach(() => {
 });
 
 describe("UserMessageCell", () => {
+  it("labels messages initiated by a scheduled task", () => {
+    render(
+      <UserMessageCell
+        cell={{
+          kind: "user_message",
+          id: "scheduled-user",
+          content: "nightly check",
+          createdAt: 1,
+          messageSource: {
+            kind: "scheduled_task",
+            taskId: "task-nightly",
+            runId: "run-2026-09-03",
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText("定时任务")).toBeTruthy();
+    expect(screen.getByText("运行 run-2026-09-03")).toBeTruthy();
+    expect(screen.getByTitle("定时任务 · 任务 task-nightly · 运行 run-2026-09-03")).toBeTruthy();
+  });
+
   it("collapses long user messages by default and allows expanding them", () => {
     const longMessage = Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n");
     const { container } = render(

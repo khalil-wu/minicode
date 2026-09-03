@@ -10,7 +10,7 @@ from backend.agent.runtime import AgentRuntime
 from backend.agent.run_context import RunContext
 from backend.agent.state import AgentState
 from backend.agent.turn_input import TurnInputQueue
-from backend.agent.turn_kernel import TurnKernel
+from backend.agent.turn_kernel import PermissionContextRefreshError, TurnKernel
 from backend.agent.message import AgentEvent
 from backend.config import TokenBudget
 from backend.permissions.context import PermissionContext, ToolExecutionContext
@@ -187,8 +187,8 @@ def test_turn_kernel_refreshes_live_permission_at_safe_boundary(tmp_path: Path) 
 
 def test_turn_kernel_refresh_fails_closed_without_committer(tmp_path: Path) -> None:
     # Subagent tool contexts carry a permission_context_provider without a
-    # turn-owned committer; the refresh must fail closed instead of raising
-    # a KeyError from the missing metadata key.
+    # turn-owned committer; the refresh must fail closed by stopping the turn
+    # instead of continuing with the stale policy.
     kernel = _kernel(tmp_path)
     current = PermissionContext(mode="plan", source="session")
     tool_context = ToolExecutionContext(
@@ -199,8 +199,26 @@ def test_turn_kernel_refresh_fails_closed_without_committer(tmp_path: Path) -> N
     tool_context.run_context = kernel.run_context
     kernel.bind_tool_context(tool_context)
 
-    assert kernel.refresh_live_permission_context() is False
+    with pytest.raises(PermissionContextRefreshError):
+        kernel.refresh_live_permission_context()
     assert tool_context.permission == PermissionContext(mode="bypass")
+
+
+def test_turn_kernel_refresh_failure_does_not_return_stale_policy(tmp_path: Path) -> None:
+    kernel = _kernel(tmp_path)
+    tool_context = ToolExecutionContext(
+        permission=PermissionContext(mode="bypass"),
+    )
+    tool_context.run_context = kernel.run_context
+    tool_context.permission_context_committer = lambda _current: None
+    kernel.run_context.permission_context_provider = lambda: (_ for _ in ()).throw(
+        RuntimeError("session policy unavailable")
+    )
+    kernel.bind_tool_context(tool_context)
+
+    with pytest.raises(PermissionContextRefreshError):
+        kernel.refresh_live_permission_context()
+    assert tool_context.permission.mode == "bypass"
 
 
 def test_turn_kernel_starts_turn_for_attachment_only_steer(tmp_path: Path) -> None:

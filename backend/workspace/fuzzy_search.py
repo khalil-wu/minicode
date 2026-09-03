@@ -18,7 +18,7 @@ from typing import Optional
 
 from pathspec.gitignore import GitIgnoreSpec
 
-from backend.security.sensitive_files import is_sensitive_file
+from backend.security.sensitive_files import is_protected_write_path
 from backend.workspace.path_filters import is_windows_reserved_path
 
 logger = logging.getLogger(__name__)
@@ -185,7 +185,7 @@ class FuzzySearchEngine:
 
                     if hidden or ignored_name or ignored_by_spec:
                         continue
-                    if is_sensitive_file(rel_path) or is_windows_reserved_path(rel_path):
+                    if is_protected_write_path(rel_path) or is_windows_reserved_path(rel_path):
                         continue
 
                     self._file_cache.append(path)

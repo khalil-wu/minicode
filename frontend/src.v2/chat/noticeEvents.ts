@@ -9,6 +9,7 @@ import { isReplayedEvent } from "../protocol/events";
 import { pushToast } from "../overlays/ToastContainer";
 import { isControlPlaneNotice } from "./controlPlaneNotices";
 import { addInspectorPayload } from "./inspectorEntries";
+import { stableTextHash } from "../lib/identity";
 
 const noticeText = (event: SystemNoticeEvent): string => {
   const title = String(event.title || "").trim();
@@ -25,15 +26,6 @@ const conversationIdFor = (e: ServerEvent, fallback?: string): string | undefine
 const eventTimestampMs = (event: ServerEvent): number => {
   const parsed = Date.parse(String(event.timestamp || ""));
   return Number.isFinite(parsed) ? parsed : Date.now();
-};
-
-const stableTextHash = (value: string): string => {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(36);
 };
 
 const systemNoticeId = (

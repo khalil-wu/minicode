@@ -378,6 +378,11 @@ _DESTRUCTIVE_COMMAND_PATTERNS = tuple(
         # could never match. Look ahead for any force flag in the segment.
         r"\bgit\s+clean\b(?=[^\n;&|]*(?:\s-[a-z]*f|\s--force))",
         r"\bgit\s+push\b[^\n]*(?:--force(?:-with-lease)?|-f)\b",
+        r"\bgit\s+(?:checkout|restore)\s+(?:--\s+)?\.\s*$",
+        r"\bgit\s+stash\s+(?:drop|clear)\b",
+        r"\bgit\s+commit\b[^\n;&|]*--amend\b",
+        r"\b(?:kubectl\s+delete|terraform\s+destroy)\b",
+        r"\b(?:drop|truncate)\s+(?:table|database|schema)\b",
         # PowerShell's Format-* cmdlets are read-only output formatting. Only
         # classify an independent `format` command as destructive.
         r"\bmkfs(?:\.[a-z0-9]+)?\b",

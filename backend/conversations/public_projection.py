@@ -13,6 +13,7 @@ from backend.agent.public_projection import (
     public_text,
 )
 from backend.secret_redaction import is_sensitive_field_name
+from backend.agent.value_utils import finite_number as _finite_number
 
 
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
@@ -57,18 +58,6 @@ def _nonnegative_int(value: Any) -> int | None:
     ):
         return None
     return int(numeric)
-
-
-def _finite_number(value: Any) -> int | float | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(numeric):
-        return None
-    return int(numeric) if numeric.is_integer() else numeric
 
 
 def _public_json(

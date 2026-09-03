@@ -10,6 +10,7 @@ from backend.agent.context import ContextBuilder
 from backend.agent.history_store import estimate_message_tokens
 from backend.agent.message import AgentEvent
 from backend.agent.state import AgentState
+from backend.config import TokenBudget
 from backend.sdk import SDKSession
 from backend.agent.conversation_query_guard import conversation_query_guards
 from backend.ws.agent_runner import (
@@ -102,10 +103,13 @@ async def _collect_sdk_events(stream):
 def test_context_builder_binds_replacement_llm_for_side_calls() -> None:
     builder = ContextBuilder()
     llm = object()
+    budget = TokenBudget(total=1234)
 
     builder.bind_llm(llm)
+    builder.bind_budget(budget)
 
     assert builder._llm is llm
+    assert builder._budget is budget
 
 
 def test_git_snapshot_is_session_owned_and_round_trips(monkeypatch, tmp_path) -> None:

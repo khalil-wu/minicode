@@ -83,6 +83,7 @@ TerminalReason = Literal[
     "blocked",
     "provider_capability",
     "provider_protocol",
+    "provider_terminal_missing",
     "provider_continuation",
     "incomplete_tool_stream",
     "tool_error",

@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from backend.tools.base import PermissionLevel
+from backend.permissions.patterns import normalize_tool_patterns
 
 # ── Constants ──────────────────────────────────────────────
 
@@ -54,21 +55,6 @@ def normalize_permission_level(value: Any) -> PermissionLevel | None:
 
 def permission_level_to_token(level: PermissionLevel) -> str:
     return str(level.value)
-
-
-def normalize_tool_patterns(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for item in value:
-        pattern = str(item or "").strip()
-        if not pattern or pattern in seen:
-            continue
-        seen.add(pattern)
-        normalized.append(pattern)
-    return normalized
 
 
 def normalize_permission_overrides(value: Any) -> dict[str, PermissionLevel]:

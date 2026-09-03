@@ -469,6 +469,7 @@ class _NonFinalWebSearchDelayedFinalBatchLLM(LLMAdapter):
             ],
             tool_calls_final=True,
         )
+        yield StreamEvent(type=StreamEventType.DONE, finish_reason="tool_calls")
 
     async def simple_chat(self, messages):
         return ""
@@ -519,6 +520,7 @@ class _UnsafeThenSafeNonFinalBlocksLLM(LLMAdapter):
             ],
             tool_calls_final=True,
         )
+        yield StreamEvent(type=StreamEventType.DONE, finish_reason="tool_calls")
 
     async def simple_chat(self, messages):
         return ""

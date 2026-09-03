@@ -1,4 +1,4 @@
-import { extractInlineCitationIndexes } from "../chat/citationProjection";
+import { citationUrl, extractInlineCitationIndexes } from "../chat/citationProjection";
 import { getContentBlocks, getToolCallsFromMessage } from "../lib/content-blocks";
 import { planStepProgressStatus, shouldSurfacePlanProgress } from "../lib/planVisibility";
 import { isProviderRequestProgress, providerProgressLabel } from "../lib/provider-progress";
@@ -17,7 +17,6 @@ import type {
   BackgroundTaskEntry,
   BrowserAnnotation,
   ChatMessage,
-  Citation,
   ContextUsage,
   ConversationGoal,
   MessageAttachmentRef,
@@ -865,11 +864,6 @@ function progressStatus(status: AgentProgressEntry["status"], isLive: boolean): 
   if (status === "completed" || status === "info") return "completed";
   if (status === "running") return isLive ? "running" : "pending";
   return "failed";
-}
-
-function citationUrl(citation: Citation): string {
-  const candidate = String(citation.url || citation.source || "").trim();
-  return /^https?:\/\//i.test(candidate) ? candidate : "";
 }
 
 function hostLabel(url: string): string {

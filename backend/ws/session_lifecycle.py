@@ -382,14 +382,17 @@ class SessionLifecycle:
         if workspace_root is None:
             logger.info("No workspace bound for session %s; file watcher not started", self._session.session_id)
             return
-        conversation_id = str(self._session.active_conversation_id or "").strip()
+        captured_workspace_root = workspace_root.resolve()
 
         async def on_change(path: Path, event_type: str) -> None:
+            current_workspace_root = self.workspace_root_for_conversation()
+            if current_workspace_root is None or current_workspace_root != captured_workspace_root:
+                return
             await self.on_file_changed(
                 path,
                 event_type,
-                workspace_root=workspace_root,
-                conversation_id=conversation_id,
+                workspace_root=current_workspace_root,
+                conversation_id=str(self._session.active_conversation_id or "").strip(),
             )
 
         try:
@@ -409,14 +412,16 @@ class SessionLifecycle:
             self.file_watcher = None
 
         resolved_workspace_root = workspace_root.resolve()
-        conversation_id = str(self._session.active_conversation_id or "").strip()
 
         async def on_change(path: Path, event_type: str) -> None:
+            current_workspace_root = self.workspace_root_for_conversation()
+            if current_workspace_root is None or current_workspace_root != resolved_workspace_root:
+                return
             await self.on_file_changed(
                 path,
                 event_type,
-                workspace_root=resolved_workspace_root,
-                conversation_id=conversation_id,
+                workspace_root=current_workspace_root,
+                conversation_id=str(self._session.active_conversation_id or "").strip(),
             )
 
         try:
@@ -465,17 +470,20 @@ class SessionLifecycle:
         if result.error_event is not None:
             from backend.ws.command_results import emit_command_error
             await emit_command_error(self._session, "conversation.create", result.error_event)
-            # The record was persisted with git_isolated=True before the attempt.
-            # Leaving it that way describes isolation that does not exist, and
-            # cleanup_isolated_worktree then refuses to remove a worktree that
-            # was never created, so the conversation could never be deleted.
-            return self._session.conversation_repo.update_workspace_binding(
-                conversation.id,
-                workspace_root=str(source_workspace_root or ""),
-                git_branch=result.git_branch,
-                worktree_path="",
-                git_isolated=False,
-            ) or conversation
+            # The record was persisted with git_isolated=True before the
+            # attempt.  Remove that provisional record instead of silently
+            # downgrading the requested isolation to a shared workspace.
+            # ``create_conversation`` allocates a fresh id, so this cannot
+            # delete an older user conversation.
+            try:
+                self._session.conversation_repo.delete_conversation(conversation.id)
+            except Exception:
+                logger.error(
+                    "Failed to remove provisional isolated conversation %s after worktree failure",
+                    conversation.id,
+                    exc_info=True,
+                )
+            return None
 
         if not result.created:
             return conversation

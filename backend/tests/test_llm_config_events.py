@@ -1,6 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
+from backend.agent.context import ContextBuilder
 from backend.agent.message import AgentEvent
 from backend.config import AppConfig, LLMSettings
 from backend.services.llm_config_service import (
@@ -27,7 +28,10 @@ class _Session:
         self.selected_model = "gpt-5"
         self._model_override_active = False
         self._provider_override_active = False
-        self.context_builder = SimpleNamespace(_llm=None)
+        self.context_builder = ContextBuilder(
+            token_budget=self.config.token_budget,
+            agent_settings=self.config.agent,
+        )
         self.events: list[dict] = []
         self.command_results: list[dict] = []
         self.session_lifecycle = SimpleNamespace(

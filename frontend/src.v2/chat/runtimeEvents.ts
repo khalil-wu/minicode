@@ -31,6 +31,7 @@ import { normalizeSkillList, normalizeSlashCommands } from "../lib/catalog-norma
 import { normalizeContextLedger } from "./contextLedger";
 import { hydrateMessages, type BackendTranscriptMessage } from "./transcriptHydration";
 import { LS, writeLS } from "../stores/shared-helpers";
+import { eventMessageId } from "../lib/identity";
 
 const userVisibleSubagentProgress = (value?: string, explicitVisible?: boolean): string => {
   const text = String(value ?? "").trim();
@@ -340,12 +341,6 @@ const inspectorTargetForRuntimeSpan = (ev: RuntimeSpanEvent): { kind: "message" 
     return { kind: "cache", id: ev.span_id };
   }
   return { kind: "message", id: ev.span_id };
-};
-
-const eventMessageId = (event: unknown): string | undefined => {
-  const value = (event as { message_id?: unknown; messageId?: unknown }).message_id
-    ?? (event as { message_id?: unknown; messageId?: unknown }).messageId;
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 };
 
 const eventTurnIdentity = (event: unknown): string | undefined => {

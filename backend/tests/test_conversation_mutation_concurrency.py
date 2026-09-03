@@ -880,6 +880,59 @@ def test_local_to_worktree_binding_failure_restores_source_and_removes_created_g
     assert result.kwargs["data"]["recovery_required"] is False
 
 
+def test_worktree_handoff_stash_failure_stops_before_workspace_mutation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "repo"
+    source.mkdir()
+    conversation = SimpleNamespace(
+        id="conv_handoff_stash_failure",
+        workspace_root=str(source),
+        worktree_path="",
+        git_isolated=False,
+    )
+    session = SimpleNamespace(emit_command_result=AsyncMock())
+    calls: list[str] = []
+
+    def fail_stash(path, *, label: str):
+        assert path == source
+        assert label == "minicode-handoff-conv_handoff_stash_failure"
+        calls.append("stash")
+        return False, "index is locked"
+
+    def should_not_create(*_args, **_kwargs):
+        calls.append("create")
+        raise AssertionError("handoff continued after stash failure")
+
+    monkeypatch.setattr(
+        "backend.services.conversation_worktree_handoff_service.stash_workspace_changes",
+        fail_stash,
+    )
+    monkeypatch.setattr(
+        "backend.services.conversation_payload_service.create_isolated_worktree_binding",
+        should_not_create,
+    )
+
+    asyncio.run(
+        conversation_handlers._handle_conversation_worktree_handoff_claimed(
+            session,
+            conversation=conversation,
+            conversation_id=conversation.id,
+            target_kind="worktree",
+            dirty_action="stash",
+            preflight={"conversation_id": conversation.id},
+        )
+    )
+
+    assert calls == ["stash"]
+    result = session.emit_command_result.await_args
+    assert result.args[0] == "conversation.worktree.handoff.execute"
+    assert "index is locked" in result.args[1]
+    assert result.kwargs["level"] == "error"
+    assert result.kwargs["data"] == {"conversation_id": conversation.id}
+
+
 def test_worktree_to_local_binding_failure_recreates_worktree_before_restoring_stash(
     monkeypatch,
     tmp_path,

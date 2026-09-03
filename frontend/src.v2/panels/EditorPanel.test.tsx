@@ -125,6 +125,26 @@ describe("EditorPanel", () => {
     expect(screen.getByRole("tab", { name: "预览" }).getAttribute("aria-selected")).toBe("true");
   });
 
+  it("keeps malformed percent-encoded Markdown fragments renderable in preview", async () => {
+    useAppStore.setState({
+      editorTabs: [{
+        path: "docs/README.md",
+        content: "[Jump](#broken%fragment)\n\n## Broken%fragment",
+        original: "[Jump](#broken%fragment)\n\n## Broken%fragment",
+        loading: false,
+        error: null,
+        largeFile: false,
+      }],
+      activeTabPath: "docs/README.md",
+    });
+
+    render(<EditorPanel />);
+    fireEvent.click(await screen.findByRole("tab", { name: "预览" }));
+
+    expect(screen.getByRole("heading", { name: "Broken%fragment" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Jump" }).getAttribute("href")).toContain("brokenfragment");
+  });
+
   it("renders workspace-local absolute Markdown assets through relative raw URLs", async () => {
     useAppStore.setState({
       editorTabs: [{

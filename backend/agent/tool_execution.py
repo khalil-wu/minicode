@@ -8,7 +8,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -78,7 +78,9 @@ class _WorkspaceTargetPathError(ValueError):
     """Raised when an executable mutation target cannot be proven in scope."""
 
 
-def argument_has_value(args: dict[str, Any], field: str) -> bool:
+def argument_has_value(args: Mapping[str, Any] | Any, field: str) -> bool:
+    if not isinstance(args, Mapping):
+        return False
     if field not in args or args.get(field) is None:
         return False
     value = args[field]
@@ -90,7 +92,9 @@ def argument_has_value(args: dict[str, Any], field: str) -> bool:
 
 
 def task_parallel_tasks_have_value(args: dict[str, Any] | None) -> bool:
-    raw_tasks = (args or {}).get("parallel_tasks")
+    if not isinstance(args, Mapping):
+        return False
+    raw_tasks = args.get("parallel_tasks")
     if not isinstance(raw_tasks, list) or len(raw_tasks) < 2:
         return False
     valid = [
@@ -800,9 +804,10 @@ def missing_required_tool_argument_reason(
     ]
     if not missing:
         return ""
+    received_keys = list(tc.arguments.keys()) if isinstance(tc.arguments, Mapping) else []
     return (
         f"Invalid tool call for '{tc.name}': missing required argument(s): {missing}. "
-        f"Received keys: {list((tc.arguments or {}).keys())}."
+        f"Received keys: {received_keys}."
     )
 
 

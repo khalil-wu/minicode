@@ -207,6 +207,32 @@ def test_recent_workspace_handler_returns_retryable_error_on_persistence_failure
     assert result.kwargs["data"]["retryable"] is True
 
 
+def test_workspace_set_accepts_camel_case_workspace_root_alias(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def activate(_session, data, *, command: str) -> bool:
+        captured.update(data)
+        captured["command"] = command
+        return True
+
+    monkeypatch.setattr(
+        workspace_handlers,
+        "_activate_workspace_for_command",
+        activate,
+    )
+
+    handled = asyncio.run(
+        workspace_handlers.handle_workspace_set(
+            SimpleNamespace(),
+            {"workspaceRoot": "C:/project"},
+        )
+    )
+
+    assert handled is True
+    assert captured["path"] == "C:/project"
+    assert captured["command"] == "workspace.set"
+
+
 def test_generated_image_artifact_preserves_media_type_after_cold_reload(tmp_path) -> None:
     artifact_dir = tmp_path / "artifacts"
     owner = "conv-image-media"

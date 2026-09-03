@@ -18,6 +18,8 @@ def test_catastrophic_shell_wrappers_are_unwrapped(command: str) -> None:
     "git log && rm -rf build",
     "git status; git clean -fdx",
     "Get-ChildItem; Remove-Item -Recurse build",
+    "echo ok; git checkout .",
+    "echo ok; git stash clear",
 ])
 def test_destructive_compound_commands_are_blocked(command: str) -> None:
     allowed, reason = check_catastrophic_command(command)
@@ -60,3 +62,42 @@ def test_broad_process_termination_is_blocked(command: str) -> None:
 ])
 def test_exact_pid_termination_keeps_normal_approval_policy(command: str) -> None:
     assert check_catastrophic_command(command) == (True, "")
+
+
+@pytest.mark.parametrize("command", [
+    "$(rm -rf /)",
+    "`rm -rf /`",
+    "echo $(rm -rf /)",
+    "bash -c 'echo `rm -rf /`'",
+])
+def test_command_substitutions_cannot_hide_catastrophic_commands(command: str) -> None:
+    allowed, reason = check_catastrophic_command(command)
+    assert allowed is False
+    assert "root filesystem" in reason
+
+
+def test_windows_drive_recursive_delete_is_catastrophic() -> None:
+    allowed, reason = check_catastrophic_command("del /s C:\\")
+    assert allowed is False
+    assert "drive root" in reason
+
+
+@pytest.mark.parametrize("command", [
+    "git clean -fdx",
+    "git reset --hard",
+    "git checkout .",
+    "git checkout -- .",
+    "git restore .",
+    "git stash drop",
+    "git stash clear",
+    "git branch -D feature",
+    "git push --force origin main",
+    "git commit --amend",
+    "kubectl delete pod api",
+    "terraform destroy",
+    "DROP TABLE users",
+])
+def test_destructive_operations_are_explicit_confirmation_boundaries(command: str) -> None:
+    allowed, reason = check_catastrophic_command(command)
+    assert allowed is False
+    assert reason

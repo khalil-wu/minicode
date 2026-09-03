@@ -156,15 +156,15 @@ def ingest_uploaded_document(
     workspace_root: str | Path | None = None,
 ) -> UploadedDocument:
     import base64 as _b64
-    from backend.security.sensitive_files import is_sensitive_file
+    from backend.security.sensitive_files import is_protected_write_path
 
     submitted_path = Path(file_name or "upload.txt")
-    if is_sensitive_file(submitted_path):
+    if is_protected_write_path(submitted_path):
         raise ValueError("Sensitive files cannot be uploaded as attachments.")
     safe_name = Path(file_name or "upload.txt").name
     if not safe_name:
         raise ValueError("Uploaded file name is required.")
-    if is_sensitive_file(Path(safe_name)):
+    if is_protected_write_path(Path(safe_name)):
         raise ValueError("Sensitive files cannot be uploaded as attachments.")
     if not raw_content:
         raise ValueError("Uploaded file is empty.")

@@ -610,6 +610,16 @@ async def handle_conversation_create(session: "WebSocketSession", data: dict[str
     )
 
     request = parse_conversation_create_request(data)
+    if request.error_event is not None:
+        from backend.ws.command_results import emit_command_error
+
+        await emit_command_error(
+            session,
+            "conversation.create",
+            request.error_event,
+            data={"conversation_id": request.conversation_id or ""},
+        )
+        return True
     if request.workspace_required_error is not None:
         from backend.ws.command_results import emit_command_error
         await emit_command_error(
@@ -631,7 +641,14 @@ async def handle_conversation_create(session: "WebSocketSession", data: dict[str
         git_isolated=request.git_isolated,
     )
     if request.git_isolated:
-        created = await session.create_isolated_conversation_worktree(created) or created
+        isolated = await session.create_isolated_conversation_worktree(created)
+        if isolated is None:
+            # The isolation request failed and the lifecycle owner already
+            # reported the concrete error.  Do not continue with a shared
+            # workspace or emit a contradictory success result for the same
+            # command.
+            return True
+        created = isolated
     elif request.workspace_root:
         created = session.conversation_repo.update_workspace_binding(
             created.id,
@@ -1842,7 +1859,35 @@ async def _handle_conversation_worktree_handoff_claimed(
             main_worktree_root=session.main_worktree_root,
         )
         if not creation.created:
-            await session.emit_command_result("conversation.worktree.handoff.execute", "Failed to create protected workspace.", level="error", data=preflight)
+            rollback_errors: list[str] = []
+            if stash_ref:
+                restored, restore_error = await asyncio.to_thread(
+                    restore_workspace_stash,
+                    source_path,
+                    stash_ref,
+                )
+                if not restored:
+                    rollback_errors.append(f"restore_source_stash:{restore_error}")
+            creation_error = getattr(creation, "error_event", None)
+            creation_data = getattr(creation_error, "data", {})
+            creation_message = (
+                str(creation_data.get("message") or "").strip()
+                if isinstance(creation_data, dict)
+                else ""
+            )
+            await session.emit_command_result(
+                "conversation.worktree.handoff.execute",
+                creation_message or "Failed to create protected workspace.",
+                level="error",
+                data={
+                    **preflight,
+                    "reason": "worktree_creation_failed",
+                    "stash_ref": stash_ref,
+                    "rollback_completed": not rollback_errors,
+                    "rollback_errors": rollback_errors,
+                    "recovery_required": bool(rollback_errors),
+                },
+            )
             return True
         updated, binding_warning = await _persist_workspace_binding(
             session,
@@ -1944,7 +1989,28 @@ async def _handle_conversation_worktree_handoff_claimed(
                 announce_initiator=False,
                 source="conversation.worktree.handoff.rollback_remove",
             )
-            await session.emit_command_result("conversation.worktree.handoff.execute", "Failed to remove the protected workspace.", level="error", data=preflight)
+            rollback_errors: list[str] = []
+            if stash_ref:
+                restored, restore_error = await asyncio.to_thread(
+                    restore_workspace_stash,
+                    source_path,
+                    stash_ref,
+                )
+                if not restored:
+                    rollback_errors.append(f"restore_source_stash:{restore_error}")
+            await session.emit_command_result(
+                "conversation.worktree.handoff.execute",
+                "Failed to remove the protected workspace.",
+                level="error",
+                data={
+                    **preflight,
+                    "reason": "remove_worktree_failed",
+                    "stash_ref": stash_ref,
+                    "rollback_completed": not rollback_errors,
+                    "rollback_errors": rollback_errors,
+                    "recovery_required": bool(rollback_errors),
+                },
+            )
             return True
         switched, error = await asyncio.to_thread(switch_main_checkout, base_root, branch)
         if not switched:

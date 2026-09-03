@@ -69,6 +69,11 @@ def test_eof_without_provider_done_closes_attempt_as_failed() -> None:
         "error_type": "provider_terminal_missing",
     }
     assert isinstance(updates[-1], ProviderStreamSettlement)
+    settlement = updates[-1]
+    assert settlement.action == "terminate"
+    errors = [item for item in updates if getattr(item, "type", "") == "error"]
+    assert len(errors) == 1
+    assert errors[0].data["error_code"] == "provider_terminal_missing"
 
 
 def test_provider_done_closes_attempt_as_completed() -> None:

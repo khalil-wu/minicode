@@ -28,6 +28,7 @@ import { providerTracePayloadFromDone, type ProviderUsageSummary } from "./provi
 import { normalizeContentBlocks } from "./transcriptHydration";
 import { projectArtifactPreviewEvent } from "./artifactEvents";
 import { isHiddenProviderReasoning } from "../lib/provider-reasoning";
+import { eventMessageId, stableTextHash } from "../lib/identity";
 
 interface ChatStreamHandlers {
   textStreamBuffer: StreamBuffer;
@@ -35,8 +36,8 @@ interface ChatStreamHandlers {
 }
 
 const flushLiveBuffers = ({ textStreamBuffer, thinkingStreamBuffer }: ChatStreamHandlers) => {
-  textStreamBuffer.flush();
   thinkingStreamBuffer?.flush();
+  textStreamBuffer.flush();
 };
 
 const adoptGeneratedConversation = (conversationId?: string) => {
@@ -252,21 +253,6 @@ const canMigrateToolCallScope = (
   // event used run_id and later events used the assistant turn id. Two or
   // more conflicting fields are a different call and must not be projected.
   return conflicts <= 1 && (conflicts > 0 || additions > 0);
-};
-
-const eventMessageId = (event: unknown): string | undefined => {
-  const value = (event as { message_id?: unknown; messageId?: unknown }).message_id
-    ?? (event as { message_id?: unknown; messageId?: unknown }).messageId;
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-};
-
-const stableTextHash = (value: string): string => {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(36);
 };
 
 const legacyImageArtifactId = (
@@ -790,7 +776,7 @@ export const handleChatStreamEvent = (
       };
       const messageId = eventMessageId(e);
       if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
-      textStreamBuffer.flush();
+      flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
       if (ev.item?.type === "agent_message") {
         s.completeAgentMessage(
           {
@@ -1206,8 +1192,7 @@ export const handleChatStreamEvent = (
         itemId
         && (ev.status === "retracted" || ev.visibility === "debug")
       ) {
-        textStreamBuffer.flush();
-        thinkingStreamBuffer?.flush();
+        flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
         addInspectorPayload("message", itemId, {
           event: "agent.item",
           conversation_id: conversationId,
@@ -1229,8 +1214,7 @@ export const handleChatStreamEvent = (
         return true;
       }
       if (itemId && content.trim() && ev.visibility !== "debug") {
-        textStreamBuffer.flush();
-        thinkingStreamBuffer?.flush();
+        flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
         s.appendProcessItem({
           id: itemId,
           itemKind: ev.kind || "process_text",
@@ -1271,8 +1255,7 @@ export const handleChatStreamEvent = (
       const target = resolveTerminalEventTarget(conversationId, messageId, eventTurnId(e));
       if (target.stale) return true;
       const terminalMessageId = terminalMessageIdForEvent(conversationId, target.messageId);
-      textStreamBuffer.flush();
-      thinkingStreamBuffer?.flush();
+      flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
       const usage = usageFromDoneEvent(e);
       const replayed = isReplayedChatEvent(e);
       if (!replayed && usage && (!conversationId || conversationId === useAppStore.getState().conversationId)) {
@@ -1434,8 +1417,7 @@ export const handleChatStreamEvent = (
       const target = resolveTerminalEventTarget(conversationId, messageId, turnId);
       if (target.stale) return true;
       const terminalMessageId = terminalMessageIdForEvent(conversationId, target.messageId);
-      textStreamBuffer.flush();
-      thinkingStreamBuffer?.flush();
+      flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
       const err = e as unknown as { conversation_id?: string; message_id?: string; message?: string; tool_call_id?: string; request_id?: string; error_type?: string; error_code?: string; provider_error_type?: string; recoverable?: boolean };
       const rawMessage = err.message ?? "发生了错误。";
       if (isStaleApprovalResponseError(rawMessage)) {

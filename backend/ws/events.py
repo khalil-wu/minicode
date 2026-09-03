@@ -323,6 +323,8 @@ class AgentMessageItemData(TypedDict, total=False):
 
 
 class ItemStartedData(TypedDict, total=False):
+    conversation_id: str
+    message_id: str
     item: AgentMessageItemData
 
 
@@ -332,6 +334,8 @@ class AgentMessageDeltaData(TypedDict, total=False):
 
 
 class ItemCompletedData(TypedDict, total=False):
+    conversation_id: str
+    message_id: str
     item: AgentMessageItemData
     finish_reason: str
     provider_raw: dict[str, Any]
@@ -349,6 +353,7 @@ class TurnDiffUpdatedData(TypedDict):
     """MiniCode ``turn/diff/updated`` notification payload."""
 
     thread_id: str
+    conversation_id: str
     turn_id: str
     diff: str
 
@@ -364,6 +369,8 @@ AgentProgressProviderState = Literal[
 
 
 class AgentProgressData(TypedDict, total=False):
+    conversation_id: str
+    message_id: str
     id: str
     stage: Literal["status", "planning", "tool", "approval", "verification", "final"]
     phase: Literal["orienting", "planning", "model", "tool", "approval", "verify", "final", "recover", "status", "iteration", "subagent", "cache"]
@@ -391,6 +398,7 @@ class AgentProgressData(TypedDict, total=False):
 
 
 class RuntimeSpanData(TypedDict, total=False):
+    conversation_id: str
     event: str
     span_id: str
     parent_span_id: str
@@ -464,6 +472,8 @@ class AgentRunData(TypedDict, total=False):
 
 
 class AgentItemData(TypedDict, total=False):
+    conversation_id: str
+    message_id: str
     id: str
     loop_id: str
     iteration_id: str
@@ -491,6 +501,8 @@ class AgentItemData(TypedDict, total=False):
 
 
 class ThinkingDeltaData(TypedDict, total=False):
+    conversation_id: str
+    message_id: str
     content: str
     source: Literal["provider", "model_preamble", "post_tool", "runtime"]
     visibility: Literal["debug", "timeline", "compact"]

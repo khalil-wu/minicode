@@ -78,6 +78,17 @@ def test_nested_access_uses_most_specific_path_then_access_tiebreaker(
     assert resolved.resolve_access(private_public / "index.md") is FileSystemAccessMode.WRITE
 
 
+def test_lexical_parent_traversal_cannot_match_workspace_write_root(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    resolved = _managed_policy(
+        workspace,
+        _path_entry(workspace, FileSystemAccessMode.WRITE),
+    ).resolve(cwd=workspace)
+
+    assert resolved.resolve_access(workspace / ".." / "outside.txt") is FileSystemAccessMode.DENY
+    assert resolved.resolve_access(workspace / "nested" / ".." / "file.txt") is FileSystemAccessMode.WRITE
+
+
 def test_root_read_with_deny_is_a_baseline_not_full_disk_read(tmp_path: Path) -> None:
     denied = tmp_path / "secret"
     policy = _managed_policy(

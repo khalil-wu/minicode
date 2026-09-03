@@ -62,6 +62,14 @@ def _is_denied_path(context: Any, file_path: str) -> bool:
     try:
         return not checker.is_path_allowed(str(file_path), context=permission)
     except Exception:
-        return False
+        # A read-only diff must not become an information-disclosure path when
+        # the policy boundary itself fails.  Callers treat ``True`` as denied,
+        # so a focused diff is rejected and a broad diff omits the path.
+        logger.warning(
+            "Git diff permission check failed closed for %s",
+            file_path,
+            exc_info=True,
+        )
+        return True
 
 

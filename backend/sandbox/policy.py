@@ -1235,7 +1235,12 @@ def _legacy_permission_profile(
 
 
 def _absolute_path(path: str | Path) -> Path:
-    return Path(path).expanduser().absolute()
+    # ``Path.absolute()`` preserves lexical ``..`` components. Policy checks
+    # use ``is_relative_to`` on this value, so ``workspace/../outside`` would
+    # otherwise be classified as inside the workspace. ``abspath`` normalizes
+    # those components without following symlinks; ``_path_candidates`` still
+    # adds the canonical symlink target when that distinction matters.
+    return Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
 
 
 def _filesystem_root(path: Path) -> Path:

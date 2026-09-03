@@ -47,6 +47,7 @@ _RAW_PROVIDER_REASONING_TYPES = frozenset(
     }
 )
 
+
 def _path_lock(path: Path) -> threading.RLock:
     key = canonical_file_path_key(path)
     with _PATH_LOCKS_GUARD:
@@ -94,6 +95,26 @@ def is_raw_provider_reasoning_event(payload: Any) -> bool:
         return True
     source = str(payload.get("source") or "").strip().lower()
     return source in {"provider", "reasoning"}
+
+
+def is_hidden_provider_reasoning_event(payload: Any) -> bool:
+    """Return whether a reasoning frame must be withheld from the live UI.
+
+    Provider-native reasoning with timeline visibility is an intentional live
+    projection. Only explicit raw markers or non-user-facing visibility values
+    belong behind the transport boundary; replay filtering remains the broader
+    ``is_raw_provider_reasoning_event`` policy above.
+    """
+
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("type") or "").strip().lower() not in {
+        "thinking",
+        "thinking_delta",
+    }:
+        return False
+    visibility = str(payload.get("visibility") or "").strip().lower()
+    return visibility in {"hidden", "internal", "redacted", "debug"}
 
 
 def _truncate_replay_string(value: str, path: str, truncated_fields: list[str]) -> str:

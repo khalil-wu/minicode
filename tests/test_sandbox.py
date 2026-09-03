@@ -117,6 +117,27 @@ def test_sandbox_runner_stream_callback_labels_stdout_and_stderr(tmp_path: Path)
     assert any(stream == "stderr" and "err" in piece for stream, piece in streamed)
 
 
+def test_sandbox_stream_callback_type_error_is_not_retried(tmp_path: Path) -> None:
+    runner = SandboxRunner(SandboxPolicy.bypass(timeout=10))
+    calls = 0
+
+    async def _stream(*_args: object) -> None:
+        nonlocal calls
+        calls += 1
+        raise TypeError("callback body failed")
+
+    result = asyncio.run(
+        runner.run(
+            _python_command("print('one')"),
+            cwd=tmp_path,
+            stream_callback=_stream,
+        )
+    )
+
+    assert result.exit_code == 0
+    assert calls == 1
+
+
 def test_sandbox_runner_timeout(tmp_path: Path) -> None:
     policy = SandboxPolicy.bypass(timeout=1)
     runner = SandboxRunner(policy)

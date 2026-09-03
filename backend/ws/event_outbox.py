@@ -21,6 +21,7 @@ from backend.async_cleanup import (
 )
 from backend.ws.event_log import (
     WebSocketReplayEventStore,
+    is_hidden_provider_reasoning_event,
     is_raw_provider_reasoning_event,
     sanitize_ws_live_payload,
     sanitize_ws_replay_payload,
@@ -86,6 +87,12 @@ class EventOutbox:
     @property
     def current_replay_seq(self) -> int:
         return self._replay_cursor
+
+    @property
+    def replay_log_degraded(self) -> bool:
+        """Whether loading the durable replay window lost evidence."""
+
+        return self._store.read_status.degraded
 
     @property
     def client_command_id(self) -> str:
@@ -211,9 +218,9 @@ class EventOutbox:
             return False
         payload = sanitize_ws_live_payload(payload)
         event_type = str(payload.get("type") or "").strip()
-        if is_raw_provider_reasoning_event(payload):
+        if is_hidden_provider_reasoning_event(payload):
             logger.warning(
-                "Dropping raw provider reasoning websocket payload: type=%s session=%s",
+                "Dropping hidden provider reasoning websocket payload: type=%s session=%s",
                 event_type,
                 self.session_id,
             )
@@ -295,6 +302,11 @@ class EventOutbox:
     def _is_replayable(payload: dict[str, Any]) -> bool:
         event_type = str(payload.get("type") or "").strip()
         if is_non_replayable_event_type(event_type):
+            return False
+        # Raw provider reasoning is a live-only projection. The replay store
+        # filters it as well, but excluding it here keeps the in-memory window
+        # and its replay cursor consistent during same-process reconnects.
+        if is_raw_provider_reasoning_event(payload):
             return False
         return bool(str(payload.get("conversation_id") or "").strip())
 

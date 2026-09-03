@@ -487,7 +487,7 @@ export const ProviderTab = ({
     try {
       const res = await fetchWithTimeout(`${apiBase()}/api/llm/provider-history`, {
         method: "DELETE",
-        headers: jsonAuthHeaders(),
+        headers: authHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({
           confirm_sensitive_change: true,
           provider: entry.provider || backendProvider(provider),
@@ -571,21 +571,13 @@ export const ProviderTab = ({
     };
   };
 
-  const jsonAuthHeaders = (): HeadersInit => {
-    try {
-      return authHeaders({ "content-type": "application/json" });
-    } catch {
-      return { "content-type": "application/json" };
-    }
-  };
-
   const saveProvider = async (draft = draftFromState(), options: { activate?: boolean; quiet?: boolean } = {}) => {
     if (!beginOperation("save")) return;
     setSaving(true);
     try {
       const res = await fetchWithTimeout(`${apiBase()}/api/llm/settings`, {
         method: "PUT",
-        headers: jsonAuthHeaders(),
+        headers: authHeaders({ "content-type": "application/json" }),
         body: JSON.stringify(payload(draft, { activate: options.activate })),
       }, { timeoutMessage: "保存提供商配置超时，请重试。" });
       if (!res.ok) {
@@ -834,7 +826,7 @@ export const ProviderTab = ({
       const draft = draftFromState();
       const res = await fetchWithTimeout(`${apiBase()}/api/llm/check`, {
         method: "POST",
-        headers: jsonAuthHeaders(),
+        headers: authHeaders({ "content-type": "application/json" }),
         body: JSON.stringify(payload({ ...draft, modelName: modelId }, { includeProvider: true })),
       }, { timeoutMessage: "模型鉴权检查超时，请重试。" });
       if (!res.ok) {
@@ -857,7 +849,7 @@ export const ProviderTab = ({
     try {
       const res = await fetchWithTimeout(`${apiBase()}/api/llm/models/refresh`, {
         method: "POST",
-        headers: jsonAuthHeaders(),
+        headers: authHeaders({ "content-type": "application/json" }),
         body: JSON.stringify(payload(undefined, { includeProvider: true })),
       }, { timeoutMessage: "发现模型超时，请检查接口后重试。" });
       if (!res.ok) {

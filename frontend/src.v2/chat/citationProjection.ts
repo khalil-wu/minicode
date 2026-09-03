@@ -1,17 +1,11 @@
 import type { ChatMessage, Citation, ContentBlock, ProviderRawCitation } from "../stores/types";
+import { extractInlineCitationIndexes } from "../lib/markdown";
+
+export { extractInlineCitationIndexes } from "../lib/markdown";
 
 export const citationUrl = (citation: Citation | undefined): string => {
   const candidate = String(citation?.url || citation?.source || "").trim();
   return /^https?:\/\//i.test(candidate) ? candidate : "";
-};
-
-export const extractInlineCitationIndexes = (content: string): Set<number> => {
-  const indexes = new Set<number>();
-  for (const match of content.matchAll(/\[(\d+)\]/g)) {
-    const index = Number(match[1]);
-    if (Number.isFinite(index) && index > 0) indexes.add(index);
-  }
-  return indexes;
 };
 
 export const providerCitationsToBase = (

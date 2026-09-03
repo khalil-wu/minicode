@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 CLIENT_COMMAND_DEDUP_MAX_AGE_SECONDS = 86_400.0
 _PATH_LOCKS_GUARD = threading.Lock()
 _PATH_LOCKS: dict[str, threading.RLock] = {}
+_PARTIAL_COMMAND_ID_PATTERN = re.compile(
+    r'"client_command_id"\s*:\s*"([A-Za-z0-9_.:-]{1,128})'
+)
 
 
 def _path_lock(path: Path) -> threading.RLock:
@@ -49,6 +52,7 @@ class ClientCommandDedupStore:
         self.path = self.root_dir / f"{safe_session_id}.jsonl"
         self._lock = _path_lock(self.path)
         self._file_lock = _process_lock(self.path)
+        self.last_load_error: dict[str, str] | None = None
 
     @contextmanager
     def _locked(self):
@@ -66,14 +70,16 @@ class ClientCommandDedupStore:
             return []
 
         with self._locked():
+            self.last_load_error = None
             if not self.path.exists():
                 return []
             now = time.time()
             ids: list[str] = []
             should_rewrite = False
+            malformed_line_seen = False
             try:
                 with self.path.open("r", encoding="utf-8") as handle:
-                    for line in handle:
+                    for line_number, line in enumerate(handle, start=1):
                         raw = line.strip()
                         if not raw:
                             should_rewrite = True
@@ -81,12 +87,34 @@ class ClientCommandDedupStore:
                         try:
                             payload = json.loads(raw)
                         except json.JSONDecodeError:
-                            logger.debug("Skipping malformed client command log line in %s", self.path)
-                            should_rewrite = True
+                            malformed_line_seen = True
+                            recovered = _clean_command_id(
+                                _PARTIAL_COMMAND_ID_PATTERN.search(raw).group(1)
+                                if _PARTIAL_COMMAND_ID_PATTERN.search(raw)
+                                else ""
+                            )
+                            if recovered:
+                                ids.append(recovered)
+                            self.last_load_error = {
+                                "path": str(self.path),
+                                "reason": "malformed_json",
+                                "line": str(line_number),
+                            }
+                            logger.error(
+                                "Malformed client command log line in %s (line %s); "
+                                "preserving the file and recovering any visible command id.",
+                                self.path,
+                                line_number,
+                            )
                             continue
                         command_id = _clean_command_id(payload.get("client_command_id") if isinstance(payload, dict) else "")
                         if not command_id:
-                            should_rewrite = True
+                            malformed_line_seen = True
+                            self.last_load_error = {
+                                "path": str(self.path),
+                                "reason": "invalid_record",
+                                "line": str(line_number),
+                            }
                             continue
                         created_at = payload.get("created_at") if isinstance(payload, dict) else None
                         if isinstance(created_at, (int, float)) and max_age_seconds > 0 and now - float(created_at) > max_age_seconds:
@@ -94,13 +122,18 @@ class ClientCommandDedupStore:
                             continue
                         ids.append(command_id)
             except OSError as exc:
+                self.last_load_error = {
+                    "path": str(self.path),
+                    "reason": type(exc).__name__,
+                    "detail": str(exc),
+                }
                 logger.debug("Failed to load client command log for %s: %s", self.session_id, exc)
                 return []
 
             retained = list(dict.fromkeys(ids[-limit:]))
             if len(ids) != len(retained) or len(ids) > limit:
                 should_rewrite = True
-            if should_rewrite:
+            if should_rewrite and not malformed_line_seen:
                 try:
                     self._rewrite_ids_unlocked(retained)
                 except OSError as exc:

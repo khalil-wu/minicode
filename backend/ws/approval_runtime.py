@@ -367,12 +367,20 @@ class SessionApprovalRuntimeMixin:
             except Exception:
                 tool = None
         try:
-            return checker.check(
+            from backend.permissions.checker import evaluate_permission_decision
+
+            decision = evaluate_permission_decision(
+                checker,
                 tool_name,
                 args,
                 context=context,
                 tool=tool,
-            ) == PermissionLevel.AUTO
+            )
+            return (
+                decision.permission_level == PermissionLevel.AUTO
+                and decision.decision == "allow"
+                and decision.capability_allowed
+            )
         except Exception as exc:
             logger.debug("pending approval auto-check failed for %s: %s", tool_name, exc)
             return False

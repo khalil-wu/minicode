@@ -99,6 +99,50 @@ describe("MarkdownRenderer", () => {
     expect([...container.querySelectorAll("h2")].map((node) => node.getAttribute("id"))).toEqual(ids);
   });
 
+  it("keeps split stable and streaming heading IDs unique when only the tail rerenders", () => {
+    const prefix = "A".repeat(130);
+    const first = `${prefix}\n\n## Duplicate\n\nStable body\n\n## Duplicate`;
+    const second = `${first}\n<!-- tail update -->`;
+    const { container, rerender } = render(<MarkdownRenderer content={first} isStreaming />);
+    const firstHeadings = [...container.querySelectorAll("h2")];
+    const firstIds = firstHeadings.map((node) => node.getAttribute("id"));
+    expect(firstIds).toHaveLength(2);
+    expect(new Set(firstIds).size).toBe(2);
+
+    rerender(<MarkdownRenderer content={second} isStreaming />);
+
+    const secondIds = [...container.querySelectorAll("h2")].map((node) => node.getAttribute("id"));
+    expect(new Set(secondIds).size).toBe(2);
+    expect(secondIds).toEqual(firstIds);
+    expect(container.querySelectorAll("h2")[0]).toBe(firstHeadings[0]);
+  });
+
+  it("does not reuse a stable heading ID when a heading-only tail rerenders", () => {
+    const prefix = `${"A".repeat(220)}\n\n## Duplicate\n\nStable body\n\n`;
+    const first = `${prefix}## Duplicate`;
+    const second = `${prefix}## **Duplicate**`;
+    const { container, rerender } = render(<MarkdownRenderer content={first} isStreaming />);
+    const firstIds = [...container.querySelectorAll("h2")].map((node) => node.getAttribute("id"));
+
+    expect(firstIds).toHaveLength(2);
+    expect(new Set(firstIds).size).toBe(2);
+
+    rerender(<MarkdownRenderer content={second} isStreaming />);
+
+    const secondIds = [...container.querySelectorAll("h2")].map((node) => node.getAttribute("id"));
+    expect(secondIds).toEqual(firstIds);
+    expect(new Set(secondIds).size).toBe(2);
+  });
+
+  it("keeps malformed percent-encoded heading links renderable", () => {
+    expect(() => render(
+      <MarkdownRenderer content={["[Jump](#broken%fragment)", "", "## Broken%fragment"].join("\n")} />,
+    )).not.toThrow();
+
+    expect(screen.getByRole("heading", { name: "Broken%fragment" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Jump" }).getAttribute("href")).toContain("brokenfragment");
+  });
+
   it("never promotes blank lines inside an unclosed fenced block into the stable prefix", () => {
     const prefix = `${"A".repeat(140)}\n\n`;
     const content = `${prefix}\`\`\`ts\nconst first = 1;\n\nconst second = 2;\n`;

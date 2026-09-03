@@ -34,12 +34,12 @@ def _is_dangerous_path(path: Path) -> bool:
     return any(part.lower() in DANGEROUS_DIRECTORIES for part in path.parts)
 
 
-# ``is_protected_write_path`` is the write guard. ``is_sensitive_file`` is kept
-# as a deprecated alias so existing call sites and transcripts resolve; both now
-# mean the single cc-dangerous-path concept (no separate secret-file list).
+# ``is_protected_write_path`` is the single dangerous-path implementation.
+# ``is_sensitive_file`` remains a compatibility alias for older integrations;
+# it deliberately delegates instead of carrying a second rule set.
 def is_protected_write_path(path: Path) -> bool:
     return _is_dangerous_path(path)
 
 
 def is_sensitive_file(path: Path) -> bool:
-    return _is_dangerous_path(path)
+    return is_protected_write_path(path)

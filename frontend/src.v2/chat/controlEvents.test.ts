@@ -367,6 +367,62 @@ describe("handleControlEvent", () => {
     expect(state.rightPanelOpen).toBe(false);
   });
 
+  it("scopes lazy approval diff updates to the owning assistant message", () => {
+    const tool = (id: string) => ({
+      type: "tool_call" as const,
+      record: {
+        id,
+        name: "write_file",
+        args: { path: "demo.txt" },
+        status: "running" as const,
+        startedAt: 1,
+      },
+    });
+    useAppStore.setState({
+      conversationId: "conv-active",
+      messages: [
+        {
+          id: "assistant-a",
+          role: "assistant",
+          content: "",
+          blocks: [tool("ctrl-diff")],
+          artifacts: [],
+          timestamp: 1,
+        },
+        {
+          id: "assistant-b",
+          role: "assistant",
+          content: "",
+          blocks: [tool("ctrl-diff")],
+          artifacts: [],
+          timestamp: 2,
+        },
+      ],
+    });
+
+    expect(handleControlEvent({
+      type: "control_request",
+      request_id: "ctrl-diff",
+      conversation_id: "conv-active",
+      message_id: "assistant-b",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "write_file",
+        input: { path: "demo.txt" },
+        tool_use_id: "ctrl-diff",
+        diff: "@@ -1 +1 @@\n-old\n+new",
+      },
+    } as unknown as ServerEvent)).toBe(true);
+
+    const [first, second] = useAppStore.getState().messages;
+    expect(first?.blocks?.[0]).toMatchObject({ type: "tool_call" });
+    expect(first?.blocks?.[0]).not.toHaveProperty("record.diff");
+    expect(second?.blocks?.[0]).toMatchObject({
+      type: "tool_call",
+      record: { diff: { plus: 0, minus: 0, patch: "@@ -1 +1 @@\n-old\n+new" } },
+    });
+  });
+
   it("maps active control-protocol elicitation requests into ask-user state", () => {
     useAppStore.setState({ conversationId: "conv-active" });
 

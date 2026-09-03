@@ -1288,7 +1288,6 @@ const hasValidSemanticPayload = (
       && (!("detail" in value) || isBoundedString(value.detail, MAX_EVENT_SUMMARY_CHARS))
       && (!("tool_call_id" in value) || isBoundedString(value.tool_call_id, 1_024))
       && (!("tool_name" in value) || isBoundedString(value.tool_name, 1_024))
-      && (!("tool_call_id" in value) || isBoundedString(value.tool_name, 1_024))
       && ["group_id", "step_id", "iteration_id"].every((field) => (
         !(field in value) || isBoundedString(value[field], 1_024)
       ))

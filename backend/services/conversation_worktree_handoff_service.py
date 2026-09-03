@@ -145,8 +145,13 @@ def build_handoff_preflight(
 def stash_workspace_changes(root: Path, *, label: str) -> tuple[bool, str]:
     """Move tracked and untracked work aside for a handoff, retaining recovery."""
     ok, output = _git(root, "stash", "push", "--include-untracked", "--message", label)
-    if not ok or "No local changes" in output:
+    if not ok:
         return False, output or "Failed to stash local changes"
+    # ``git stash push`` exits successfully when the checkout is already
+    # clean, but reports that no stash was created. Treat that as a no-op so
+    # choosing the stash path does not block an otherwise valid handoff.
+    if "No local changes" in output:
+        return True, ""
     ok, ref = _git(root, "stash", "list", "-1", "--format=%gd")
     return (bool(ok and ref), ref or output)
 

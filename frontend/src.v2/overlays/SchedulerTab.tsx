@@ -1,12 +1,13 @@
 import { useMemo, useState } from "react";
 import { CalendarClock, History, MessageSquareText, Play, Plus, RotateCcw, Square, Trash2 } from "lucide-react";
 import { useAppStore } from "../stores";
-import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
-import type { ClientCommand, CommandResultEvent } from "../protocol/events";
+import { sendClientCommandAwaitResult } from "../protocol/ws-outbox";
+import type { ClientCommand } from "../protocol/events";
 import { Section, inputStyle, secondaryActionStyle } from "./settingsShared";
 import { pushToast } from "./ToastContainer";
 import { showConfirm } from "./DialogService";
 import { SelectMenu } from "../components/SelectMenu";
+import { reportCommandFailure } from "./commandFeedback";
 
 type SchedulePreset = "hourly" | "daily" | "weekdays" | "custom";
 
@@ -31,12 +32,6 @@ const runStatusLabel = (status: string) => ({
 
 const operationError = (error: unknown): string =>
   error instanceof Error ? error.message : String(error || "未知错误");
-
-const commandFailure = (result: CommandResultEvent, action: string): boolean => {
-  if (commandResultSucceeded(result)) return false;
-  pushToast(`${action}失败：${result.message || "后端未返回具体原因"}`, "error");
-  return true;
-};
 
 export const SchedulerTab = ({
   title = "已安排",
@@ -88,7 +83,7 @@ export const SchedulerTab = ({
         ...ownerScope,
         conversation_id: taskMode === "heartbeat" ? conversationId ?? undefined : undefined,
       }, "scheduler.add");
-      if (commandFailure(result, "添加定时任务")) return;
+      if (reportCommandFailure(result, "添加定时任务")) return;
       setNewTaskName((current) => current.trim() === name ? "" : current);
       setNewTaskPrompt((current) => current.trim() === prompt ? "" : current);
       setNewTaskSchedule((current) => current.trim() === schedule ? "0 * * * *" : current);
@@ -111,7 +106,7 @@ export const SchedulerTab = ({
     setPendingTaskActions((current) => ({ ...current, [taskId]: expectedCommand }));
     try {
       const result = await sendClientCommandAwaitResult(command, expectedCommand);
-      if (!commandFailure(result, action)) pushToast(successMessage, "success");
+      if (!reportCommandFailure(result, action)) pushToast(successMessage, "success");
     } catch (error) {
       pushToast(`${action}失败：${operationError(error)}`, "error");
     } finally {
@@ -151,7 +146,7 @@ export const SchedulerTab = ({
     setPendingRunActions((current) => ({ ...current, [runId]: expectedCommand }));
     try {
       const result = await sendClientCommandAwaitResult(command, expectedCommand);
-      if (!commandFailure(result, action)) pushToast(successMessage, "success");
+      if (!reportCommandFailure(result, action)) pushToast(successMessage, "success");
     } catch (error) {
       pushToast(`${action}失败：${operationError(error)}`, "error");
     } finally {

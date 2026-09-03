@@ -149,11 +149,37 @@ class LSPClient:
         self._lock = asyncio.Lock()
 
     def is_running(self) -> bool:
-        return self._process is not None and self._process.returncode is None
+        return (
+            self._process is not None
+            and self._process.returncode is None
+            and self._reader_task is not None
+            and not self._reader_task.done()
+        )
 
     async def start(self) -> None:
         if self._process is not None and self._process.returncode is None:
-            return
+            if self._reader_task is not None and not self._reader_task.done():
+                return
+            # The server kept its process handle after the protocol reader
+            # reached EOF.  Terminate that stale process before replacing it;
+            # otherwise a direct ``start()`` call leaks the old server.
+            try:
+                await self._sandbox_runner.terminate(self._process)
+            except (ProcessLookupError, OSError):
+                pass
+            for task_attr in ("_reader_task", "_stderr_task"):
+                task = getattr(self, task_attr)
+                if task is None or task.done():
+                    continue
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                setattr(self, task_attr, None)
+            self._process = None
+            self._stdin = None
+            self._stdout = None
         try:
             self._process = await self._sandbox_runner.spawn_interactive(
                 [self._command, *self._args],
@@ -177,7 +203,13 @@ class LSPClient:
         await self._initialize()
 
     async def stop(self) -> None:
-        if self._process and self._process.returncode is None:
+        # Graceful LSP shutdown requires the protocol reader to deliver the
+        # response.  If stdout already reached EOF, the process handle can
+        # still report ``returncode is None`` while no task remains to settle
+        # the shutdown future; sending a request then waits for the full
+        # request timeout.  Skip directly to owned-process termination for
+        # that stale lifecycle state.
+        if self.is_running():
             try:
                 for file_path in list(self._opened_files):
                     await self.close_file(file_path)
@@ -241,8 +273,8 @@ class LSPClient:
         abs_path = str(Path(file_path).resolve())
         try:
             content = Path(abs_path).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return
+        except OSError as exc:
+            raise RuntimeError(f"Unable to read source file for LSP: {abs_path}") from exc
         content_hash = __import__("hashlib").sha256(content.encode("utf-8")).hexdigest()
         opened = self._opened_files.get(abs_path)
         if opened is not None:
@@ -330,7 +362,15 @@ class LSPClient:
         })
         if not isinstance(result, list):
             return []
-        return [_parse_symbol(item) for item in result if isinstance(item, dict)]
+        symbols: list[LSPSymbol] = []
+        for item in result:
+            if not isinstance(item, dict):
+                continue
+            try:
+                symbols.append(_parse_symbol(item))
+            except ValueError:
+                logger.debug("Skipping malformed LSP document symbol")
+        return symbols
 
     async def _send_request(self, method: str, params: dict[str, Any]) -> Any:
         if not self._stdin or not self._process or self._process.returncode is not None:
@@ -342,13 +382,16 @@ class LSPClient:
         self._pending[msg_id] = future
         body = json.dumps(message)
         header = f"Content-Length: {len(body.encode('utf-8'))}\r\n\r\n"
-        self._stdin.write(header.encode("utf-8") + body.encode("utf-8"))
-        await self._stdin.drain()
         try:
+            self._stdin.write(header.encode("utf-8") + body.encode("utf-8"))
+            await self._stdin.drain()
             return await asyncio.wait_for(future, timeout=30.0)
         except asyncio.TimeoutError:
             self._pending.pop(msg_id, None)
             raise RuntimeError(f"LSP request timed out: {method}")
+        except BaseException:
+            self._pending.pop(msg_id, None)
+            raise
 
     async def _send_notification(self, method: str, params: dict[str, Any]) -> None:
         if not self._stdin or not self._process or self._process.returncode is not None:
@@ -607,36 +650,94 @@ def _parse_locations(
         if not uri:
             continue
         rng = item.get("range") or item.get("targetSelectionRange") or item.get("targetRange") or {}
-        start = rng.get("start", {}) if isinstance(rng, dict) else {}
-        end = rng.get("end", {}) if isinstance(rng, dict) else {}
+        start = (
+            rng.get("start", {})
+            if isinstance(rng, dict) and isinstance(rng.get("start", {}), dict)
+            else {}
+        )
+        end = (
+            rng.get("end", {})
+            if isinstance(rng, dict) and isinstance(rng.get("end", {}), dict)
+            else {}
+        )
+        line = _lsp_position_component(start, "line")
+        character = _lsp_position_component(start, "character")
+        end_line = _lsp_position_component(end, "line")
+        end_character = _lsp_position_component(end, "character")
+        if None in {line, character, end_line, end_character}:
+            continue
         locations.append(LSPLocation(
             file=_uri_to_path(uri, path_mapper=path_mapper),
-            line=start.get("line", 0),
-            character=start.get("character", 0),
-            end_line=end.get("line", 0),
-            end_character=end.get("character", 0),
+            line=line,
+            character=character,
+            end_line=end_line,
+            end_character=end_character,
         ))
     return locations
 
 
 def _parse_symbol(item: dict[str, Any]) -> LSPSymbol:
-    rng = item.get("location", {}).get("range") or item.get("range") or {}
-    start = rng.get("start", {}) if isinstance(rng, dict) else {}
-    end = rng.get("end", {}) if isinstance(rng, dict) else {}
-    children = [
-        _parse_symbol(child)
-        for child in (item.get("children") or [])
-        if isinstance(child, dict)
-    ]
+    location = item.get("location")
+    location_range = location.get("range") if isinstance(location, dict) else None
+    rng = location_range or item.get("range") or {}
+    start = (
+        rng.get("start", {})
+        if isinstance(rng, dict) and isinstance(rng.get("start", {}), dict)
+        else {}
+    )
+    end = (
+        rng.get("end", {})
+        if isinstance(rng, dict) and isinstance(rng.get("end", {}), dict)
+        else {}
+    )
+    line = _lsp_position_component(start, "line")
+    character = _lsp_position_component(start, "character")
+    end_line = _lsp_position_component(end, "line")
+    end_character = _lsp_position_component(end, "character")
+    kind = item.get("kind", 0)
+    if (
+        line is None
+        or character is None
+        or end_line is None
+        or end_character is None
+        or isinstance(kind, bool)
+        or not isinstance(kind, int)
+        or kind < 0
+        or kind > 9_007_199_254_740_991
+    ):
+        raise ValueError("malformed LSP symbol")
+    children: list[LSPSymbol] = []
+    raw_children = item.get("children")
+    if isinstance(raw_children, list):
+        for child in raw_children:
+            if not isinstance(child, dict):
+                continue
+            try:
+                children.append(_parse_symbol(child))
+            except (ValueError, TypeError):
+                logger.debug("Skipping malformed nested LSP symbol")
     return LSPSymbol(
         name=str(item.get("name") or ""),
-        kind=int(item.get("kind") or 0),
-        line=start.get("line", 0),
-        character=start.get("character", 0),
-        end_line=end.get("line", 0),
-        end_character=end.get("character", 0),
+        kind=kind,
+        line=line,
+        character=character,
+        end_line=end_line,
+        end_character=end_character,
         children=children,
     )
+
+
+def _lsp_position_component(value: Any, field: str) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    if field not in value:
+        return 0
+    component = value[field]
+    if isinstance(component, bool) or not isinstance(component, int) or component < 0:
+        return None
+    if component > 9_007_199_254_740_991:
+        return None
+    return component
 
 
 def _language_id_for_extension(ext: str) -> str:

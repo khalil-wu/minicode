@@ -178,6 +178,8 @@ const applyApprovalRequest = (
       request.requestId,
       { diff: { plus, minus, patch } },
       request.conversationId,
+      undefined,
+      request.messageId,
     );
   }
   const reviewState: DiffReviewState = {

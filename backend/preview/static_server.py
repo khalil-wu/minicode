@@ -6,7 +6,6 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from backend.security.sensitive_files import is_protected_write_path, is_sensitive_file
 
 
 class PreviewRequestHandler(SimpleHTTPRequestHandler):
@@ -34,8 +33,6 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
         if not relative_text or relative.is_absolute() or ".." in relative.parts:
             return None
         if any(part.startswith(".") for part in relative.parts):
-            return None
-        if is_sensitive_file(relative) or is_protected_write_path(relative):
             return None
         try:
             candidate = (self._preview_root / relative).resolve()

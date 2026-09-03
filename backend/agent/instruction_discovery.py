@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 from threading import Lock
+from typing import Any
 
 import yaml
 from pathspec.gitignore import GitIgnoreSpec

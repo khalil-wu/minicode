@@ -511,7 +511,21 @@ class TaskScheduler:
             if requested_workspace is not None and task.workspace_root != requested_workspace:
                 continue
             row = task.to_dict()
-            next_run = _stored_next_run(task) if task.enabled else None
+            if task.enabled:
+                try:
+                    next_run = _stored_next_run(task)
+                except (ZoneInfoNotFoundError, ValueError) as exc:
+                    # Keep a malformed persisted task visible while preventing
+                    # one bad timezone/schedule from breaking the whole list.
+                    logger.error(
+                        "Task %s has an unusable schedule/timezone (%s); it will not fire until fixed.",
+                        task.id,
+                        exc,
+                    )
+                    self._unusable_schedule_ids.add(task.id)
+                    next_run = None
+            else:
+                next_run = None
             row["next_run_at"] = next_run.isoformat() if next_run else None
             rows.append(row)
         return sorted(rows, key=lambda row: (str(row.get("created_at") or ""), str(row.get("id") or "")), reverse=True)

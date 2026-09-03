@@ -40,6 +40,11 @@ import {
   workspacePathWithin,
   workspacePathsEqual,
 } from "../../lib/workspace-path";
+import {
+  createMarkdownHeadingIdAssigner,
+  decodeMarkdownFragment,
+  markdownHeadingSlug,
+} from "../../lib/markdown";
 
 interface Props {
   content: string;
@@ -936,41 +941,6 @@ const shouldRenderInlineCodeAsProse = (value: string): boolean => {
   return proseInlinePattern.test(text);
 };
 
-const markdownHeadingSlug = (value: string): string => {
-  const slug = value
-    .trim()
-    .toLocaleLowerCase()
-    .replace(/[^\p{L}\p{N}\s_-]/gu, "")
-    .replace(/[\s_]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || "section";
-};
-
-/**
- * Assign heading anchor ids without mutating render-order state.
- *
- * A counter that accumulates as headings render forces the component table to
- * be rebuilt whenever content changes, which remounts every rendered element.
- * Ranking duplicates by source line is order-independent and idempotent, so
- * the same heading keeps the same id across re-renders and the component table
- * stays referentially stable while text streams in.
- */
-type HeadingIdAssigner = (base: string, line: number | undefined) => string;
-
-const createHeadingIdAssigner = (scopeId: string): HeadingIdAssigner => {
-  const assignedLines = new Map<string, number[]>();
-  return (base, line) => {
-    if (line == null) return `${scopeId}-${base}`;
-    const lines = assignedLines.get(base) ?? [];
-    if (!lines.includes(line)) {
-      lines.push(line);
-      assignedLines.set(base, lines);
-    }
-    const rank = lines.filter((candidate) => candidate < line).length + 1;
-    return `${scopeId}-${base}${rank > 1 ? `-${rank}` : ""}`;
-  };
-};
-
 const InlineOptionList = ({ text }: { text: string }) => {
   const parts = text.split("/").map((part) => part.trim()).filter(Boolean);
   if (parts.length < 2) return <>{text}</>;
@@ -1331,11 +1301,14 @@ const MarkdownImage = (props: React.ImgHTMLAttributes<HTMLImageElement>) => {
   ) : image;
 };
 
-const mdComponents = (resolvedTheme: ResolvedTheme, scopeId: string): MarkdownComponents => {
-  const headingId = createHeadingIdAssigner(scopeId);
+const mdComponents = (
+  resolvedTheme: ResolvedTheme,
+  scopeId: string,
+  headingId: ReturnType<typeof createMarkdownHeadingIdAssigner>,
+): MarkdownComponents => {
   const heading = (level: 1 | 2 | 3) => ({ node, ...props }: MarkdownPositionedProps<React.HTMLAttributes<HTMLHeadingElement>>) => {
     const base = markdownHeadingSlug(textFromReactNode(props.children));
-    const id = headingId(base, node?.position?.start.line);
+    const id = headingId(base, node?.position?.start?.line);
     const Tag: "h1" | "h2" | "h3" = level === 1 ? "h1" : level === 2 ? "h2" : "h3";
     const className = level === 1
       ? "text-[length:var(--text-2xl)] font-bold mt-5 mb-2.5 first:mt-0"
@@ -1412,7 +1385,7 @@ const mdComponents = (resolvedTheme: ResolvedTheme, scopeId: string): MarkdownCo
     const href = typeof props.href === "string" ? props.href : "";
     const childrenText = textFromReactNode(props.children);
     if (href.startsWith("#")) {
-      const targetId = `${scopeId}-${markdownHeadingSlug(decodeURIComponent(href.slice(1)))}`;
+      const targetId = `${scopeId}-${markdownHeadingSlug(decodeMarkdownFragment(href.slice(1)))}`;
       return (
         <a
           {...props}
@@ -1598,6 +1571,40 @@ function scanFences(content: string): FenceScanResult {
   };
 }
 
+/** Return whether a Markdown heading exists outside a fenced code block. */
+function hasMarkdownHeading(content: string): boolean {
+  let open: { marker: "`" | "~"; length: number } | null = null;
+  let lineStart = 0;
+
+  while (lineStart <= content.length) {
+    const newline = content.indexOf("\n", lineStart);
+    const lineEnd = newline >= 0 ? newline : content.length;
+    const line = content.slice(lineStart, lineEnd).replace(/\r$/, "");
+
+    if (open) {
+      const close = /^ {0,3}(`+|~+)[\t ]*$/.exec(line);
+      if (close && close[1][0] === open.marker && close[1].length >= open.length) {
+        open = null;
+      }
+    } else {
+      const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+      if (opening) {
+        open = {
+          marker: opening[1][0] as "`" | "~",
+          length: opening[1].length,
+        };
+      } else if (/^ {0,3}#{1,6}(?:[\t ]+|$)/.test(line)) {
+        return true;
+      }
+    }
+
+    if (newline < 0) break;
+    lineStart = newline + 1;
+  }
+
+  return false;
+}
+
 export function findStableSplitPoint(content: string): number {
   const fenceScan = scanFences(content);
   const openFenceStart = fenceScan.unclosedStart;
@@ -1722,14 +1729,16 @@ export const MarkdownRenderer = memo(({ content, isStreaming, citations }: Props
   const resolved = useResolvedTheme();
   const rawScopeId = useId();
   const scopeId = useMemo(() => `md-${rawScopeId.replace(/[^a-zA-Z0-9_-]/g, "")}`, [rawScopeId]);
+  const headingId = useMemo(() => createMarkdownHeadingIdAssigner(scopeId), [scopeId]);
   const displayContent = useMemo(
     () => preserveWindowsMarkdownFileLinks(normalizeLatexDelimiters(normalizeCitationText(content, citations))),
     [content, citations],
   );
   const components = useMemo(
-    () => mdComponents(resolved, scopeId),
-    [resolved, scopeId],
+    () => mdComponents(resolved, scopeId, headingId),
+    [resolved, scopeId, headingId],
   );
+  headingId.reset();
   const prevStableRef = useRef("");
 
   // Plain-text fast path: skip react-markdown entirely for content with
@@ -1749,12 +1758,14 @@ export const MarkdownRenderer = memo(({ content, isStreaming, citations }: Props
       }
       const stable = prevStableRef.current;
       const tail = displayContent.slice(stable.length);
-      return (
-        <div className="md-body">
-          <StableMarkdown content={stable} components={components} />
-          {tail && <StreamingTailMarkdown content={tail} components={components} />}
-        </div>
-      );
+      if (!hasMarkdownHeading(tail)) {
+        return (
+          <div className="md-body">
+            <StableMarkdown content={stable} components={components} />
+            {tail && <StreamingTailMarkdown content={tail} components={components} />}
+          </div>
+        );
+      }
     }
   }
 

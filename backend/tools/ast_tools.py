@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.permissions.context import ToolExecutionContext
-from backend.security.sensitive_files import is_sensitive_file
+from backend.security.sensitive_files import is_protected_write_path
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.tree_sitter_parser import (
     find_definitions as _ts_find_definitions,
@@ -95,7 +95,7 @@ def _iter_source_files(root: Path) -> list[Path]:
             continue
         if any(part in _IGNORED_DIRS for part in item.parts):
             continue
-        if is_sensitive_file(relative_item):
+        if is_protected_write_path(relative_item):
             continue
         if item.suffix.lower() in _SEARCHABLE_EXTENSIONS:
             result.append(item)
@@ -103,7 +103,7 @@ def _iter_source_files(root: Path) -> list[Path]:
 
 
 def _read_safe(path: Path) -> str | None:
-    if path.is_symlink() or is_sensitive_file(path):
+    if path.is_symlink() or is_protected_write_path(path):
         return None
     try:
         return path.read_text(encoding="utf-8", errors="ignore")

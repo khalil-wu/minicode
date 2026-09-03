@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from backend.agent.run_context import RunContext
+from backend.agent.provider_protocol import provider_raw_from_event_data
 
 
 logger = logging.getLogger(__name__)
@@ -378,7 +379,7 @@ class ExtensionLifecycleObserver:
         self._rebuild_assistant_content()
 
     def _record_thinking_event(self, data: Mapping[str, Any]) -> dict[str, Any]:
-        raw_index = data.get("content_index", data.get("content_index", 0))
+        raw_index = data.get("content_index", 0)
         if isinstance(raw_index, bool) or not isinstance(raw_index, int) or raw_index < 0:
             index = 0
         else:
@@ -485,10 +486,6 @@ class ExtensionLifecycleObserver:
             # bootstrap. The context builder applies it exactly once before
             # the first provider request.
             if before_result.get("system_prompt") is not None:
-                metadata["_extension_system_prompt"] = str(
-                    before_result.get("system_prompt") or ""
-                )
-            elif before_result.get("system_prompt") is not None:
                 metadata["_extension_system_prompt"] = str(
                     before_result.get("system_prompt") or ""
                 )
@@ -955,7 +952,7 @@ class ExtensionLifecycleObserver:
         if tool_id not in self._started_tool_calls:
             await self._flush_pending_message_end()
             await self._start_tool(tool_id, tool_name, args)
-        is_error = bool(event.get("is_error", event.get("is_error", False)))
+        is_error = bool(event.get("is_error", False))
         summary = event.get("summary")
         if summary is None:
             summary = event.get("content_preview", event.get("content", ""))
@@ -1050,7 +1047,7 @@ class ExtensionLifecycleObserver:
                 usage = data.get("usage")
                 if isinstance(usage, Mapping):
                     self._current_assistant["usage"] = _extension_usage(usage)
-                provider_raw = data.get("provider_raw", data.get("provider_raw"))
+                provider_raw = provider_raw_from_event_data(data)
                 if isinstance(provider_raw, Mapping):
                     request_summary = provider_raw.get("request_summary")
                     if isinstance(request_summary, Mapping):

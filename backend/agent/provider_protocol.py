@@ -18,11 +18,28 @@ from backend.agent.public_projection import (
     public_text,
 )
 from backend.agent.state import AgentState
+from backend.agent.value_utils import finite_number, nonnegative_int
 from backend.llm.base import (
     UsageInfo,
     _normalize_usage_cost,
     _normalize_usage_int,
 )
+
+
+def provider_raw_from_event_data(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Read provider trace metadata at a protocol seam.
+
+    ``provider_raw`` is the canonical wire spelling. ``providerRaw`` was used
+    by a short-lived pre-alignment path; accepting it here keeps old in-process
+    events readable while callers converge on one field.
+    """
+
+    if not isinstance(value, Mapping):
+        return {}
+    raw = value.get("provider_raw")
+    if not isinstance(raw, Mapping):
+        raw = value.get("providerRaw")
+    return dict(raw) if isinstance(raw, Mapping) else {}
 
 
 def provider_raw_for_projection(
@@ -221,28 +238,8 @@ def provider_raw_for_projection(
     return projected
 
 
-def _safe_nonnegative_int(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(numeric) or numeric < 0 or not numeric.is_integer():
-        return None
-    return int(numeric)
-
-
-def _safe_number(value: Any) -> int | float | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(numeric):
-        return None
-    return int(numeric) if numeric.is_integer() else numeric
+_safe_nonnegative_int = nonnegative_int
+_safe_number = finite_number
 
 
 def _safe_count_mapping(value: Any, fields: tuple[str, ...]) -> dict[str, int]:

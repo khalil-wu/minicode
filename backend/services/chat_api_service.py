@@ -138,6 +138,24 @@ async def run_owned_rest_chat(
         active_claim = conversation_query_guards().active_claim(conversation_id)
         if active_claim != query_claim:
             raise RuntimeError("The REST turn does not own the active conversation query generation.")
+    normalized_permission_mode = str(permission_mode or "confirm").strip().lower()
+    if normalized_permission_mode == "auto_approve":
+        normalized_permission_mode = "auto"
+    from backend.permissions.checker import normalize_permission_mode_token
+
+    try:
+        normalized_permission_mode = normalize_permission_mode_token(
+            normalized_permission_mode
+        )
+    except ValueError as exc:
+        return {
+            "reply": "(No reply)",
+            "stopped_reason": "invalid_permission_mode",
+            "status": "failed",
+            "errors": [str(exc)],
+            "iterations": 0,
+            "tool_calls": [],
+        }
     config = load_config(cwd=workspace_root)
 
     artifact_store = ArtifactStore()
@@ -193,9 +211,6 @@ async def run_owned_rest_chat(
         else config.agent
     )
 
-    normalized_permission_mode = str(permission_mode or "confirm").strip().lower()
-    if normalized_permission_mode == "auto_approve":
-        normalized_permission_mode = "auto"
     journal_turn_id = str(run_id or uuid4().hex)
     journal_owner = execution_journal_owner(
         "main",
@@ -206,7 +221,7 @@ async def run_owned_rest_chat(
     session_id = f"scheduled:{run_id}" if run_id else "rest_api"
     runtime = AgentLoopSessionContext(
         permission_context=PermissionContext(
-            mode=normalized_permission_mode if normalized_permission_mode in {"plan", "confirm", "bypass", "auto"} else "confirm",
+            mode=normalized_permission_mode,
             workspace_scope="project",
             source="scheduled_task" if run_id else "rest_api",
         ),

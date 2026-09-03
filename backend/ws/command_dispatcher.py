@@ -5,9 +5,7 @@ import json
 import logging
 import uuid
 from pathlib import Path
-from typing import Any, Callable
-
-from fastapi import WebSocketDisconnect
+from typing import Any
 
 from backend.agent.message import AgentEvent, UserCommand
 from backend.ws.client_command_log import ClientCommandDedupStore, _clean_command_id
@@ -420,10 +418,20 @@ class SessionCommandDispatcher:
                     client_command_id,
                     command.type,
                 ):
-                    await self._handle_command(
+                    handled = await self._handle_command(
                         command,
                         connection_generation=connection_generation,
                     )
+            if handled is False:
+                # ``_handle_command`` reports the failure to the client and
+                # returns False.  It is not a successful durable completion:
+                # keep the command pending so reconnect can retry it.
+                durable_queue.release_client_command(client_command_id)
+                return
+            # Record the completed side effect before removing the durable
+            # command.  A crash between those writes must replay as a
+            # duplicate acknowledgement, never execute the command twice.
+            self._mark_client_command_seen(command, require_persistence=True)
         except asyncio.CancelledError:
             try:
                 durable_queue.release_client_command(client_command_id)
@@ -437,8 +445,10 @@ class SessionCommandDispatcher:
                 logger.exception("Failed to release failed client command %s", client_command_id)
             raise
         else:
-            durable_queue.complete_client_command(client_command_id)
-            self._mark_client_command_seen(command)
+            if not durable_queue.complete_client_command(client_command_id):
+                raise RuntimeError(
+                    f"Could not complete durable client command {client_command_id}"
+                )
 
     def prune_command_tasks(self) -> None:
         for task in list(self._command_tasks):
@@ -481,7 +491,12 @@ class SessionCommandDispatcher:
         client_command_id = self._client_command_id(command)
         return bool(client_command_id and client_command_id in self._recent_client_command_id_set)
 
-    def _mark_client_command_seen(self, command: UserCommand) -> bool:
+    def _mark_client_command_seen(
+        self,
+        command: UserCommand,
+        *,
+        require_persistence: bool = False,
+    ) -> bool:
         client_command_id = self._client_command_id(command)
         if not client_command_id:
             return False
@@ -492,6 +507,10 @@ class SessionCommandDispatcher:
         try:
             self._client_command_store.append(client_command_id, command_type=command.type)
         except Exception as exc:
+            if require_persistence:
+                self._recent_client_command_id_set.discard(client_command_id)
+                self._recent_client_command_ids.remove(client_command_id)
+                raise
             logger.debug("Failed to persist client command id for %s: %s", self._session.session_id, exc)
         pruned = False
         while len(self._recent_client_command_ids) > RECENT_CLIENT_COMMAND_IDS_MAX:
@@ -847,6 +866,34 @@ class SessionCommandDispatcher:
                     return
                 target_conversation_id = target.id
 
+            raw_permission_mode = command.data.get("permission_mode")
+            requested_permission_mode: str | None = None
+            if raw_permission_mode is not None and not (
+                isinstance(raw_permission_mode, str)
+                and not raw_permission_mode.strip()
+            ):
+                requested_permission_mode = normalize_permission_mode(
+                    str(raw_permission_mode)
+                )
+                if requested_permission_mode is None:
+                    error_event = AgentEvent.error(
+                        "Invalid permission mode. Use one of: plan, confirm, auto, bypass.",
+                        recoverable=False,
+                        error_type="validation",
+                        error_code="invalid_permission_mode",
+                    )
+                    if target_conversation_id:
+                        error_event.data["conversation_id"] = target_conversation_id
+                    await self._session.send_event(error_event)
+                    await self._seal_unstarted_user_message(
+                        target_conversation_id,
+                        reason="permission_mode_rejected",
+                        message_id=str(
+                            command.data.get("assistant_message_id") or ""
+                        ),
+                    )
+                    return
+
             # Handle workspace switching if requested
             requested_workspace_root = str(
                 command.data.get("workspace_root") or ""
@@ -867,9 +914,6 @@ class SessionCommandDispatcher:
                     return
 
             # Handle permission mode update if requested
-            requested_permission_mode = normalize_permission_mode(
-                str(command.data.get("permission_mode") or "")
-            )
             permission_result = await self._handle_user_message_permission(
                 requested_permission_mode, target_conversation_id
             )

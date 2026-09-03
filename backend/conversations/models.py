@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from backend.config_requirements import normalize_string_array
+from backend.permissions.patterns import normalize_tool_patterns as normalize_permission_deny_rules
 
 
 ConversationMemoryMode = Literal["enabled", "disabled", "polluted"]
@@ -71,21 +72,6 @@ def normalize_permission_rule_level(value: Any) -> ConversationPermissionRuleLev
     if level in {"auto", "confirm", "diff", "deny"}:
         return level
     return None
-
-
-def normalize_permission_deny_rules(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for item in value:
-        pattern = str(item or "").strip()
-        if not pattern or pattern in seen:
-            continue
-        seen.add(pattern)
-        normalized.append(pattern)
-    return normalized
 
 
 def normalize_permission_overrides(value: Any) -> dict[str, ConversationPermissionRuleLevel]:

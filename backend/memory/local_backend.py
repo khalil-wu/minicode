@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.atomic_io import atomic_write_text, file_mutation_locks
+from backend.memory.text_utils import truncate_middle_tokens as _truncate_middle_tokens
 
 
 DEFAULT_LIST_MAX_RESULTS = 2_000
@@ -23,19 +24,6 @@ _AD_HOC_FILENAME_RE = re.compile(
 
 class MemoryBackendError(RuntimeError):
     pass
-
-
-def _truncate_middle_tokens(value: str, max_tokens: int) -> str:
-    max_bytes = max(0, int(max_tokens)) * 4
-    encoded = value.encode("utf-8")
-    if len(encoded) <= max_bytes:
-        return value
-    left_budget = max_bytes // 2
-    right_budget = max_bytes - left_budget
-    left = encoded[:left_budget].decode("utf-8", errors="ignore")
-    right = encoded[-right_budget:].decode("utf-8", errors="ignore") if right_budget else ""
-    removed_tokens = (max(0, len(encoded) - max_bytes) + 3) // 4
-    return f"{left}…{removed_tokens} tokens truncated…{right}"
 
 
 @dataclass(frozen=True)

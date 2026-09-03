@@ -1174,8 +1174,8 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
         model=session.selected_model,
         model_runtime=model_runtime,
     )
-    session.context_builder._llm = session.llm
-    session.context_builder._budget = session.config.token_budget
+    session.context_builder.bind_llm(session.llm)
+    session.context_builder.bind_budget(session.config.token_budget)
 
     if reasoning_effort and not from_slash_command:
         await session.emit_command_result(

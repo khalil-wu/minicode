@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend.agent.context import ContextBuilder
 from backend.agent.message import AgentEvent
 from backend.agent.query_engine import QueryEngine
 from backend.agent.runtime import default_runtime
@@ -159,7 +160,13 @@ class _Session(SessionAgentRunnerMixin):
         self.permission_checker = PermissionChecker(settings=PermissionSettings(), workspace_root=tmp_path)
         self.config = AppConfig(llm=LLMSettings(api_key="test-key"))
         self.llm = _NoopLLM()
-        self.context_builder = SimpleNamespace(_llm=self.llm)
+        # Keep the harness on the same collaborator contract as the real
+        # WebSocket session; a one-field namespace hides binding drift.
+        self.context_builder = ContextBuilder(
+            token_budget=self.config.token_budget,
+            agent_settings=self.config.agent,
+            llm=self.llm,
+        )
         self.provider = "openai"
         self.available_models = ["gpt-test"]
         self.selected_model = "gpt-test"
@@ -1050,7 +1057,7 @@ def test_runner_persists_partial_work_and_replaces_it_when_user_cancels(tmp_path
     ]
     assert len(assistant_messages) == 1
     assert assistant_messages[0]["terminal_status"] == "cancelled"
-    assert assistant_messages[0]["tool_calls"][0]["status"] == "partial"
+    assert assistant_messages[0]["tool_calls"][0]["status"] == "cancelled"
     assert next(event for event in events if event.get("type") == "done")["status"] == "cancelled"
 
 
@@ -1079,6 +1086,80 @@ def test_projection_flush_does_not_wait_on_debounce_task_holding_the_same_lock(t
     saved = session.conversation_repo.get_conversation("conv_runnerdone")
     assert saved is not None
     assert saved.context_snapshot["ui_agent_state"]["todos"][0]["id"] == "todo-1"
+
+
+def test_projection_flush_keeps_pending_state_when_persistence_fails(tmp_path, monkeypatch):
+    session = _Session(tmp_path, [])
+    original_patch = session.conversation_repo.patch_context_snapshot
+    attempts = 0
+
+    def flaky_patch(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("projection disk unavailable")
+        return original_patch(*args, **kwargs)
+
+    monkeypatch.setattr(
+        session.conversation_repo,
+        "patch_context_snapshot",
+        flaky_patch,
+    )
+
+    async def scenario() -> None:
+        session._persist_ui_agent_state_event(
+            "conv_runnerdone",
+            "task.update",
+            {
+                "id": "todo-retry",
+                "content": "retry projection",
+                "status": "in_progress",
+            },
+        )
+        await session._flush_ui_agent_state_now("conv_runnerdone")
+        assert "conv_runnerdone" in session.ui_agent_state_store.pending
+        await session._flush_ui_agent_state_now("conv_runnerdone")
+
+    asyncio.run(scenario())
+    assert "conv_runnerdone" not in session.ui_agent_state_store.pending
+    saved = session.conversation_repo.get_conversation("conv_runnerdone")
+    assert saved is not None
+    assert saved.context_snapshot["ui_agent_state"]["todos"][0]["id"] == "todo-retry"
+
+
+def test_reconcile_retries_retained_pending_state_before_runtime_merge(tmp_path, monkeypatch):
+    session = _Session(tmp_path, [])
+    original_patch = session.conversation_repo.patch_context_snapshot
+    attempts = 0
+
+    def flaky_patch(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("projection disk unavailable")
+        return original_patch(*args, **kwargs)
+
+    monkeypatch.setattr(session.conversation_repo, "patch_context_snapshot", flaky_patch)
+
+    async def scenario() -> object:
+        session._persist_ui_agent_state_event(
+            "conv_runnerdone",
+            "task.update",
+            {
+                "id": "todo-reconcile",
+                "content": "keep this todo",
+                "status": "in_progress",
+            },
+        )
+        return await session.reconcile_persisted_ui_agent_state("conv_runnerdone")
+
+    refreshed = asyncio.run(scenario())
+
+    assert refreshed is not None
+    saved = session.conversation_repo.get_conversation("conv_runnerdone")
+    assert saved is not None
+    assert saved.context_snapshot["ui_agent_state"]["todos"][0]["id"] == "todo-reconcile"
+    assert "conv_runnerdone" not in session.ui_agent_state_store.pending
 
 
 def test_late_terminal_turn_events_are_fenced_but_next_turn_is_accepted(tmp_path):

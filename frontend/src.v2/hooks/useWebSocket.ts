@@ -34,6 +34,7 @@ import { clearStreamingState } from "../chat/streamingState";
 import { safeJsonParse } from "../lib/safe-parse";
 import { LS, readLS } from "../stores/shared-helpers";
 import { hasInterruptFence } from "../lib/interrupt-command";
+import { isTransientProviderReasoning } from "../lib/provider-reasoning";
 
 // Transport policy follows MiniCode's WebSocket transport: reconnects are
 // bounded by a total budget, use bounded jitter, and heartbeat liveness is
@@ -181,8 +182,8 @@ export const rendererSessionId = (renderer: SessionStorageHost): string => {
   }
   if (existing && /^session_[A-Za-z0-9_-]+$/.test(existing)) return existing;
   const created = `session_${
-    typeof crypto.randomUUID === "function"
-      ? crypto.randomUUID().replace(/-/g, "")
+    typeof globalThis.crypto?.randomUUID === "function"
+      ? globalThis.crypto.randomUUID().replace(/-/g, "")
       : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 18)}`
   }`;
   try {
@@ -292,7 +293,8 @@ export const shouldAdvanceReplayCursor = (event: ServerEvent): boolean => {
     // Process it as a legacy/transient event without moving the cursor.
     && Number.isSafeInteger(seq) && seq >= 0
     && !NON_REPLAYABLE_CURSOR_EVENT_TYPES.has(event.type)
-    && !event.type.startsWith("session.");
+    && !event.type.startsWith("session.")
+    && !isTransientProviderReasoning(event);
 };
 
 export const shouldProcessInboundEvent = (event: ServerEvent): boolean => {

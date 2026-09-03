@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend.agent.context import ContextBuilder
 from backend.agent.message import AgentEvent
 from backend.artifact.store import ArtifactStore
 from backend.attachments.store import AttachmentStore
@@ -427,13 +428,10 @@ def test_reasoning_effort_config_is_not_persisted_for_deepseek_chat(monkeypatch,
         }
     )
 
-    class _ContextBuilder:
-        _llm = None
-
     class _Session:
         def __init__(self) -> None:
             self.config = load_config()
-            self.context_builder = _ContextBuilder()
+            self.context_builder = ContextBuilder()
             self.events = []
             self.llm = object()
             self.provider = "custom"

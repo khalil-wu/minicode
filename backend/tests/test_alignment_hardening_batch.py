@@ -207,3 +207,22 @@ def test_replay_and_client_command_logs_compact_and_expire(tmp_path: Path) -> No
     old_path.write_text('{"client_command_id":"old"}\n', encoding="utf-8")
     os.utime(old_path, (80, 80))
     assert cleanup_stale_client_command_logs(command_root, now=100, max_age_seconds=10) == 1
+
+
+def test_client_command_log_preserves_corrupt_lines_and_recovers_partial_id(tmp_path: Path) -> None:
+    store = ClientCommandDedupStore(session_id="renderer-corrupt", root_dir=tmp_path)
+    store.append("complete")
+    store.path.write_text(
+        store.path.read_text(encoding="utf-8")
+        + '{"client_command_id":"truncated"\n',
+        encoding="utf-8",
+    )
+    before = store.path.read_text(encoding="utf-8")
+
+    assert store.load_ids(limit=10) == ["complete", "truncated"]
+    assert store.path.read_text(encoding="utf-8") == before
+    assert store.last_load_error == {
+        "path": str(store.path),
+        "reason": "malformed_json",
+        "line": "2",
+    }

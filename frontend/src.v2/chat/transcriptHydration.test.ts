@@ -2,6 +2,28 @@ import { describe, expect, it } from "vitest";
 import { hydrateMessages, type BackendTranscriptMessage } from "./transcriptHydration";
 
 describe("hydrateMessages", () => {
+  it("preserves scheduled-task origin metadata on hydrated user messages", () => {
+    const messages = hydrateMessages([{
+      id: "scheduled-user-message",
+      role: "user",
+      content: "run the nightly check",
+      metadata: {
+        source: "scheduled_task",
+        scheduled_task_id: "task-nightly",
+        scheduled_run_id: "run-2026-09-03",
+      },
+      timestamp: "2026-09-03T00:00:00Z",
+    }]);
+
+    expect(messages[0]).toMatchObject({
+      messageSource: {
+        kind: "scheduled_task",
+        taskId: "task-nightly",
+        runId: "run-2026-09-03",
+      },
+    });
+  });
+
   it("restores steer provenance for persisted user turns", () => {
     const [message] = hydrateMessages([{
       id: "user-steer",

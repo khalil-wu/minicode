@@ -22,8 +22,8 @@ const pendingCommandResults = new Map<string, {
 }>();
 
 export const createClientCommandId = (): string => {
-  const randomPart = typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID().replace(/-/g, "")
+  const randomPart = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID().replace(/-/g, "")
     : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
   return `cmd_${randomPart}`;
 };

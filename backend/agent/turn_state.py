@@ -699,6 +699,7 @@ class AgentTurnState:
 
     def _terminalized_blocks(self, terminal_status: str) -> list[dict[str, Any]]:
         interrupted = terminal_status in {'cancelled', 'interrupted', 'partial'}
+        cancelled = terminal_status in {'cancelled', 'interrupted'}
         failed = terminal_status == 'failed'
         blocks: list[dict[str, Any]] = []
         for block in self._blocks:
@@ -716,7 +717,18 @@ class AgentTurnState:
             elif next_block.get('type') == 'tool_call' and isinstance(next_block.get('record'), dict):
                 record = dict(next_block['record'])
                 if record.get('status') in {'running', 'pending'}:
-                    record['status'] = 'partial' if interrupted else 'failed'
+                    # Keep cancellation distinct from a max-output/partial
+                    # completion.  The live client renders an interrupted run
+                    # as ``cancelled``; durable snapshots must preserve that
+                    # same status so reconnect/hydration cannot change the
+                    # meaning of an unfinished tool.
+                    record['status'] = (
+                        'cancelled'
+                        if cancelled
+                        else 'partial'
+                        if terminal_status == 'partial'
+                        else 'failed'
+                    )
                     if not interrupted:
                         record.setdefault('error', 'Tool result was not received before the run ended.')
                         record.setdefault('terminationReason', 'missing_tool_result')

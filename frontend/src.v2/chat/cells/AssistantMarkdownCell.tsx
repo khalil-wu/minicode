@@ -3,9 +3,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type React from "react";
 import { createPortal } from "react-dom";
 import type { AssistantMarkdownCellState, AssistantReplyAttachment } from "./cellTypes";
-import type { ArtifactPreview, Citation, ProgressContentBlock } from "../../stores/types";
+import type { ArtifactPreview, ProgressContentBlock } from "../../stores/types";
 import { MarkdownRenderer } from "../messages/MarkdownRenderer";
 import { normalizeCitationText } from "../messages/citationText";
+import { citationUrl } from "../citationProjection";
 import { BrandIcon } from "../../components/BrandIcon";
 import { useAppStore } from "../../stores";
 import { openWebTarget } from "../openWebTarget";
@@ -27,6 +28,7 @@ import {
   inlineImageResourceUrl,
   withPreviewCacheBust,
 } from "../../lib/artifact-resource";
+import { extractInlineCitationIndexes } from "../../lib/markdown";
 import "./cells.css";
 
 export function AssistantMarkdownCell({
@@ -672,11 +674,6 @@ function generatedImageFilename(artifact: ArtifactPreview): string {
   return `${base}.${extension}`;
 }
 
-function citationHref(citation: Citation | undefined): string {
-  const candidate = String(citation?.url || citation?.source || "").trim();
-  return /^https?:\/\//i.test(candidate) ? candidate : "";
-}
-
 function AttachmentChip({
   attachment,
   conversationId,
@@ -778,7 +775,7 @@ function uniqueCitationSources(content: string, citations: AssistantMarkdownCell
     } else if (!citation.providerNative) {
       continue;
     }
-    const url = citationHref(citation);
+    const url = citationUrl(citation);
     const source = String(citation.source || citation.url || "").trim();
     const key = sourceKey(source);
     if (!source || seen.has(key)) continue;
@@ -793,13 +790,4 @@ function uniqueCitationSources(content: string, citations: AssistantMarkdownCell
     });
   }
   return sources;
-}
-
-function extractInlineCitationIndexes(content: string): Set<number> {
-  const indexes = new Set<number>();
-  for (const match of content.matchAll(/\[(\d+)\]/g)) {
-    const index = Number(match[1]);
-    if (Number.isFinite(index) && index > 0) indexes.add(index);
-  }
-  return indexes;
 }

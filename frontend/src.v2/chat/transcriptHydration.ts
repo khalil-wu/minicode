@@ -474,6 +474,9 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
     if (type === "thinking") {
       if (isHiddenProviderReasoning(item) || isTransientProviderReasoning(item)) continue;
       const reasoningType = providerReasoningType(item);
+      const itemId = stringValue(item.item_id ?? item.itemId);
+      const contentIndex = numberValue(item.content_index ?? item.contentIndex);
+      const lifecycle = stringValue(item.lifecycle);
       blocks.push({
         type: "thinking",
         content: typeof item.content === "string" ? item.content : "",
@@ -481,6 +484,11 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
         visibility: stringValue(item.visibility),
         phase: stringValue(item.phase),
         providerReasoningType: reasoningType || undefined,
+        ...(itemId ? { item_id: itemId } : {}),
+        ...(contentIndex !== undefined && Number.isSafeInteger(contentIndex) && contentIndex >= 0
+          ? { content_index: contentIndex }
+          : {}),
+        ...(lifecycle ? { lifecycle } : {}),
       });
       continue;
     }

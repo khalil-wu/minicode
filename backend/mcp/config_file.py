@@ -11,6 +11,7 @@ from typing import Any
 from backend.mcp.manager import MCP_CONFIG_FILE
 from backend.mcp.transport import mcp_transport_from_mapping
 from backend.atomic_io import atomic_write_text, file_mutation_locks
+from backend.mcp.value_utils import has_nonempty_value as _has_nonempty_value
 
 DEFAULT_MCP_CONFIG = {"servers": {}}
 _MCP_CONFIG_WRITE_LOCK = threading.RLock()
@@ -320,16 +321,6 @@ def _validate_server(name: str, server: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"MCP server '{name}' {field} must be a string.")
 
     return normalized
-
-
-def _has_nonempty_value(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, (list, tuple, dict, set, frozenset)):
-        return bool(value)
-    return True
 
 
 def _reject_nonempty_fields(

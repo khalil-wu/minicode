@@ -48,6 +48,17 @@ async def settle_provider_stream(
 ) -> AsyncIterator[AgentEvent | ProviderStreamSettlement]:
     """Close provider lifecycle state and account usage."""
 
+    missing_terminal = (
+        not provider_done
+        and retry_budget_boundary is None
+        and not provider_stream_steered
+        and not rebuild_context_and_retry
+        # A timeout, provider error, or incomplete tool stream can end the
+        # iterator without a provider DONE frame too.  Those paths already
+        # committed a more specific terminal reason; do not overwrite it with
+        # the secondary transport symptom.
+        and not state.stopped_reason
+    )
     if retry_budget_boundary is not None:
         _, events = await budget_runtime.apply_boundary(retry_budget_boundary)
         for event in events:
@@ -67,7 +78,26 @@ async def settle_provider_stream(
                 **({} if provider_done else {"error_type": "provider_terminal_missing"}),
             },
         )
-        action = "proceed"
+        if missing_terminal:
+            # EOF is not a successful assistant turn.  Proceeding here lets
+            # the recovery path treat text accumulated before EOF as a final
+            # answer and, worse, can execute an unterminated tool batch.  Pi
+            # and the provider adapters require an explicit terminal frame;
+            # preserve that invariant at the shared stream boundary.
+            state.stopped_reason = "provider_terminal_missing"
+            state.terminal_status = "failed"
+            mark_transition = getattr(state, "mark_transition", None)
+            if callable(mark_transition):
+                mark_transition("provider_terminal_missing")
+            yield AgentEvent.error(
+                "The provider stream ended before its terminal event. The response was not accepted.",
+                recoverable=True,
+                error_type="provider_protocol",
+                error_code="provider_terminal_missing",
+            )
+            action = "terminate"
+        else:
+            action = "proceed"
 
     if provider_stream_steered:
         action = "retry"

@@ -32,6 +32,7 @@ from backend.agent.state import AgentState
 from backend.agent.loop_session import AgentLoopSessionContext
 from backend.agent.stream_sanitizer import scrub_thinking_tags as _scrub_thinking_tags
 from backend.agent.turn_kernel import (
+    PermissionContextRefreshError,
     TurnKernel,
     _set_terminal_reason,
 )
@@ -458,19 +459,27 @@ async def run_agent_loop(
             raise deferred_cancel
     except asyncio.CancelledError:
         raise
-    except Exception:
+    except Exception as exc:
         # Every run crosses the durable ``running`` boundary in TurnKernel.create.
         # An unexpected admission, provider, tool, or final-answer exception must
         # therefore become one canonical failed terminal transition instead of
         # escaping with a permanently running record and no public done event.
-        logger.exception("Unhandled MiniCode agent-loop failure")
+        if isinstance(exc, PermissionContextRefreshError):
+            logger.warning("Stopping turn after live permission refresh failure: %s", exc)
+        else:
+            logger.exception("Unhandled MiniCode agent-loop failure")
         if not turn_kernel.completion_emitted:
             _set_terminal_reason(state, "runtime_error", status="failed")
             yield AgentEvent.error(
-                "MiniCode agent loop failed unexpectedly.",
-                recoverable=False,
-                error_type="agent_loop",
-                error_code="agent_loop.runtime_error",
+                str(exc) if isinstance(exc, PermissionContextRefreshError)
+                else "MiniCode agent loop failed unexpectedly.",
+                recoverable=isinstance(exc, PermissionContextRefreshError),
+                error_type=("permission" if isinstance(exc, PermissionContextRefreshError) else "agent_loop"),
+                error_code=(
+                    "permission_context_refresh_failed"
+                    if isinstance(exc, PermissionContextRefreshError)
+                    else "agent_loop.runtime_error"
+                ),
             )
             for event in terminal_boundary_events(
                 turn_kernel=turn_kernel,

@@ -111,14 +111,6 @@ const reportRuntimeRefresh = (payload: PluginSettingsPayload): boolean => {
   return false;
 };
 
-const jsonHeaders = (): HeadersInit => {
-  try {
-    return authHeaders({ "content-type": "application/json" });
-  } catch {
-    return { "content-type": "application/json" };
-  }
-};
-
 const operationError = (error: unknown): string =>
   error instanceof Error ? error.message : String(error || "未知错误");
 
@@ -204,7 +196,7 @@ export const PluginsTab = () => {
         `${apiBase()}/api/plugins/${encodeURIComponent(pluginKey)}/state`,
         {
           method: "PUT",
-          headers: jsonHeaders(),
+          headers: authHeaders({ "content-type": "application/json" }),
           body: JSON.stringify({ enabled }),
         },
         {
@@ -280,7 +272,7 @@ export const PluginsTab = () => {
         `${apiBase()}/api/plugins/import`,
         {
           method: "POST",
-          headers: jsonHeaders(),
+          headers: authHeaders({ "content-type": "application/json" }),
           body: JSON.stringify({ source_path: sourcePath }),
         },
         {
@@ -332,7 +324,7 @@ export const PluginsTab = () => {
         `${apiBase()}/api/plugins/validate`,
         {
           method: "POST",
-          headers: jsonHeaders(),
+          headers: authHeaders({ "content-type": "application/json" }),
           body: JSON.stringify({ source_path: sourcePath }),
         },
         {
@@ -362,7 +354,7 @@ export const PluginsTab = () => {
         `${apiBase()}/api/plugins/package`,
         {
           method: "POST",
-          headers: jsonHeaders(),
+          headers: authHeaders({ "content-type": "application/json" }),
           body: JSON.stringify({ source_path: sourcePath }),
         },
         {

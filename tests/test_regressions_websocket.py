@@ -2009,12 +2009,12 @@ def test_two_live_owners_cannot_claim_same_durable_client_command(tmp_path) -> N
     assert second.claim_client_command("cmd-owner-once") is None
 
 
-def test_durable_client_command_enters_recent_log_only_after_completion(monkeypatch, tmp_path) -> None:
+def test_durable_client_command_records_recent_id_before_completion(monkeypatch, tmp_path) -> None:
     conversation_dir = tmp_path / "conversations"
     monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", conversation_dir)
     monkeypatch.setattr("backend.ws.run_manager.CONVERSATION_DATA_DIR", conversation_dir)
 
-    async def scenario() -> tuple[bool, bool, list[str]]:
+    async def scenario() -> tuple[bool, list[str], list[str]]:
         session = WebSocketSession(
             session_id="session-command-completion",
             websocket=_FakeWebSocket(),
@@ -2030,6 +2030,16 @@ def test_durable_client_command_enters_recent_log_only_after_completion(monkeypa
             type="session.sync",
             data={"client_command_id": "cmd-completion"},
         ))
+        completion_log: list[str] = []
+        original_complete = durable_queue.complete_client_command
+
+        def observe_completion(command_id: str) -> bool:
+            completion_log.extend(
+                session.command_dispatcher.client_command_store.load_ids(limit=10)
+            )
+            return original_complete(command_id)
+
+        durable_queue.complete_client_command = observe_completion  # type: ignore[method-assign]
         started = asyncio.Event()
         release = asyncio.Event()
 
@@ -2045,21 +2055,106 @@ def test_durable_client_command_enters_recent_log_only_after_completion(monkeypa
             )
         )
         await started.wait()
-        before_completion = "cmd-completion" in session.command_dispatcher.recent_client_command_id_set
         inflight_before_completion = "cmd-completion" in durable_queue._client_inflight
         release.set()
         await task
         return (
-            before_completion,
             inflight_before_completion,
+            completion_log,
             session.command_dispatcher.client_command_store.load_ids(limit=10),
         )
 
-    before_completion, inflight_before_completion, recent_ids = asyncio.run(scenario())
+    inflight_before_completion, completion_log, recent_ids = asyncio.run(scenario())
 
-    assert before_completion is False
     assert inflight_before_completion is True
+    assert completion_log == ["cmd-completion"]
     assert recent_ids == ["cmd-completion"]
+
+
+def test_durable_client_command_stays_pending_when_dedup_persistence_fails(monkeypatch, tmp_path) -> None:
+    conversation_dir = tmp_path / "conversations"
+    monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", conversation_dir)
+    monkeypatch.setattr("backend.ws.run_manager.CONVERSATION_DATA_DIR", conversation_dir)
+
+    async def scenario() -> tuple[list[str], bool]:
+        session = WebSocketSession(
+            session_id="session-command-dedup-failure",
+            websocket=_FakeWebSocket(),
+            llm=_HungLLM(),
+            artifact_store=ArtifactStore(),
+            tool_registry=ToolRegistry(),
+            permission_checker=PermissionChecker(PermissionSettings()),
+            config=AppConfig(llm=LLMSettings(api_key="")),
+        )
+        durable_queue = session.run_manager.durable_queue
+        assert durable_queue is not None
+        command_id = "cmd-dedup-failure"
+        durable_queue.persist_client_command(UserCommand(
+            type="session.sync",
+            data={"client_command_id": command_id},
+        ))
+
+        async def succeed(_command: UserCommand, **_kwargs) -> None:
+            return None
+
+        session.command_dispatcher._handle_command = succeed  # type: ignore[method-assign]
+
+        def fail_append(*_args, **_kwargs) -> None:
+            raise OSError("dedup log unavailable")
+
+        monkeypatch.setattr(session.command_dispatcher.client_command_store, "append", fail_append)
+        with pytest.raises(OSError, match="dedup log unavailable"):
+            await session.command_dispatcher._run_durable_client_command(
+                command_id,
+                session.connection_generation,
+            )
+        return (
+            [str(item.data.get("client_command_id") or "") for item in durable_queue.pending_client_commands()],
+            command_id in session.command_dispatcher.recent_client_command_id_set,
+        )
+
+    pending_ids, marked_seen = asyncio.run(scenario())
+    assert pending_ids == ["cmd-dedup-failure"]
+    assert marked_seen is False
+
+
+def test_durable_client_handler_failure_keeps_command_pending(monkeypatch, tmp_path) -> None:
+    conversation_dir = tmp_path / "conversations"
+    monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", conversation_dir)
+    monkeypatch.setattr("backend.ws.run_manager.CONVERSATION_DATA_DIR", conversation_dir)
+
+    async def scenario() -> list[str]:
+        session = WebSocketSession(
+            session_id="session-command-handler-failure",
+            websocket=_FakeWebSocket(),
+            llm=_HungLLM(),
+            artifact_store=ArtifactStore(),
+            tool_registry=ToolRegistry(),
+            permission_checker=PermissionChecker(PermissionSettings()),
+            config=AppConfig(llm=LLMSettings(api_key="")),
+        )
+        durable_queue = session.run_manager.durable_queue
+        assert durable_queue is not None
+        command_id = "cmd-handler-failure"
+        durable_queue.persist_client_command(UserCommand(
+            type="session.sync",
+            data={"client_command_id": command_id},
+        ))
+
+        async def fail_inner(_command: UserCommand) -> None:
+            raise RuntimeError("handler failed")
+
+        session.command_dispatcher._handle_command_inner = fail_inner  # type: ignore[method-assign]
+        await session.command_dispatcher._run_durable_client_command(
+            command_id,
+            session.connection_generation,
+        )
+        return [
+            str(item.data.get("client_command_id") or "")
+            for item in durable_queue.pending_client_commands()
+        ]
+
+    assert asyncio.run(scenario()) == ["cmd-handler-failure"]
 
 
 @pytest.mark.parametrize("failure_mode", ["cancelled", "failed"])

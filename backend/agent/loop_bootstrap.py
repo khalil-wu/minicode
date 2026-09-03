@@ -194,6 +194,7 @@ async def bootstrap_agent_loop(
     context = request.context_builder or ContextBuilder(
         token_budget=budget,
         agent_settings=settings,
+        llm=request.llm,
     )
     if run_context.llm_turn_context is not None:
         run_context.llm_turn_context.lifecycle_runtime = lifecycle_runtime

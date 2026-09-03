@@ -27,6 +27,7 @@ from backend.mcp.policy import (
     load_mcp_policy,
 )
 from backend.mcp.transport import mcp_transport_from_mapping, normalize_mcp_transport
+from backend.mcp.value_utils import has_nonempty_value as _has_nonempty_config_value
 from backend.plugins.layout import plugin_manifest_path
 from backend.workspace.state import get_explicit_active_workspace_root
 
@@ -360,7 +361,6 @@ class MCPServerState:
             # extra list/read requests from the status path.
             "capabilities": capability_payload,
             "cleanup": cleanup,
-            "operation_failures": list(self.operation_failures.values()),
             "error": self.last_error if self.status == ServerStatus.ERROR else "",
             "source": self.config.source,
             "approval_status": self.config.approval_status,
@@ -1958,16 +1958,6 @@ def _tool_approval_modes(value: Any) -> dict[str, str]:
         if mode is not None:
             result[tool_name] = mode
     return result
-
-
-def _has_nonempty_config_value(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, (list, tuple, dict, set, frozenset)):
-        return bool(value)
-    return True
 
 
 def _mcp_catalog_sort_key(config: MCPServerConfig) -> tuple[int, int, str, str]:

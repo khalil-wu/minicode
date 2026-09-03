@@ -5,10 +5,12 @@ import asyncio
 import codecs
 from contextlib import suppress
 from fnmatch import fnmatchcase
+import inspect
 import json
 import locale
 import logging
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -651,10 +653,13 @@ class SandboxRunner:
             return path
         if workspace is None:
             return path
-        candidate = PurePosixPath(path.replace("\\", "/"))
+        normalized = posixpath.normpath(str(path or "").replace("\\", "/"))
+        candidate = PurePosixPath(normalized)
         try:
             relative = candidate.relative_to(PurePosixPath("/workspace"))
         except ValueError:
+            return path
+        if any(part in {"", ".", ".."} for part in relative.parts):
             return path
         return str(workspace.expanduser().resolve().joinpath(*relative.parts))
 
@@ -756,14 +761,35 @@ class SandboxRunner:
                 if not stream_callback or not piece:
                     return
                 try:
-                    await stream_callback(piece, stream_name)
-                except TypeError:
                     try:
-                        await stream_callback(piece)
-                    except Exception:
-                        pass
+                        parameters = tuple(
+                            inspect.signature(stream_callback).parameters.values()
+                        )
+                        accepts_two = any(
+                            parameter.kind == inspect.Parameter.VAR_POSITIONAL
+                            for parameter in parameters
+                        ) or sum(
+                            parameter.kind
+                            in {
+                                inspect.Parameter.POSITIONAL_ONLY,
+                                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                            }
+                            for parameter in parameters
+                        ) >= 2
+                    except (TypeError, ValueError):
+                        accepts_two = True
+                    result = (
+                        stream_callback(piece, stream_name)
+                        if accepts_two
+                        else stream_callback(piece)
+                    )
+                    if inspect.isawaitable(result):
+                        await result
                 except Exception:
-                    pass
+                    # Streaming is observational; a failed observer must not
+                    # abort the owned process. Do not retry after TypeError:
+                    # the callback may already have performed a side effect.
+                    logger.debug("Sandbox stream callback failed", exc_info=True)
 
             async def _read_stream(
                 stream: Any, capture: _OutputCapture, *, stream_name: str

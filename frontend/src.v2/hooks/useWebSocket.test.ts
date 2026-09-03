@@ -30,6 +30,7 @@ import {
 } from "./useWebSocket";
 import { LS } from "../stores/shared-helpers";
 import {
+  createClientCommandId,
   registerWebSocketSender,
   resetPendingCommandResultsForTests,
   sendClientCommandAwaitResult,
@@ -186,6 +187,19 @@ describe("useWebSocket session restore workspace", () => {
       conversationId: null,
       conversations: [{ id: "conv-archived", archived: true }],
     })).toBe("");
+  });
+});
+
+describe("browser identity fallbacks", () => {
+  it("does not read an absent global crypto object", () => {
+    const originalCrypto = globalThis.crypto;
+    vi.stubGlobal("crypto", undefined);
+    try {
+      expect(rendererSessionId({})).toMatch(/^session_[A-Za-z0-9_-]+$/);
+      expect(createClientCommandId()).toMatch(/^cmd_[A-Za-z0-9_-]+$/);
+    } finally {
+      vi.stubGlobal("crypto", originalCrypto);
+    }
   });
 });
 
@@ -582,7 +596,23 @@ describe("useWebSocket server sequence tracking", () => {
       events: [],
     } as ServerEvent)).toBe(false);
     expect(shouldAdvanceReplayCursor({ type: "agent_message.delta", seq: 6 } as ServerEvent)).toBe(false);
-    expect(shouldAdvanceReplayCursor({ type: "done", conversation_id: "conv-1", seq: 7 } as ServerEvent)).toBe(true);
+    expect(shouldAdvanceReplayCursor({
+      type: "thinking_delta",
+      conversation_id: "conv-1",
+      seq: 7,
+      source: "provider",
+      provider_reasoning_type: "reasoning_content",
+      visibility: "timeline",
+    } as ServerEvent)).toBe(false);
+    expect(shouldAdvanceReplayCursor({
+      type: "thinking_delta",
+      conversation_id: "conv-1",
+      seq: 8,
+      source: "provider",
+      provider_reasoning_type: "reasoning_summary_text",
+      visibility: "timeline",
+    } as ServerEvent)).toBe(true);
+    expect(shouldAdvanceReplayCursor({ type: "done", conversation_id: "conv-1", seq: 9 } as ServerEvent)).toBe(true);
     expect(shouldAdvanceReplayCursor({ type: "done", conversation_id: "conv-1" } as ServerEvent)).toBe(false);
   });
 

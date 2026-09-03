@@ -13,7 +13,8 @@ from backend.agent.context import ContextBuilder
 from backend.agent.loop_session import mcp_registry_version
 from backend.agent.run_context import RunContext
 from backend.agent.query_engine import QueryEngine
-from backend.agent.message import AgentEvent, UserCommand
+from backend.agent.message import AgentEvent
+from backend.agent.provider_protocol import provider_raw_from_event_data
 from backend.async_cleanup import (
     CANCELLATION_DRAIN_TIMEOUT_SECONDS,
     cancel_and_drain_receipt,
@@ -45,7 +46,7 @@ from backend.permissions.profiles import (
 )
 from backend.tasks.manager import TaskManager
 from backend.terminal.session import TerminalSessionManager
-from backend.terminal.manager import BackgroundCommandManager, BackgroundCommand
+from backend.terminal.manager import BackgroundCommandManager
 from backend.tools.registry import ToolRegistry
 from backend.ws.agent_runner import (
     SessionAgentRunnerMixin,
@@ -58,6 +59,7 @@ from backend.ws.session_lifecycle import SessionLifecycle
 from backend.ws.command_handlers import SessionCommandHandlersMixin
 from backend.ws.conversation_runtime import ConversationRuntime
 from backend.ws.event_outbox import EventOutbox
+from backend.ws.event_log import is_hidden_provider_reasoning_event
 from backend.ws.fork_registry import ForkRegistry
 from backend.ws.manager import _SESSION_MCP_MANAGER_UNSET
 from backend.ws.permission_runtime import SessionPermissionRuntimeMixin
@@ -65,6 +67,7 @@ from backend.ws.run_manager import SessionRunManager
 from backend.ws.stream_state import apply_stream_event
 from backend.ws.turn_wait_state import TurnWaitState
 from backend.ws.ui_agent_state_store import UiAgentStateStore
+from backend.ws.payload_contracts import validate_session_projection_payload
 from backend.ws.utils import (
     build_effective_user_message,
     build_summary_from_transcript,
@@ -1399,6 +1402,10 @@ class WebSocketSession(
         )
 
     async def send_event(self, event: AgentEvent) -> None:
+        # Broadcast paths may hand the same AgentEvent instance to multiple
+        # sessions.  This method enriches payloads with session-owned fields,
+        # so keep the caller's object immutable across deliveries.
+        event = AgentEvent(type=event.type, data=dict(event.data))
         # Raw provider frames are an in-process SDK/extension surface. The
         # renderer receives typed text, tool, citation, usage, and Inspector
         # projections instead; forwarding ``sdk_only`` frames would put raw
@@ -1407,6 +1414,11 @@ class WebSocketSession(
         if event.type == "stream_event" and bool(
             event.data.get("sdk_only", True)
         ):
+            return
+        # Raw provider reasoning with timeline visibility is intentionally
+        # live-only. Hide only explicit debug/internal frames here; the
+        # broader replay predicate is applied by the outbox/store boundary.
+        if is_hidden_provider_reasoning_event(event.to_ws_message()):
             return
         # Notices are transcript state, not session-global toasts. Producers in
         # the agent loop already stamp their immutable run owner; command-side
@@ -1456,7 +1468,7 @@ class WebSocketSession(
             # the renderer duplicates tool arguments that already have typed
             # tool_call events and creates a second, unused projection path.
             event.data.pop("tool_calls", None)
-            provider_raw = event.data.get("provider_raw")
+            provider_raw = provider_raw_from_event_data(event.data)
             if isinstance(provider_raw, dict) and provider_raw:
                 item = event.data.get("item")
                 item_id = str(item.get("id") or "") if isinstance(item, dict) else ""
@@ -1470,19 +1482,21 @@ class WebSocketSession(
                     provider_raw,
                     conversation_id=str(event.data.get("conversation_id") or ""),
                 )
+                event.data.pop("providerRaw", None)
         elif event.type == "done":
-            provider_raw = event.data.get("providerRaw")
+            provider_raw = provider_raw_from_event_data(event.data)
             if isinstance(provider_raw, dict) and provider_raw:
                 trace_id = str(
                     provider_raw.get("trace_id")
                     or f"{event.data.get('message_id') or event.data.get('conversation_id') or 'provider'}:provider:done"
                 )
-                event.data["providerRaw"] = self.diagnostic_store.put(
+                event.data["provider_raw"] = self.diagnostic_store.put(
                     "provider",
                     trace_id,
                     provider_raw,
                     conversation_id=str(event.data.get("conversation_id") or ""),
                 )
+                event.data.pop("providerRaw", None)
         target_conversation_id = str(event.data.get("conversation_id") or "").strip()
         if (
             _requires_conversation_owner(event.type, event.data)
@@ -1504,21 +1518,53 @@ class WebSocketSession(
                 sorted(event.data.keys()),
             )
             return
-        apply_stream_event(
-            getattr(self, "_conversation_streams", {}),
-            target_conversation_id,
-            event.type,
-            event.data,
-        )
-
+        # Stream state is the reconnect snapshot. Validate a session
+        # projection before mutating it; EventOutbox repeats the same contract
+        # at the transport boundary, but a rejected payload must not leave an
+        # in-memory snapshot for an event that never reached the wire/log.
         payload = self._build_ws_payload(event)
         if target_conversation_id:
             payload.setdefault("conversation_id", target_conversation_id)
             if event.type in _TURN_MESSAGE_SCOPED_EVENT_TYPES:
                 stream_state = getattr(self, "_conversation_streams", {}).get(target_conversation_id)
                 message_id = str((stream_state or {}).get("message_id") or "").strip()
-                if message_id:
-                    payload.setdefault("message_id", message_id)
+                if message_id and not str(payload.get("message_id") or "").strip():
+                    payload["message_id"] = message_id
+        try:
+            validate_session_projection_payload(payload)
+        except ValueError as exc:
+            logger.warning(
+                "Dropping invalid session/conversation event before state projection: "
+                "type=%s session=%s error=%s",
+                event.type,
+                self.session_id,
+                exc,
+            )
+            return
+        # The wire payload may acquire the stream's canonical owner when a
+        # producer omitted it (for example, a command-side event emitted while
+        # the assistant placeholder is already active).  Feed that same owner
+        # projection into the reconnect reducer; otherwise a late event can
+        # bypass the message fence even though the browser received the right
+        # owner on the wire.  Keep this as a narrow copy of owner fields rather
+        # than passing the transformed control payload: ``ask_user`` is still
+        # reduced as its source event type while its wire shape is
+        # ``control_request``.
+        projection_data = dict(event.data)
+        for owner_key in ("conversation_id", "message_id", "turn_id"):
+            owner_value = payload.get(owner_key)
+            if owner_value not in (None, ""):
+                current_value = projection_data.get(owner_key)
+                if current_value is None or (
+                    isinstance(current_value, str) and not current_value.strip()
+                ):
+                    projection_data[owner_key] = owner_value
+        apply_stream_event(
+            getattr(self, "_conversation_streams", {}),
+            target_conversation_id,
+            event.type,
+            projection_data,
+        )
         if event.type in {"approval_request", "ask_user"}:
             request_id = str(
                 payload.get("request_id")
@@ -1570,10 +1616,27 @@ class WebSocketSession(
             schema = event.data.get("schema")
             if isinstance(schema, dict):
                 request["schema"] = dict(schema)
-            return {
+            control_payload = {
                 "type": "control_request",
                 "request_id": request_id,
                 "request": request,
             }
+            # Keep the same turn/message ownership metadata as the approval
+            # control path. The renderer uses these fields to bind an
+            # elicitation to the assistant item that requested it.
+            for key in (
+                "conversation_id",
+                "turn_id",
+                "message_id",
+                "workspace_root",
+                "permission_mode",
+                "workspace_scope",
+                "timeout_seconds",
+                "expires_at",
+            ):
+                value = event.data.get(key)
+                if value not in (None, ""):
+                    control_payload[key] = value
+            return control_payload
 
         return event.to_ws_message()

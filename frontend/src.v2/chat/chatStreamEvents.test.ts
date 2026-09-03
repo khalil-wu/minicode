@@ -291,6 +291,84 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     expect(useAppStore.getState().messages[0]?.blocks[0]).toHaveProperty("source", "model_final");
   });
 
+  it("flushes pending thinking before final text at item completion", () => {
+    let pendingThinking: (() => void) | undefined;
+    let pendingText: (() => void) | undefined;
+    const delayedThinkingBuffer: StreamBuffer = {
+      push: (chunk, conversationId, _source, metadata, messageId) => {
+        pendingThinking = () => useAppStore.getState().appendThinkingChunk(
+          chunk,
+          conversationId,
+          metadata,
+          messageId,
+        );
+      },
+      flush: vi.fn(() => {
+        pendingThinking?.();
+        pendingThinking = undefined;
+      }),
+      destroy: vi.fn(),
+    };
+    const delayedTextBuffer: StreamBuffer = {
+      push: (chunk, conversationId, itemId, _metadata, messageId) => {
+        pendingText = () => useAppStore.getState().appendAgentMessageDelta(
+          itemId || "agent-message",
+          chunk,
+          conversationId,
+          messageId,
+        );
+      },
+      flush: vi.fn(() => {
+        pendingText?.();
+        pendingText = undefined;
+      }),
+      destroy: vi.fn(),
+    };
+    const delayedHandlers = {
+      textStreamBuffer: delayedTextBuffer,
+      thinkingStreamBuffer: delayedThinkingBuffer,
+    };
+
+    handleChatStreamEvent({
+      type: "thinking_delta",
+      content: "Checked the repository.",
+      source: "provider",
+      provider_reasoning_type: "reasoning_summary_text",
+      message_id: "assistant-stream",
+    } as ServerEvent, "conv-stream", delayedHandlers);
+    handleChatStreamEvent({
+      type: "agent_message.delta",
+      item_id: "final-message",
+      delta: "Done",
+      message_id: "assistant-stream",
+    } as ServerEvent, "conv-stream", delayedHandlers);
+    handleChatStreamEvent({
+      type: "item.completed",
+      item: {
+        id: "final-message",
+        type: "agent_message",
+        text: "Done",
+        source: "model_final",
+        status: "completed",
+      },
+      message_id: "assistant-stream",
+    } as ServerEvent, "conv-stream", delayedHandlers);
+
+    expect(delayedThinkingBuffer.flush).toHaveBeenCalledOnce();
+    expect(delayedTextBuffer.flush).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([
+      expect.objectContaining({
+        type: "thinking",
+        content: "Checked the repository.",
+      }),
+      expect.objectContaining({
+        type: "text",
+        content: "Done",
+        isStreaming: false,
+      }),
+    ]);
+  });
+
   it("keeps a public reasoning summary when the final message starts", () => {
     handle({
       type: "thinking_delta",
@@ -317,6 +395,49 @@ describe("handleChatStreamEvent typed lifecycle", () => {
         providerReasoningType: "reasoning_summary_text",
       }),
       expect.objectContaining({ type: "text", itemId: "final-message" }),
+    ]);
+  });
+
+  it("keeps reasoning item identity when a stream resumes before the next delta", () => {
+    handle({
+      type: "stream_resume",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      turn_id: "turn-resumed",
+      content_blocks: [{
+        type: "thinking",
+        content: "Before reconnect",
+        source: "provider",
+        visibility: "timeline",
+        provider_reasoning_type: "reasoning_summary_text",
+        item_id: "summary-item",
+        content_index: 0,
+        lifecycle: "delta",
+      }],
+      tool_states: [],
+    } as unknown as ServerEvent);
+
+    handle({
+      type: "thinking_delta",
+      conversation_id: "conv-stream",
+      message_id: "assistant-stream",
+      content: " and after reconnect",
+      source: "provider",
+      visibility: "timeline",
+      provider_reasoning_type: "reasoning_summary_text",
+      item_id: "summary-item",
+      content_index: 0,
+      lifecycle: "delta",
+    } as unknown as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([
+      expect.objectContaining({
+        type: "thinking",
+        content: "Before reconnect and after reconnect",
+        item_id: "summary-item",
+        content_index: 0,
+        providerReasoningType: "reasoning_summary_text",
+      }),
     ]);
   });
 

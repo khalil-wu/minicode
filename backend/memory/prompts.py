@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from typing import Mapping
 
+from backend.memory.text_utils import truncate_middle_tokens as _truncate_middle_tokens
+
 
 TEMPLATE_ROOT = Path(__file__).with_name("templates")
 PHASE2_WORKSPACE_DIFF_FILE = "phase2_workspace_diff.md"
@@ -72,19 +74,6 @@ _STAGE1_INPUT_TEMPLATE = _load_template("stage_one_input.md")
 _CONSOLIDATION_TEMPLATE = _load_template("consolidation.md")
 _READ_PATH_TEMPLATE = _load_template("read_path.md")
 AD_HOC_INSTRUCTIONS = _load_template("ad_hoc_instructions.md")
-
-
-def _truncate_middle_tokens(value: str, max_tokens: int) -> str:
-    max_bytes = max(0, int(max_tokens)) * 4
-    encoded = value.encode("utf-8")
-    if len(encoded) <= max_bytes:
-        return value
-    left_budget = max_bytes // 2
-    right_budget = max_bytes - left_budget
-    left = encoded[:left_budget].decode("utf-8", errors="ignore")
-    right = encoded[-right_budget:].decode("utf-8", errors="ignore") if right_budget else ""
-    removed_tokens = (max(0, len(encoded) - max_bytes) + 3) // 4
-    return f"{left}…{removed_tokens} tokens truncated…{right}"
 
 
 def build_stage1_input(

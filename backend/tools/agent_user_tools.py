@@ -121,6 +121,7 @@ class BriefTool(BaseTool):
     mutates_external_state = True
     side_effect_kind = "external"
     idempotent = False
+    workspace_path_fields = ("attachments",)
     deferred_catalog_scopes = ()
 
     _IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
@@ -250,7 +251,11 @@ class BriefTool(BaseTool):
                 rel_path = real_path.relative_to(workspace_root).as_posix()
                 if self._matches_attachment_denylist(path_str, rel_path, real_path.name, denylist, fnmatch):
                     continue
-                allowed, _reason = checker.validate_file_operation(str(real_path), "read")
+                allowed, _reason = checker.validate_file_operation(
+                    str(real_path),
+                    "read",
+                    context=permission_context,
+                )
                 if not allowed or not real_path.is_file():
                     continue
                 size = real_path.stat().st_size

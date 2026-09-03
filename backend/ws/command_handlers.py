@@ -237,8 +237,8 @@ class SessionCommandHandlersMixin:
             model=self.selected_model,
             model_runtime=model_runtime,
         )
-        self.context_builder._llm = self.llm
-        self.context_builder._budget = self.config.token_budget
+        self.context_builder.bind_llm(self.llm)
+        self.context_builder.bind_budget(self.config.token_budget)
         return True
 
     async def set_selected_model(self, model: str, *, manual_override: bool) -> None:
