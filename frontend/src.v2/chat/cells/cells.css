@@ -1597,11 +1597,14 @@
   flex-shrink: 0;
   gap: 4px;
   min-height: 22px;
-  padding: 2px 7px;
-  border: 1px solid color-mix(in oklch, var(--state-danger) 45%, var(--border-subtle));
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  justify-content: center;
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  background: color-mix(in oklch, var(--state-danger) 10%, transparent);
-  color: var(--state-danger);
+  background: transparent;
+  color: var(--text-muted);
   font-size: var(--text-xs);
   font-weight: var(--fw-semibold);
   cursor: pointer;
@@ -1615,12 +1618,11 @@
 .exec-cell-stop-button:hover {
   background: color-mix(in oklch, var(--state-danger) 15%, transparent);
   border-color: var(--state-danger);
-  transform: translateY(-1px);
-  box-shadow: 0 2px 4px color-mix(in oklch, var(--state-danger) 15%, transparent);
+  color: var(--state-danger);
 }
 
 .exec-cell-stop-button:active {
-  transform: scale(0.95) translateY(0);
+  background: var(--state-danger-soft);
   box-shadow: none;
 }
 
@@ -1637,11 +1639,11 @@
 }
 
 .exec-cell-expanded {
-  margin: 6px 0 5px 22px;
-  padding: 8px 10px;
+  margin: 6px 0 10px;
+  padding: 10px 12px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  background: var(--surface-raised);
+  background: var(--workbench-tool);
   box-shadow: none;
   animation: expand-detail var(--duration-fast) cubic-bezier(0.2, 0.8, 0.2, 1);
 }
@@ -1696,22 +1698,54 @@
    and it is rendered after the final answer. */
 .agent-loop-diff-area {
   margin-top: 10px;
-  padding: 12px 14px 13px;
-  border: 1px solid var(--border-soft);
-  border-radius: 12px;
-  background: var(--surface-raised);
-  box-shadow: var(--shadow-refined);
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-base);
+  box-shadow: none;
+}
+
+.exec-cell-output-toolbar,
+.exec-cell-output-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.exec-cell-output-toolbar {
+  justify-content: space-between;
+  min-height: 28px;
+  margin-bottom: 8px;
+}
+
+.exec-cell-output-status {
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.exec-cell-output-status[data-status="failed"] {
+  color: var(--state-danger);
 }
 
 .agent-loop-diff-area .diff-cell {
-  padding: 0;
+  gap: 0;
+  padding: 0 0 8px;
+}
+
+.agent-loop-diff-area .diff-cell-header-row {
+  min-height: 76px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .agent-loop-diff-area .diff-cell-icon-tile {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: transparent;
+  width: 42px;
+  height: 42px;
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
 }
 
 .diff-cell-heading {
@@ -1779,10 +1813,16 @@
 }
 
 .diff-cell-action-button-accent {
-  color: var(--accent-primary);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-base);
+  color: var(--text-primary);
 }
 
 .diff-cell-action-button-danger {
+  color: var(--text-secondary);
+}
+
+.diff-cell-action-button-danger:hover:not(:disabled) {
   color: var(--state-danger);
 }
 
@@ -1859,17 +1899,18 @@
   justify-self: start;
   width: 100%;
   margin: 0;
-  padding: 10px 14px 2px;
+  padding: 10px 16px;
   border: 0;
   background: transparent;
-  color: var(--accent-primary);
+  color: var(--text-secondary);
   font: inherit;
   font-size: var(--text-xs);
   cursor: pointer;
 }
 
 .diff-cell-more-files:hover {
-  color: var(--accent-hover);
+  color: var(--text-primary);
+  background: var(--surface-soft);
 }
 
 .diff-file-section {
@@ -1887,7 +1928,7 @@
   gap: 8px;
   min-width: 0;
   min-height: 38px;
-  padding: 7px 14px;
+  padding: 7px 16px;
   border-bottom: 0;
   background: transparent;
 }
@@ -1899,10 +1940,25 @@
 .diff-cell-file-path {
   overflow: hidden;
   color: var(--text-secondary);
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+button.diff-cell-file-path {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.diff-cell-file-path:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .diff-cell-file-kind {
@@ -2159,20 +2215,7 @@
 .thinking-cell-live,
 .thinking-cell-summary {
   padding: 6px 0;
-  color: var(--text-secondary);
-  font-size: var(--text-sm);
-  line-height: var(--leading-normal);
   word-break: break-word;
-}
-
-.thinking-cell-live p,
-.thinking-cell-summary p {
-  margin: 0;
-}
-
-.thinking-cell-live p + p,
-.thinking-cell-summary p + p {
-  margin-top: 7px;
 }
 
 /* ════════════════════════════════════════════════════════

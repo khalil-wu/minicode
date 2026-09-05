@@ -42,11 +42,11 @@ describe("ExecCell", () => {
     expect(screen.getByRole("region", { name: "命令输出" })).toBeTruthy();
     expect(container.querySelector(".exec-cell-expanded")?.previousElementSibling)
       .toBe(container.querySelector(".exec-cell-header-row"));
-    // One frame only: the header row already carries the outcome and duration,
-    // so the panel must not repeat them behind another nested card.
+    // Output has its own copy action without another nested card.
     expect(container.querySelector(".exec-cell-shell-card")).toBeNull();
     expect(container.querySelector(".exec-cell-expanded-heading")).toBeNull();
-    expect(screen.queryByText("Shell")).toBeNull();
+    expect(screen.getByText("Shell")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "复制命令输出" })).toBeTruthy();
     expect(screen.queryByText("命令已在 1.3s 内运行完成")).toBeNull();
     expect(screen.getByText("$ " + command)).toBeTruthy();
     expect(screen.getByText("7 passed")).toBeTruthy();
@@ -78,7 +78,7 @@ describe("ExecCell", () => {
     expect(screen.queryByText("running")).toBeNull();
   });
 
-  it("opens the command output when the active command finishes", () => {
+  it("does not open a collapsed output just because the command finishes", () => {
     const command = "grep -n foo 1.txt";
     const { container, rerender } = render(
       <ExecCell
@@ -115,7 +115,8 @@ describe("ExecCell", () => {
       />,
     );
 
-    expect(container.querySelector(".exec-cell-expanded")).toBeTruthy();
+    expect(container.querySelector(".exec-cell-expanded")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "展开命令详情" }));
     expect(screen.getByText("1:foo")).toBeTruthy();
   });
 
@@ -138,7 +139,7 @@ describe("ExecCell", () => {
     );
 
     expect(screen.getByText("已启动后台命令")).toBeTruthy();
-    expect(screen.getByText("后台运行")).toBeTruthy();
+    expect(screen.getAllByText("后台运行").length).toBeGreaterThan(0);
     expect(screen.queryByText("后台命令已启动；状态和输出会保留在活动任务中。")).toBeNull();
 
     rerender(
@@ -156,6 +157,15 @@ describe("ExecCell", () => {
       />,
     );
     expect(screen.getByText("命令未完整结束")).toBeTruthy();
-    expect(screen.getByText("未完整结束")).toBeTruthy();
+    expect(screen.getAllByText("未完整结束").length).toBeGreaterThan(0);
+  });
+
+  it("copies the actual command, stdout and stderr", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    render(<ExecCell cell={{ kind: "exec", id: "copy", command: "npm test", status: "success", stdoutPreview: ["passed"], stderrPreview: ["warning"], collapsed: false, createdAt: 1 }} />);
+    fireEvent.click(screen.getByRole("button", { name: "复制命令输出" }));
+    expect(writeText).toHaveBeenCalledWith("$ npm test\npassed\nwarning");
+    expect(await screen.findByRole("button", { name: "已复制命令输出" })).toBeTruthy();
   });
 });

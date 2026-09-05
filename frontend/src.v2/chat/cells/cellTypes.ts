@@ -187,6 +187,8 @@ export interface ThinkingCellState {
   source: "commentary" | "model_preamble" | "post_tool" | "provider" | "reasoning" | "runtime";
   phase?: string; // Optional phase indicator (e.g., "analyzing", "planning")
   providerReasoningType?: string;
+  /** Legacy/untyped thinking is shown behind the timeline's “思考” control. */
+  collapsible?: boolean;
   isStreaming?: boolean;
   createdAt: number;
   segment?: number;

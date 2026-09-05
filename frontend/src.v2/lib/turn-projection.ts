@@ -2,6 +2,7 @@ import type { ContentBlock } from "../stores/types";
 import {
   isCompletedAgentMessageBlock,
   isFinalAnswerBlock,
+  isLegacyTextBlock,
 } from "./content-blocks";
 import type { ToolCallRecord } from "./tool-call-reducer";
 import { isBrowserScreenshotRecord } from "./artifact-projection";
@@ -51,6 +52,8 @@ export interface TurnActivityItem {
   source?: string;
   phase?: string;
   providerReasoningType?: string;
+  /** Legacy/untyped thinking is user-visible but intentionally collapsed. */
+  collapsible?: boolean;
   itemKind?: string;
   records?: ToolCallRecord[];
   progress?: Extract<ContentBlock, { type: "progress" }>[];
@@ -353,10 +356,13 @@ export function projectTurn(
       ? [String(block.record.name || "").trim().toLowerCase()].filter(Boolean)
       : []),
   );
+  const hasTypedActivity = blocks.some((block) => block.type === "tool_call" || block.type === "progress");
+  const isProjectedFinalAnswer = (block: ContentBlock): block is Extract<ContentBlock, { type: "text" }> =>
+    block.type === "text"
+    && (isFinalAnswerBlock(block) || (hasTypedActivity && isLegacyTextBlock(block) && !block.source));
   const finalBlocks = blocks.filter(
     (block): block is Extract<ContentBlock, { type: "text" }> =>
-      isFinalAnswerBlock(block)
-      && block.type === "text"
+      isProjectedFinalAnswer(block)
   );
   const selectedFinal = finalBlocks.at(-1);
   // CC keeps each max-output continuation as another assistant segment. Join
@@ -399,10 +405,12 @@ export function projectTurn(
       if (!block.content.trim() || !isVisibleActivity(block, Boolean(options.includeHiddenActivity))) return;
       if (isToolProtocolSummary(block.content, typedToolNames)) return;
       const isActiveReasoning = index === activeThinkingIndex;
+      const providerReasoning = isProviderReasoning(block);
       const summary = isProviderReasoningSummary(block);
       const transient = isTransientProviderReasoning(block);
+      const collapsible = !providerReasoning && !block.source;
       segment += 1;
-      if (summary || (transient && isActiveReasoning)) {
+      if (summary || (transient && isActiveReasoning) || collapsible) {
         activityItems.push({
           id: `thinking-${index}`,
           kind: thinkingKind(block),
@@ -411,6 +419,7 @@ export function projectTurn(
           source: block.source,
           phase: block.phase,
           providerReasoningType: providerReasoningType(block) || undefined,
+          collapsible,
           status: isActiveReasoning ? "running" : "completed",
           hasFailure: false,
           hasPendingUserAction: false,
@@ -501,7 +510,7 @@ export function projectTurn(
       segment += 1;
       return;
     }
-    if (block.type === "text" && isFinalAnswerBlock(block)) segment += 1;
+    if (block.type === "text" && isProjectedFinalAnswer(block)) segment += 1;
   });
 
   for (const item of activityItems) {

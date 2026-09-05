@@ -40,6 +40,12 @@
   --surface-hover:   oklch(0.275 0.005 250);
   --surface-active:  oklch(0.315 0.006 250);
 
+  /* Workbench-only surfaces; settings retain the established palette. */
+  --workbench-sidebar: oklch(0.190 0.002 250);
+  --workbench-tool: oklch(0.235 0.002 250);
+  --workbench-hover: oklch(0.275 0.002 250);
+  --workbench-active: oklch(0.305 0.003 250);
+
   /* ── Text (4) — Pillar 1.2
      WCAG invariant (P1.3): primary/secondary ≥ 4.5:1 vs any surface,
      muted ≥ 3.0:1 (large text only). ────────────────────── */
@@ -341,6 +347,11 @@ uses in its UI. The `--cjk-leading` and
   --surface-raised:  oklch(1 0 0);
   --surface-hover:   oklch(0.915 0.004 250);
   --surface-active:  oklch(0.885 0.005 250);
+
+  --workbench-sidebar: oklch(0.973 0.009 245);
+  --workbench-tool: oklch(0.978 0.001 250);
+  --workbench-hover: oklch(0.958 0.004 245);
+  --workbench-active: oklch(0.937 0.009 245);
 
   /* Text (4) — muted/secondary darkened for readability on white (was 0.52/0.38) */
   --text-primary:   oklch(0.110 0.004 250);

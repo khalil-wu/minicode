@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type React from "react";
 import { ChevronDown, ChevronRight, PencilLine, TerminalSquare } from "lucide-react";
 import type { AgentLoopProcessCell } from "../projection/project-turn";
@@ -24,7 +24,7 @@ type TimelineGroup = {
 
 const timelineGroupKind = (cell: AgentLoopProcessCell): TimelineGroupKind => {
   if (cell.kind === "thinking") {
-    return ["provider", "reasoning"].includes(cell.source) ? "thinking" : "narration";
+    return cell.collapsible || ["provider", "reasoning"].includes(cell.source) ? "thinking" : "narration";
   }
   if (cell.kind === "status_notice" && /压缩|compac/i.test(`${cell.title} ${cell.message || ""}`)) return "context";
   if (cell.kind === "status_notice") return "notice";
@@ -117,19 +117,24 @@ const latestWorkGlyph = (cell: AgentLoopProcessCell | undefined): React.ReactNod
   return <TerminalSquare size={15} />;
 };
 
-function ClosedWorkGroup({ group, groupIndex, renderCell }: { group: TimelineGroup; groupIndex: number; renderCell: RenderAgentCell }) {
+function WorkGroup({ group, renderCell, expandWorkGroups, isRunning }: { group: TimelineGroup; renderCell: RenderAgentCell; expandWorkGroups: boolean; isRunning: boolean }) {
   const containsScreenshot = group.cells.some((cell) => (
     cell.kind === "activity"
     && cell.toolCallRecords?.some((record) => Boolean(record.artifactId) && isBrowserScreenshotRecord(record))
   ));
-  const [expanded, setExpanded] = useState(containsScreenshot);
-  const previousGroupKey = useRef(`${group.segment ?? "none"}:${group.cells[0]?.id ?? groupIndex}`);
-  const groupKey = `${group.segment ?? "none"}:${group.cells[0]?.id ?? groupIndex}`;
+  const containsFailure = group.cells.some((cell) => cell.kind === "error"
+    || ((cell.kind === "exec" || cell.kind === "activity" || cell.kind === "collaboration")
+      && (cell.status === "failed" || cell.status === "partial")));
+  const defaultExpanded = (isRunning && (!group.closed || containsScreenshot || containsFailure)) || expandWorkGroups;
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const userToggled = useRef(false);
+  const detailId = useId();
   useEffect(() => {
-    if (previousGroupKey.current !== groupKey) setExpanded(containsScreenshot);
-    previousGroupKey.current = groupKey;
-  }, [containsScreenshot, groupKey]);
-  const title = timelineGroupTitle(group);
+    if (!userToggled.current) setExpanded(defaultExpanded);
+  }, [defaultExpanded]);
+  const latest = group.cells.at(-1);
+  const liveGroup = isRunning && !group.closed;
+  const title = liveGroup ? latestWorkTitle(latest) : timelineGroupTitle(group);
   const labels = group.cells.map(workLabel);
   const groupGlyph = labels.includes("编辑了文件")
     ? <PencilLine size={15} />
@@ -143,66 +148,52 @@ function ClosedWorkGroup({ group, groupIndex, renderCell }: { group: TimelineGro
         })();
   const keyed = withStableRenderKeys(group.cells);
   return (
-    <section className="agent-loop-timeline-group agent-loop-timeline-group-work" data-group-kind="work" data-group-expanded={expanded} aria-label={title}>
-      <button type="button" className="agent-loop-timeline-group-title" data-group-kind="work" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
-        <span className="agent-loop-timeline-group-icon" aria-hidden="true">{groupGlyph}</span>
-        <span>{title}</span>
+    <section className={`agent-loop-timeline-group agent-loop-timeline-group-work${liveGroup ? " agent-loop-open-work-group" : ""}`} data-group-kind="work" data-group-open={liveGroup} data-group-expanded={expanded} aria-label={title}>
+      <button type="button" className="agent-loop-timeline-group-title" data-group-kind="work" aria-expanded={expanded} aria-controls={detailId} onClick={() => {
+        userToggled.current = true;
+        setExpanded((value) => !value);
+      }}>
+        <span className="agent-loop-timeline-group-icon" aria-hidden="true">{liveGroup ? latestWorkGlyph(latest) : groupGlyph}</span>
+        <span className={liveGroup ? "agent-loop-timeline-group-live-title" : "agent-loop-timeline-group-label"} title={title}>{title}</span>
         <span className="agent-loop-timeline-group-chevron" aria-hidden="true">
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>
       </button>
       {expanded && (
-        <div className="agent-loop-timeline-group-items">
-          {keyed.map(({ cell, key }) => renderCell({ key, cell, className: "chat-turn-process-cell agent-loop-process-cell" }))}
+        <div id={detailId} className="agent-loop-timeline-group-items">
+          {keyed.map(({ cell, key }) => renderCell({ key, cell, isActive: liveGroup && cell.id === latest?.id, className: "chat-turn-process-cell agent-loop-process-cell" }))}
         </div>
       )}
     </section>
   );
 }
 
-function OpenWorkGroup({ group, renderCell }: { group: TimelineGroup; renderCell: RenderAgentCell }) {
-  const [expanded, setExpanded] = useState(true);
-  const latest = group.cells.at(-1);
-  const title = latestWorkTitle(latest);
-  const keyed = withStableRenderKeys(group.cells);
-  const latestId = latest?.id;
+function CollapsibleThinkingCell({ cell, renderCell }: { cell: Extract<AgentLoopProcessCell, { kind: "thinking" }>; renderCell: RenderAgentCell }) {
+  const [expanded, setExpanded] = useState(false);
   return (
-    <section
-      className="agent-loop-open-work-group agent-loop-timeline-group agent-loop-timeline-group-work"
-      data-group-kind="work"
-      data-group-open="true"
-      data-group-expanded={expanded}
-      data-group-latest-id={latest?.id}
-      aria-label={title}
-    >
+    <section className="agent-loop-thinking-disclosure" data-thinking-expanded={expanded}>
       <button
         type="button"
-        className="agent-loop-timeline-group-title agent-loop-timeline-group-title-live"
-        data-group-kind="work"
+        className="agent-loop-timeline-group-title agent-loop-thinking-toggle"
+        aria-label="思考"
         aria-expanded={expanded}
         onClick={() => setExpanded((value) => !value)}
       >
-        <span className="agent-loop-timeline-group-icon" aria-hidden="true">{latestWorkGlyph(latest)}</span>
-        <span className="agent-loop-timeline-group-live-title">{title}</span>
+        <span>思考</span>
         <span className="agent-loop-timeline-group-chevron" aria-hidden="true">
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>
       </button>
       {expanded && (
         <div className="agent-loop-timeline-group-items">
-          {keyed.map(({ cell, key }) => renderCell({
-            key,
-            cell,
-            isActive: cell.id === latestId,
-            className: "chat-turn-process-cell agent-loop-process-cell",
-          }))}
+          {renderCell({ cell, key: cell.id, className: "chat-turn-process-cell agent-loop-process-cell" })}
         </div>
       )}
     </section>
   );
 }
 
-export function AgentTimeline({ cells, renderCell, showAllOpenWork = false }: { cells: AgentLoopProcessCell[]; renderCell: RenderAgentCell; showAllOpenWork?: boolean }) {
+export function AgentTimeline({ cells, renderCell, showAllOpenWork = false, expandWorkGroups = false, isRunning = false }: { cells: AgentLoopProcessCell[]; renderCell: RenderAgentCell; showAllOpenWork?: boolean; expandWorkGroups?: boolean; isRunning?: boolean }) {
   const groups = groupTimelineCells(cells);
   return (
     <div className="chat-turn-process-stack agent-loop-timeline">
@@ -212,19 +203,15 @@ export function AgentTimeline({ cells, renderCell, showAllOpenWork = false }: { 
           return group.cells
             .filter((cell) => (
               cell.kind === "thinking"
-              && (cell.isStreaming || isProviderReasoningSummary(cell))
+              && (cell.isStreaming || isProviderReasoningSummary(cell) || cell.collapsible)
             ))
-            .map((cell) => renderCell({ key: cell.id, cell, className: "chat-turn-process-cell agent-loop-process-cell" }));
-        }
-        if (group.kind === "work" && group.closed) {
-          if (group.cells.length === 1) {
-            return keyed.map(({ cell, key }) => renderCell({ key, cell, className: "chat-turn-process-cell agent-loop-process-cell" }));
-          }
-          return <ClosedWorkGroup key={`timeline-group-work-${group.segment ?? groupIndex}-${groupIndex}`} group={group} groupIndex={groupIndex} renderCell={renderCell} />;
+            .map((cell) => cell.kind === "thinking" && cell.collapsible
+              ? <CollapsibleThinkingCell key={cell.id} cell={cell} renderCell={renderCell} />
+              : renderCell({ key: cell.id, cell, className: "chat-turn-process-cell agent-loop-process-cell" }));
         }
         if (group.kind === "work") {
-          if (!showAllOpenWork && group.cells.length > 1) {
-            return <OpenWorkGroup key={`timeline-group-open-work-${group.segment ?? groupIndex}-${groupIndex}`} group={group} renderCell={renderCell} />;
+          if (group.cells.length > 1) {
+            return <WorkGroup key={`timeline-group-work-${group.segment ?? groupIndex}-${group.cells[0].id}`} group={group} renderCell={renderCell} isRunning={isRunning} expandWorkGroups={expandWorkGroups || showAllOpenWork} />;
           }
           return keyed.map(({ cell, key }) => renderCell({ key, cell, className: "chat-turn-process-cell agent-loop-process-cell" }));
         }

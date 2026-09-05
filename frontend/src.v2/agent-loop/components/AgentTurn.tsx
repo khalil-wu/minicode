@@ -68,7 +68,7 @@ export const AgentTurn = memo(function AgentTurn({
       && !hasBrowserScreenshot
       && !userToggled.current
     ) {
-      setProcessExpanded(false);
+      setProcessExpanded(initialProcessExpanded);
     } else if (
       enteredRunning
       && turn.processDetailMode === "normal"
@@ -158,6 +158,7 @@ export const AgentTurn = memo(function AgentTurn({
             <AgentTimeline
               cells={timelineCells}
               renderCell={renderCell}
+              isRunning={turn.status === "running"}
               showAllOpenWork={turn.status !== "running" && !turn.hasCompleteFinalAnswer}
             />
           )}

@@ -61,6 +61,31 @@ const openExec = (id: string, command: string): AgentLoopProcessCell => ({
 });
 
 describe("AgentTimeline", () => {
+  it("preserves a user's collapse choice when a live group closes", () => {
+    const { rerender } = render(<AgentTimeline cells={[openExec("one", "npm test"), openExec("latest", "npm run build")]} renderCell={renderCell} isRunning />);
+    fireEvent.click(screen.getByRole("button", { name: "运行命令 npm run build" }));
+    rerender(<AgentTimeline cells={[exec("one", "npm test"), exec("latest", "npm run build")]} renderCell={renderCell} />);
+    expect(screen.getByRole("button", { name: "运行了 2 条命令" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("npm test")).toBeNull();
+  });
+
+  it("preserves an explicitly expanded group when it closes", () => {
+    const { rerender } = render(<AgentTimeline cells={[openExec("one", "npm test"), openExec("latest", "npm run build")]} renderCell={renderCell} isRunning />);
+    const toggle = screen.getByRole("button", { name: "运行命令 npm run build" });
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+    rerender(<AgentTimeline cells={[exec("one", "npm test"), exec("latest", "npm run build")]} renderCell={renderCell} />);
+    expect(screen.getByRole("button", { name: "运行了 2 条命令" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("npm test")).toBeTruthy();
+  });
+
+  it("expands groups only when the caller explicitly requests full evidence", () => {
+    const { rerender } = render(<AgentTimeline cells={[exec("one", "npm test"), exec("two", "npm run build")]} renderCell={renderCell} expandWorkGroups />);
+    expect(screen.getByText("npm test")).toBeTruthy();
+    rerender(<AgentTimeline cells={[exec("one", "npm test"), { ...exec("two", "npm run build"), status: "failed" } as AgentLoopProcessCell]} renderCell={renderCell} showAllOpenWork />);
+    expect(screen.getByText("npm run build")).toBeTruthy();
+  });
+
   it("groups a contiguous edit and command sequence under one ordered work heading", () => {
     const { container } = render(<AgentTimeline cells={[fileChange("edit"), exec("test", "npm test")]} renderCell={renderCell} />);
 
@@ -103,6 +128,7 @@ describe("AgentTimeline", () => {
   it("uses the latest live command as the title while keeping all work rows ordered", () => {
     const { container } = render(
       <AgentTimeline
+        isRunning
         cells={[
           openExec("old-1", "git status --short"),
           openExec("old-2", "npm test"),
@@ -123,6 +149,7 @@ describe("AgentTimeline", () => {
   it("uses the latest List action as the title while keeping Read and Search rows visible", () => {
     const { container } = render(
       <AgentTimeline
+        isRunning
         cells={[
           activity("read", "fileRead"),
           activity("search", "workspaceSearch"),
@@ -143,6 +170,7 @@ describe("AgentTimeline", () => {
   it("keeps the live title separate from the ordered tool rows and lets the group collapse", () => {
     const { container } = render(
       <AgentTimeline
+        isRunning
         cells={[
           activity("list", "workspaceList"),
           activity("read", "fileRead"),
@@ -171,6 +199,7 @@ describe("AgentTimeline", () => {
     const activeIds: string[] = [];
     render(
       <AgentTimeline
+        isRunning
         cells={[openExec("read", "read 1.txt"), openExec("latest", "grep -n foo 1.txt")]}
         renderCell={({ cell, key, isActive }) => {
           if (isActive) activeIds.push(cell.id);
@@ -180,6 +209,18 @@ describe("AgentTimeline", () => {
     );
 
     expect(activeIds).toEqual(["latest"]);
+  });
+
+  it("folds settled work groups even when persisted segments lack a closing marker", () => {
+    const cells = [activity("read-one", "fileRead"), activity("read-two", "fileRead")];
+    const { container, rerender } = render(<AgentTimeline cells={cells} renderCell={renderCell} isRunning />);
+    expect(container.querySelectorAll(".agent-loop-process-cell")).toHaveLength(2);
+    rerender(<AgentTimeline cells={cells} renderCell={renderCell} isRunning={false} />);
+    const toggle = screen.getByRole("button", { name: "读取了文件" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelectorAll(".agent-loop-process-cell")).toHaveLength(0);
+    fireEvent.click(toggle);
+    expect(container.querySelectorAll(".agent-loop-process-cell")).toHaveLength(2);
   });
 
   it("keeps completed reasoning summaries while hiding completed raw reasoning", () => {

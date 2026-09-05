@@ -15,7 +15,7 @@
   gap: 4px;
   padding: 5px 7px 0;
   border-bottom: 1px solid var(--border-subtle);
-  background: color-mix(in oklch, var(--surface-panel) 82%, var(--surface-base));
+  background: var(--workbench-tool);
 }
 
 .mc-browser-tabs-scroll {
@@ -45,7 +45,7 @@
   border-color: var(--border-subtle);
   background: var(--surface-base);
   color: var(--text-primary);
-  box-shadow: 0 -1px 8px color-mix(in oklch, black 8%, transparent);
+  box-shadow: none;
 }
 
 .mc-browser-tab > button {

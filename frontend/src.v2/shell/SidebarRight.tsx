@@ -150,12 +150,12 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
 
   const tabs: { id: StackTab; label: string; badge?: string; icon: React.ReactNode }[] = [
     { id: "tasks", label: "上下文", icon: <PanelRightOpen {...sidebarIconProps} /> },
-    { id: "subagents", label: "子智能体", badge: runningSubagents ? String(runningSubagents) : undefined, icon: <Bot {...sidebarIconProps} /> },
-    { id: "artifacts", label: "产物", badge: activePreviewArtifact ? "1" : undefined, icon: <Layers {...sidebarIconProps} /> },
-    { id: "inspector", label: "运行详情", icon: <FileSearch {...sidebarIconProps} /> },
     { id: "diff", label: "审阅", badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <FileDiff {...sidebarIconProps} /> },
     { id: "preview", label: "预览", badge: previewSurfaceLiveUrl || previewSurfaceArtifact ? "开" : undefined, icon: <MonitorPlay {...sidebarIconProps} /> },
     { id: "browser", label: "浏览器", icon: <Globe2 {...sidebarIconProps} /> },
+    { id: "artifacts", label: "产物", badge: activePreviewArtifact ? "1" : undefined, icon: <Layers {...sidebarIconProps} /> },
+    { id: "subagents", label: "子智能体", badge: runningSubagents ? String(runningSubagents) : undefined, icon: <Bot {...sidebarIconProps} /> },
+    { id: "inspector", label: "运行详情", icon: <FileSearch {...sidebarIconProps} /> },
     { id: "diagnostics", label: "运行状态", badge: mcpErrors ? String(mcpErrors) : undefined, icon: <HeartPulse {...sidebarIconProps} /> },
   ];
   const activeItem = tabs.find((tab) => tab.id === activeTab) ?? tabs[0];

@@ -1781,6 +1781,12 @@ export const MarkdownRenderer = memo(({ content, isStreaming, citations }: Props
     );
   }
 
+  // A stream that starts with a code fence has no stable prefix yet. It still
+  // needs the unhighlighted tail path instead of re-highlighting on each delta.
+  if (isStreaming) {
+    return <div className="md-body"><StreamingTailMarkdown content={displayContent} components={components} /></div>;
+  }
+
   return (
     <div className="md-body">
       <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>

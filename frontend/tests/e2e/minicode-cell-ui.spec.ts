@@ -576,7 +576,7 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     const commandCell = page.locator('.exec-cell[data-status="success"]');
     await expect(commandCell).toHaveCount(1);
     await commandCell.getByRole("button", { name: "展开命令详情" }).click();
-    await expect(commandCell.locator(".exec-cell-shell-card")).toBeVisible();
+    await expect(commandCell.locator(".exec-cell-expanded")).toBeVisible();
     await expect(commandCell).toContainText("git status --short");
     await expect(commandCell).toContainText("frontend/src.v2/chat/cells/ActivityCell.tsx");
 

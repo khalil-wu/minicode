@@ -1,11 +1,16 @@
 import {
   ChevronRight,
+  FileDiff,
   FileImage,
   FileText,
+  Folder,
+  GitBranch,
   ListChecks,
+  Monitor,
   PanelRightOpen,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { BrandIcon } from "../components/BrandIcon";
 import {
@@ -35,6 +40,7 @@ import type { ChatMessage, RightStackTab } from "../stores/types";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } from "./openAttachmentPreview";
 import { openWebTarget } from "./openWebTarget";
+import { useTurnChanges } from "./useTurnChanges";
 import "./ChatContextCard.css";
 
 interface ContextSource {
@@ -345,10 +351,16 @@ function ContextAttachmentThumbnail({ attachment }: { attachment: ContextAttachm
 }
 
 export const ChatContextCard = () => {
-  const messages = useAppStore((state) => state.messages);
+  const contextInputs = useAppStore(useShallow((state) => state.messages.flatMap((message) => [
+    message.id, message.citations, message.attachmentRefs, message.replyAttachments, message.artifacts,
+    ...getToolCallsFromMessage(message),
+  ])));
   const subagents = useAppStore((state) => state.subagents);
   const backgroundTasks = useAppStore((state) => state.backgroundTasks);
   const conversationId = useAppStore((state) => state.conversationId);
+  const workingDirectory = useAppStore((state) => state.workingDirectory);
+  const workspaceGit = useAppStore((state) => state.workspaceGit);
+  const { summary: changes, openReview } = useTurnChanges();
   const rightPanelOpen = useAppStore((state) => state.rightPanelOpen);
   const setRightStackTab = useAppStore((state) => state.setRightStackTab);
   const setFocusedSubagentId = useAppStore((state) => state.setFocusedSubagentId);
@@ -359,11 +371,12 @@ export const ChatContextCard = () => {
   );
   const previousRightPanelOpenRef = useRef(rightPanelOpen);
   const agentViews = useMemo(() => projectAgentViews(subagents), [subagents]);
-  const sources = useMemo(() => collectSources(messages), [messages]);
-  const attachments = useMemo(
-    () => collectAttachments(messages, conversationId || undefined),
-    [conversationId, messages],
-  );
+  // Text-only deltas do not change context. Keep collection and thumbnail
+  // rendering off that path while still responding to new artifacts/tools.
+  const { sources, attachments } = useMemo(() => {
+    const messages = useAppStore.getState().messages;
+    return { sources: collectSources(messages), attachments: collectAttachments(messages, conversationId || undefined) };
+  }, [conversationId, contextInputs]);
 
   useEffect(() => {
     const wasOpen = previousRightPanelOpenRef.current;
@@ -446,7 +459,8 @@ export const ChatContextCard = () => {
           ? "已取消"
           : "已完成";
   const hasBackgroundTasks = scopedBackgroundTasks.length > 0;
-  const contextCount = attachments.length + sources.length + browserTargets.length + agentViews.length + (hasBackgroundTasks ? 1 : 0);
+  const hasWorkspace = Boolean(conversationId && workingDirectory);
+  const contextCount = attachments.length + sources.length + browserTargets.length + agentViews.length + (hasBackgroundTasks ? 1 : 0) + (hasWorkspace ? 1 : 0) + (changes ? 1 : 0);
 
   const openPanel = (tab: RightStackTab) => setRightStackTab(tab);
   const openAgent = (agentId?: string) => {
@@ -530,7 +544,7 @@ export const ChatContextCard = () => {
       </button>
 
       <header className="mc-chat-context-card-header" hidden={collapsed}>
-        <span>上下文 <small>{contextCount}</small></span>
+        <span>{hasWorkspace || changes ? "环境信息" : "上下文"}</span>
         <span className="mc-chat-context-card-header-actions">
           <button type="button" aria-label="打开上下文详情" title="打开上下文详情" onClick={() => openPanel("tasks")}>
             <PanelRightOpen size={16} strokeWidth={1.8} />
@@ -542,6 +556,21 @@ export const ChatContextCard = () => {
       </header>
 
       <div className="mc-chat-context-card-body" hidden={collapsed}>
+        {(hasWorkspace || changes) && <section className="mc-chat-context-card-section" aria-label="环境信息">
+          {changes && <button type="button" className="mc-chat-context-environment-row" onClick={openReview} title="审阅本轮文件更改">
+            <FileDiff size={17} aria-hidden="true" />
+            <span>变更</span>
+            <span className="mc-chat-context-change-stats"><span className="chat-change-added">+{changes.additions}</span><span className="chat-change-deleted">-{changes.deletions}</span></span>
+            <ChevronRight size={14} aria-hidden="true" />
+          </button>}
+          {hasWorkspace && <>
+            <div className="mc-chat-context-environment-row"><Monitor size={17} aria-hidden="true" /><span>{workspaceGit?.isWorktree ? "独立工作树" : "本地工作区"}</span></div>
+            <div className="mc-chat-context-environment-row" title={workingDirectory}><Folder size={17} aria-hidden="true" /><span>{shortPath(workingDirectory)}</span></div>
+            {workspaceGit?.branch && <button type="button" className="mc-chat-context-environment-row" onClick={() => openPanel("diff")} title={workspaceGit.branch}>
+              <GitBranch size={17} aria-hidden="true" /><span>{workspaceGit.branch}</span><ChevronRight size={14} aria-hidden="true" />
+            </button>}
+          </>}
+        </section>}
         {agentViews.length > 0 && <section className="mc-chat-context-card-section" aria-label="子智能体摘要">
           <button type="button" className="mc-chat-context-section-title" onClick={() => openAgent()}>
             <span>子智能体</span>

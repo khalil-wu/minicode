@@ -6,6 +6,7 @@ import { SafeBoundary } from "../shell/ChunkErrorBoundary";
 import { ComposerErrorFallback } from "../components/ComposerErrorFallback";
 import { ChatErrorFallback } from "../components/ChatErrorFallback";
 import { ChatContextCard } from "./ChatContextCard";
+import { TurnChangeSummary } from "./TurnChangeSummary";
 import { useAppStore } from "../stores";
 
 export const ChatPane = () => {
@@ -95,6 +96,7 @@ export const ChatPane = () => {
             </SafeBoundary>
           </div>
           <div className="chat-pane-composer-region">
+            <TurnChangeSummary />
             <SafeBoundary fallback={<ComposerErrorFallback />}>
               <Composer />
             </SafeBoundary>

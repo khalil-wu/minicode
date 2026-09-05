@@ -80,7 +80,7 @@ describe("openWorkspaceFolder", () => {
 
     const state = useAppStore.getState();
     expect(state.appMode).toBe("code");
-    expect(state.workingDirectory).toBe("");
+    expect(state.workingDirectory).toBe("C:\\Desktop\\MiniCode");
 
     handlePeripheralEvent({
       type: "workspace.imported",

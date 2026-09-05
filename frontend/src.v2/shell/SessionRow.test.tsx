@@ -6,7 +6,6 @@ import { SessionRow } from "./SessionRow";
 
 const callbacks = {
   onSwitch: vi.fn(),
-  onToggleSelected: vi.fn(),
   onSetMenuFor: vi.fn(),
   onStartRename: vi.fn(),
   onCommitRename: vi.fn(),
@@ -41,8 +40,6 @@ describe("SessionRow hydration status", () => {
         isHydrating
         active
         deleting={false}
-        selectionMode={false}
-        selected={false}
         menuOpen={false}
         renaming={false}
         renameValue=""
@@ -68,8 +65,6 @@ describe("SessionRow hydration status", () => {
         isHydrating={false}
         active={false}
         deleting={false}
-        selectionMode={false}
-        selected={false}
         menuOpen={false}
         renaming={false}
         renameValue=""
@@ -95,8 +90,6 @@ describe("SessionRow hydration status", () => {
         isHydrating={false}
         active={false}
         deleting
-        selectionMode={false}
-        selected={false}
         menuOpen={false}
         renaming={false}
         renameValue=""
@@ -111,7 +104,7 @@ describe("SessionRow hydration status", () => {
     expect((screen.getByRole("button", { name: "会话操作" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("does not re-render an unchanged row when another row selection changes", () => {
+  it("does not re-render an unchanged row when another row menu changes", () => {
     let unchangedTitleReads = 0;
     const firstConversation = {
       id: "conv-first",
@@ -126,7 +119,7 @@ describe("SessionRow hydration status", () => {
       },
       updatedAt: "2026-08-15T00:00:01Z",
     };
-    const renderRows = (firstSelected: boolean) => (
+    const renderRows = (firstMenuOpen: boolean) => (
       <>
         <SessionRow
           conversation={firstConversation}
@@ -134,9 +127,7 @@ describe("SessionRow hydration status", () => {
           isHydrating={false}
           active={false}
           deleting={false}
-          selectionMode
-          selected={firstSelected}
-          menuOpen={false}
+          menuOpen={firstMenuOpen}
           renaming={false}
           renameValue=""
           waitingLabel={null}
@@ -148,8 +139,6 @@ describe("SessionRow hydration status", () => {
           isHydrating={false}
           active={false}
           deleting={false}
-          selectionMode
-          selected={false}
           menuOpen={false}
           renaming={false}
           renameValue=""

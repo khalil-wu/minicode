@@ -51,6 +51,16 @@ const baseTurn = (): ChatTurnState => ({
 });
 
 describe("agent-loop process detail projection", () => {
+  it("keeps commentary visible after the final answer while summary mode still collapses", () => {
+    const turn: ChatTurnState = {
+      ...baseTurn(),
+      committedCells: [{ kind: "thinking", id: "narration", content: "Reviewing the files", source: "commentary", createdAt: 1 }],
+      finalAnswerCell: { kind: "assistant_markdown", id: "answer", messageId: "answer", markdownSource: "Done", phase: "final", copyable: true, createdAt: 2 },
+    };
+    expect(projectChatTurnToAgentLoop(turn, undefined, "normal").initialProcessExpanded).toBe(true);
+    expect(projectChatTurnToAgentLoop(turn, undefined, "summary").initialProcessExpanded).toBe(false);
+  });
+
   it("keeps the useful trace in summary mode", () => {
     const projection = projectChatTurnToAgentLoop(baseTurn(), undefined, "summary");
 

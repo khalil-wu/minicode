@@ -1212,6 +1212,7 @@ test.describe("Message context and compact assistant process UI", () => {
     await expect(page.getByText("Plan complete. I checked BrowserPanel").first()).toBeVisible();
     await page.getByRole("button", { name: "关闭右侧面板" }).click();
     await page.getByRole("button", { name: "展开处理步骤" }).click();
+    await page.getByRole("button", { name: "展开活动详情" }).click();
     await expect(page.getByText(/Read BrowserPanel\.tsx and found CDP target selection/).first()).toBeVisible();
     await expect
       .poll(() => page.evaluate(() => {

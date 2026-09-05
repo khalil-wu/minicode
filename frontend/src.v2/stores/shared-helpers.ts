@@ -482,6 +482,7 @@ export const updateMessagesForConversation = (
     : state.conversationMessages[targetId] ?? [];
   const nextMessages = updater(sourceMessages);
   if (!nextMessages) return state;
+  const nextStreaming = streaming ?? (isActive ? state.isStreaming : state.conversationStreaming[targetId] ?? false);
 
   return {
     ...(isActive ? { messages: nextMessages, isStreaming: streaming ?? state.isStreaming } : {}),
@@ -489,10 +490,9 @@ export const updateMessagesForConversation = (
       ...state.conversationMessages,
       [targetId]: nextMessages,
     },
-    conversationStreaming: {
-      ...state.conversationStreaming,
-      [targetId]: streaming ?? (isActive ? state.isStreaming : state.conversationStreaming[targetId] ?? false),
-    },
+    conversationStreaming: state.conversationStreaming[targetId] === nextStreaming
+      ? state.conversationStreaming
+      : { ...state.conversationStreaming, [targetId]: nextStreaming },
   };
 };
 

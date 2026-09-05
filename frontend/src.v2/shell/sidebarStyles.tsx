@@ -44,55 +44,6 @@ export const modeSwitchLabelStyle: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-export const bulkBarStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  flexWrap: "wrap",
-  gap: 6,
-  margin: "0 8px 8px",
-  padding: "5px 6px",
-  background: "var(--surface-page)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-md, 8px)",
-};
-
-export const bulkActionStyle: React.CSSProperties = {
-  height: 28,
-  padding: "0 8px",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 6px)",
-  background: "var(--surface-base)",
-  color: "var(--text-secondary)",
-  cursor: "pointer",
-  fontSize: "var(--text-xs)",
-  fontWeight: "var(--fw-semibold)",
-  lineHeight: 1,
-  whiteSpace: "nowrap",
-};
-
-export const bulkMetaStyle: React.CSSProperties = {
-  flex: "1 1 auto",
-  color: "var(--text-secondary)",
-  fontSize: "var(--text-xs)",
-  fontFamily: "var(--font-ui)",
-  fontVariantNumeric: "tabular-nums",
-  whiteSpace: "nowrap",
-};
-
-export const bulkActionsStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 4,
-  marginLeft: "auto",
-};
-
-export const sessionCheckboxStyle: React.CSSProperties = {
-  width: 14,
-  height: 14,
-  flexShrink: 0,
-  accentColor: "var(--accent-primary)",
-};
-
 export const sessionMainButtonStyle: React.CSSProperties = {
   flex: 1,
   minWidth: 0,
@@ -111,53 +62,6 @@ export const sectionHeaderRowStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "space-between",
   gap: 8,
-};
-
-export const searchBarWrapStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-};
-
-export const searchInputStyle: React.CSSProperties = {
-  width: "100%",
-  minWidth: 0,
-  background: "var(--surface-base)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 6px)",
-  height: 30,
-  padding: "0 10px",
-  color: "var(--text-primary)",
-  fontFamily: "var(--font-ui)",
-  fontSize: "var(--text-chrome)",
-  outline: "none",
-};
-
-export const filterRowStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 4,
-  flexWrap: "wrap",
-  overflow: "hidden",
-};
-
-export const filterButtonStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 4,
-  height: 24,
-  padding: "0 8px",
-  border: 0,
-  borderRadius: 999,
-  cursor: "pointer",
-  fontSize: "var(--text-2xs)",
-  whiteSpace: "nowrap",
-  transition: "var(--transition-fast)",
-};
-
-export const filterCountStyle: React.CSSProperties = {
-  fontSize: "var(--text-3xs)",
-  opacity: 0.7,
-  fontFamily: "var(--font-ui)",
 };
 
 export const sessionListWrapStyle: React.CSSProperties = {

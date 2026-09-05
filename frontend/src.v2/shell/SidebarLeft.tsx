@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
-import { Blend, Clock3, Code2, FolderOpen, MessageSquareText, Moon, Search, Settings, SquarePen, Sun } from "lucide-react";
+import { Clock3, Code2, FolderOpen, MessageSquareText, Moon, Puzzle, Search, Settings, SquarePen, Sun } from "lucide-react";
 import { useAppStore } from "../stores";
 import { LEFT_SIDEBAR_MIN_WIDTH } from "../stores/shared-helpers";
 import { FileTree } from "./FileTree";
@@ -77,7 +77,14 @@ export const SidebarLeft = ({
         pointerEvents: isOpen ? "auto" : "none",
       }}
     >
-      <div role="tablist" aria-label="工作模式" data-testid="sidebar-mode-switch" style={{ ...modeSwitchStyle, margin: "2px 0" }}>
+      <div role="tablist" aria-label="工作模式" data-testid="sidebar-mode-switch" style={{ ...modeSwitchStyle, margin: "2px 0" }}
+        onKeyDown={(event) => {
+          if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+          event.preventDefault();
+          const mode = event.key === "Home" ? "cowork" : event.key === "End" ? "code" : appMode === "code" ? "cowork" : "code";
+          setAppMode(mode);
+          event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[mode === "code" ? 1 : 0].focus();
+        }}>
         <button
           type="button"
           role="tab"
@@ -105,12 +112,17 @@ export const SidebarLeft = ({
       </div>
 
       <nav className="mc-sidebar-nav" aria-label="工作区导航" style={{ display: "grid", gap: 2, padding: "8px 2px 12px" }}>
-        <SidebarAction icon={<SquarePen />} label="新建任务" onClick={startSession} />
-        {globalSearchEnabled && <SidebarAction icon={<Search />} label="搜索" onClick={() => navigate(() => toggleCommandPalette())} />}
-        <SidebarAction icon={<FolderOpen />} label={workingDirectory ? "切换项目" : "打开项目"} onClick={() => navigate(() => void openWorkspaceFolder())} />
+        <div className="mc-sidebar-primary-actions">
+          <SidebarAction icon={<SquarePen />} label="新建任务" onClick={startSession} />
+          {globalSearchEnabled && <button type="button" className="btn-ghost mc-icon-button" aria-label="搜索" title="搜索任务与命令" onClick={() => navigate(() => toggleCommandPalette())}><Search size={16} /></button>}
+        </div>
         <SidebarAction icon={<Clock3 />} label="已安排" onClick={openAutomationsPanel} />
-        <SidebarAction icon={<Blend />} label="技能" onClick={() => navigate(() => toggleSkillsMarketplace())} />
+        <SidebarAction icon={<Puzzle />} label="技能" onClick={() => navigate(() => toggleSkillsMarketplace())} />
       </nav>
+
+      <button type="button" className="mc-sidebar-project-open" onClick={() => navigate(() => void openWorkspaceFolder())} title={workingDirectory || "打开项目"}>
+        <FolderOpen size={16} aria-hidden="true" /><span>{workingDirectory ? "切换项目" : "打开项目"}</span>
+      </button>
 
       <div key={appMode} className="mc-sidebar-mode-content" data-mode={appMode}>
         {appMode === "cowork" ? (

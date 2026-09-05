@@ -51,6 +51,8 @@ export function projectChatTurnToAgentLoop(
   // cell intact so live work stays immediate and only a closed semantic
   // segment is folded.
   const projectedProcessCells = processCells;
+  const hasNarration = processCells.some((cell) => cell.kind === "thinking"
+    && !cell.collapsible && cell.source !== "provider" && cell.source !== "reasoning");
   const durationMs = turnDurationMs(turn);
   const hasCompleteFinalAnswer = Boolean(
     turn.status === "completed"
@@ -79,10 +81,11 @@ export function projectChatTurnToAgentLoop(
     // The setting controls the work-area disclosure itself, not only the
     // contents of individual tool cards:
     // - summary: compact transcript
-    // - normal: follow live work, collapse only after a complete final answer
+    // - normal: keep narration in order; individual completed work groups fold
     // - verbose: keep the complete work trace visible
     initialProcessExpanded:
       processDetailMode === "verbose"
+      || (processDetailMode === "normal" && hasNarration)
       || !hasCompleteFinalAnswer,
   };
 }

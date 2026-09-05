@@ -82,7 +82,7 @@ export const ChatTurn = memo(function ChatTurn({
 
 // ── HistoryCellRenderer ─────────────────────────────────────────────
 
-export function HistoryCellRenderer({
+export const HistoryCellRenderer = memo(function HistoryCellRenderer({
   cell,
   isActive = false,
   onStopExecution,
@@ -136,4 +136,4 @@ export function HistoryCellRenderer({
       // the settled answer into the reply area as assistant markdown.
       return null;
   }
-}
+});

@@ -106,6 +106,17 @@ describe("SidebarLeft session status", () => {
     expect(aside!.getAttribute("style")).toContain("272px");
   });
 
+  it("groups search with new task and keeps project navigation outside primary commands", () => {
+    render(<SidebarLeft />);
+    const navigation = screen.getByRole("navigation", { name: "工作区导航" });
+    expect(within(navigation).getByRole("button", { name: "搜索" }).querySelector("svg")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "切换项目" }).closest("nav")).toBeNull();
+    const code = screen.getByRole("tab", { name: "代码" });
+    fireEvent.keyDown(code, { key: "End" });
+    expect(useAppStore.getState().appMode).toBe("code");
+    expect(document.activeElement).toBe(code);
+  });
+
   it("marks the active session as waiting from restored runtime pending state", () => {
     useAppStore.setState({
       runtimeSession: {
@@ -115,9 +126,6 @@ describe("SidebarLeft session status", () => {
     });
 
     render(<SidebarLeft />);
-
-    fireEvent.click(screen.getByRole("button", { name: "选择会话" }));
-    fireEvent.click(screen.getByRole("button", { name: /等待中\s*1/ }));
 
     expect(screen.getByText("Restored pending prompt")).toBeTruthy();
     expect(screen.getByText("等待回复")).toBeTruthy();
@@ -153,12 +161,9 @@ describe("SidebarLeft session status", () => {
 
     render(<SidebarLeft />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择会话" }));
-    fireEvent.click(screen.getByRole("button", { name: /等待中\s*1/ }));
-
     expect(screen.getByText("Waiting inactive session")).toBeTruthy();
     expect(screen.getByText("等待回复")).toBeTruthy();
-    expect(screen.queryByText("Active session")).toBeNull();
+    expect(screen.getByText("Active session")).toBeTruthy();
     expect(screen.queryByText("当前筛选下暂无会话")).toBeNull();
   });
 
@@ -190,9 +195,6 @@ describe("SidebarLeft session status", () => {
     });
 
     render(<SidebarLeft />);
-
-    fireEvent.click(screen.getByRole("button", { name: "选择会话" }));
-    fireEvent.click(screen.getByRole("button", { name: /等待中\s*2/ }));
 
     expect(screen.getByText("Active question")).toBeTruthy();
     expect(screen.getByText("Queued review")).toBeTruthy();
@@ -503,7 +505,7 @@ describe("SidebarLeft session status", () => {
     document.removeEventListener("keydown", outsideEscape);
   });
 
-  it("keeps the bulk action scoped to the sessions currently shown", () => {
+  it("shows tasks without selection or bulk controls", () => {
     useAppStore.setState({
       conversations: [
         { id: "conv-alpha", title: "Alpha", updatedAt: "2026-05-24T00:00:00.000Z" },
@@ -512,13 +514,10 @@ describe("SidebarLeft session status", () => {
     });
 
     render(<SidebarLeft />);
-    fireEvent.click(screen.getByRole("button", { name: "选择会话" }));
-    fireEvent.change(screen.getByPlaceholderText("搜索会话"), { target: { value: "Alpha" } });
-    fireEvent.click(screen.getByRole("button", { name: "选择当前结果" }));
-    fireEvent.change(screen.getByPlaceholderText("搜索会话"), { target: { value: "Beta" } });
-
-    expect(screen.getByRole("button", { name: "选择当前结果" })).toBeTruthy();
-    expect(screen.getByText("已选择 1 个")).toBeTruthy();
+    expect(screen.getByText("Alpha")).toBeTruthy();
+    expect(screen.getByText("Beta")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "选择会话" })).toBeNull();
+    expect(screen.queryByRole("checkbox")).toBeNull();
   });
 
   it("uses the streaming state map instead of scanning stale cached messages", () => {
@@ -596,14 +595,12 @@ describe("SidebarLeft session status", () => {
 
     render(<SidebarLeft />);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择会话" }));
-    fireEvent.click(screen.getByRole("button", { name: /运行中\s*1/ }));
-
     expect(screen.getByText("Background run")).toBeTruthy();
-    expect(screen.queryByText("Active session")).toBeNull();
+    expect(screen.getByLabelText("任务运行中")).toBeTruthy();
+    expect(screen.getByText("Active session")).toBeTruthy();
   });
 
-  it("filters sessions to the current workspace", () => {
+  it("keeps tasks from all projects visible in their workspace groups", () => {
     useAppStore.setState({
       appMode: "cowork",
       workingDirectory: "C:\\Desktop\\MiniCode",
@@ -633,11 +630,9 @@ describe("SidebarLeft session status", () => {
     expect(screen.getByText("Current project task")).toBeTruthy();
     expect(screen.getByText("Other project task")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "选择会话" }));
-    fireEvent.click(screen.getByRole("button", { name: "当前工作区" }));
-
-    expect(screen.getByText("Current project task")).toBeTruthy();
-    expect(screen.queryByText("Other project task")).toBeNull();
+    expect(screen.getByRole("region", { name: "工作区 MiniCode" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "工作区 Other" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "当前工作区" })).toBeNull();
   });
 
   it("uses open and closed folder icons for workspace groups", () => {

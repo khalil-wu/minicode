@@ -20,6 +20,7 @@ vi.hoisted(() => {
 });
 import type { ChatTurnState, HistoryCellState } from "../cells/cellTypes";
 import { ChatTurn, HistoryCellRenderer } from "./ChatTurn";
+import { useAppStore } from "../../stores";
 
 afterEach(() => cleanup());
 
@@ -129,6 +130,29 @@ describe("HistoryCellRenderer", () => {
 });
 
 describe("ChatTurn live answer", () => {
+  it("opens processed history with nested work groups folded, even in detailed mode", () => {
+    const previousMode = useAppStore.getState().viewMode;
+    useAppStore.setState({ viewMode: "verbose" });
+    const turn: ChatTurnState = {
+      id: "settled-nested", userCell: null, status: "completed", startedAt: 1, activeCell: null,
+      committedCells: ["first.md", "second.md"].map((path, index) => ({
+        kind: "activity", id: `read-${index}`, activityKind: "fileRead", title: "Read", status: "done", collapsed: true, startedAt: 1, segment: 1, segmentClosed: false,
+        toolCallRecords: [{ id: `read-${index}`, name: "read_file", args: { path }, status: "success", startedAt: 1 }],
+      })),
+      finalAnswerCell: { kind: "assistant_markdown", id: "answer", messageId: "answer", markdownSource: "Done", phase: "final", copyable: true, createdAt: 2 },
+    };
+    render(<ChatTurn turn={turn} />);
+    const group = screen.getByRole("button", { name: "读取了文件" });
+    expect(group.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(group);
+    expect(screen.getByText("first.md")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+    expect(screen.getByRole("button", { name: "读取了文件" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("first.md")).toBeNull();
+    useAppStore.setState({ viewMode: previousMode });
+  });
+
   it("renders the first streamed answer text immediately without waiting for completion", () => {
     const turn: ChatTurnState = {
       id: "turn-live-answer",

@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState, type MouseEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Check, ChevronDown, ChevronRight, Circle, Pencil, Wifi, WifiOff } from "lucide-react";
 import type { ActivityCellState } from "./cellTypes";
 import { useAppStore } from "../../stores";
@@ -116,10 +116,14 @@ export const ActivityCell = memo(function ActivityCell({
     : "";
   const shouldAutoExpand = !cell.collapsed;
   const [isExpanded, setIsExpanded] = useState(shouldAutoExpand);
+  const userToggled = useRef(false);
+  const previousId = useRef(cell.id);
 
   useEffect(() => {
-    setIsExpanded(shouldAutoExpand);
-  }, [cell.id, cell.status, cell.collapsed, shouldAutoExpand]);
+    if (previousId.current !== cell.id) userToggled.current = false;
+    if (!userToggled.current) setIsExpanded(shouldAutoExpand);
+    previousId.current = cell.id;
+  }, [cell.id, shouldAutoExpand]);
 
   const isFailed = cell.status === "failed" || cell.status === "interrupted";
   const isPartial = cell.status === "partial";
@@ -268,7 +272,11 @@ export const ActivityCell = memo(function ActivityCell({
           disabled={!canToggle}
           data-clickable={canToggle}
           className="activity-cell-main-button"
-          onClick={() => { if (canToggle) setIsExpanded((v) => !v); }}
+          onClick={() => {
+            if (!canToggle) return;
+            userToggled.current = true;
+            setIsExpanded((value) => !value);
+          }}
         >
           {isFileChange ? (
             <span className="activity-cell-file-change-icon" aria-hidden="true">

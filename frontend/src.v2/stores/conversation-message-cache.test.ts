@@ -24,6 +24,15 @@ const message = (id: string): ChatMessage => ({
 });
 
 describe("conversation transcript renderer cache", () => {
+  it("keeps sidebar streaming state stable for text-only deltas", () => {
+    useAppStore.setState({ conversationId: "live", messages: [{ ...message("live"), isStreaming: true }], isStreaming: true, conversationStreaming: { live: true } });
+    const before = useAppStore.getState().conversationStreaming;
+    useAppStore.getState().appendThinkingChunk("first", "live", { source: "provider" }, "message-live");
+    useAppStore.getState().appendThinkingChunk("second", "live", { source: "provider" }, "message-live");
+    expect(useAppStore.getState().conversationStreaming).toBe(before);
+    expect(useAppStore.getState().messages[0].blocks).toEqual([expect.objectContaining({ content: "firstsecond" })]);
+  });
+
   afterEach(() => {
     useAppStore.setState({
       conversationId: null,

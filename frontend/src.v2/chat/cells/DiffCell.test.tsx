@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { useAppStore } from "../../stores";
 import { DiffCell } from "./DiffCell";
@@ -43,6 +43,22 @@ describe("DiffCell", () => {
     expect(screen.getByText("src/a.ts")).toBeTruthy();
     expect(screen.queryByText("oldA")).toBeNull();
     expect(screen.queryByText("newA")).toBeNull();
+  });
+
+  it("shows three files by default and can fold the remaining file rows again", () => {
+    const files = Array.from({ length: 5 }, (_,index) => ({ ...cell.files[0], path: `src/${index}.ts` }));
+    const { container } = render(<DiffCell cell={{ ...cell, files }} />);
+    expect(container.querySelectorAll(".diff-file-section")).toHaveLength(3);
+    fireEvent.click(screen.getByRole("button", { name: "再显示 2 个文件" }));
+    expect(container.querySelectorAll(".diff-file-section")).toHaveLength(5);
+    fireEvent.click(screen.getByRole("button", { name: "收起文件列表" }));
+    expect(container.querySelectorAll(".diff-file-section")).toHaveLength(3);
+  });
+
+  it("opens the selected file's patch rather than the first file", () => {
+    render(<DiffCell cell={cell} />);
+    fireEvent.click(screen.getByRole("button", { name: "src/b.ts" }));
+    expect(useAppStore.getState().diffReview).toMatchObject({ selectedPath: "src/b.ts", diff: cell.files[1].patch, mode: "view" });
   });
 
   it("shows rename evidence as one file section", () => {

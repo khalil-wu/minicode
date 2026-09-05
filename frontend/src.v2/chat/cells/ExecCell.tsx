@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, StopCircle } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Copy, Square, TerminalSquare } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ExecCellState } from "./cellTypes";
 import { StatusIcon } from "../../components/icons";
@@ -18,7 +18,6 @@ import "./cells.css";
  */
 export function ExecCell({
   cell,
-  isActive = false,
   onStop,
 }: {
   cell: ExecCellState;
@@ -35,9 +34,10 @@ export function ExecCell({
   const statusMeta = cell.exitCode != null ? `exit ${cell.exitCode}` : statusLabel;
   const title = commandTitle(cell.status, Boolean(cell.background));
   const duration = cell.background ? "" : formatCellDuration(cell.durationMs);
-  const running = isActive || isRunningCellStatus(status);
-  const shouldAutoExpand = !cell.collapsed;
+  const running = isRunningCellStatus(status);
+  const shouldAutoExpand = !cell.collapsed || cell.status === "failed" || cell.status === "partial";
   const [expanded, setExpanded] = useState(shouldAutoExpand);
+  const [copied, setCopied] = useState(false);
   const userToggled = useRef(false);
   const previousId = useRef(cell.id);
   const previousRunning = useRef(running);
@@ -49,9 +49,9 @@ export function ExecCell({
       userToggled.current = false;
       setExpanded(shouldAutoExpand);
     } else if (!userToggled.current && settled) {
-      setExpanded(true);
-    } else if (!userToggled.current && !cell.collapsed) {
-      setExpanded(true);
+      setExpanded(shouldAutoExpand);
+    } else if (!userToggled.current && shouldAutoExpand) {
+      setExpanded(shouldAutoExpand);
     }
     previousId.current = cell.id;
     previousRunning.current = running;
@@ -87,7 +87,7 @@ export function ExecCell({
           }}
         >
           <span className={`exec-cell-status-badge exec-cell-status-${statusColor}`}>
-            <StatusIcon status={cell.status} size={14} spinningClassName="exec-cell-spin-icon" />
+            <TerminalSquare size={15} aria-hidden="true" />
           </span>
           <span className="exec-cell-title">{running ? "正在运行" : title}</span>
           <span className="exec-cell-command-preview" title={cell.command}>{cell.command}</span>
@@ -107,21 +107,32 @@ export function ExecCell({
             aria-label="停止命令"
             className="exec-cell-stop-button"
           >
-            <StopCircle size={14} />
-            停止
+            <Square size={13} fill="currentColor" aria-hidden="true" />
           </button>
         )}
       </div>
       {expanded && (
-        // One frame. The header row already states outcome and duration, so the
-        // panel carries only the command and its output.
         <div className="exec-cell-expanded" role="region" aria-label="命令输出">
+          <div className="exec-cell-output-toolbar">
+            <span>Shell</span>
+            <button type="button" className="cell-action-btn" aria-label={copied ? "已复制命令输出" : "复制命令输出"} title={copied ? "已复制" : "复制命令输出"}
+              onClick={() => navigator.clipboard.writeText([`$ ${cell.command}`, stdout, stderr].filter(Boolean).join("\n")).then(() => {
+                setCopied(true);
+                window.setTimeout(() => setCopied(false), 1200);
+              })}>
+              {copied ? <Check size={14} /> : <Copy size={14} />}
+            </button>
+          </div>
           <pre className="exec-cell-output-pre">
             <span className="exec-cell-output-command">$ {cell.command}</span>
             {stdout && <span className="exec-cell-output-stdout">{stdout}</span>}
             {stderr && <span className="exec-cell-output-stderr">{stderr}</span>}
             {!hasOutput && <span className="exec-cell-no-output">无输出</span>}
           </pre>
+          <div className="exec-cell-output-status" data-status={status}>
+            <StatusIcon status={cell.status} size={13} spinningClassName="exec-cell-spin-icon" />
+            <span>{statusLabel}</span>
+          </div>
         </div>
       )}
     </div>

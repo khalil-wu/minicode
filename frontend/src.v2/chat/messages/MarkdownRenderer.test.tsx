@@ -68,6 +68,17 @@ afterEach(() => {
 });
 
 describe("MarkdownRenderer", () => {
+  it("uses the plain streaming code path when a fence has no preceding paragraph", () => {
+    const { container, rerender } = render(<MarkdownRenderer content={"```ts\nconst value = 1;"} isStreaming />);
+    const pre = container.querySelector("pre");
+    expect(pre).toBeTruthy();
+    expect(pre?.textContent).toContain("const value = 1;");
+    expect(container.querySelector(".token")).toBeNull();
+    rerender(<MarkdownRenderer content={"```ts\nconst value = 1;\nconst next = 2;"} isStreaming />);
+    expect(container.querySelector("pre")).toBe(pre);
+    expect(pre?.textContent).toContain("const next = 2;");
+  });
+
   it("keeps rendered nodes mounted while streamed text grows", () => {
     // The first line flickered because appending a delta rebuilt the component
     // table, which remounts every element React had already committed. Identity

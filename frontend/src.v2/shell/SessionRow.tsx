@@ -7,7 +7,6 @@ import { IconAction, ConversationMenu } from "./sidebarComponents";
 import {
   sessionRowStyle,
   sessionMainButtonStyle,
-  sessionCheckboxStyle,
   sessionTitleStyle,
   renameInputStyle,
 } from "./sidebarStyles";
@@ -18,14 +17,11 @@ export type SessionRowProps = {
   isHydrating: boolean;
   active: boolean;
   deleting?: boolean;
-  selectionMode: boolean;
-  selected: boolean;
   menuOpen: boolean;
   renaming: boolean;
   renameValue: string;
   waitingLabel: string | null;
   onSwitch: (id: string) => void;
-  onToggleSelected: (id: string) => void;
   onSetMenuFor: (id: string | null) => void;
   onStartRename: (id: string, title: string) => void;
   onCommitRename: () => void;
@@ -48,14 +44,11 @@ const SessionRowComponent = ({
   isHydrating,
   active,
   deleting,
-  selectionMode,
-  selected,
   menuOpen,
   renaming,
   renameValue,
   waitingLabel,
   onSwitch,
-  onToggleSelected,
   onSetMenuFor,
   onStartRename,
   onCommitRename,
@@ -87,17 +80,6 @@ const SessionRowComponent = ({
         opacity: c.archived || deleting ? 0.6 : 1,
       }}
     >
-      {selectionMode && (
-        <input
-          type="checkbox"
-          checked={selected}
-          disabled={deleting || sessionStatus === "running" || sessionStatus === "waiting"}
-          onChange={() => onToggleSelected(c.id)}
-          onClick={(e) => e.stopPropagation()}
-          style={sessionCheckboxStyle}
-          aria-label={`Select ${c.title}`}
-        />
-      )}
       {renaming ? (
         <div style={sessionMainButtonStyle}>
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -129,7 +111,6 @@ const SessionRowComponent = ({
           aria-current={active ? "page" : undefined}
           disabled={c.archived || deleting}
           onClick={(e) => {
-            if (selectionMode) { onToggleSelected(c.id); return; }
             if (e.ctrlKey || e.metaKey) {
               const id = `chat-${c.id}`;
               const state = useAppStore.getState();

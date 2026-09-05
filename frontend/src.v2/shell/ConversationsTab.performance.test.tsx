@@ -24,14 +24,6 @@ vi.mock("./SessionRow", async () => {
         },
         props.conversation.title,
       ),
-      props.selectionMode
-        ? React.createElement("input", {
-            type: "checkbox",
-            "aria-label": `Select ${props.conversation.title}`,
-            checked: props.selected,
-            onChange: () => props.onToggleSelected(props.conversation.id),
-          })
-        : null,
     );
   });
   return { SessionRow: MockSessionRow };
@@ -107,7 +99,7 @@ describe("ConversationsTab row rendering performance", () => {
 
   afterEach(() => cleanup());
 
-  it("re-renders only the affected row when a menu opens or selection changes", () => {
+  it("re-renders only the affected row when a menu opens or the active session changes", () => {
     render(<ParentWithUnrelatedUpdates />);
     expect(sessionRowRenderMock).toHaveBeenCalledTimes(3);
 
@@ -122,9 +114,5 @@ describe("ConversationsTab row rendering performance", () => {
     fireEvent.click(screen.getByRole("button", { name: "打开菜单 Task A" }));
     expect(sessionRowRenderMock.mock.calls.map(([id]) => id)).toEqual(["conv-a"]);
 
-    fireEvent.click(screen.getByRole("button", { name: "选择会话" }));
-    sessionRowRenderMock.mockClear();
-    fireEvent.click(screen.getByRole("checkbox", { name: "Select Task B" }));
-    expect(sessionRowRenderMock.mock.calls.map(([id]) => id)).toEqual(["conv-b"]);
   });
 });

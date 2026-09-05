@@ -24,7 +24,7 @@ export const ThinkingCell = memo(function ThinkingCell({
   const variant = summary ? "summary" : transient ? "live" : "commentary";
   return (
     <div
-      className={`thinking-cell thinking-cell-${variant}`}
+      className={`thinking-cell md-prose thinking-cell-${variant}`}
       data-source={cell.source}
       data-reasoning-type={cell.providerReasoningType}
       data-streaming={streaming ? "true" : "false"}

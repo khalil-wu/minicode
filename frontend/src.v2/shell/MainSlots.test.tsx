@@ -38,6 +38,8 @@ describe("MainSlots", () => {
       value: 1200,
     });
     useAppStore.setState({
+      conversationId: null,
+      conversations: [],
       panelSlots: [{ id: "main-chat", kind: "chat", label: "Chat", focused: true }],
       editorTabs: [],
       activeTabPath: null,
@@ -57,6 +59,44 @@ describe("MainSlots", () => {
     expect(screen.queryByRole("button", { name: "Preview" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Activity" })).toBeNull();
     expect(screen.queryByRole("button", { name: /side panel/i })).toBeNull();
+  });
+
+  it("shows the active conversation title and opens the existing chat search", () => {
+    useAppStore.setState({
+      conversationId: "active-task",
+      conversations: [{ id: "active-task", title: "Review the workspace", updatedAt: "2026-09-05" }],
+    });
+    const onSearch = vi.fn();
+    window.addEventListener("chat:request-search", onSearch);
+    render(<MainSlots mode="tabs" />);
+
+    expect(screen.getByTitle("Review the workspace")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "搜索当前对话" }));
+    expect(onSearch).toHaveBeenCalledTimes(1);
+    window.removeEventListener("chat:request-search", onSearch);
+  });
+
+  it("moves focus and selection together when navigating workbench tabs by keyboard", async () => {
+    useAppStore.setState({
+      panelSlots: [
+        { id: "main-chat", kind: "chat", label: "Chat", focused: true },
+        { id: "main-editor", kind: "editor", label: "File", focused: false },
+      ],
+    });
+    render(<MainSlots mode="tabs" />);
+    const chat = screen.getByRole("tab", { name: "对话" });
+    const editor = screen.getByRole("tab", { name: "文件" });
+
+    chat.focus();
+    fireEvent.keyDown(chat, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(editor);
+    expect(editor.getAttribute("aria-selected")).toBe("true");
+    expect(chat.tabIndex).toBe(-1);
+    await screen.findByText("Editor pane");
+
+    fireEvent.keyDown(editor, { key: "Home" });
+    expect(document.activeElement).toBe(chat);
+    expect(chat.getAttribute("aria-selected")).toBe("true");
   });
 
   it("shows chat and an opened editor side by side on wide workbench windows", async () => {

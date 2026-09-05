@@ -62,6 +62,7 @@ describe("FooterRow permission picker", () => {
       effortLevel: "high",
       prMonitor: null,
       contextUsage: null,
+      budgetBuckets: [],
       lastUsage: null,
       isStreaming: false,
       runtimeSession: null,
@@ -104,6 +105,28 @@ describe("FooterRow permission picker", () => {
     expect(container.querySelector(".composer-footer")?.getAttribute("data-compact")).toBe("false");
   });
 
+  it("offers model configuration when no model has been configured", () => {
+    useAppStore.setState({ currentModel: "", availableModels: [], settingsOpen: false });
+    render(<FooterRow sendState="disabled" onSend={() => {}} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "选择模型" }));
+    expect(screen.getByText("尚未配置模型")).toBeTruthy();
+    fireEvent.click(screen.getByRole("option", { name: "配置模型…" }));
+    expect(useAppStore.getState().settingsOpen).toBe(true);
+    expect(useAppStore.getState().settingsTab).toBe("provider");
+  });
+
+  it("keeps stop and queue as separate accessible controls", () => {
+    const onStop = vi.fn();
+    const onSend = vi.fn();
+    render(<FooterRow sendState="queue" onSend={onSend} onStop={onStop} compact />);
+
+    fireEvent.click(screen.getByRole("button", { name: "停止当前回复" }));
+    fireEvent.click(screen.getByRole("button", { name: "将消息加入队列" }));
+    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledTimes(1);
+  });
+
   it("shows the context budget control in compact code mode", () => {
     useAppStore.setState({ contextUsage: { used: 1_000, limit: 10_000 } });
 
@@ -133,7 +156,7 @@ describe("FooterRow permission picker", () => {
     }));
   });
 
-  it("shows the three supported permission choices", () => {
+  it("shows all permission choices with distinct icons and concise descriptions", () => {
     render(<FooterRow sendState="disabled" onSend={() => {}} />);
 
     fireEvent.click(screen.getByTitle("权限：自动"));
@@ -146,6 +169,9 @@ describe("FooterRow permission picker", () => {
     expect(screen.queryByText("Auto read, search, and edit workspace files")).toBeNull();
     expect(screen.queryByText("Use files, network, edits, and commands without prompts")).toBeNull();
     expect(screen.getByText("规划")).toBeTruthy();
+    expect(screen.getByRole("option", { name: "询问" }).querySelector(".lucide-hand")).toBeTruthy();
+    expect(screen.getByRole("option", { name: "完全访问" }).querySelector(".lucide-shield-alert")).toBeTruthy();
+    expect(screen.getByText("敏感操作前请求确认")).toBeTruthy();
     expect(screen.queryByText("Accept")).toBeNull();
     expect(screen.queryByText("Auto-accept file edits, ask for commands")).toBeNull();
   });
@@ -393,6 +419,7 @@ describe("FooterRow permission picker", () => {
     render(<FooterRow sendState="disabled" onSend={() => {}} />);
 
     fireEvent.click(screen.getByTitle("模型推理强度：Provider 声明的推理强度：focused。仅在当前 Provider/模型支持时生效，不改变工具迭代预算。"));
+    fireEvent.click(screen.getByRole("button", { name: "选择推理档位" }));
 
     expect(screen.getByText("低")).toBeTruthy();
     expect(screen.getAllByText("focused").length).toBeGreaterThan(0);
@@ -415,6 +442,7 @@ describe("FooterRow permission picker", () => {
     render(<FooterRow sendState="idle" onSend={() => {}} />);
 
     fireEvent.click(screen.getByTitle("模型推理强度：中等推理强度。仅在当前 Provider/模型支持时生效，不改变工具迭代预算。"));
+    fireEvent.click(screen.getByRole("button", { name: "选择推理档位" }));
     fireEvent.click(screen.getByText("极高"));
 
     await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({
@@ -442,6 +470,7 @@ describe("FooterRow permission picker", () => {
     // because narrowing dropped `ultra` from the ladder, which also made the
     // real level impossible to reselect.
     fireEvent.click(screen.getByTitle("模型推理强度：Ultra 推理强度。仅在当前 Provider/模型支持时生效，不改变工具迭代预算。"));
+    fireEvent.click(screen.getByRole("button", { name: "选择推理档位" }));
 
     expect(screen.getByText("低")).toBeTruthy();
     expect(screen.getByText("中")).toBeTruthy();
@@ -476,6 +505,7 @@ describe("FooterRow permission picker", () => {
     expect(screen.queryByText("中（不支持）")).toBeNull();
 
     fireEvent.click(pill);
+    fireEvent.click(screen.getByRole("button", { name: "选择推理档位" }));
 
     const choices = screen.getAllByRole("button").filter((node) => node.textContent === "最低");
     expect(choices.length).toBeGreaterThan(0);
@@ -498,6 +528,34 @@ describe("FooterRow permission picker", () => {
     render(<FooterRow minimal sendState="idle" onSend={() => {}} />);
 
     expect(screen.getByTitle("模型推理强度：中等推理强度。仅在当前 Provider/模型支持时生效，不改变工具迭代预算。")).toBeTruthy();
+  });
+
+  it("commits a supported slider value once after dragging, not on every move", async () => {
+    useAppStore.setState({ effortLevel: "medium", runtimeCapabilities: { provider_capabilities: { reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high", "xhigh"] } } });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    expect(screen.getByRole("group", { name: "模型与推理强度" }).querySelectorAll(':scope > div')).toHaveLength(2);
+    fireEvent.click(screen.getByTitle(/模型推理强度：中等/));
+    const slider = screen.getByRole("slider", { name: "推理强度" });
+    fireEvent.change(slider, { target: { value: "2" } });
+    fireEvent.change(slider, { target: { value: "3" } });
+    expect(slider.getAttribute("aria-valuetext")).toBe("极高");
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    fireEvent.pointerUp(slider);
+    await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({ reasoning_effort: "xhigh" }), "effort"));
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not display an unknown usage placeholder in the footer", () => {
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    expect(screen.queryByRole("button", { name: "显示上下文和令牌用量" })).toBeNull();
+  });
+
+  it("resets to a declared medium level without inventing unsupported levels", () => {
+    useAppStore.setState({ effortLevel: "high", runtimeCapabilities: { provider_capabilities: { reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"] } } });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByTitle(/模型推理强度：高/));
+    fireEvent.click(screen.getByRole("button", { name: "恢复中等推理强度" }));
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({ reasoning_effort: "medium" }), "effort");
   });
 
   it("shows the exact selected model name", () => {

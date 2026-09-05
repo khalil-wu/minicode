@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, FileDiff, RotateCcw, ShieldCheck } from "lucide-react";
+import { ChevronDown, ChevronUp, FileDiff, RotateCcw } from "lucide-react";
 import type { DiffCellState, DiffFileChange } from "./cellTypes";
 import { diffCellTitle, diffFileChangeType } from "./diffCellLabels";
 import { useAppStore } from "../../stores";
@@ -23,10 +23,10 @@ export function DiffCell({ cell, showActions = true }: { cell: DiffCellState; sh
   const visibleFiles = showAllFiles ? files : files.slice(0, 3);
   const hiddenFileCount = Math.max(0, files.length - visibleFiles.length);
 
-  const openDiffReview = () => {
+  const openDiffReview = (path?: string) => {
     const reviewableFiles = files.filter((file) => Boolean(file.patch));
     if (reviewableFiles.length === 0) return;
-    const selectedPath = reviewableFiles[0].path;
+    const selectedPath = path ?? reviewableFiles[0].path;
     useAppStore.getState().setDiffReviewState({
       requestId: `diff-cell-${cell.id}`,
       toolName: "助手修改",
@@ -95,41 +95,43 @@ export function DiffCell({ cell, showActions = true }: { cell: DiffCellState; sh
             <button
               type="button"
               className="diff-cell-action-button diff-cell-action-button-accent"
-              onClick={openDiffReview}
+              onClick={() => openDiffReview()}
               disabled={!files.some((file) => Boolean(file.patch))}
               title="在审核面板查看更改"
             >
-              <ShieldCheck size={14} aria-hidden="true" />
               <span>审核</span>
             </button>
           </div>
         )}
       </div>
       <div className="diff-cell-files">
-        {visibleFiles.map((file, index) => <DiffFileSection key={file.path || index} file={file} />)}
+        {visibleFiles.map((file, index) => <DiffFileSection key={file.path || index} file={file} onOpen={showActions && file.patch ? () => openDiffReview(file.path) : undefined} />)}
       </div>
-      {hiddenFileCount > 0 && (
+      {files.length > 3 && (
         <button
           type="button"
           className="diff-cell-more-files"
-          onClick={() => setShowAllFiles(true)}
+          aria-expanded={showAllFiles}
+          onClick={() => setShowAllFiles((value) => !value)}
         >
-          <span>再显示 {hiddenFileCount} 个文件</span>
-          <ChevronDown size={14} aria-hidden="true" />
+          <span>{showAllFiles ? "收起文件列表" : `再显示 ${hiddenFileCount} 个文件`}</span>
+          {showAllFiles ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
         </button>
       )}
     </div>
   );
 }
 
-function DiffFileSection({ file }: { file: DiffFileChange }) {
+function DiffFileSection({ file, onOpen }: { file: DiffFileChange; onOpen?: () => void }) {
   const changeType = diffFileChangeType(file);
   const displayPath = changeType === "renamed" && file.oldPath
     ? `${file.oldPath.split(/[\\/]/).pop()} → ${file.path.split(/[\\/]/).pop()}`
     : file.path;
   return <section className="diff-file-section">
     <div className="diff-file-section-header">
-      <span className="diff-cell-file-path" title={file.path}>{displayPath}</span>
+      {onOpen
+        ? <button type="button" className="diff-cell-file-path" title={file.path} onClick={onOpen}>{displayPath}</button>
+        : <span className="diff-cell-file-path" title={file.path}>{displayPath}</span>}
       <span className="diff-cell-stats"><RollingNumber value={file.additions} prefix="+" className="diff-cell-added" animateOnMount /><RollingNumber value={file.deletions} prefix="-" className="diff-cell-removed" animateOnMount /></span>
     </div>
   </section>;

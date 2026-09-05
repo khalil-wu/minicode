@@ -2,6 +2,7 @@ import type { ChatMessage, ContentBlock } from "../stores/types";
 import {
   getContentBlocks,
   isFinalAnswerBlock,
+  isLegacyTextBlock,
 } from "../lib/content-blocks";
 import {
   activityKindFromToolRecord,
@@ -26,6 +27,7 @@ import type {
   CollaborationCellState,
 } from "./cells/cellTypes";
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
+import { shallow } from "zustand/shallow";
 import { recordInputTarget, recordOutcomeMeta } from "./cells/activityCellHelpers";
 import { readableToolLabel } from "./toolDisplayName";
 import { purifyToolErrorText } from "./errorMessages";
@@ -79,6 +81,7 @@ const activitySubtitle = (item: TurnActivityItem): string => {
 };
 
 const thinkingSource = (item: TurnActivityItem): ThinkingCellState["source"] => {
+  if (item.collapsible) return "commentary";
   if (item.source === "commentary") return "commentary";
   if (item.source === "provider") return "provider";
   if (item.source === "model_preamble") return "model_preamble";
@@ -313,6 +316,68 @@ const coalesceConsecutiveFileChanges = (
   return grouped;
 };
 
+type ProcessItemProjection = { cells: CommittedCellState[]; diff?: DiffCellState | null };
+type ProcessItemCacheEntry = {
+  item: TurnActivityItem;
+  messageId: string;
+  timestamp: number;
+  workspaceRoot: string;
+  projection: ProcessItemProjection;
+};
+
+// Store updates retain completed block/record identities. Cache by that source,
+// not the assistant message, which is replaced for every text delta.
+const processItemCache = new WeakMap<ContentBlock, Map<string, ProcessItemCacheEntry>>();
+const sameProcessItem = (previous: TurnActivityItem, next: TurnActivityItem): boolean => (
+  Object.keys(previous).length === Object.keys(next).length
+  && (Object.keys(next) as (keyof TurnActivityItem)[]).every((key) => {
+    if (key === "blocks" || key === "records" || key === "progress") return shallow(previous[key], next[key]);
+    return Object.is(previous[key], next[key]);
+  })
+);
+
+const projectProcessItem = (
+  item: TurnActivityItem,
+  message: ChatMessage,
+): ProcessItemProjection => {
+  if (item.source === "runtime") return { cells: [] };
+  if (["reasoning", "processNote", "providerReasoning", "agentMessage"].includes(item.kind)) {
+    if (!item.content) return { cells: [] };
+    return { cells: [{
+      kind: "thinking",
+      id: item.id,
+      content: item.content,
+      source: thinkingSource(item),
+      phase: item.phase,
+      providerReasoningType: item.providerReasoningType,
+      collapsible: item.collapsible,
+      isStreaming: item.status === "running",
+      createdAt: item.startedAt ?? message.timestamp,
+      segment: item.segment,
+      segmentClosed: item.segmentClosed,
+    }] };
+  }
+  if (item.kind === "commandExecution" && item.records?.length) {
+    return { cells: item.records.map((record) => execCell(record, item)) };
+  }
+  const collaboration = collaborationCells(item);
+  if (collaboration.length > 0) {
+    return { cells: collaboration.map((cell) => ({
+      ...cell,
+      segment: item.segment,
+      segmentClosed: item.segmentClosed,
+    })) };
+  }
+  if (item.kind === "fileChange") {
+    // Keep the authoritative edit/write lifecycle in the process trace for
+    // every terminal state. The aggregate diff below is a separate outcome
+    // projection, so removing this row would make the process history lie
+    // about which mutation calls actually ran.
+    return { cells: [activityCell(item, message)], diff: diffCell([item]) };
+  }
+  return { cells: [activityCell(item, message)] };
+};
+
 const processCells = (
   items: TurnActivityItem[],
   message: ChatMessage,
@@ -320,53 +385,19 @@ const processCells = (
 ): CommittedCellState[] => {
   const cells: CommittedCellState[] = [];
   const diffCells: DiffCellState[] = [];
-  const normalizedItems = coalesceConsecutiveFileChanges(
-    items.flatMap(splitActivityRecords),
-    workspaceRoot,
-  );
-  for (let index = 0; index < normalizedItems.length; index += 1) {
-    const item = normalizedItems[index];
-    if (item.source === "runtime") continue;
-    if (["reasoning", "processNote", "providerReasoning", "agentMessage"].includes(item.kind)) {
-      if (!item.content) continue;
-      cells.push({
-        kind: "thinking",
-        id: item.id,
-        content: item.content,
-        source: thinkingSource(item),
-        phase: item.phase,
-        providerReasoningType: item.providerReasoningType,
-        isStreaming: item.status === "running",
-        createdAt: item.startedAt ?? message.timestamp,
-        segment: item.segment,
-        segmentClosed: item.segmentClosed,
-      });
-      continue;
-    }
-    if (item.kind === "commandExecution" && item.records?.length) {
-      cells.push(...item.records.map((record) => execCell(record, item)));
-      continue;
-    }
-    const collaboration = collaborationCells(item);
-    if (collaboration.length > 0) {
-      cells.push(...collaboration.map((cell) => ({
-        ...cell,
-        segment: item.segment,
-        segmentClosed: item.segmentClosed,
-      })));
-      continue;
-    }
-    if (item.kind === "fileChange") {
-      // Keep the authoritative edit/write lifecycle in the process trace for
-      // every terminal state. The aggregate diff below is a separate outcome
-      // projection, so removing this row would make the process history lie
-      // about which mutation calls actually ran.
-      cells.push(activityCell(item, message));
-      const diff = diffCell([item]);
-      if (diff) diffCells.push(diff);
-      continue;
-    }
-    cells.push(activityCell(item, message));
+  const normalizedItems = coalesceConsecutiveFileChanges(items.flatMap(splitActivityRecords), workspaceRoot);
+  for (const item of normalizedItems) {
+    const anchor = item.blocks[0];
+    const entries = processItemCache.get(anchor) ?? new Map<string, ProcessItemCacheEntry>();
+    const cached = entries.get(item.id);
+    const projection = cached && cached.messageId === message.id && cached.timestamp === message.timestamp
+      && cached.workspaceRoot === workspaceRoot && sameProcessItem(cached.item, item)
+      ? cached.projection
+      : projectProcessItem(item, message);
+    entries.set(item.id, { item, messageId: message.id, timestamp: message.timestamp, workspaceRoot, projection });
+    processItemCache.set(anchor, entries);
+    cells.push(...projection.cells);
+    if (projection.diff) diffCells.push(projection.diff);
   }
   const overallDiff = aggregateDiffCells(diffCells, message.id, workspaceRoot);
   return overallDiff ? [...cells, overallDiff] : cells;
@@ -570,9 +601,11 @@ function buildTurn(
     isThinkingStreaming: assistantMessage.isThinkingStreaming,
     terminalStatus: assistantMessage.terminalStatus,
   });
+  const hasTypedActivity = blocks.some((block) => block.type === "tool_call" || block.type === "progress");
   const finalBlock = [...blocks].reverse().find(
     (block): block is Extract<ContentBlock, { type: "text" }> =>
-      block.type === "text" && isFinalAnswerBlock(block),
+      block.type === "text"
+      && (isFinalAnswerBlock(block) || (hasTypedActivity && isLegacyTextBlock(block) && !block.source)),
   );
   const citations = resolveCitations(
     assistantMessage.citations,

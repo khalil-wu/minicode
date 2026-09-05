@@ -106,7 +106,7 @@ const WorkbenchModeShell = ({ mode }: { mode: "cowork" | "code" }) => {
     <>
       <div
         className="flex-1 flex overflow-hidden min-h-0"
-        style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}
+        style={{ flex: 1, display: "flex", overflow: "hidden", minWidth: 0, minHeight: 0 }}
       >
         <MainSlots mode="tabs" forceChat={mode === "cowork"} />
       </div>

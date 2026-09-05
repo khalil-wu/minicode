@@ -194,7 +194,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 /* ── Timeline ────────────────────────────────────────────────────────── */
 
 .agent-loop-timeline {
-  gap: 10px;
+  gap: 14px;
   padding: 4px 0 0;
   border: 0;
   border-radius: 0;
@@ -242,7 +242,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 .agent-loop-process-cell .activity-cell-main-button[data-clickable="true"]:hover,
 .agent-loop-process-cell .exec-cell-header-button:hover {
   border: 0;
-  background: var(--surface-hover);
+  background: var(--workbench-hover);
   border-radius: var(--radius-sm);
 }
 
@@ -329,15 +329,21 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 }
 
 .agent-loop-process-cell .exec-cell-stop-button {
+  width: 32px;
+  height: 32px;
   min-height: 32px;
 }
 
 .agent-loop-process-cell .activity-cell-name,
 .agent-loop-process-cell .exec-cell-title,
 .agent-loop-process-cell .exec-cell-command-preview,
-.agent-loop-process-cell .activity-cell-detail {
-  font-size: var(--text-md);
-  line-height: 1.5;
+.agent-loop-process-cell .activity-cell-detail,
+.agent-loop-process-cell .activity-cell-detail-path,
+.agent-loop-process-cell .activity-cell-file-change-target {
+  font-family: var(--font-prose);
+  font-size: var(--mc-font-reading);
+  font-weight: var(--fw-regular);
+  line-height: var(--cjk-leading);
 }
 
 .agent-loop-process-cell .activity-cell-file-change-target,
@@ -427,19 +433,8 @@ html[data-theme="light"] .agent-loop-process-summary-status {
   color: var(--state-info);
 }
 
-/* thinking 正文在进程区内放大一档（cells 默认 text-sm）。 */
-.agent-loop-process-cell > .thinking-cell-live,
-.agent-loop-process-cell > .thinking-cell-summary {
-  color: var(--text-secondary);
-  font-size: var(--text-md);
-  line-height: var(--leading-relaxed);
-}
-
 .agent-loop-process-cell > .thinking-cell-commentary {
   padding: 7px 0 5px;
-  color: var(--text-primary);
-  font-size: var(--text-base);
-  line-height: var(--leading-relaxed);
 }
 
 /* ── Final answer（回答正文 + 流式光标）───────────────────────────────── */
@@ -462,7 +457,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 .agent-loop-answer-cell .assistant-cell-content,
 .agent-loop-answer-cell .md-prose {
   color: var(--text-primary);
-  font-weight: var(--fw-medium);
+  font-weight: var(--fw-regular);
 }
 
 /* ── Reduced motion ──────────────────────────────────────────────────── */
@@ -506,9 +501,11 @@ html[data-theme="light"] .agent-loop-process-summary-status {
   border: 0;
   border-radius: 0;
   background: transparent;
-  color: var(--text-secondary);
-  font-size: var(--text-md);
-  font-weight: var(--fw-medium);
+  color: var(--text-muted);
+  font-family: var(--font-prose);
+  font-size: var(--mc-font-reading);
+  line-height: var(--cjk-leading);
+  font-weight: var(--fw-regular);
   text-align: left;
   cursor: pointer;
   transition:
@@ -516,7 +513,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 }
 
 .agent-loop-timeline-group-title:hover {
-  background: var(--surface-soft);
+  background: var(--workbench-tool);
   border-radius: var(--radius-sm);
 }
 
@@ -538,14 +535,33 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 }
 
 .agent-loop-timeline-group-chevron {
-  margin-left: auto;
+  margin-left: 0;
+}
+
+.agent-loop-timeline-group-label,
+.agent-loop-timeline-group-live-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-loop-timeline-group-items {
   display: grid;
-  gap: 6px;
-  margin: 7px 0 0 22px;
+  gap: 3px;
+  margin: 4px 0 0;
   padding-left: 0;
+}
+
+.agent-loop-process-cell .exec-cell-command-preview,
+.agent-loop-process-cell .exec-cell-title {
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-weight: var(--fw-regular);
+}
+
+.agent-loop-process-cell .exec-cell-status-success {
+  color: var(--text-muted);
 }
 
 .agent-loop-open-work-group {
@@ -576,8 +592,4 @@ html[data-theme="light"] .agent-loop-process-summary-status {
     max-width: min(92%, 760px);
   }
 
-  .agent-loop-answer-cell .assistant-cell-content,
-  .agent-loop-answer-cell .md-prose {
-    font-size: var(--text-sm) !important;
-  }
 }

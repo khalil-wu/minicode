@@ -107,6 +107,69 @@ html[data-theme="dark"] ::selection {
   overflow: hidden;
 }
 
+.mc-workbench-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+  min-width: 0;
+  min-height: 44px;
+  gap: 10px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-base);
+}
+
+.mc-workbench-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-medium);
+}
+
+.mc-sidebar-primary-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mc-sidebar-primary-actions > .mc-sidebar-action {
+  flex: 1;
+}
+
+.mc-sidebar-project-open {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 9px;
+  min-height: 36px;
+  margin: 2px 2px 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-chrome);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mc-sidebar-project-open:hover {
+  background: var(--workbench-hover);
+  color: var(--text-primary);
+}
+
+@media (max-width: 768px) {
+  .mc-workbench-toolbar {
+    --mc-slot-switcher-height: 50px;
+  }
+}
+
 /* ════════════════════════════════════════════════════════
    Workbench mode body and main surface (the "floating canvas" corner)
    ════════════════════════════════════════════════════════ */
@@ -707,11 +770,11 @@ html[data-theme="light"] .workbench-home {
   display: grid;
   height: 100%;
   min-height: 0;
-  align-content: start;
-  gap: 2px;
+  align-content: center;
+  gap: 6px;
   overflow-y: auto;
-  padding: 8px;
-  background: var(--mc-sidebar-body-bg, var(--surface-sidebar));
+  padding: 24px;
+  background: var(--surface-base);
 }
 
 .mc-sidebar-launcher > button {
@@ -720,7 +783,7 @@ html[data-theme="light"] .workbench-home {
   align-items: center;
   gap: 9px;
   width: 100%;
-  min-height: 38px;
+  min-height: 44px;
   padding: 0 10px;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
@@ -736,8 +799,8 @@ html[data-theme="light"] .workbench-home {
 
 .mc-sidebar-launcher > button:hover,
 .mc-sidebar-launcher > button[data-active="true"] {
-  border-color: var(--border-soft);
-  background: var(--surface-hover);
+  border-color: transparent;
+  background: var(--workbench-hover);
   color: var(--text-primary);
 }
 
@@ -749,7 +812,7 @@ html[data-theme="light"] .workbench-home {
 .mc-sidebar-launcher > button > svg {
   width: 18px;
   height: 18px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
 }
 
 .mc-sidebar-launcher > button > span {
@@ -847,6 +910,7 @@ html[data-theme="dark"] .mc-sidebar-right {
    缺了这层图标与文字会直接贴住胶囊边缘。 */
 .mc-sidebar-right-tab-frame {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 2px;
   padding-inline: 10px 6px;
@@ -996,15 +1060,15 @@ body.layout-dragging .mc-sidebar-right {
 }
 
 .message-list-content {
-  width: var(--chat-unified-container-width);
+  width: min(var(--input-max-width), 100%);
   max-width: 100%;
   margin-inline: auto;
 }
 
 .message-list-content[data-layout-mode="cowork"],
 .message-list-content[data-layout-mode="code"] {
-  width: var(--chat-unified-container-width);
-  max-width: var(--chat-unified-container-width);
+  width: min(var(--input-max-width), 100%);
+  max-width: 100%;
 }
 
 .chat-pane .workbench-empty-state {

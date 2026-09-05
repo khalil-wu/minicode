@@ -57,6 +57,15 @@ afterEach(() => {
 });
 
 describe("ActivityCell", () => {
+  it("preserves a user's disclosure choice across tool status updates", () => {
+    const cell: ActivityCellState = { kind: "activity", id: "read", activityKind: "fileRead", title: "Read", status: "running", collapsed: false, startedAt: 1,
+      toolCallRecords: [{ id: "read", name: "read_file", args: { path: "a.ts" }, status: "running", startedAt: 1, outputPreview: "content" }] };
+    const { rerender } = render(<ActivityCell cell={cell} />);
+    fireEvent.click(screen.getByRole("button", { name: "收起活动详情" }));
+    rerender(<ActivityCell cell={{ ...cell, status: "done", toolCallRecords: [{ ...cell.toolCallRecords![0], status: "success" }] }} />);
+    expect(screen.getByRole("button", { name: "展开活动详情" }).getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("renders the typed provider reconnect ladder in the main transcript", () => {
     const baseCell: ActivityCellState = {
       kind: "activity",

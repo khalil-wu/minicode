@@ -22,6 +22,35 @@ const message = (
 });
 
 describe("chat surface explicit projection", () => {
+  it("reuses unchanged tool cells while thinking and answer text grow", () => {
+    const tool: ContentBlock = {
+      type: "tool_call", record: { id: "read-one", name: "run_command", args: { command: "npm test" }, status: "success", startedAt: 1, finishedAt: 2, stdoutPreview: "passed\n".repeat(200) },
+    };
+    const note: ContentBlock = { type: "text", itemId: "note", source: "commentary", content: "Checking the files", status: "completed" };
+    const thinking: ContentBlock = { type: "thinking", item_id: "reason", source: "provider", providerReasoningType: "reasoning_content", content: "Working" };
+    const first = message("assistant-2", "assistant", [note, tool, thinking], { isStreaming: true, isThinkingStreaming: true });
+    const before = projectMessagesToTurns([first], true)[0];
+    const second = { ...first, blocks: [note, tool, { ...thinking, content: "Working on the result" }] };
+    const after = projectMessagesToTurns([second], true)[0];
+    expect(after.committedCells[0]).toBe(before.committedCells[0]);
+    expect(after.committedCells[1]).toBe(before.committedCells[1]);
+    expect(after.committedCells[2]).not.toBe(before.committedCells[2]);
+
+    const changedTool: ContentBlock = { ...tool, record: { ...tool.record, stdoutPreview: "updated output" } };
+    const updated = projectMessagesToTurns([{ ...second, blocks: [note, changedTool, thinking] }], true)[0];
+    expect(updated.committedCells[1]).not.toBe(after.committedCells[1]);
+    expect(updated.committedCells[1]).toMatchObject({ kind: "exec", stdoutFull: "updated output" });
+  });
+
+  it("invalidates a reused tool projection when its semantic segment closes", () => {
+    const tool: ContentBlock = { type: "tool_call", record: { id: "tool", name: "read_file", args: { path: "a.ts" }, status: "success", startedAt: 1 } };
+    const assistant = message("assistant-2", "assistant", [tool], { isStreaming: true });
+    const before = projectMessagesToTurns([assistant], true)[0].committedCells[0];
+    const next = projectMessagesToTurns([{ ...assistant, blocks: [tool, { type: "text", itemId: "next", source: "commentary", content: "Next step", status: "completed" }] }], true)[0].committedCells[0];
+    expect(next).not.toBe(before);
+    expect(next).toMatchObject({ segmentClosed: true });
+  });
+
   it("keeps the active user turn streaming before the assistant envelope exists", () => {
     const turns = projectMessagesToTurns([
       message("user-live", "user", [], { content: "执行三个工具" }),

@@ -17,14 +17,7 @@ export const AttachmentStrip = () => {
   };
   if (attachments.length === 0) return null;
   return (
-    <div
-      style={{
-        display: "flex",
-        flexWrap: "wrap",
-        gap: 6,
-        padding: "4px 0 6px",
-      }}
-    >
+    <div className="composer-attachment-strip">
       {attachments.map((a) =>
         a.dataUrl && a.type.startsWith("image/") ? (
           <ImageChip key={a.id} attachment={a} onRemove={() => remove(a)} />
@@ -54,9 +47,10 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
       }}
       style={{
         position: "relative",
-        width: 64,
-        height: 64,
-        borderRadius: "var(--radius-sm, 6px)",
+        width: 88,
+        height: 88,
+        borderRadius: "var(--radius-md)",
+        background: "var(--workbench-tool)",
         border: `1px solid ${a.status === "error" ? "var(--state-danger)" : "var(--border-subtle)"}`,
         overflow: "hidden",
         cursor: "zoom-in",
@@ -66,7 +60,7 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
       <img
         src={a.dataUrl}
         alt={a.name}
-        style={{ width: "100%", height: "100%", objectFit: "cover" }}
+        style={{ width: "100%", height: "100%", objectFit: "contain" }}
       />
       {a.status === "uploading" && (
         <div
@@ -149,6 +143,7 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
         </button>
       )}
       <button
+        type="button"
         onClick={(event) => {
           event.stopPropagation();
           onRemove();
@@ -158,8 +153,10 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
           position: "absolute",
           top: 2,
           right: 2,
-          width: 18,
-          height: 18,
+          width: 20,
+          height: 20,
+          minWidth: 20,
+          minHeight: 20,
           borderRadius: "50%",
           background: "var(--backdrop-strong)",
           color: "var(--text-on-accent)",

@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { ChatContextCard, collectAttachments } from "./ChatContextCard";
@@ -70,20 +71,35 @@ describe("ChatContextCard", () => {
       rightStackTab: "tasks",
       rightPanelOpen: false,
       isConnected: false,
+      turnDiffs: {},
     });
   });
 
   afterEach(cleanup);
 
+  it("does not render the context card for text-only stream updates", () => {
+    const onRender = vi.fn();
+    render(<Profiler id="context" onRender={onRender}><ChatContextCard /></Profiler>);
+    onRender.mockClear();
+    act(() => useAppStore.setState((state) => ({ messages: state.messages.map((message) => ({ ...message, content: message.content + " next" })) })));
+    expect(onRender).not.toHaveBeenCalled();
+    act(() => useAppStore.setState((state) => ({ messages: state.messages.map((message) => ({ ...message, citations: [...(message.citations ?? []), { source: "https://example.com/new", url: "https://example.com/new", title: "New source", range: [0, 0] }] })) })));
+    expect(screen.getByText("New source")).toBeTruthy();
+    expect(onRender).toHaveBeenCalled();
+  });
+
   it("renders a focused context summary with separate attachments and web sources", () => {
     const { container } = render(<ChatContextCard />);
 
     expect(screen.getByRole("complementary", { name: "工作区上下文摘要" })).toBeTruthy();
-    expect(screen.getByText("上下文")).toBeTruthy();
+    expect(screen.getByText("环境信息")).toBeTruthy();
     expect(screen.getByText("附件")).toBeTruthy();
     expect(screen.getByText("layout-reference.png")).toBeTruthy();
     expect(screen.getByText("Layout guide")).toBeTruthy();
     expect(screen.getByText("后台任务")).toBeTruthy();
+    expect(screen.getByRole("region", { name: "环境信息" })).toBeTruthy();
+    expect(screen.getByText("本地工作区")).toBeTruthy();
+    expect(screen.getByTitle("codex/ui-polish")).toBeTruthy();
     expect(container.querySelector('[data-brand="website"] img')?.getAttribute("src")).toBe(
       "https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fdocs.example.com&sz=64",
     );
@@ -371,7 +387,7 @@ describe("ChatContextCard", () => {
   });
 
   it("does not render an empty context card", () => {
-    useAppStore.setState({ messages: [], subagents: [], backgroundTasks: [], terminalSessions: [] });
+    useAppStore.setState({ messages: [], subagents: [], backgroundTasks: [], terminalSessions: [], workingDirectory: "" });
     const { container } = render(<ChatContextCard />);
 
     expect(container.firstChild).toBeNull();
@@ -379,6 +395,7 @@ describe("ChatContextCard", () => {
 
   it("does not classify user-opened terminals as agent background tasks", () => {
     useAppStore.setState({
+      workingDirectory: "",
       messages: [],
       subagents: [],
       backgroundTasks: [],
@@ -391,6 +408,7 @@ describe("ChatContextCard", () => {
 
   it("scopes agent background tasks to the active conversation", () => {
     useAppStore.setState({
+      workingDirectory: "",
       messages: [],
       subagents: [],
       conversationId: "conv-active",

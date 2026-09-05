@@ -22,6 +22,7 @@ async function mockDesktopWorkbench(page: Page) {
         notify: async () => undefined,
         onDeepLink: () => () => undefined,
         pickDirectory: async () => workspacePath,
+        pickWorkspaceDirectory: async () => workspacePath,
         trustWorkspace: async (path: string) => path,
         openExternal: async () => undefined,
         revealPath: async () => undefined,

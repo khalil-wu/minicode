@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import type React from "react";
-import { FileCode2, MessagesSquare } from "lucide-react";
+import { FileCode2, MessagesSquare, Search } from "lucide-react";
 import { useAppStore } from "../stores";
 import type { PanelSlot } from "../stores/types";
 import { ChatPane } from "../chat/ChatPane";
@@ -29,6 +29,7 @@ export const MainSlots = ({ mode = "split", forceChat = false }: MainSlotsProps)
   const resizePanel = useAppStore((s) => s.resizePanel);
   const setAppMode = useAppStore((s) => s.setAppMode);
   const hasOpenEditor = useAppStore((s) => s.editorTabs.length > 0);
+  const conversationTitle = useAppStore((s) => s.conversations.find((item) => item.id === s.conversationId)?.title);
   const [compact, setCompact] = useState(isCompactViewport);
 
   const chatSlot = panelSlots.find((slot) => slot.kind === "chat") ?? { id: "main-chat", kind: "chat" as const, label: "对话" };
@@ -81,13 +82,27 @@ export const MainSlots = ({ mode = "split", forceChat = false }: MainSlotsProps)
       }}
     >
       <main style={mainCanvasStyle}>
-        {showSwitcher && (tabbed || compact || effectiveMaximizedSlot) && (
-          <WorkbenchSlotSwitcher
-            chatSlot={chatSlot}
-            editorSlot={editorSlot}
-            activeKind={activeSlot.kind === "editor" ? "editor" : "chat"}
-            onFocus={focusWorkbenchPanel}
-          />
+        {(conversationTitle || (showSwitcher && (tabbed || compact || effectiveMaximizedSlot))) && (
+          <div className="mc-workbench-toolbar">
+            {conversationTitle && <span className="mc-workbench-title" title={conversationTitle}>{conversationTitle}</span>}
+            {conversationTitle && activeSlot.kind === "chat" && (
+              <button
+                type="button"
+                className="btn-ghost mc-icon-button"
+                aria-label="搜索当前对话"
+                title="搜索当前对话"
+                onClick={() => window.dispatchEvent(new Event("chat:request-search"))}
+              ><Search size={16} /></button>
+            )}
+            {showSwitcher && (tabbed || compact || effectiveMaximizedSlot) && (
+              <WorkbenchSlotSwitcher
+                chatSlot={chatSlot}
+                editorSlot={editorSlot}
+                activeKind={activeSlot.kind === "editor" ? "editor" : "chat"}
+                onFocus={focusWorkbenchPanel}
+              />
+            )}
+          </div>
         )}
         <div style={slotDeckStyle}>
           {mountedSlots.map((slot) => {
@@ -223,43 +238,55 @@ const WorkbenchSlotSwitcher = ({
     { id: editorSlot?.id ?? "", kind: "editor" as const, label: "文件", icon: <FileCode2 size={14} />, title: editorSlot?.label ?? "文件" },
   ].filter((option) => option.kind === "chat" || editorSlot);
 
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const index = options.findIndex((option) => option.kind === activeKind);
+    let nextIndex: number;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % options.length;
+    else if (event.key === "ArrowLeft") nextIndex = (index - 1 + options.length) % options.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = options.length - 1;
+    else return;
+    event.preventDefault();
+    onFocus(options[nextIndex].id);
+    event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[nextIndex].focus();
+  };
+
   return (
-    <div style={slotSwitcherBarStyle}>
-      <div role="tablist" aria-label="主工作区" style={slotSwitcherTrackStyle}>
-        <span
-          aria-hidden="true"
-          style={{
-            ...slotSwitcherThumbStyle,
-            transform: activeKind === "editor" ? "translateX(100%)" : "translateX(0)",
-          }}
-        />
-        {options.map((option) => {
-          const active = option.kind === activeKind;
-          return (
-            <button
-              key={option.kind}
-              type="button"
-              role="tab"
-              aria-selected={active}
-              style={{
-                ...slotSwitcherButtonStyle,
-                color: active ? "var(--text-primary)" : "var(--text-muted)",
-              }}
-              onClick={() => onFocus(option.id)}
-              title={option.title ?? option.label}
-            >
-              <span style={slotHeaderIconStyle} aria-hidden="true">{option.icon}</span>
-              <span>{option.label}</span>
-            </button>
-          );
-        })}
-      </div>
+    <div role="tablist" aria-label="主工作区" style={slotSwitcherTrackStyle} onKeyDown={handleKeyDown}>
+      <span
+        aria-hidden="true"
+        style={{
+          ...slotSwitcherThumbStyle,
+          transform: activeKind === "editor" ? "translateX(100%)" : "translateX(0)",
+        }}
+      />
+      {options.map((option) => {
+        const active = option.kind === activeKind;
+        return (
+          <button
+            key={option.kind}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            tabIndex={active ? 0 : -1}
+            style={{
+              ...slotSwitcherButtonStyle,
+              color: active ? "var(--text-primary)" : "var(--text-muted)",
+            }}
+            onClick={() => onFocus(option.id)}
+            title={option.title ?? option.label}
+          >
+            <span style={slotHeaderIconStyle} aria-hidden="true">{option.icon}</span>
+            <span>{option.label}</span>
+          </button>
+        );
+      })}
     </div>
   );
 };
 
 const PanelContent = ({ slot }: { slot: PanelSlot }) => (
-  <div key={slot.id} className="anim-fade-in" style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+  <div key={slot.id} className="anim-fade-in" style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
     {slot.kind === "chat" && (
       <SafeBoundary fallback={<ChatErrorFallback />}>
         <ChatPane />
@@ -282,6 +309,7 @@ const PanelContent = ({ slot }: { slot: PanelSlot }) => (
 
 const mainCanvasStyle: React.CSSProperties = {
   flex: 1,
+  minWidth: 0,
   minHeight: 0,
   overflow: "hidden",
   display: "flex",
@@ -317,20 +345,11 @@ const resizeHandleStyle: React.CSSProperties = {
   touchAction: "none",
 };
 
-const slotSwitcherBarStyle: React.CSSProperties = {
-  minHeight: 36,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "flex-end",
-  padding: "4px 12px",
-  background: "var(--surface-sidebar)",
-};
-
 const slotSwitcherTrackStyle: React.CSSProperties = {
   position: "relative",
   width: 164,
   flexShrink: 0,
-  height: 28,
+  height: "var(--mc-slot-switcher-height, 28px)",
   display: "grid",
   gridTemplateColumns: "1fr 1fr",
   padding: 2,

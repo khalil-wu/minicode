@@ -1,4 +1,4 @@
-import { ArrowUp, BrainCircuit, Check, ChevronDown, Plus, ShieldCheck, Square } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, ChevronRight, Hand, ListChecks, Plus, RotateCcw, ShieldAlert, Square, TerminalSquare } from "lucide-react";
 import { memo, useEffect, useId, useRef, useState } from "react";
 import type { SendButtonState } from "../lib/send-state";
 import { useAppStore } from "../stores";
@@ -24,12 +24,12 @@ interface Props {
   minimal?: boolean;
 }
 
-const PERMISSION_MODES: { id: PermissionMode; label: string }[] = [
-  { id: "confirm", label: "询问" },
-  { id: "plan", label: "规划" },
-  { id: "auto", label: "自动" },
-  { id: "bypass", label: "完全访问" },
-];
+const PERMISSION_MODES = [
+  { id: "confirm", label: "询问", icon: Hand, description: "敏感操作前请求确认" },
+  { id: "plan", label: "规划", icon: ListChecks, description: "先分析和规划，不执行修改" },
+  { id: "auto", label: "自动", icon: TerminalSquare, description: "按工作区权限策略执行" },
+  { id: "bypass", label: "完全访问", icon: ShieldAlert, description: "文件、命令与网络操作无需逐项确认" },
+] as const;
 
 type EffortOption = {
   id: EffortLevel;
@@ -95,7 +95,8 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
     const options = () => Array.from(root.querySelectorAll<HTMLButtonElement>('[role="option"]:not(:disabled)'));
     queueMicrotask(() => {
       const items = options();
-      (items.find((item) => item.getAttribute("aria-selected") === "true") ?? items[0])?.focus();
+      (root.querySelector<HTMLInputElement>('input[type="range"]')
+        ?? items.find((item) => item.getAttribute("aria-selected") === "true") ?? items[0])?.focus();
     });
     const handleMenuKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -106,6 +107,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
         queueMicrotask(() => trigger?.focus());
         return;
       }
+      if (event.target instanceof HTMLInputElement && event.target.type === "range") return;
       const items = options();
       if (!items.length) return;
       const current = items.indexOf(document.activeElement as HTMLButtonElement);
@@ -219,6 +221,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   const disabledReason = !currentModel.trim() ? "请先选择模型再发送" : undefined;
 
   const permLabel = permissionLabel(permissionMode);
+  const PermissionIcon = PERMISSION_MODES.find((mode) => mode.id === permissionMode)!.icon;
   const providerCapabilities = runtimeCapabilities?.provider_capabilities;
   const capabilityEffortLevels = normalizeCapabilityEffortLevels(
     providerCapabilities?.reasoning_effort_levels,
@@ -314,13 +317,17 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             }}
             label={permLabel}
             title={`权限：${permLabel}`}
-            icon={<ShieldCheck size={14} />}
+            icon={<PermissionIcon size={15} />}
           >
+            <div className="composer-menu-heading">操作权限</div>
             {PERMISSION_MODES.map((mode) => (
               <MenuChoice
                 key={mode.id}
                 active={permissionMode === mode.id}
                 label={mode.label}
+                icon={<mode.icon size={17} />}
+                description={mode.description}
+                warning={mode.id === "bypass"}
                 onClick={() => {
                   switchPermissionMode(mode.id);
                 }}
@@ -334,34 +341,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
 
         {!minimal && <ContextUsageRing />}
 
-        {supportsReasoningEffort && (
-          <Picker
-            refEl={effortRef}
-            open={effortOpen}
-            className="composer-effort-picker"
-            align="right"
-            setOpen={(open) => {
-              if (open) {
-                setModelOpen(false);
-                setPermissionOpen(false);
-              }
-              setEffortOpen(open);
-            }}
-            label={effortLabel}
-            title={effortTitle}
-            icon={<BrainCircuit size={14} />}
-          >
-            {effortOptions.map((option) => (
-              <MenuChoice
-                key={option.id}
-                active={selectedEffort.id === option.id}
-                label={option.label}
-                onClick={() => switchEffort(option.id)}
-              />
-            ))}
-          </Picker>
-        )}
-
+        <div className="composer-model-controls" role="group" aria-label="模型与推理强度">
         <div ref={dropdownRef} className="composer-model-picker relative">
           <button
             type="button"
@@ -380,8 +360,9 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{modelLabel}</span>
             <ChevronDown size={14} className="opacity-55 ml-0.5 flex-shrink-0" />
           </button>
-          {modelOpen && selectableModels.length > 0 && (
+          {modelOpen && (
             <div className="mc-dropdown-menu composer-picker-menu" role="listbox" aria-label="选择模型" style={dropdownStyle("right")}>
+              {selectableModels.length === 0 && <div className="composer-menu-empty">尚未配置模型</div>}
               {selectableModels.map((m) => (
                   <button key={m} type="button" role="option" aria-selected={m === currentModel} onClick={() => switchModel(m)} style={{ ...dropdownItem, background: m === currentModel ? dropdownActiveBg : "transparent" }}>
                   <ModelBrandIcon model={m} size={16} />
@@ -405,6 +386,27 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
               </div>
             </div>
           )}
+        </div>
+        {supportsReasoningEffort && (
+          <Picker
+            refEl={effortRef}
+            open={effortOpen}
+            className="composer-effort-picker"
+            menuRole="dialog"
+            align="right"
+            setOpen={(open) => {
+              if (open) {
+                setModelOpen(false);
+                setPermissionOpen(false);
+              }
+              setEffortOpen(open);
+            }}
+            label={effortLabel}
+            title={effortTitle}
+          >
+            <EffortControl key={`${currentModel}:${effortLevel}:${composerEffortLevels.join(",")}`} options={effortOptions} selected={selectedEffort} modelLabel={modelLabel} onSelect={switchEffort} />
+          </Picker>
+        )}
         </div>
 
         {sendState === "queue" && onStop ? (
@@ -435,6 +437,7 @@ const Picker = ({
   className,
   icon,
   children,
+  menuRole = "listbox",
 }: {
   refEl: React.RefObject<HTMLDivElement>;
   open: boolean;
@@ -445,8 +448,9 @@ const Picker = ({
   className?: string;
   icon?: React.ReactNode;
   children: React.ReactNode;
+  menuRole?: "listbox" | "dialog";
 }) => (
-  <div ref={refEl} className={className ? `${className} relative` : "relative"}>
+  <div ref={refEl} className={`${className ?? "composer-permission-picker"} relative`}>
     <button
       type="button"
       onClick={() => {
@@ -454,47 +458,94 @@ const Picker = ({
       }}
       className="composer-permission-btn"
       aria-expanded={open}
-      aria-haspopup="listbox"
+      aria-haspopup={menuRole}
       style={{ ...pill, background: open ? "var(--surface-page)" : "var(--surface-soft)", borderColor: open ? "var(--border-subtle)" : "transparent" }}
       title={title}
     >
       {icon}
-      {label}
+      <span className="composer-control-label">{label}</span>
       <ChevronDown size={14} className="opacity-55 ml-0.5" />
     </button>
-    {open && <div className="mc-dropdown-menu composer-picker-menu" role="listbox" aria-label={title} style={dropdownStyle(align)}>{children}</div>}
+    {open && <div className="mc-dropdown-menu composer-picker-menu" role={menuRole} aria-label={title} style={dropdownStyle(align)}>{children}</div>}
   </div>
 );
+
+function EffortControl({ options, selected, modelLabel, onSelect }: {
+  options: EffortOption[];
+  selected: EffortOption;
+  modelLabel: string;
+  onSelect: (level: EffortLevel) => void;
+}) {
+  const selectedIndex = options.findIndex((option) => option.id === selected.id);
+  const [index, setIndex] = useState(Math.max(0, selectedIndex));
+  const [showChoices, setShowChoices] = useState(selectedIndex < 0 || options.length === 1);
+  const canSlide = selectedIndex >= 0 && options.length > 1;
+  const current = canSlide ? options[index] : selected;
+  const commit = () => {
+    if (options[index].id !== selected.id) onSelect(options[index].id);
+  };
+  return <div className="composer-effort-control">
+    <div className="composer-effort-heading">
+      <button type="button" className="composer-effort-value" aria-label="选择推理档位" aria-expanded={showChoices} onClick={() => setShowChoices((value) => !value)}>
+        {current.label}<ChevronRight size={14} aria-hidden="true" />
+      </button>
+      {options.some((option) => option.id === "medium") && <button type="button" className="composer-effort-reset" title="恢复中等推理强度" aria-label="恢复中等推理强度" onClick={() => onSelect("medium")}><RotateCcw size={16} /></button>}
+    </div>
+    <div className="composer-effort-model" title={modelLabel}>{modelLabel}</div>
+    {canSlide && <input
+      className="composer-effort-slider"
+      type="range" min={0} max={options.length - 1} step={1} value={index}
+      aria-label="推理强度" aria-valuetext={current.label}
+      style={{ "--effort-progress": `${index / (options.length - 1) * 100}%` } as React.CSSProperties}
+      onChange={(event) => setIndex(Number(event.target.value))}
+      onPointerUp={commit}
+      onPointerCancel={() => setIndex(selectedIndex)}
+      onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) commit(); }}
+    />}
+    {showChoices && <div role="listbox" aria-label="推理档位" className="composer-effort-options">
+      {options.map((option) => <MenuChoice key={option.id} label={option.label} active={selected.id === option.id} onClick={() => onSelect(option.id)} />)}
+    </div>}
+  </div>;
+}
 
 const MenuChoice = ({
   active,
   label,
   onClick,
+  icon,
+  description,
+  warning = false,
 }: {
   active: boolean;
   label: string;
   onClick: () => void;
+  icon?: React.ReactNode;
+  description?: string;
+  warning?: boolean;
 }) => (
   <button
     type="button"
     role="option"
     aria-selected={active}
+    aria-label={label}
     onClick={onClick}
     className="composer-menu-choice"
+    data-warning={warning && active ? "true" : undefined}
     style={{
       ...dropdownItem,
       display: "grid",
-      gridTemplateColumns: "18px 1fr",
+      gridTemplateColumns: icon ? "20px minmax(0, 1fr) 16px" : "18px minmax(0, 1fr)",
       columnGap: 8,
       alignItems: "center",
       background: active ? dropdownActiveBg : "transparent",
       padding: "7px 9px",
     }}
   >
-    <span style={{ display: "inline-flex", justifyContent: "center", color: active ? "var(--accent-primary)" : "transparent" }}>
-      <Check size={14} />
+    <span className="composer-menu-choice-icon" aria-hidden="true" style={{ visibility: icon || active ? "visible" : "hidden" }}>
+      {icon || <Check size={14} />}
     </span>
-    <span style={{ minWidth: 0, color: "var(--text-primary)", fontWeight: active ? 600 : 500 }}>{label}</span>
+    <span className="composer-menu-choice-copy"><span>{label}</span>{description && <small>{description}</small>}</span>
+    {icon && <Check size={14} aria-hidden="true" style={{ visibility: active ? "visible" : "hidden" }} />}
   </button>
 );
 
@@ -554,6 +605,8 @@ const ContextUsageRing = memo(() => {
       silent: true,
     });
   }, [appMode, conversationId, currentModel]);
+
+  if (!contextUsage && budgetBuckets.length === 0) return null;
 
   return (
     <button
@@ -664,16 +717,16 @@ const pill: React.CSSProperties = {
 const dropdownStyle = (align: "left" | "right" = "left"): React.CSSProperties => ({
   position: "absolute",
   bottom: "calc(100% + 6px)",
-  left: align === "left" ? 0 : "auto",
-  right: align === "right" ? 0 : "auto",
-  minWidth: 244,
+  left: `var(--composer-menu-left, ${align === "left" ? "0px" : "auto"})`,
+  right: `var(--composer-menu-right, ${align === "right" ? "0px" : "auto"})`,
+  minWidth: "var(--composer-menu-min-width, var(--composer-menu-width, 280px))",
   background: "var(--surface-page)",
   border: "1px solid var(--border-subtle)",
   borderRadius: "var(--radius-md, 8px)",
   boxShadow: "var(--shadow-soft)",
   padding: 6,
   zIndex: "var(--z-sticky)",
-  maxHeight: 260,
+  maxHeight: "min(var(--composer-menu-height, 260px), 55dvh)",
   overflowY: "auto",
 });
 

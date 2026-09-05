@@ -128,8 +128,7 @@ svg.lucide {
   min-height: var(--header-height) !important;
   height: var(--header-height) !important;
   padding-inline: 14px !important;
-  /* Slight downward gradient sinks the chrome so content planes read as lifted. */
-  background: linear-gradient(to bottom, var(--surface-base), var(--surface-sunken)) !important;
+  background: var(--workbench-sidebar) !important;
   border-bottom: 1px solid var(--border-subtle) !important;
 }
 
@@ -139,7 +138,7 @@ svg.lucide {
 
 .mc-sidebar-left,
 .sidebar-animate {
-  background: var(--surface-sidebar) !important;
+  background: var(--workbench-sidebar) !important;
   border-right-color: var(--border-subtle) !important;
 }
 
@@ -181,9 +180,9 @@ svg.lucide {
 /* Selected mode tab: accent-tinted so it separates clearly from hover. */
 .mc-sidebar-mode-tab[aria-selected="true"] {
   border-color: transparent !important;
-  background: color-mix(in oklch, var(--accent-primary) 10%, transparent) !important;
+  background: var(--workbench-active) !important;
   color: var(--text-primary) !important;
-  box-shadow: var(--shadow-refined) !important;
+  box-shadow: none !important;
 }
 
 /* Mode switching is navigation. It has a stable plane, with no press/settle
@@ -202,7 +201,7 @@ svg.lucide {
   flex: 1 1 auto;
   flex-direction: column;
   overflow: hidden;
-  animation: mc-sidebar-mode-enter var(--duration-slow) var(--easing-spring) both;
+  animation: mc-sidebar-mode-enter var(--duration-fast) var(--easing-enter) both;
 }
 
 @keyframes mc-sidebar-mode-enter {
@@ -218,7 +217,7 @@ svg.lucide {
 
 .mc-sidebar-nav {
   gap: 0 !important;
-  padding: 6px 2px 10px !important;
+  padding: 10px 2px 18px !important;
 }
 
 .mc-sidebar-action {
@@ -236,12 +235,12 @@ svg.lucide {
 }
 
 .mc-sidebar-action:hover {
-  background: var(--surface-hover) !important;
+  background: var(--workbench-hover) !important;
   color: var(--text-primary) !important;
 }
 
 .mc-sidebar-action:active {
-  background: var(--surface-active) !important;
+  background: var(--workbench-active) !important;
 }
 
 .mc-sidebar-action[data-active="true"] {
@@ -256,6 +255,7 @@ svg.lucide {
   width: 20px !important;
   height: 20px !important;
   border-radius: var(--radius-sm) !important;
+  color: var(--text-secondary);
 }
 
 .mc-sidebar-action-icon > svg,
@@ -310,14 +310,14 @@ svg.lucide {
 }
 
 .mc-sidebar-left .session-row-hover:hover {
-  background: var(--surface-hover) !important;
+  background: var(--workbench-hover) !important;
 }
 
 /* Active session stays neutral so the task list reads as one flat surface. */
 .mc-sidebar-left .session-row-hover[data-active] {
   border-color: transparent !important;
-  background: var(--surface-active) !important;
-  box-shadow: inset 2px 0 0 var(--text-muted) !important;
+  background: var(--workbench-active) !important;
+  box-shadow: none !important;
 }
 
 .mc-sidebar-left .session-row-hover :where(button, span) {
@@ -356,11 +356,15 @@ svg.lucide {
 
 .mc-sidebar-right:not([data-embedded="true"]) {
   margin: 0 !important;
-  border: 1px solid var(--border-subtle) !important;
+  border: 0 !important;
   border-left: 1px solid var(--border-subtle) !important;
   border-radius: 0 !important;
   background: var(--surface-base) !important;
   box-shadow: none !important;
+}
+
+.mc-sidebar-right[data-open="false"]:not([data-embedded="true"]) {
+  border-left-width: 0 !important;
 }
 
 .mc-sidebar-right,
@@ -397,8 +401,8 @@ svg.lucide {
 
 .mc-sidebar-right-tab-frame[data-active="true"] {
   border-color: transparent !important;
-  background: var(--surface-soft) !important;
-  box-shadow: inset 0 -2px 0 color-mix(in oklch, var(--accent-primary) 52%, transparent) !important;
+  background: var(--workbench-tool) !important;
+  box-shadow: none !important;
 }
 
 .mc-sidebar-right [role="tab"] {
@@ -456,11 +460,17 @@ svg.lucide {
 
 .assistant-cell-content,
 .user-cell-content,
+.thinking-cell,
 .md-prose {
   font-family: var(--font-prose) !important;
   font-size: var(--mc-font-reading) !important;
   line-height: 1.62 !important;
   letter-spacing: 0 !important;
+}
+
+.thinking-cell {
+  color: var(--text-primary);
+  font-weight: var(--fw-regular);
 }
 
 /* User bubble — neutral gray surface, visually separate from assistant prose. */
@@ -469,7 +479,7 @@ svg.lucide {
   border: 1px solid var(--border-subtle) !important;
   border-radius: var(--radius-lg) !important;
   border-bottom-right-radius: var(--radius-sm) !important;
-  background: var(--surface-soft) !important;
+  background: var(--workbench-tool) !important;
   color: var(--text-primary) !important;
   box-shadow: none !important;
 }
@@ -585,8 +595,8 @@ svg.lucide {
 
 #root .chat-pane .composer-container:focus-within,
 #root .workbench-home-composer .composer-container:focus-within {
-  border-color: var(--border-focus) !important;
-  box-shadow: var(--shadow-refined), 0 0 0 3px var(--accent-soft) !important;
+  border-color: var(--border-strong) !important;
+  box-shadow: var(--shadow-refined) !important;
 }
 
 #root .composer-container[data-command-mode="true"]:focus-within {
@@ -678,7 +688,7 @@ svg.lucide {
 .composer-model-select:hover,
 .composer-workspace-pill:hover {
   border-color: transparent !important;
-  background: var(--surface-hover) !important;
+  background: var(--workbench-hover) !important;
   color: var(--text-primary) !important;
 }
 
@@ -688,27 +698,36 @@ svg.lucide {
   min-width: 32px !important;
   min-height: 32px !important;
   border-radius: 50% !important;
-  background: var(--accent-primary) !important;
-  color: var(--text-on-accent) !important;
+  background: var(--text-primary) !important;
+  color: var(--surface-base) !important;
   box-shadow: none !important;
 }
 
 .composer-send-btn:hover:not(:disabled) {
-  background: var(--accent-hover) !important;
+  background: var(--text-secondary) !important;
   transform: none !important;
   box-shadow: none !important;
 }
 
 .composer-send-btn:disabled {
-  background: var(--surface-active) !important;
+  background: var(--workbench-active) !important;
   color: var(--text-muted) !important;
   opacity: 1 !important;
+}
+
+.composer-footer[data-permission-mode="bypass"] .composer-permission-picker > .composer-permission-btn {
+  color: var(--state-warning) !important;
+}
+
+.composer-send-btn .anim-icon-swap,
+.composer-stop-current-btn .anim-icon-swap {
+  animation: fade-in var(--duration-fast) var(--easing-standard) both;
 }
 
 .composer-menu-item[data-active="true"],
 .composer-menu-choice:hover {
   border-color: var(--border-subtle) !important;
-  background: var(--surface-hover) !important;
+  background: var(--workbench-hover) !important;
 }
 
 .composer-menu-item[data-selected="true"] {
@@ -741,6 +760,7 @@ svg.lucide {
 
 .composer-picker-menu {
   padding: 5px !important;
+  border-radius: var(--radius-lg) !important;
 }
 
 @keyframes mc-dropdown-enter {
@@ -1160,21 +1180,17 @@ svg.lucide {
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-/* Short, transform-only feedback keeps repeated desktop actions tactile without
-   shifting surrounding controls or introducing decorative motion. */
+/* Workbench controls keep a stable text baseline; modal feedback is unchanged. */
 #root :where(
   button,
   [role="button"],
   [role="menuitem"],
   [role="option"]
-):not(:disabled):not([aria-disabled="true"]):active {
+):not(:disabled):not([aria-disabled="true"]):not(:where(.header-bar *, .workbench-mode-body *, .chat-pane *)):active {
   animation: mc-control-press var(--duration-micro) var(--easing-standard) both;
 }
 
 #root :where(
-  .mc-sidebar-action[data-active="true"],
-  .mc-sidebar-right-tab-frame[data-active="true"],
-  .composer-menu-item[data-selected="true"],
   .command-palette-option[aria-selected="true"]
 ) {
   animation: mc-control-settle var(--duration-base) var(--easing-enter) both;

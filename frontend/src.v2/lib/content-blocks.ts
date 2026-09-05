@@ -69,6 +69,15 @@ export function isCompletedAgentMessageBlock(
     && (block.status === "completed" || block.status === "partial");
 }
 
+/** Typed activity snapshots may carry an answer text block without lifecycle metadata. */
+export function isLegacyTextBlock(block: ContentBlock): boolean {
+  return block.type === "text"
+    && !block.itemId
+    && block.status == null
+    && block.isStreaming == null
+    && Boolean(block.content.trim());
+}
+
 export function isExplicitFinalAnswerSource(source: string | undefined): boolean {
   return Boolean(source && ["model_final", "reply", "recovery", "partial"].includes(source));
 }
