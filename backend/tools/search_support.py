@@ -295,6 +295,18 @@ def _apply_pagination(items: list[str], *, offset: int, head_limit: int | None) 
     return items[start:end], len(items) > end
 
 
+def _sort_glob_matches(search_root: Path, matches: list[str]) -> list[str]:
+    """Keep glob ordering stable across ripgrep and Python implementations."""
+    def sort_key(relative: str) -> tuple[int, str, str]:
+        try:
+            modified_ns = (search_root / relative).stat().st_mtime_ns
+        except OSError:
+            modified_ns = 0
+        return modified_ns, relative.casefold(), relative
+
+    return sorted(matches, key=sort_key)
+
+
 def _pagination_suffix(*, offset: int, head_limit: int | None, truncated: bool) -> str:
     parts: list[str] = []
     if head_limit is not None and truncated:
@@ -1109,8 +1121,10 @@ async def _glob_with_ripgrep(
         for line in decode_process_output(stdout).splitlines()
         if line.strip()
     ]
-    # ``rg --sort=modified`` emits oldest-first, which is exactly Claude
-    # Code's glob contract (glob.ts never reverses); keep that order.
+    # Normalize the order ourselves because rg's modified-time ordering is
+    # not consistent across runner platforms. This is CC's oldest-first
+    # contract, with a stable path tie-breaker.
+    all_matches = _sort_glob_matches(search_root, all_matches)
     display_matches, truncated = _apply_pagination(
         all_matches,
         offset=offset,
@@ -1127,13 +1141,10 @@ def _glob_with_python(
     offset: int,
     is_allowed: Callable[[Path], bool] | None = None,
 ) -> _GlobFallbackResult:
-    selected: list[str] = []
-    skipped = 0
-    selected_bytes = 0
+    candidates: list[str] = []
     deadline = time.monotonic() + PYTHON_SEARCH_TIMEOUT_SECONDS
     try:
-        candidates = search_root.glob(pattern)
-        for file_path in candidates:
+        for file_path in search_root.glob(pattern):
             if time.monotonic() >= deadline:
                 raise SearchResourceLimitError(
                     f"file search exceeded the {PYTHON_SEARCH_TIMEOUT_SECONDS:.0f}s time limit"
@@ -1154,10 +1165,19 @@ def _glob_with_python(
                         continue
                 except Exception:
                     continue
+            candidates.append(str(relative))
+
+        selected: list[str] = []
+        skipped = 0
+        selected_bytes = 0
+        for display_path in _sort_glob_matches(search_root, candidates):
+            if time.monotonic() >= deadline:
+                raise SearchResourceLimitError(
+                    f"file search exceeded the {PYTHON_SEARCH_TIMEOUT_SECONDS:.0f}s time limit"
+                )
             if skipped < offset:
                 skipped += 1
                 continue
-            display_path = str(relative)
             selected.append(display_path)
             selected_bytes += len(display_path.encode("utf-8")) + 1
             if limit is not None and len(selected) > limit:
