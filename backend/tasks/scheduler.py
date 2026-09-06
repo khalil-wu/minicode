@@ -202,11 +202,13 @@ def _cron_parts_match(parts: CronFields, dt: datetime) -> bool:
     return dt.minute in parts.minutes and dt.hour in parts.hours and dt.month in parts.months and day_match
 
 
-def _schedule_timezone(name: str | None) -> ZoneInfo:
+def _schedule_timezone(name: str | None) -> ZoneInfo | None:
     # Empty means the process-local timezone (cc cron.ts default).
     value = str(name or "").strip()
     if not value:
-        return datetime.now().astimezone().tzinfo  # type: ignore[return-value]
+        # astimezone(None) resolves the local offset at the scheduled instant,
+        # including DST, rather than freezing today's offset for future dates.
+        return None
     # An unknown timezone is a configuration error and must fail explicitly;
     # silently shifting every fire time to UTC hid the mistake from the user.
     return ZoneInfo(value)
@@ -248,8 +250,9 @@ def next_run_after(
     aware = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
     current = aware.astimezone(UTC).replace(second=0, microsecond=0) + timedelta(minutes=1)
     deadline = current + timedelta(days=max_days)
+    zone = _schedule_timezone(timezone)
     while current <= deadline:
-        if _cron_parts_match(parts, current.astimezone(_schedule_timezone(timezone))):
+        if _cron_parts_match(parts, current.astimezone(zone)):
             return current
         current += timedelta(minutes=1)
     return None
@@ -318,6 +321,10 @@ class TaskScheduler:
         self.last_load_error: dict[str, str] | None = None
         self._unusable_schedule_ids: set[str] = set()
         self._load()
+        self._saved_workspace_roots = {
+            item.workspace_root for item in (*self._tasks.values(), *self._runs.values())
+            if item.workspace_root
+        }
 
     def _load(self) -> None:
         # Older MiniCode builds stored every project's tasks in one process
@@ -382,6 +389,11 @@ class TaskScheduler:
                 task.next_run_at = None
             elif task.enabled:
                 try:
+                    # Stored timestamps do not validate the configuration that
+                    # produced them. Validate disk-loaded schedules once here.
+                    _schedule_timezone(task.timezone)
+                    if _parse_cron_expression(task.schedule) is None:
+                        raise ValueError(f"Invalid cron expression: {task.schedule}")
                     next_run = _stored_next_run(task)
                 except (ZoneInfoNotFoundError, ValueError) as exc:
                     # A stored task whose schedule can no longer be computed
@@ -410,13 +422,16 @@ class TaskScheduler:
                 self._runs[run.id] = run
 
     def _save(self) -> None:
-        # Keep recent history bounded.  It is user-facing diagnostics, not an
-        # unbounded execution log.
-        history = sorted(
+        ordered_runs = sorted(
             self._runs.values(),
             key=lambda run: (run.started_at or run.scheduled_at, run.id),
             reverse=True,
-        )[:500]
+        )
+        # History limits must not remove a pending run or its cleanup owner.
+        history = [
+            run for index, run in enumerate(ordered_runs)
+            if index < 500 or run.status in {"pending", "running"} or run.cleanup_pending
+        ]
         tasks_by_workspace: dict[str, list[ScheduledTask]] = {}
         runs_by_workspace: dict[str, list[ScheduledTaskRun]] = {}
         for task in self._tasks.values():
@@ -433,7 +448,7 @@ class TaskScheduler:
             runs_by_workspace.get("", []),
         )
         workspace_roots = sorted(root for root in set(tasks_by_workspace) | set(runs_by_workspace) if root)
-        for workspace_root in workspace_roots:
+        for workspace_root in sorted(set(workspace_roots) | self._saved_workspace_roots):
             self._write_state_file(
                 _project_schedule_file(workspace_root),
                 tasks_by_workspace.get(workspace_root, []),
@@ -445,6 +460,8 @@ class TaskScheduler:
             json.dumps({"version": 1, "workspace_roots": workspace_roots}, indent=2),
             encoding="utf-8",
         )
+        self._saved_workspace_roots = set(workspace_roots)
+        self._runs = {run.id: run for run in history}
         self._notify_changed()
 
     @staticmethod
@@ -483,9 +500,9 @@ class TaskScheduler:
         except Exception:
             logger.debug("Failed to notify scheduled task observers", exc_info=True)
 
-    def _sweep_expired(self) -> None:
+    def _sweep_expired(self, now: datetime | None = None) -> None:
         """MiniCode auto-expires recurring schedules after 7 days."""
-        now = time.time()
+        timestamp = now.timestamp() if now is not None else time.time()
         changed = False
         for task in list(self._tasks.values()):
             if task.deleted_at is not None or not task.recurring:
@@ -494,8 +511,8 @@ class TaskScheduler:
                 created = datetime.fromisoformat(task.created_at).timestamp()
             except ValueError:
                 continue
-            if now - created > SCHEDULED_TASK_MAX_AGE_SECONDS:
-                task.deleted_at = datetime.now(UTC).isoformat()
+            if timestamp - created > SCHEDULED_TASK_MAX_AGE_SECONDS:
+                task.deleted_at = datetime.fromtimestamp(timestamp, UTC).isoformat()
                 task.next_run_at = None
                 changed = True
         if changed:
@@ -757,6 +774,7 @@ class TaskScheduler:
             pass
 
     def _tick(self, now: datetime) -> None:
+        self._sweep_expired(now)
         for task in list(self._tasks.values()):
             if (
                 task.deleted_at is not None

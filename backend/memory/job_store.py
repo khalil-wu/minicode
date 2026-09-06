@@ -464,7 +464,7 @@ class MemoryJobStore:
         self,
         *,
         older_than: int,
-        limit: int | None,
+        limit: int,
     ) -> int:
         timestamp = self._now(None)
         with self._connect() as connection:
@@ -615,7 +615,7 @@ class MemoryJobStore:
     def list_stage1_outputs(
         self,
         *,
-        limit: int,
+        limit: int | None,
         max_unused_days: int,
         now: int | None = None,
     ) -> list[Stage1Output]:
