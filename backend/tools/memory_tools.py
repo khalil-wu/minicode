@@ -34,8 +34,8 @@ class _MemoryTool(BaseTool):
         *,
         lock: bool = False,
     ) -> ToolResult:
-        memory = self._memory_for(context)
         try:
+            memory = self._memory_for(context)
             if lock:
                 with memory.reset_lock.acquire(timeout=5.0):
                     payload = operation(LocalMemoryBackend(memory.memory_dir))

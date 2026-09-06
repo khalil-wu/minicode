@@ -203,6 +203,6 @@ def windows_powershell_native_tool_alias_prelude() -> str:
 
     return (
         "if (Get-Command curl.exe -ErrorAction SilentlyContinue) { "
-        "Set-Alias -Name curl -Value curl.exe -Scope Local -Force; "
+        "Set-Alias -Name curl -Value curl.exe -Scope Local -Option AllScope -Force; "
         "} "
     )

@@ -12,6 +12,7 @@ from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmissio
 from backend.agent.state import AgentState
 from backend.artifact.store import ArtifactStore
 from backend.config import AgentSettings, PermissionSettings, TokenBudget
+from backend.memory.paths import resolve_memory_path
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
 from backend.tools.agent_artifact_tools import ReadArtifactTool
@@ -74,7 +75,7 @@ async def run_memory_consolidation_agent(
 ) -> None:
     """Run one ephemeral internal agent and require a clean terminal outcome."""
 
-    root = memory_root.expanduser().resolve()
+    root = resolve_memory_path(memory_root.expanduser().absolute())
     artifact_store = ArtifactStore()
     registry = _tool_registry(artifact_store)
     permission_checker = PermissionChecker(_permission_settings(), root)

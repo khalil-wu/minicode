@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.atomic_io import atomic_write_text, file_mutation_locks
+from backend.memory.paths import MemoryBackendError, is_link, resolve_memory_path
 from backend.memory.text_utils import truncate_middle_tokens as _truncate_middle_tokens
 
 
@@ -22,10 +23,6 @@ _AD_HOC_FILENAME_RE = re.compile(
 )
 
 
-class MemoryBackendError(RuntimeError):
-    pass
-
-
 @dataclass(frozen=True)
 class _SearchMode:
     kind: str
@@ -34,36 +31,14 @@ class _SearchMode:
 
 class LocalMemoryBackend:
     def __init__(self, root: Path | str) -> None:
-        self.root = Path(root).expanduser().resolve()
-
-    @staticmethod
-    def _reject_symlink(path: Path, display: str) -> None:
-        if path.is_symlink():
-            raise MemoryBackendError(f"path '{display}' must not be a symlink")
+        self.root = Path(root).expanduser().absolute()
 
     def resolve(self, relative_path: str | None = None) -> Path:
-        if relative_path is None or not str(relative_path):
-            return self.root
-        raw = str(relative_path)
+        raw = str(relative_path) if relative_path is not None else ""
         relative = Path(raw)
-        if relative.is_absolute() or any(part == ".." for part in relative.parts):
-            raise MemoryBackendError(f"path '{raw}' must stay within the memories root")
-        if any(part.startswith(".") for part in relative.parts):
+        if any(part.startswith(".") and part != ".." for part in relative.parts):
             raise MemoryBackendError(f"path '{raw}' was not found")
-
-        current = self.root
-        self._reject_symlink(current, "")
-        for index, part in enumerate(relative.parts):
-            current = current / part
-            if not current.exists() and not current.is_symlink():
-                current = current.joinpath(*relative.parts[index + 1 :])
-                break
-            self._reject_symlink(current, current.relative_to(self.root).as_posix())
-            if index + 1 < len(relative.parts) and not current.is_dir():
-                raise MemoryBackendError(
-                    f"path '{raw}' traverses through a non-directory path component"
-                )
-        return current
+        return resolve_memory_path(self.root, relative)
 
     def list(
         self,
@@ -75,7 +50,6 @@ class LocalMemoryBackend:
         start = self.resolve(path)
         if not start.exists():
             raise MemoryBackendError(f"path '{path or ''}' was not found")
-        self._reject_symlink(start, path or "")
         try:
             start_index = int(cursor or 0)
         except ValueError as exc:
@@ -90,7 +64,7 @@ class LocalMemoryBackend:
         elif start.is_dir():
             entries = []
             for candidate in sorted(start.iterdir()):
-                if candidate.name.startswith(".") or candidate.is_symlink():
+                if candidate.name.startswith(".") or is_link(candidate):
                     continue
                 if candidate.is_dir():
                     entry_type = "directory"
@@ -133,7 +107,6 @@ class LocalMemoryBackend:
         target = self.resolve(path)
         if not target.exists():
             raise MemoryBackendError(f"path '{path}' was not found")
-        self._reject_symlink(target, path)
         if not target.is_file():
             raise MemoryBackendError(f"path '{path}' is not a file")
         try:
@@ -216,7 +189,6 @@ class LocalMemoryBackend:
         start = self.resolve(path)
         if not start.exists():
             raise MemoryBackendError(f"path '{path or ''}' was not found")
-        self._reject_symlink(start, path or "")
         try:
             start_index = int(cursor or 0)
         except ValueError as exc:
@@ -248,12 +220,12 @@ class LocalMemoryBackend:
                 dir_names[:] = sorted(
                     name
                     for name in dir_names
-                    if not name.startswith(".") and not (current_path / name).is_symlink()
+                    if not name.startswith(".") and not is_link(current_path / name)
                 )
                 files.extend(
                     current_path / name
                     for name in sorted(file_names)
-                    if not name.startswith(".") and not (current_path / name).is_symlink()
+                    if not name.startswith(".") and not is_link(current_path / name)
                 )
 
         matches: list[dict[str, Any]] = []
@@ -363,16 +335,8 @@ class LocalMemoryBackend:
         target = notes_dir / filename
         try:
             with file_mutation_locks([self.root, notes_dir, target]):
-                current = self.root
-                for part in ("extensions", "ad_hoc", "notes"):
-                    self._reject_symlink(current, current.relative_to(self.root).as_posix())
-                    current = current / part
-                    if current.exists() or current.is_symlink():
-                        self._reject_symlink(current, current.relative_to(self.root).as_posix())
-                        if not current.is_dir():
-                            raise MemoryBackendError(f"path '{current}' must be a directory")
-                    else:
-                        current.mkdir(parents=True, exist_ok=False)
+                target = self.resolve(f"extensions/ad_hoc/notes/{filename}")
+                target.parent.mkdir(parents=True, exist_ok=True)
                 atomic_write_text(target, note, overwrite=False)
         except FileExistsError as exc:
             raise MemoryBackendError(f"ad-hoc note '{filename}' already exists") from exc

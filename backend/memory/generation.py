@@ -26,6 +26,7 @@ from backend.llm.base import LLMMessage, SideQueryOptions
 from backend.memory.consolidation_agent import run_memory_consolidation_agent
 from backend.memory.file_memory import FileMemory
 from backend.memory.job_store import JobClaim, MEMORY_DB_NAME, MemoryJobStore, Stage1Output
+from backend.memory.paths import resolve_memory_path
 from backend.memory.prompts import (
     STAGE1_SYSTEM_PROMPT,
     PHASE2_WORKSPACE_DIFF_FILE,
@@ -661,7 +662,7 @@ class MemoryGenerationCoordinator:
                 artifacts_valid = self._artifacts_valid()
                 if changes or not artifacts_valid:
                     atomic_write_text(
-                        self.memory_root / PHASE2_WORKSPACE_DIFF_FILE,
+                        resolve_memory_path(self.memory_root, PHASE2_WORKSPACE_DIFF_FILE),
                         self._render_workspace_diff(changes, diff),
                     )
                 return Phase2WorkspaceState(
@@ -672,8 +673,9 @@ class MemoryGenerationCoordinator:
             raise MemoryGenerationError("Timed out waiting for the memory reset lock") from exc
 
     def _ensure_git_workspace(self) -> None:
+        git_path = resolve_memory_path(self.memory_root, ".git")
+        ignore_path = resolve_memory_path(self.memory_root, ".gitignore")
         self.memory_root.mkdir(parents=True, exist_ok=True)
-        ignore_path = self.memory_root / ".gitignore"
         ignore = (
             f"/{MEMORY_DB_NAME}\n"
             f"/{MEMORY_DB_NAME}-shm\n"
@@ -683,9 +685,6 @@ class MemoryGenerationCoordinator:
         )
         if _read_text(ignore_path) != ignore:
             atomic_write_text(ignore_path, ignore)
-        git_path = self.memory_root / ".git"
-        if git_path.is_symlink():
-            raise MemoryGenerationError("Refusing to use symlinked memory git metadata")
         if not git_path.exists():
             self._git("init", "--quiet")
             self._git("config", "user.name", "MiniCode Memory")
@@ -700,7 +699,7 @@ class MemoryGenerationCoordinator:
             for output in outputs
         }
         sections = ["# Raw Memories", ""]
-        summaries_dir = self.memory_root / "rollout_summaries"
+        summaries_dir = resolve_memory_path(self.memory_root, "rollout_summaries")
         summaries_dir.mkdir(parents=True, exist_ok=True)
         expected_summaries: set[Path] = set()
         for output in sorted(outputs, key=lambda item: item.thread_id):
@@ -720,7 +719,9 @@ class MemoryGenerationCoordinator:
                     "",
                 ]
             )
-            summary_path = summaries_dir / f"{_rollout_summary_file_stem(output)}.md"
+            summary_path = resolve_memory_path(
+                summaries_dir, f"{_rollout_summary_file_stem(output)}.md"
+            )
             expected_summaries.add(summary_path)
             summary = (
                 f"thread_id: {output.thread_id}\n"
@@ -751,13 +752,13 @@ class MemoryGenerationCoordinator:
             if outputs
             else "# Raw Memories\n\nNo raw memories yet.\n"
         )
-        raw_path = self.memory_root / "raw_memories.md"
+        raw_path = resolve_memory_path(self.memory_root, "raw_memories.md")
         if _read_text(raw_path) != raw_memories:
             atomic_write_text(raw_path, raw_memories)
         return raw_memories
 
     def _workspace_diff(self) -> str:
-        diff_path = self.memory_root / PHASE2_WORKSPACE_DIFF_FILE
+        diff_path = resolve_memory_path(self.memory_root, PHASE2_WORKSPACE_DIFF_FILE)
         if diff_path.exists():
             diff_path.unlink()
         self._git("add", "-N", "--", ".", check=False)
@@ -851,12 +852,10 @@ class MemoryGenerationCoordinator:
             raise MemoryGenerationError("Timed out waiting for the memory reset lock") from exc
 
     def _commit_git_baseline(self) -> None:
-        diff_path = self.memory_root / PHASE2_WORKSPACE_DIFF_FILE
+        git_path = resolve_memory_path(self.memory_root, ".git")
+        diff_path = resolve_memory_path(self.memory_root, PHASE2_WORKSPACE_DIFF_FILE)
         if diff_path.exists():
             diff_path.unlink()
-        git_path = self.memory_root / ".git"
-        if git_path.is_symlink():
-            raise MemoryGenerationError("Refusing to reset symlinked memory git metadata")
         if git_path.is_dir():
             shutil.rmtree(git_path, onerror=_remove_readonly_git_path)
         elif git_path.exists():
@@ -868,9 +867,9 @@ class MemoryGenerationCoordinator:
         self._git("commit", "--quiet", "--allow-empty", "-m", "memory baseline")
 
     def _artifacts_valid(self) -> bool:
-        if not (self.memory_root / "MEMORY.md").is_file():
+        if not resolve_memory_path(self.memory_root, "MEMORY.md").is_file():
             return False
-        summary = _read_text(self.memory_root / "memory_summary.md")
+        summary = _read_text(resolve_memory_path(self.memory_root, "memory_summary.md"))
         return summary.splitlines()[:1] == ["v1"]
 
     def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:

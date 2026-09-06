@@ -20,6 +20,7 @@ from filelock import FileLock, Timeout as FileLockTimeout
 
 from backend.config import DATA_ROOT
 from backend.atomic_io import atomic_write_text
+from backend.memory.paths import is_link, resolve_memory_path
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,7 @@ class FileMemory:
         if os.name == "nt":
             identity = identity.casefold()
         project_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
-        return MEMORY_DIR / "projects" / project_key
+        return resolve_memory_path(MEMORY_DIR, Path("projects") / project_key)
 
     @staticmethod
     def _git_common_identity(marker: Path, checkout_root: Path) -> Path:
@@ -131,24 +132,26 @@ class FileMemory:
 
     def _ensure_initialized(self) -> None:
         """确保记忆目录和索引文件存在。"""
+        index_path = resolve_memory_path(self._dir, "MEMORY.md")
+        instructions_path = resolve_memory_path(
+            self._dir, "extensions/ad_hoc/instructions.md"
+        )
         self._dir.mkdir(parents=True, exist_ok=True)
 
-        if not self._index_file.exists():
-            atomic_write_text(self._index_file, DEFAULT_MEMORY_INDEX)
+        if not index_path.exists():
+            atomic_write_text(index_path, DEFAULT_MEMORY_INDEX)
             logger.info("Created empty MEMORY.md")
 
         from backend.memory.prompts import AD_HOC_INSTRUCTIONS
 
-        extension_root = self._dir / "extensions" / "ad_hoc"
-        extension_root.mkdir(parents=True, exist_ok=True)
-        instructions_path = extension_root / "instructions.md"
+        instructions_path.parent.mkdir(parents=True, exist_ok=True)
         if not instructions_path.exists():
             atomic_write_text(instructions_path, AD_HOC_INSTRUCTIONS)
 
     def get_context(self) -> str:
         from backend.memory.prompts import build_memory_read_prompt
 
-        summary_path = self._dir / "memory_summary.md"
+        summary_path = resolve_memory_path(self._dir, "memory_summary.md")
         try:
             summary = summary_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -169,7 +172,7 @@ class FileMemory:
         """
         # 安全检查：防止路径遍历
         safe_name = Path(filename).name
-        filepath = self._dir / safe_name
+        filepath = resolve_memory_path(self._dir, safe_name)
 
         if not filepath.exists():
             return None
@@ -181,12 +184,13 @@ class FileMemory:
             return None
 
     def list_files(self) -> list[str]:
-        if not self._dir.exists():
+        root = resolve_memory_path(self._dir)
+        if not root.exists():
             return []
         return [
             path.name
-            for path in sorted(self._dir.iterdir())
-            if path.is_file() and path.suffix == ".md"
+            for path in sorted(root.iterdir())
+            if not is_link(path) and path.is_file() and path.suffix == ".md"
         ]
 
     def reset(self) -> MemoryResetResult:
@@ -200,8 +204,8 @@ class FileMemory:
         """
 
         root = self._dir.absolute()
-        if self._dir.is_symlink():
-            raise ValueError("Refusing to reset a symlinked memory directory")
+        if is_link(self._dir):
+            raise ValueError("Refusing to reset a symlinked or junction memory directory")
         if root == Path(root.anchor) or root == DATA_ROOT.absolute():
             raise ValueError(f"Refusing to reset unsafe memory directory: {root}")
 
@@ -249,7 +253,10 @@ class FileMemory:
             return 0, 0
         files = 0
         directories = 0
-        for _current, dir_names, file_names in os.walk(root, followlinks=False):
+        for current, dir_names, file_names in os.walk(root, followlinks=False):
             directories += len(dir_names)
             files += len(file_names)
+            dir_names[:] = [
+                name for name in dir_names if not is_link(Path(current) / name)
+            ]
         return files, directories

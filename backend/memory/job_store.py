@@ -12,6 +12,8 @@ from typing import Iterable
 
 from filelock import FileLock, Timeout as FileLockTimeout
 
+from backend.memory.paths import resolve_memory_path
+
 
 STAGE1_JOB_KIND = "memory_stage1"
 PHASE2_JOB_KIND = "memory_consolidate_global"
@@ -114,6 +116,7 @@ class MemoryJobStore:
     def _connect(self):
         """Open the DB inside the same reset lock as phase2/file writes."""
 
+        resolve_memory_path(self.path.parent, self.path.name)
         try:
             with self._reset_lock.acquire(timeout=5.0):
                 self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -26,7 +26,9 @@ http.createServer(async (req, res) => {
     if (!prompt) throw new Error('请输入消息');
     if (!cwd.startsWith('/root/') || !fs.statSync(cwd).isDirectory()) throw new Error('工作目录必须是 /root 下的已有目录');
     res.writeHead(200, {'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache'});
-    const args = ['exec', '--json', '--model', String(input.model || 'gpt-6-astra'), '--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check', '-C', cwd, prompt];
+    const model = String(input.model || 'gpt-6-astra');
+    const effort = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(input.effort) ? input.effort : 'medium';
+    const args = ['exec', '--json', '--model', model, '-c', `model_reasoning_effort="${effort}"`, '--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check', '-C', cwd, prompt];
     const child = spawn('codex', args, {cwd, env: {...process.env, CI: '1', TERM: 'dumb'}});
     child.stdout.on('data', data => res.write(`data: ${JSON.stringify({stream: data.toString()})}\n\n`));
     child.stderr.on('data', data => res.write(`data: ${JSON.stringify({stream: data.toString()})}\n\n`));
