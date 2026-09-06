@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +29,7 @@ class FileStateEntry:
     path: Path
     content: str
     size_bytes: int
-    mtime_ns: int  # 修改时间（纳秒）
+    stat_result: os.stat_result
     language_hint: str
 
 
@@ -91,7 +92,10 @@ class FileStateCache:
             # 检查文件是否被修改
             try:
                 stat = path.stat()
-                if stat.st_mtime_ns != entry.mtime_ns:
+                observed = entry.stat_result
+                if (stat.st_mtime_ns, stat.st_size, stat.st_ino) != (
+                    observed.st_mtime_ns, observed.st_size, observed.st_ino,
+                ):
                     # 文件已修改，移除缓存
                     self._remove_entry(key)
                     logger.debug(f"Cache miss (modified): {path}")
@@ -107,7 +111,9 @@ class FileStateCache:
             logger.debug(f"Cache hit: {path}")
             return entry
 
-    def put(self, path: Path, content: str, language_hint: str = "") -> None:
+    def put(
+        self, path: Path, content: str, language_hint: str = "", *, stat_result: os.stat_result,
+    ) -> None:
         """
         添加或更新文件状态。
 
@@ -115,22 +121,17 @@ class FileStateCache:
             path: 文件路径
             content: 文件内容
             language_hint: 语言提示
+            stat_result: 读取内容的同一文件句柄所对应的版本
         """
         path = path.resolve()
         key = canonical_file_path_key(path)
-
-        try:
-            stat = path.stat()
-        except OSError as e:
-            logger.warning(f"Cannot cache file {path}: {e}")
-            return
 
         size_bytes = len(content.encode("utf-8"))
         entry = FileStateEntry(
             path=path,
             content=content,
             size_bytes=size_bytes,
-            mtime_ns=stat.st_mtime_ns,
+            stat_result=stat_result,
             language_hint=language_hint,
         )
 

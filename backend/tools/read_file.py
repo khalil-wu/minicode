@@ -7,13 +7,15 @@ import os
 import tempfile
 import time
 import hashlib
+from io import StringIO
+from itertools import islice
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from backend.atomic_io import canonical_file_path_key, canonical_path_mapping_key
+from backend.atomic_io import canonical_file_path_key, canonical_path_mapping_key, normalize_text_newlines
 from backend.artifact.store import ArtifactStore
 from backend.permissions.context import ToolExecutionContext
 from backend.agent.cache_metrics import args_signature, emit_cache_metric
@@ -260,7 +262,8 @@ class ReadFileTool(BaseTool):
             file_size = stat_result.st_size
         except OSError as exc:
             return self._error_result(f"Unable to read file metadata: {exc}")
-        if file_size > MAX_FILE_READ_BYTES and not has_line_range:
+        non_text = path.suffix.lower() in {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
+        if file_size > MAX_FILE_READ_BYTES and (not has_line_range or non_text):
             return self._error_result(
                 f"File is too large ({file_size // 1024 // 1024}MB); limit is {MAX_FILE_READ_BYTES // 1024 // 1024}MB"
             )
@@ -273,68 +276,71 @@ class ReadFileTool(BaseTool):
         if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
             return self._read_image(path, file_path, file_size)
 
-        line_offset = 0
-        if has_line_range:
-            if end_line is not None and end_line < start_line:
-                return self._error_result("end_line must be greater than or equal to start_line")
-            try:
+        line_offset = start_line - 1 if has_line_range else 0
+        full_file_hash = ""
+        if has_line_range and end_line is not None and end_line < start_line:
+            return self._error_result("end_line must be greater than or equal to start_line")
+        try:
+            if has_line_range and file_size > MAX_FILE_READ_BYTES:
                 content = _read_text_range(
                     path,
                     start_line=start_line,
                     end_line=end_line,
                     max_bytes=MAX_FILE_READ_BYTES,
                 )
-                line_offset = start_line - 1
-            except UnicodeDecodeError:
-                return self._error_result(
-                    f"Cannot read binary or non-UTF-8 file: {file_path}. "
-                    "This tool only supports UTF-8 text files."
-                )
-            except PermissionError:
-                return self._error_result(f"No permission to read file: {file_path}")
-            except ValueError as exc:
-                return self._error_result(str(exc))
-            except OSError as exc:
-                return self._error_result(f"Failed to read file: {exc}")
-        else:
-            # Try the file-state cache first for complete reads.
-            cache = get_global_file_cache()
-            cached_entry = cache.get(path)
-            signature = args_signature({"file_path": str(path)})
-
-            if cached_entry is not None:
-                content = cached_entry.content
-                await emit_cache_metric(
-                    context,
-                    cache_layer="read_file.file_state",
-                    tool_name=self.name,
-                    args_signature_value=signature,
-                    hit=True,
-                    payload_size_bytes=len(content.encode("utf-8")),
-                )
             else:
-                try:
-                    content = path.read_text(encoding="utf-8")
-                    # Cache file content for subsequent reads.
-                    language_hint = path.suffix.lstrip(".") if path.suffix else ""
-                    cache.put(path, content, language_hint)
+                # A focused range and its edit hash must come from one snapshot.
+                cache = get_global_file_cache()
+                cached_entry = cache.get(path)
+                full_content = None
+                if cached_entry is not None:
+                    full_content = cached_entry.content
+                    stat_result = cached_entry.stat_result
+                else:
+                    with path.open("rb") as handle:
+                        stat_result = os.fstat(handle.fileno())
+                        raw = handle.read(MAX_FILE_READ_BYTES + 1)
+                    if len(raw) > MAX_FILE_READ_BYTES:
+                        raise ValueError(
+                            f"File is too large; limit is {MAX_FILE_READ_BYTES // 1024 // 1024}MB"
+                        )
+                    try:
+                        full_content = normalize_text_newlines(raw.decode("utf-8"))
+                    except UnicodeDecodeError:
+                        if not has_line_range:
+                            raise
+                        # A readable range in a non-UTF-8 file remains useful,
+                        # but cannot authorize a whole-file edit.
+                        content = _read_text_range(
+                            path, start_line=start_line, end_line=end_line, max_bytes=MAX_FILE_READ_BYTES,
+                        )
+                    else:
+                        cache.put(path, full_content, path.suffix.lstrip("."), stat_result=stat_result)
+                if full_content is not None:
+                    full_file_hash = content_hash(full_content)
+                    content = (
+                        "".join(islice(StringIO(full_content), line_offset, end_line))
+                        if has_line_range else full_content
+                    )
                     await emit_cache_metric(
                         context,
                         cache_layer="read_file.file_state",
                         tool_name=self.name,
-                        args_signature_value=signature,
-                        hit=False,
-                        payload_size_bytes=len(content.encode("utf-8")),
+                        args_signature_value=args_signature({"file_path": str(path)}),
+                        hit=cached_entry is not None,
+                        payload_size_bytes=len(full_content.encode("utf-8")),
                     )
-                except UnicodeDecodeError:
-                    return self._error_result(
-                        f"Cannot read binary or non-UTF-8 file: {file_path}. "
-                        "This tool only supports UTF-8 text files."
-                    )
-                except PermissionError:
-                    return self._error_result(f"No permission to read file: {file_path}")
-                except OSError as exc:
-                    return self._error_result(f"Failed to read file: {exc}")
+        except UnicodeDecodeError:
+            return self._error_result(
+                f"Cannot read binary or non-UTF-8 file: {file_path}. "
+                "This tool only supports UTF-8 text files."
+            )
+        except PermissionError:
+            return self._error_result(f"No permission to read file: {file_path}")
+        except ValueError as exc:
+            return self._error_result(str(exc))
+        except OSError as exc:
+            return self._error_result(f"Failed to read file: {exc}")
 
         # Apply MiniCode's bounded line/UTF-8-byte contract before display numbering.
         file_hash = content_hash(content)
@@ -343,30 +349,7 @@ class ReadFileTool(BaseTool):
         returned_end_line = returned_start_line + returned_line_count - 1
         version = _file_version(path, stat_result)
 
-        # A focused read is normally the right way to inspect a large source
-        # file, but writes still need an optimistic full-file hash.  Compute it
-        # privately (without returning the omitted content) so the model can
-        # read a small range and immediately issue a guarded edit.  Reuse the
-        # file-state cache when possible; files above the direct-read limit stay
-        # range-only because loading their complete text would defeat the
-        # bounded-read contract.
-        write_safe_hash = ""
-        if has_line_range and file_size <= MAX_FILE_READ_BYTES:
-            try:
-                cache = get_global_file_cache()
-                cached_full = cache.get(path)
-                if cached_full is not None:
-                    full_content = cached_full.content
-                else:
-                    full_content = path.read_text(encoding="utf-8")
-                    language_hint = path.suffix.lstrip(".") if path.suffix else ""
-                    cache.put(path, full_content, language_hint)
-                write_safe_hash = content_hash(full_content)
-            except (UnicodeDecodeError, OSError):
-                # The requested range remains useful even when a full-file
-                # hash cannot be produced (for example, a concurrently
-                # changing or oversized/non-text file).
-                write_safe_hash = ""
+        write_safe_hash = full_file_hash if has_line_range else ""
 
         if context is not None and write_safe_hash:
             seen = context.metadata.setdefault("_read_file_hashes", {})

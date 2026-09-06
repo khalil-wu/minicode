@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import hashlib
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -404,11 +405,7 @@ def _read_text_range(
     selected_bytes = 0
 
     with path.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            if line_number < start_line:
-                continue
-            if end_line is not None and line_number > end_line:
-                break
+        for line in islice(handle, start_line - 1, end_line):
             selected.append(line)
             selected_bytes += len(line.encode("utf-8"))
             if selected_bytes > max_bytes:
