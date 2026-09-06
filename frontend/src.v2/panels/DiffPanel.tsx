@@ -15,6 +15,7 @@ import { EmptyState } from "../components/EmptyState";
 import { Button } from "../components/Button";
 import { diffFileDecisionForPath, diffFilePathsEqual } from "../chat/diffReviewState";
 import { workspaceFilePathsEqual } from "../lib/workspace-path";
+import { parseUnifiedDiffLines } from "../lib/unified-diff";
 
 type DiffViewMode = "unified" | "split" | "monaco";
 type ChangeScope = "review" | "history" | "git";
@@ -32,18 +33,11 @@ interface DiffLine {
 }
 
 const parseUnifiedDiff = (raw: string): DiffLine[] => {
-  if (!raw) return [];
-  const lines = raw.split(/\r?\n/);
-  const out: DiffLine[] = [];
-  for (const line of lines) {
-    if (line.startsWith("@@")) out.push({ kind: "hunk", text: line });
-    else if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ") || line.startsWith("index "))
-      out.push({ kind: "meta", text: line });
-    else if (line.startsWith("+")) out.push({ kind: "add", text: line.slice(1) });
-    else if (line.startsWith("-")) out.push({ kind: "del", text: line.slice(1) });
-    else out.push({ kind: "context", text: line.startsWith(" ") ? line.slice(1) : line });
-  }
-  return out;
+  return parseUnifiedDiffLines(raw).map(({ kind, text }) => ({
+    kind: kind === "marker" ? "context" : kind,
+    text: kind === "add" || kind === "del" || (kind === "context" && text.startsWith(" "))
+      ? text.slice(1) : text,
+  }));
 };
 
 const visibleDiffLines = (lines: DiffLine[]): DiffLine[] =>

@@ -790,7 +790,13 @@ async def handle_skills_list(session: "WebSocketSession", data: dict[str, Any]) 
     from backend.services.skills_service import list_skills
 
     skills = list_skills(session.skill_manager)
-    await session.send_payload({"type": "skills.list", "skills": skills}, log_context="skills.list")
+    conversation_id = str(
+        data.get("conversation_id")
+        or data.get("owner_conversation_id")
+        or session.active_conversation_id
+        or ""
+    ).strip()
+    await session.send_payload({"type": "skills.list", "skills": skills, "conversation_id": conversation_id}, log_context="skills.list")
     await session.send_event(
         AgentEvent.command_result("skills.list", "", data={"count": len(skills)})
     )
@@ -1023,7 +1029,11 @@ async def handle_skills_install(session: "WebSocketSession", data: dict[str, Any
         return True
     await session.send_event(AgentEvent(type="system_notice", data={"content": result.notice}))
     if result.installed:
-        await session.send_payload({"type": "skills.list", "skills": result.skills}, log_context="skills.list")
+        await session.send_payload({
+            "type": "skills.list",
+            "skills": result.skills,
+            "conversation_id": str(session.active_conversation_id or "").strip(),
+        }, log_context="skills.list")
     await session.send_event(
         AgentEvent.command_result(
             "skills.install",

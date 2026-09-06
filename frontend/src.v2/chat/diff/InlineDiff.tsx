@@ -1,10 +1,11 @@
 import { useMemo } from "react";
+import { parseUnifiedDiffLines } from "../../lib/unified-diff";
 
 type DiffLine = {
   text: string;
   oldLine?: number;
   newLine?: number;
-  kind: "context" | "added" | "removed" | "header";
+  kind: "context" | "added" | "removed" | "header" | "marker";
 };
 
 type ParsedDiff = {
@@ -15,8 +16,8 @@ type ParsedDiff = {
 function parseLines(patch: string, contextLines: number | undefined): ParsedDiff {
   let oldLine = 0;
   let newLine = 0;
-  const sourceLines = patch.split(/\r?\n/);
-  const lines: DiffLine[] = sourceLines.map((text): DiffLine => {
+  const sourceLines = parseUnifiedDiffLines(patch);
+  const lines: DiffLine[] = sourceLines.map(({ text, kind }): DiffLine => {
     const hunk = text.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
     if (hunk) {
       const rawOldLine = Number(hunk[1]);
@@ -29,14 +30,15 @@ function parseLines(patch: string, contextLines: number | undefined): ParsedDiff
       newLine = Math.max(rawNewLine, newLine);
       return { text, kind: "header" };
     }
-    if (/^(?:diff --git|index |new file mode|deleted file mode|rename (?:from|to)|--- |\+\+\+ )/.test(text)) {
+    if (kind === "meta" || kind === "hunk") {
       return { text, kind: "header" };
     }
-    if (text.startsWith("+") && !text.startsWith("+++")) {
+    if (kind === "marker") return { text, kind: "marker" };
+    if (kind === "add") {
       const line = newLine++;
       return { text, newLine: line, kind: "added" };
     }
-    if (text.startsWith("-") && !text.startsWith("---")) {
+    if (kind === "del") {
       const line = oldLine++;
       return { text, oldLine: line, kind: "removed" };
     }
@@ -65,7 +67,7 @@ export function InlineDiff({ patch, contextLines }: { patch: string; contextLine
         <div key={`${index}-${line.text}`} className={`inline-diff-line inline-diff-line-${line.kind}`}>
           <span className="inline-diff-number">{line.kind === "removed" ? line.oldLine ?? "" : line.newLine ?? line.oldLine ?? ""}</span>
           <span className="inline-diff-marker">{line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " "}</span>
-          <span className="inline-diff-text">{line.text.slice(line.kind === "header" || line.kind === "context" ? 0 : 1)}</span>
+          <span className="inline-diff-text">{line.kind === "added" || line.kind === "removed" || (line.kind === "context" && line.text.startsWith(" ")) ? line.text.slice(1) : line.text}</span>
         </div>
       ))}
     </div>

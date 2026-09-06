@@ -334,7 +334,17 @@ def test_upload_document_stays_draft_until_user_message_is_sent(monkeypatch, tmp
             assert preview_response.status_code == 200
             assert preview_response.json()["content"] == "hello minicode"
             assert preview_response.json()["file_name"] == "note.txt"
-            assert preview_response.json()["has_native"] is False
+            assert preview_response.json()["has_native"] is True
+            assert "data" not in payload["attachment"]
+            raw_text = client.get("/api/attachments/raw", params={
+                "session_id": "session_test_upload",
+                "conversation_id": payload["conversation_id"],
+                "artifact_id": payload["artifact_id"],
+                "download": "true",
+            })
+            assert raw_text.status_code == 200
+            assert raw_text.content == b"hello minicode"
+            assert raw_text.headers["content-disposition"].startswith("attachment;")
 
             pdf_response = client.post(
                 "/api/uploads",
@@ -372,6 +382,30 @@ def test_upload_document_stays_draft_until_user_message_is_sent(monkeypatch, tmp
             assert raw_pdf.status_code == 206
             assert raw_pdf.content == b"%PDF"
             assert raw_pdf.headers["content-range"] == "bytes 0-3/14"
+            assert raw_pdf.headers["content-disposition"].startswith("inline;")
+            pdf_download = client.get("/api/attachments/raw", params={
+                "session_id": "session_test_upload",
+                "conversation_id": pdf_payload["conversation_id"],
+                "artifact_id": pdf_payload["artifact_id"],
+                "download": "true",
+            })
+            assert pdf_download.content == b"%PDF-1.4\n%%EOF"
+            assert pdf_download.headers["content-disposition"].startswith("attachment;")
+
+            broken_docx = client.post("/api/uploads", params={
+                "session_id": "session_test_upload", "conversation_id": payload["conversation_id"],
+            }, files={"file": ("会议记录.docx", b"unreadable Word original", "application/octet-stream")})
+            assert broken_docx.status_code == 200
+            assert broken_docx.json()["attachment"]["parse_error"]
+            docx_download = client.get("/api/attachments/raw", params={
+                "session_id": "session_test_upload",
+                "conversation_id": payload["conversation_id"],
+                "artifact_id": broken_docx.json()["artifact_id"],
+                "download": "true",
+            })
+            assert docx_download.status_code == 200
+            assert docx_download.content == b"unreadable Word original"
+            assert docx_download.headers["content-disposition"].startswith("attachment; filename*=UTF-8''")
 
             ws.send_json({"type": "conversation.list"})
             listing = _receive_next_non_task_update(ws)

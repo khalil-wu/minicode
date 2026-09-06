@@ -126,34 +126,29 @@ export const FileContextMenu = ({
       danger: true,
     });
     if (!ok) { onClose(); return; }
-    if (isDesktop()) {
-      const result = await desktop()?.fs.deletePath(menu.path, menu.isDir, false);
-      if (result && "needsConfirmation" in result && result.needsConfirmation) {
-        const confirmed = await showConfirm({
-          title: "确认删除大型目录",
-          message: `${menu.path} 包含 ${result.entryCount}+ 个项目。将其移到回收站？`,
-          confirmLabel: "移到回收站",
-          danger: true,
-        });
-        if (!confirmed) { onClose(); return; }
-        const finalResult = await desktop()?.fs.deletePath(menu.path, menu.isDir, true);
-        if (!finalResult || !("deleted" in finalResult) || !finalResult.deleted) {
-          onClose();
-          return;
+    try {
+      if (isDesktop()) {
+        let result = await desktop()?.fs.deletePath(menu.path, menu.isDir, false);
+        if (result && "needsConfirmation" in result && result.needsConfirmation) {
+          const confirmed = await showConfirm({
+            title: "确认删除大型目录",
+            message: `${menu.path} 包含 ${result.entryCount}+ 个项目。将其移到回收站？`,
+            confirmLabel: "移到回收站",
+            danger: true,
+          });
+          if (!confirmed) return;
+          result = await desktop()?.fs.deletePath(menu.path, menu.isDir, true);
         }
-      } else if (!result || !("deleted" in result) || !result.deleted) {
-        onClose();
-        return;
+        if (!result || !("deleted" in result) || !result.deleted) throw new Error(`无法删除：${menu.path}`);
+      } else if (!(await deleteWorkspacePath(menu.path, workingDirectory, menu.isDir))) {
+        throw new Error(`无法删除：${menu.path}`);
       }
-    } else {
-      if (!(await deleteWorkspacePath(menu.path, workingDirectory, menu.isDir))) {
-        await showAlert({ title: "删除失败", message: `无法删除：${menu.path}` });
-        onClose();
-        return;
-      }
+      onRefresh();
+    } catch (error) {
+      await showAlert({ title: "删除失败", message: error instanceof Error ? error.message : `无法删除：${menu.path}` });
+    } finally {
+      onClose();
     }
-    onRefresh();
-    onClose();
   };
 
   const renameFile = async () => {

@@ -451,6 +451,7 @@ describe("handleNoticeEvent", () => {
         path: "src/app.ts",
         event: "modified",
         timestamp: Date.parse("2026-08-09T08:00:00Z"),
+        sequence: 1,
       }]);
       // Bursts of file.changed collapse into one trailing git refresh.
       expect(requestGitChanges).not.toHaveBeenCalled();
@@ -460,6 +461,32 @@ describe("handleNoticeEvent", () => {
       vi.useRealTimers();
       useAppStore.setState({ requestGitChanges: originalRequestGitChanges });
     }
+  });
+
+  it("keeps file-change sequences monotonic after the retained history is capped", () => {
+    const requestGitChanges = vi.fn();
+    useAppStore.setState({
+      conversationId: "conv-active",
+      workingDirectory: "C:\\repo",
+      fileChanges: [],
+      requestGitChanges,
+    });
+
+    for (let index = 0; index < 101; index += 1) {
+      expect(handlePeripheralEvent({
+        type: "file.changed",
+        conversation_id: "conv-active",
+        workspace_root: "C:\\repo",
+        path: `src/file-${index}.ts`,
+        event: "modified",
+        timestamp: "2026-08-09T08:00:00Z",
+      } as unknown as ServerEvent)).toBe(true);
+    }
+
+    const changes = useAppStore.getState().fileChanges;
+    expect(changes).toHaveLength(100);
+    expect(changes[0]?.sequence).toBe(2);
+    expect(changes.at(-1)?.sequence).toBe(101);
   });
 
   it("does not let replayed file-change events mark an open image tab as externally changed", () => {

@@ -32,6 +32,7 @@ export const App = () => {
   useWorkspaceGit();
 
   const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);
+  const quickOpenVisible = useAppStore((s) => s.quickOpenVisible);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const automationsOpen = useAppStore((s) => s.automationsOpen);
   const shortcutsHelpOpen = useAppStore((s) => s.shortcutsHelpOpen);
@@ -58,7 +59,7 @@ export const App = () => {
         </Suspense>
       </ChunkErrorBoundary>
       <QuickOpen />
-      <ToastContainer />
+      <ToastContainer placement={commandPaletteOpen || quickOpenVisible ? "bottom" : "top"} />
     </>
   );
 };

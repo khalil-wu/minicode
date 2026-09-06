@@ -52,7 +52,7 @@ const TYPE_ICONS: Record<ToastItem["type"], React.ReactNode> = {
   error: <CircleAlert size={15} />,
 };
 
-export const ToastContainer = () => {
+export const ToastContainer = ({ placement = "top" }: { placement?: "top" | "bottom" }) => {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [exiting, setExiting] = useState<Set<string>>(new Set());
   const [paused, setPaused] = useState<Set<string>>(new Set());
@@ -114,7 +114,7 @@ export const ToastContainer = () => {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="toast-container" aria-live="polite" aria-relevant="additions removals">
+    <div className="toast-container" aria-live="polite" aria-relevant="additions removals" style={placement === "bottom" ? { top: "auto", bottom: "max(12px, env(safe-area-inset-bottom))" } : undefined}>
       {toasts.map((t) => (
         <div
           key={t.id}

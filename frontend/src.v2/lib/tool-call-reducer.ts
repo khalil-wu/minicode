@@ -1,4 +1,6 @@
 import type { ToolCallEvent, ToolErrorInfo, ToolResultEvent } from "../protocol/events";
+import { countUnifiedDiffLines } from "./unified-diff";
+export { countUnifiedDiffLines } from "./unified-diff";
 
 export type ToolCallStatus = "pending" | "running" | "success" | "failed" | "blocked" | "partial" | "timeout" | "cancelled";
 
@@ -183,40 +185,6 @@ export interface DiffBadge {
   plus: number;
   minus: number;
 }
-
-export const countUnifiedDiffLines = (patch: string): DiffBadge => {
-  let plus = 0;
-  let minus = 0;
-  let sawHunk = false;
-  let inHunk = false;
-  const fallbackLines = patch.split(/\r?\n/);
-
-  for (const line of fallbackLines) {
-    if (line.startsWith("diff --git ") || line.startsWith("Index: ")) {
-      inHunk = false;
-      continue;
-    }
-    if (line.startsWith("@@")) {
-      sawHunk = true;
-      inHunk = true;
-      continue;
-    }
-    if (!inHunk || line.startsWith("\\ No newline")) continue;
-    if (line.startsWith("+")) plus += 1;
-    else if (line.startsWith("-")) minus += 1;
-  }
-
-  if (sawHunk) return { plus, minus };
-
-  plus = 0;
-  minus = 0;
-  for (const line of fallbackLines) {
-    if (line.startsWith("+++") || line.startsWith("---")) continue;
-    if (line.startsWith("+")) plus += 1;
-    else if (line.startsWith("-")) minus += 1;
-  }
-  return { plus, minus };
-};
 
 export const getToolDiffStats = (diff: NonNullable<ToolCallRecord["diff"]>): DiffBadge => {
   if (diff.plus || diff.minus || !diff.patch) {

@@ -330,6 +330,34 @@ const blankEditorTab = (path: string): EditorTab => ({
   readOnly: false,
 });
 
+type CachedEditorWorkspace = {
+  tabs: EditorTab[];
+  activeTabPath: string | null;
+  activeEditorPath: string | null;
+};
+
+// Keep the live buffer separate from the path-only localStorage index. The
+// index is intentionally small and durable; this cache preserves unsaved work
+// while the user moves between workspaces during one renderer session.
+const editorWorkspaceBuffers = new Map<string, CachedEditorWorkspace>();
+
+export const cacheEditorStateForWorkspace = (
+  workspace: string | null | undefined,
+  tabs: EditorTab[],
+  activeTabPath: string | null,
+  activeEditorPath: string | null,
+) => {
+  editorWorkspaceBuffers.set(editorWorkspaceKey(workspace), {
+    tabs: tabs.map((tab) => ({ ...tab })),
+    activeTabPath,
+    activeEditorPath,
+  });
+};
+
+export const clearEditorWorkspaceBufferCacheForTests = () => {
+  editorWorkspaceBuffers.clear();
+};
+
 export const loadPersistedEditorTabs = (workspace?: string | null): EditorTab[] => {
   try {
     const storageKey = editorTabsStorageKey(workspace);
@@ -376,6 +404,18 @@ export const persistEditorTabs = (tabs: EditorTab[], workspace?: string | null) 
 };
 
 export const editorStateForWorkspace = (workspace: string | null | undefined) => {
+  const cached = editorWorkspaceBuffers.get(editorWorkspaceKey(workspace));
+  if (cached) {
+    const editorTabs = cached.tabs.map((tab) => ({ ...tab }));
+    return {
+      editorTabs,
+      activeTabPath: cached.activeTabPath && editorTabs.some((tab) => editorPathsEqual(tab.path, cached.activeTabPath, workspace ?? ""))
+        ? cached.activeTabPath
+        : editorTabs[0]?.path ?? null,
+      activeEditorPath: cached.activeEditorPath,
+      editorOpenRequests: [],
+    };
+  }
   const editorTabs = loadPersistedEditorTabs(workspace);
   return {
     editorTabs,

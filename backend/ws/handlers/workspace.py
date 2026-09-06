@@ -27,7 +27,11 @@ async def _activate_workspace_for_command(
     client actually sent so its pending state resolves.
     """
 
-    from backend.services.workspace_service import parse_workspace_import_request, workspace_conversation_switched_payload
+    from backend.services.workspace_service import (
+        parse_workspace_import_request,
+        workspace_conversation_switched_payload,
+        workspace_imported_payload,
+    )
 
     request = parse_workspace_import_request(data)
     if request.error_event is not None:
@@ -36,9 +40,16 @@ async def _activate_workspace_for_command(
         return True
 
     project_path = request.project_path
+    if not str(session.active_conversation_id or "").strip():
+        # A first-run renderer may have no active conversation yet. Create it
+        # only after the path parser has accepted the requested workspace.
+        session._ensure_active_conversation()
     activated = await session.activate_workspace_path(
         str(project_path),
-        announce=True,
+        # Commit the conversation binding before publishing a renderer-visible
+        # workspace event. Otherwise a binding failure leaves the UI on a
+        # workspace that the backend could not persist.
+        announce=False,
         wait_for_initialize=True,
         error_command=command,
     )
@@ -74,6 +85,19 @@ async def _activate_workspace_for_command(
             workspace_conversation_switched_payload(updated),
             log_context="conversation.switched",
         )
+        lifecycle_context = session.session_lifecycle.workspace_context
+        metadata = getattr(lifecycle_context, "metadata", None)
+        if lifecycle_context is not None and metadata is not None:
+            await session.send_payload(
+                workspace_imported_payload(
+                    lifecycle_context,
+                    metadata,
+                    conversation_id=session.active_conversation_id,
+                    workspace_root=project_path,
+                    request_id=session.event_outbox.client_command_id,
+                ),
+                log_context="workspace.imported",
+            )
         from backend.ws.handlers.conversation import _broadcast_conversation_lists
 
         broadcast_errors = await _broadcast_conversation_lists(session)
@@ -87,11 +111,25 @@ async def _activate_workspace_for_command(
                     "projection_errors": broadcast_errors,
                 },
             )
+    if activated:
+        await session.emit_command_result(
+            command,
+            "Workspace activated.",
+            level="success",
+            data={
+                "workspace_root": str(project_path),
+                "conversation_id": str(session.active_conversation_id or ""),
+            },
+        )
     return True
 
 
 async def handle_workspace_import(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     return await _activate_workspace_for_command(session, data, command="workspace.import")
+
+
+async def handle_workspace_switch(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    return await _activate_workspace_for_command(session, data, command="workspace.switch")
 
 
 async def handle_workspace_recent(session: "WebSocketSession", data: dict[str, Any]) -> bool:
@@ -254,7 +292,7 @@ async def handle_git_pr_automation_set(session: "WebSocketSession", data: dict[s
 
 HANDLERS: dict[str, Any] = {
     "workspace.import": handle_workspace_import,
-    "workspace.switch": handle_workspace_import,
+    "workspace.switch": handle_workspace_switch,
     "workspace.recent": handle_workspace_recent,
     "workspace.recent.remove": handle_workspace_recent_remove,
     "workspace.recent.clear": handle_workspace_recent_clear,

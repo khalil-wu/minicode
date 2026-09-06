@@ -311,6 +311,9 @@ export interface ArtifactContentEvent extends WorkspaceOwnedEvent {
   purpose?: string;
   name?: string;
   is_attachment?: boolean;
+  has_native?: boolean;
+  parse_error?: string;
+  parse_warning?: string;
 }
 
 export interface GitPrAutomationSetCommand {

@@ -1,16 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 import os
 from pathlib import Path
 from typing import Any
 
 from backend.artifact.store import ArtifactStore
-from backend.atomic_io import file_mutation_locks
 from backend.attachments.store import AttachmentStore
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
-from backend.tools.file_tools_common import _atomic_write_text
 
 
 PRESENTABLE_FILE_EXTENSIONS = frozenset({
@@ -245,34 +244,36 @@ class ReadArtifactTool(BaseTool):
 
         conversation_id = str(getattr(context, "conversation_id", "") or "") if context else ""
         workspace_root = str(getattr(context, "workspace_root", "") or "") if context else ""
-        content = self._artifact_store.get(
-            artifact_id,
-            conversation_id=conversation_id,
-            workspace_root=workspace_root,
-        )
-        if content is None and self._attachment_store is not None:
-            content = self._attachment_store.get(
+        payload = None
+        if self._attachment_store is not None:
+            payload = self._attachment_store.find_payload(
                 artifact_id,
                 conversation_id=conversation_id,
                 workspace_root=workspace_root,
             )
-        if content is None and self._attachment_store is not None:
-            resolved = self._attachment_store.resolve_content(
+        if payload is not None:
+            artifact_id = payload["artifact_id"]
+            content = str(payload.get("content") or "")
+            attachment = payload.get("metadata", {}).get("attachment", {})
+            legacy_pdf_error = (
+                attachment.get("media_type") == "application/pdf"
+                and "parse_error" not in attachment
+                and self._is_parse_error(content)
+            )
+            if attachment.get("parse_error") or legacy_pdf_error:
+                reparsed = await asyncio.to_thread(
+                    self._try_reparse, payload,
+                    conversation_id=conversation_id,
+                    workspace_root=workspace_root,
+                )
+                if reparsed is not None:
+                    content = reparsed
+        else:
+            content = self._artifact_store.get(
                 artifact_id,
                 conversation_id=conversation_id,
                 workspace_root=workspace_root,
             )
-            if resolved is not None:
-                _resolved_artifact_id, content, _metadata = resolved
-
-        if content and self._is_parse_error(content) and self._attachment_store is not None:
-            reparsed = self._try_reparse(
-                artifact_id,
-                conversation_id=conversation_id,
-                workspace_root=workspace_root,
-            )
-            if reparsed:
-                content = reparsed
 
         # Large tool outputs predate the ArtifactStore path and are persisted in
         # MiniCode's read-only tool-result cache. Models sometimes pass the
@@ -369,30 +370,17 @@ class ReadArtifactTool(BaseTool):
 
     def _try_reparse(
         self,
-        artifact_id: str,
+        payload: dict[str, Any],
         *,
         conversation_id: str = "",
         workspace_root: str = "",
     ) -> str | None:
         import base64
-        import os
-        import tempfile
+        import binascii
+        from backend.documents.service import parse_document_preview
 
-        if self._attachment_store is None:
-            return None
-        payload = self._attachment_store.find_payload(
-            artifact_id,
-            conversation_id=conversation_id,
-            workspace_root=workspace_root,
-        )
-        if not payload:
-            return None
-        metadata = payload.get("metadata")
-        if not isinstance(metadata, dict):
-            return None
-        attachment = metadata.get("attachment")
-        if not isinstance(attachment, dict):
-            return None
+        metadata = payload["metadata"]
+        attachment = metadata.get("attachment", {})
         native_data = str(
             attachment.get("data", "") or payload.get("native_data") or ""
         )
@@ -400,42 +388,15 @@ class ReadArtifactTool(BaseTool):
         if not native_data or not file_name:
             return None
 
-        suffix = "." + file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
-        if suffix != ".pdf":
-            return None
-
         try:
-            raw_bytes = base64.b64decode(native_data)
-        except Exception:
+            raw_bytes = base64.b64decode(native_data, validate=True)
+            parsed = parse_document_preview(file_name, raw_bytes)
+        except (binascii.Error, ValueError):
             return None
-
-        fd, temp_path = tempfile.mkstemp(suffix=suffix)
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(raw_bytes)
-            from backend.documents.parsers import _parse_pdf
-
-            parsed = _parse_pdf(temp_path)
-            full_text = str(parsed.get("full_text", "")).strip()
-            if not full_text or self._is_parse_error(full_text):
-                return None
-            self._attachment_store.save(
-                artifact_id=artifact_id,
-                content=full_text,
-                metadata=metadata,
-                native_data=native_data,
-            )
-            from backend.artifact.store import ARTIFACT_DATA_DIR
-
-            content_path = ARTIFACT_DATA_DIR / f"{artifact_id}.txt"
-            with file_mutation_locks([content_path]):
-                if content_path.parent.exists():
-                    _atomic_write_text(content_path, full_text)
-            return full_text
-        except Exception:
+        if parsed.get("parse_error"):
             return None
-        finally:
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
+        return self._attachment_store.update_extraction(
+            payload["artifact_id"], parsed,
+            conversation_id=conversation_id,
+            workspace_root=workspace_root,
+        )

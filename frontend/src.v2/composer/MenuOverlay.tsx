@@ -1,11 +1,11 @@
-import { AtSign, Blocks, Command, Folder } from "lucide-react";
+import { AtSign, Blocks, Command, Folder, RefreshCw } from "lucide-react";
 import { BrandIcon } from "../components/BrandIcon";
 import { fileIcon } from "../shell/fileTreeHelpers";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isDesktop, fsListTree, fsSearchFiles } from "../desktop/runtime";
 import { useAppStore } from "../stores";
 import { listWorkspaceTree, searchWorkspaceFiles } from "../protocol/workspace";
-import { apiBase, authHeaders, fetchWithTimeout } from "../protocol/api";
+import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
 import { fuzzyFilter } from "../lib/fuzzy-match";
 import { buildRuntimeSlashArgMenuItems, buildRuntimeSlashMenuItems } from "../lib/runtime-commands";
 import { mentionSearchCache, mentionTreeCache, type MentionFileItem } from "./mentionCache";
@@ -65,7 +65,11 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
   const [activeIndex, setActiveIndex] = useState(0);
   const [fileResults, setFileResults] = useState<FileItem[]>([]);
   const [pluginResults, setPluginResults] = useState<PluginMentionEntry[]>([]);
+  const [pluginLoading, setPluginLoading] = useState(false);
+  const [pluginLoadError, setPluginLoadError] = useState("");
+  const [pluginRefresh, setPluginRefresh] = useState(0);
   const [searching, setSearching] = useState(false);
+  const [fileSearchError, setFileSearchError] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Array<HTMLDivElement | null>>([]);
   const searchSequenceRef = useRef(0);
@@ -182,45 +186,53 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
 
   useEffect(() => {
     setActiveIndex(0);
-  }, [open, kind, filter]);
+  }, [open, kind, filter, workingDirectory]);
 
   useEffect(() => {
     if (!open || kind !== "mention") return;
     let active = true;
     const controller = new AbortController();
-    let headers: HeadersInit = {};
-    try {
-      headers = authHeaders();
-    } catch {
-      headers = {};
-    }
-    fetchWithTimeout(`${apiBase()}/api/plugins`, { headers, signal: controller.signal })
-      .then(async (response) => response.ok ? response.json() : { plugins: [] })
-      .then((payload) => {
-        if (!active) return;
-        setPluginResults(Array.isArray(payload?.plugins) ? payload.plugins : []);
-      })
-      .catch(() => {
-        if (active) setPluginResults([]);
-      });
+    setPluginResults([]);
+    setPluginLoadError("");
+    setPluginLoading(true);
+    const loadPlugins = async () => {
+      try {
+        const response = await fetchWithTimeout(`${apiBase()}/api/plugins`, {
+          headers: authHeaders(), signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(errorMessageFromResponseText(await response.text(), `HTTP ${response.status}`));
+        }
+        const payload = await response.json() as { plugins: PluginMentionEntry[] };
+        if (active) setPluginResults(payload.plugins);
+      } catch (error) {
+        if (active) setPluginLoadError(error instanceof Error ? error.message : "插件加载失败");
+      } finally {
+        if (active) setPluginLoading(false);
+      }
+    };
+    void loadPlugins();
     return () => {
       active = false;
       controller.abort();
     };
-  }, [open, kind]);
+  }, [open, kind, pluginRefresh]);
 
   // File search effect for @ mentions
   useEffect(() => {
     if (!open || kind !== "mention") {
       searchSequenceRef.current += 1;
       setSearching(false);
+      setFileSearchError("");
       return;
     }
 
     const searchId = ++searchSequenceRef.current;
     const desktopMode = isDesktop();
     const root = workingDirectory || "";
-    const cacheScope = desktopMode ? `desktop:${root}` : "web";
+    const cacheScope = `${desktopMode ? "desktop" : "web"}:${root}`;
+    setFileSearchError("");
+    setFileResults([]);
 
     if (!mentionSearchQuery) {
       const cacheKey = `${cacheScope}:tree`;
@@ -248,9 +260,10 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
             rememberMentionResults(mentionTreeCache, cacheKey, results);
             setFileResults(results);
           })
-          .catch(() => {
+          .catch((error: unknown) => {
             if (searchId !== searchSequenceRef.current) return;
             setFileResults([]);
+            setFileSearchError(error instanceof Error ? error.message : "无法读取工作区文件，请重试。");
           })
           .finally(() => {
             if (searchId !== searchSequenceRef.current) return;
@@ -272,9 +285,10 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
           rememberMentionResults(mentionTreeCache, cacheKey, results);
           setFileResults(results);
         })
-        .catch(() => {
+        .catch((error: unknown) => {
           if (searchId !== searchSequenceRef.current) return;
           setFileResults([]);
+          setFileSearchError(error instanceof Error ? error.message : "无法读取工作区文件，请重试。");
         })
         .finally(() => {
           if (searchId !== searchSequenceRef.current) return;
@@ -307,9 +321,10 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
             rememberMentionResults(mentionSearchCache, cacheKey, results);
             setFileResults(results);
           })
-          .catch(() => {
+          .catch((error: unknown) => {
             if (searchId !== searchSequenceRef.current) return;
             setFileResults([]);
+            setFileSearchError(error instanceof Error ? error.message : "文件搜索失败，请重试。");
           })
           .finally(() => {
             if (searchId !== searchSequenceRef.current) return;
@@ -329,9 +344,10 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
             rememberMentionResults(mentionSearchCache, cacheKey, results);
             setFileResults(results);
           })
-          .catch(() => {
+          .catch((error: unknown) => {
             if (searchId !== searchSequenceRef.current) return;
             setFileResults([]);
+            setFileSearchError(error instanceof Error ? error.message : "文件搜索失败，请重试。");
           })
           .finally(() => {
             if (searchId !== searchSequenceRef.current) return;
@@ -360,6 +376,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (!open) return;
+      if (e.key !== "Escape" && listRef.current?.contains(e.target as Node)) return;
       if (["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key)) {
         e.stopPropagation();
       }
@@ -413,9 +430,22 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
         data-skills-picker={skillsPickerActive || explicitSkillPickerActive ? "true" : "false"}
         style={menuListStyle(kind, skillsPickerActive || explicitSkillPickerActive)}
       >
+        {fileSearchError && <div role="alert" style={emptyMenuStyle}>{fileSearchError}</div>}
+        {kind === "mention" && pluginLoadError && (
+          <div role="alert" style={{ ...emptyMenuStyle, display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ flex: 1, overflowWrap: "anywhere" }}>插件加载失败：{pluginLoadError}</span>
+            <button type="button" onClick={() => setPluginRefresh((value) => value + 1)} title="重试加载插件" aria-label="重试加载插件" className="mc-icon-btn">
+              <RefreshCw size={14} />
+            </button>
+          </div>
+        )}
         {items.length === 0 ? (
-          <div style={emptyMenuStyle}>
-            {searching ? "正在搜索…" : kind === "mention" ? "未找到文件" : (skillsPickerActive || explicitSkillPickerActive) ? "未找到技能" : "无匹配项"}
+          fileSearchError || (kind === "mention" && pluginLoadError) ? null : <div style={emptyMenuStyle}>
+            {searching || (kind === "mention" && pluginLoading)
+              ? "正在搜索…"
+              : kind === "mention"
+                  ? "未找到文件或插件"
+                  : (skillsPickerActive || explicitSkillPickerActive) ? "未找到技能" : "无匹配项"}
           </div>
         ) : (
           items.map((it, i) => {

@@ -47,16 +47,10 @@ def test_custom_anthropic_discovers_models_only_through_anthropic_endpoint(monke
     async def fail_openai(_base_url: str, _api_key: str, **_transport) -> list[str]:
         raise AssertionError("explicit Anthropic wire API must not probe OpenAI discovery")
 
-    async def config_change_hook(**_kwargs) -> None:
-        return None
-
-    monkeypatch.setattr(llm_provider_service, "_persist_refreshed_models", lambda *args, **kwargs: None)
-
     result = asyncio.run(llm_provider_service.refresh_llm_models(
         _request(),
         fetch_anthropic_models=fetch_anthropic,
         fetch_openai_models=fail_openai,
-        config_change_hook=config_change_hook,
     ))
 
     assert calls == ["anthropic:https://api.deepseek.com/anthropic"]
@@ -104,16 +98,10 @@ def test_custom_anthropic_preserves_manual_model_without_cross_protocol_fallback
     async def fail_openai(_base_url: str, _api_key: str, **_transport) -> list[str]:
         raise AssertionError("explicit Anthropic wire API must not probe OpenAI discovery")
 
-    async def config_change_hook(**_kwargs) -> None:
-        return None
-
-    monkeypatch.setattr(llm_provider_service, "_persist_refreshed_models", lambda *args, **kwargs: None)
-
     result = asyncio.run(llm_provider_service.refresh_llm_models(
         _custom_messages_request(),
         fetch_anthropic_models=empty_anthropic,
         fetch_openai_models=fail_openai,
-        config_change_hook=config_change_hook,
     ))
 
     assert calls == ["anthropic:https://gateway.example/v1"]
@@ -122,70 +110,80 @@ def test_custom_anthropic_preserves_manual_model_without_cross_protocol_fallback
     assert result["models"] == ["vendor-model-1"]
 
 
-def test_refreshed_models_persist_only_the_target_provider(monkeypatch) -> None:
-    saved_payloads: list[dict] = []
-    loaded_config = object()
-    monkeypatch.setattr(
-        llm_provider_helpers,
-        "get_llm_settings_payload",
-        lambda: {
-            "provider": "openai",
-            "openai": {
-                "base_url": "https://api.openai.com/v1",
-                "model": "gpt-5",
-            },
-            "anthropic": {
-                "base_url": "http://127.0.0.1:15721",
-                "model": "claude-sonnet-4-6",
-            },
-            "custom": {
-                "display_name": "Work gateway",
-                "base_url": "https://gateway.example/v1",
-                "model": "vendor-model-1",
-                "available_models": ["vendor-model-1"],
-                "wire_api": "responses",
-            },
-        },
-    )
-    monkeypatch.setattr(
-        llm_provider_helpers,
-        "save_llm_settings",
-        lambda payload: saved_payloads.append(payload),
-    )
-    monkeypatch.setattr(llm_provider_helpers, "load_config", lambda: loaded_config)
+@pytest.mark.parametrize("provider,wire_api", [
+    ("custom", "chat"), ("custom", "responses"), ("custom", "anthropic"),
+    ("openai", "responses"), ("anthropic", "anthropic"),
+])
+def test_model_discovery_keeps_draft_candidates_out_of_saved_profiles(tmp_path, provider, wire_api) -> None:
+    from backend.config import get_llm_settings_payload, save_llm_settings
 
-    result = llm_provider_helpers._persist_refreshed_models(
-        "custom",
-        ["vendor-model-2", "vendor-model-1"],
-        "vendor-model-2",
-        {
-            "vendor-model-2": {
-                "context_window": 96_000,
-                "reasoning_effort_levels": ["low", "medium"],
-                "source": "provider",
-            }
+    save_llm_settings({
+        "provider": provider,
+        provider: {
+            "base_url": "https://saved.example/v1",
+            "api_key": "saved-test-key",
+            "model": "saved-model",
+            "available_models": ["saved-model"],
+            "wire_api": wire_api,
+            "reasoning_effort": "high",
+            "model_metadata": {"saved-model": {"context_window": 96_000}},
         },
-    )
+    })
+    before_payload = get_llm_settings_payload()
+    before_file = (tmp_path / "settings.json").read_bytes()
+    calls = []
 
-    assert result is loaded_config
-    assert len(saved_payloads) == 1
-    assert set(saved_payloads[0]) == {"custom"}
-    assert saved_payloads[0]["custom"] == {
-        "display_name": "Work gateway",
-        "base_url": "https://gateway.example/v1",
-        "model": "vendor-model-2",
-        "available_models": ["vendor-model-2", "vendor-model-1"],
-        "models_source": "live",
-        "model_metadata": {
-            "vendor-model-2": {
-                "context_window": 96_000,
-                "reasoning_effort_levels": ["low", "medium"],
-                "source": "provider",
-            }
-        },
-        "wire_api": "responses",
-        "reasoning_effort_levels": ["low", "medium"],
-    }
+    async def discover(base_url, api_key, **_transport):
+        calls.append((base_url, api_key))
+        return llm_provider_helpers.ModelDiscovery(
+            ["draft-model"], {"draft-model": {"context_window": 128_000}},
+        )
+
+    result = asyncio.run(llm_provider_service.refresh_llm_models(
+        LLMSettingsUpdateRequest.model_validate({
+            "provider": provider,
+            provider: {
+                "base_url": "https://draft.example/v1",
+                "api_key": "draft-test-key",
+                "model": "",
+                "wire_api": wire_api,
+                "reasoning_effort": "",
+                "model_metadata": {},
+            },
+        }),
+        fetch_openai_models=discover,
+        fetch_anthropic_models=discover,
+    ))
+
+    assert calls == [("https://draft.example/v1", "draft-test-key")]
+    assert result["source"] == "live"
+    assert result["models"] == ["draft-model"]
+    assert result["model_metadata"] == {"draft-model": {"context_window": 128_000}}
+    assert result["configured_reasoning_effort"] == ""
+    assert "_config" not in result
+    assert (tmp_path / "settings.json").read_bytes() == before_file
+    assert get_llm_settings_payload() == before_payload
+
+
+@pytest.mark.parametrize("field", ["base_url", "model"])
+def test_connection_check_does_not_replace_explicit_blank_fields_with_saved_values(monkeypatch, field) -> None:
+    monkeypatch.setattr(llm_provider_service, "get_custom_settings", lambda: {
+        "base_url": "https://saved.example/v1", "model": "saved-model", "wire_api": "chat",
+    })
+    values = {"base_url": "https://draft.example/v1", "model": "draft-model", "api_key": "draft-key"}
+    values[field] = ""
+
+    async def unexpected_request(*_args, **_kwargs):
+        pytest.fail("An incomplete draft must not make a provider request")
+
+    result = asyncio.run(llm_provider_service.check_llm_connection(
+        LLMSettingsUpdateRequest.model_validate({"provider": "custom", "custom": values}),
+        fetch_openai_models=unexpected_request,
+        check_openai_generation=unexpected_request,
+    ))
+    assert result["ok"] is False
+    assert result["failure_kind"] == "configuration_error"
+    assert result[field] == ""
 
 
 def test_model_discovery_extracts_reference_client_metadata_shapes() -> None:
@@ -286,7 +284,6 @@ def test_live_refresh_clears_stale_capabilities_when_provider_declares_none(
         openai=section,
         anthropic=section,
     )
-    persisted: list[tuple] = []
 
     monkeypatch.setattr(
         llm_provider_service,
@@ -301,27 +298,16 @@ def test_live_refresh_clears_stale_capabilities_when_provider_declares_none(
             "model_metadata": section.model_metadata,
         },
     )
-    monkeypatch.setattr(
-        llm_provider_service,
-        "_persist_refreshed_models",
-        lambda *args: persisted.append(args),
-    )
-
     async def fetch_models(_base_url: str, _api_key: str, **_transport):
         return llm_provider_helpers.ModelDiscovery(["deepseek-v4-flash"], {})
-
-    async def config_change_hook(**_kwargs):
-        return None
 
     result = asyncio.run(
         llm_provider_service.refresh_llm_models(
             request,
             fetch_openai_models=fetch_models,
-            config_change_hook=config_change_hook,
         )
     )
 
-    assert persisted[0][3] == {}
     assert result["model_metadata"] == {}
     assert result["reasoning_effort_levels"] == []
     assert result["configured_reasoning_effort"] == "low"
@@ -363,19 +349,13 @@ def test_live_refresh_uses_exact_known_responses_efforts_when_catalog_omits_meta
             "model_metadata": {},
         },
     )
-    monkeypatch.setattr(llm_provider_service, "_persist_refreshed_models", lambda *_args: None)
-
     async def fetch_models(_base_url: str, _api_key: str, **_transport):
         return llm_provider_helpers.ModelDiscovery(["gpt-5.6-sol"], {})
-
-    async def config_change_hook(**_kwargs):
-        return None
 
     result = asyncio.run(
         llm_provider_service.refresh_llm_models(
             request,
             fetch_openai_models=fetch_models,
-            config_change_hook=config_change_hook,
         )
     )
 
@@ -634,16 +614,10 @@ def test_direct_proxy_mode_is_used_for_refresh_discovery(monkeypatch) -> None:
         seen.append(proxy_mode)
         return ["gateway-model"]
 
-    async def config_change_hook(**_kwargs) -> None:
-        return None
-
-    monkeypatch.setattr(llm_provider_service, "_persist_refreshed_models", lambda *_args: None)
-
     result = asyncio.run(
         llm_provider_service.refresh_llm_models(
             request,
             fetch_openai_models=fetch_models,
-            config_change_hook=config_change_hook,
         )
     )
 

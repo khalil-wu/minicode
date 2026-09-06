@@ -107,6 +107,8 @@ export interface ArtifactContentState {
   name?: string;
   mediaType?: string;
   url?: string;
+  /** The attachment store has the original bytes, independently of preview support. */
+  hasNative?: boolean;
   kind?: string;
   sizeBytes?: number;
   contentChars?: number;
@@ -431,7 +433,7 @@ export interface UISlice {
   previewLaunchProcesses: PreviewLaunchProcessInfo[];
   previewVerification: PreviewVerificationInfo | null;
   previewOwnerConversationId: string | null;
-  fileChanges: { path: string; event: string; timestamp: number }[];
+  fileChanges: { path: string; event: string; timestamp: number; sequence: number }[];
   fileTreeVersion: number;
   fileTreeRevealRequests: FileTreeRevealRequest[];
   mcpServers: McpServerStatus[];

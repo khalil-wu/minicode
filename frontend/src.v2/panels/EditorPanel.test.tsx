@@ -4,7 +4,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fsReadFileInfo, fsSearchFiles, isDesktop } from "../desktop/runtime";
-import { compareWriteWorkspaceFile, searchWorkspaceFiles } from "../protocol/workspace";
+import { compareWriteWorkspaceFile, readWorkspaceFile, searchWorkspaceFiles } from "../protocol/workspace";
+import { pushToast } from "../overlays/ToastContainer";
 import { useAppStore } from "../stores";
 import { EditorPanel } from "./EditorPanel";
 
@@ -65,10 +66,13 @@ vi.mock("../protocol/workspace", () => ({
   readWorkspaceFile: vi.fn(),
   searchWorkspaceFiles: vi.fn(),
 }));
+vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 describe("EditorPanel", () => {
   beforeEach(() => {
     vi.mocked(isDesktop).mockReturnValue(false);
+    vi.mocked(fsSearchFiles).mockResolvedValue([]);
+    vi.mocked(searchWorkspaceFiles).mockResolvedValue([]);
     useAppStore.setState({
       themeMode: "dark",
       workingDirectory: "C:\\projects\\demo",
@@ -87,6 +91,23 @@ describe("EditorPanel", () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+  });
+
+  it("reports basename resolution failures and can open the file when the service recovers", async () => {
+    vi.mocked(searchWorkspaceFiles).mockRejectedValueOnce(new Error("Search service unavailable"));
+    useAppStore.setState({ editorOpenRequests: [{ id: "failed-open", path: "README.md" }] });
+    render(<EditorPanel />);
+
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith("无法定位文件：Search service unavailable", "error", 5000));
+    expect(useAppStore.getState().editorTabs).toHaveLength(0);
+    vi.mocked(searchWorkspaceFiles).mockResolvedValueOnce([{ path: "docs/README.md", name: "README.md", score: 1 }]);
+    vi.mocked(readWorkspaceFile).mockResolvedValueOnce({ path: "docs/README.md", content: "recovered file", content_hash: "recovered-hash" });
+
+    act(() => useAppStore.getState().openEditorFile("README.md"));
+
+    const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    expect(editor.value).toBe("recovered file");
+    expect(useAppStore.getState().activeTabPath).toBe("docs/README.md");
   });
 
   it("uses localized guidance when Code mode has no open file", () => {

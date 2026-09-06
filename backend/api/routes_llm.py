@@ -181,15 +181,9 @@ async def refresh_llm_models_api(request: LLMSettingsUpdateRequest) -> LLMModels
             request,
             fetch_anthropic_models=_fetch_anthropic_models,
             fetch_openai_models=_fetch_openai_compatible_models,
-            config_change_hook=run_config_change_hook,
         )
     except (SettingsError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    config = result.pop("_config", None)
-    if config is not None:
-        if _state.bootstrap is not None:
-            _state.bootstrap.config = config
-        _state.invalidate_status_cache()
     return LLMModelsRefreshResponse(**result)
 
 

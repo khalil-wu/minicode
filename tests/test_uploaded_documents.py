@@ -5,6 +5,7 @@ import base64
 import io
 import zipfile
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from backend.agent.context import ContextBuilder
 from backend.agent.attachment_policy import build_attachment_input_plan
@@ -102,6 +103,15 @@ def test_ingest_zip_archive_summarizes_entries_and_indexes_text_members() -> Non
 def test_ingest_pptx_extracts_slide_text_without_optional_dependencies() -> None:
     presentation = io.BytesIO()
     with zipfile.ZipFile(presentation, "w") as zf:
+        zf.writestr("ppt/presentation.xml", '''
+            <p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst>
+            </p:presentation>''')
+        zf.writestr("ppt/_rels/presentation.xml.rels", '''
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Target="slides/slide1.xml"/>
+            </Relationships>''')
         zf.writestr(
             "[Content_Types].xml",
             """<?xml version="1.0" encoding="UTF-8"?>
@@ -229,8 +239,8 @@ def test_ingest_xlsx_extracts_sheet_cells_into_readable_text() -> None:
     assert result.attachment.kind == "document"
     assert result.attachment.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     assert "Sheet1" in result.full_text
-    assert "Field | Description" in result.full_text
-    assert "user_id | Primary key" in result.full_text
+    assert "A1: Field | B1: Description" in result.full_text
+    assert "A2: user_id | B2: Primary key" in result.full_text
 
 
 def test_ingest_image_keeps_native_multimodal_data() -> None:
@@ -505,7 +515,7 @@ def test_native_pdf_page_count_is_capped_at_provider_limit() -> None:
 def test_pdf_parse_error_is_not_exposed_as_document_text(monkeypatch) -> None:
     monkeypatch.setattr(
         "backend.documents.service._parse_pdf",
-        lambda path: {"title": "Broken", "full_text": "错误: PDF 解析失败。缺少 pymupdf", "format": "pdf", "pages": 0},
+        Mock(side_effect=ImportError("Missing pymupdf")),
     )
     pdf_bytes = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
 
@@ -521,7 +531,8 @@ def test_pdf_parse_error_is_not_exposed_as_document_text(monkeypatch) -> None:
     user_message = messages[-1]
 
     assert "indexed_chunks" not in result.attachment.to_dict()
-    assert result.attachment.parse_error.startswith("错误:")
+    assert "Missing pymupdf" in result.attachment.parse_error
+    assert "Missing pymupdf" not in result.full_text
     assert "text extraction failed" in user_message.content
     assert "instead of inferring from the title" in user_message.content
 
@@ -529,7 +540,7 @@ def test_pdf_parse_error_is_not_exposed_as_document_text(monkeypatch) -> None:
 def test_pdf_parse_error_blocks_title_only_summary_when_native_pdf_is_unavailable(monkeypatch) -> None:
     monkeypatch.setattr(
         "backend.documents.service._parse_pdf",
-        lambda path: {"title": "Broken", "full_text": "错误: PDF 解析失败。缺少 pymupdf", "format": "pdf", "pages": 0},
+        Mock(side_effect=ImportError("Missing pymupdf")),
     )
     pdf_bytes = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
 

@@ -4,6 +4,7 @@ import hashlib
 import io
 import logging
 import os
+import posixpath
 import re
 import struct
 import tempfile
@@ -15,7 +16,7 @@ from typing import Any
 from defusedxml import ElementTree
 
 from backend.artifact.store import ArtifactStore
-from backend.documents.parsers import _parse_docx, _parse_pdf
+from backend.documents.parsers import PDFPageLimitError, _parse_docx, _parse_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ class AttachmentRecord:
     summary: str = ""
     data: str = ""
     parse_error: str = ""
+    parse_warning: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d = {
@@ -80,6 +82,8 @@ class AttachmentRecord:
             d["data"] = self.data
         if self.parse_error:
             d["parse_error"] = self.parse_error
+        if self.parse_warning:
+            d["parse_warning"] = self.parse_warning
         return d
 
 
@@ -179,9 +183,9 @@ def ingest_uploaded_document(
             parse_error,
         )
 
-    native_data = ""
-    if _should_keep_native_attachment(parsed):
-        native_data = _b64.b64encode(raw_content).decode("ascii")
+    # Original storage is independent of the active model's input formats.
+    # Attachment policy selects the bytes that may enter a provider request.
+    native_data = _b64.b64encode(raw_content).decode("ascii")
 
     doc_id = _build_doc_id(safe_name, raw_content)
     artifact_id = artifact_store.save(
@@ -204,6 +208,7 @@ def ingest_uploaded_document(
         summary=str(parsed.get("summary") or ""),
         data=native_data,
         parse_error=parse_error,
+        parse_warning=str(parsed.get("parse_warning") or ""),
     )
 
     return UploadedDocument(
@@ -226,13 +231,6 @@ def parse_document_preview(file_name: str, raw_content: bytes) -> dict[str, Any]
     full_text = str(parsed.get("full_text") or "").strip()
     parse_error = str(parsed.get("parse_error") or "").strip()
 
-    # Some legacy parser adapters return a localized ``错误:`` line as their
-    # content. Never project that diagnostic into model context or a copyable
-    # file body.
-    if _is_parse_error_text(full_text):
-        parse_error = parse_error or full_text
-        full_text = ""
-
     if not full_text:
         media_type = str(parsed.get("media_type") or _guess_media_type(file_name))
         kind = str(parsed.get("kind") or "document")
@@ -243,10 +241,6 @@ def parse_document_preview(file_name: str, raw_content: bytes) -> dict[str, Any]
     if parse_error:
         parsed["parse_error"] = parse_error
     return parsed
-
-
-def _is_parse_error_text(text: str) -> bool:
-    return str(text or "").strip().lower().startswith(("error:", "错误:", "閿欒:"))
 
 
 def _build_doc_id(file_name: str, raw_content: bytes) -> str:
@@ -275,13 +269,6 @@ def _parse_uploaded_content(file_name: str, raw_content: bytes, depth: int = 0) 
             return _parse_binary_unknown_document(
                 file_name=file_name, raw_content=raw_content
             )
-        # cc caps PDF ingestion (apiLimits: 10 inline / 20 per read / 100 API);
-        # a bound here keeps 500-page uploads from flooding context.
-        pages = _count_pdf_pages_bytes(raw_content)
-        if pages > 100:
-            raise ValueError(
-                f"PDF has {pages} pages; the limit is 100 (cc apiLimits contract)"
-            )
         return _parse_binary_document(file_name=file_name, raw_content=raw_content)
     if suffix == ".docx":
         return _parse_binary_document(file_name=file_name, raw_content=raw_content)
@@ -297,13 +284,6 @@ def _parse_uploaded_content(file_name: str, raw_content: bytes, depth: int = 0) 
     if _looks_like_text(raw_content):
         return _parse_text_document(file_name=file_name, raw_content=raw_content)
     return _parse_binary_unknown_document(file_name=file_name, raw_content=raw_content)
-
-
-def _should_keep_native_attachment(parsed: dict[str, Any]) -> bool:
-    media_type = str(parsed.get("media_type") or "")
-    if str(parsed.get("kind")) == "image":
-        return True
-    return media_type == "application/pdf"
 
 
 def _cleanup_temp_file(path: str, attempts: int = 8) -> None:
@@ -330,10 +310,13 @@ def _parse_binary_document(file_name: str, raw_content: bytes) -> dict[str, Any]
 
         try:
             parsed = _parse_pdf(temp_path) if suffix == ".pdf" else _parse_docx(temp_path)
+        except PDFPageLimitError:
+            raise
         except Exception as exc:
             logger.info("Could not extract text from %s: %s", file_name, exc)
             return _parser_failure_document(file_name, exc)
         parsed["kind"] = "document"
+        parsed["title"] = Path(file_name).stem
         parsed["media_type"] = (
             "application/pdf"
             if suffix == ".pdf"
@@ -453,15 +436,14 @@ def _parse_pptx_presentation(file_name: str, raw_content: bytes) -> dict[str, An
     try:
         with zipfile.ZipFile(io.BytesIO(raw_content)) as archive:
             _validate_zip_archive(archive)
-            slide_names = sorted(
-                name for name in archive.namelist() if name.startswith("ppt/slides/slide") and name.endswith(".xml")
-            )
+            slide_names = [part for _, part in _read_openxml_parts(archive, "ppt/presentation.xml", "sldId")]
             slides: list[str] = []
             failed_slides: list[str] = []
             for index, slide_name in enumerate(slide_names, start=1):
                 try:
                     xml_bytes = archive.read(slide_name)
                 except KeyError:
+                    failed_slides.append(f"slide {index}")
                     continue
                 text = _extract_text_from_openxml_slide(xml_bytes)
                 if text is None:
@@ -477,14 +459,14 @@ def _parse_pptx_presentation(file_name: str, raw_content: bytes) -> dict[str, An
 
     return {
         "title": Path(file_name).stem,
-        "full_text": full_text or "Presentation uploaded with no extractable slide text.",
+        "full_text": full_text,
         "format": "pptx",
-        "pages": max(1, len(slide_names) if "slide_names" in locals() else 1),
+        "pages": len(slide_names),
         "kind": "presentation",
         "media_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "summary": "Presentation deck",
         **(
-            {"parse_error": f"Could not parse text from {', '.join(failed_slides)}; other slides remain available."}
+            {"parse_warning": f"Could not parse text from {', '.join(failed_slides)}; other slides remain available."}
             if failed_slides
             else {}
         ),
@@ -514,6 +496,7 @@ def _parse_zip_archive(file_name: str, raw_content: bytes, depth: int = 0) -> di
             "kind": "archive",
             "media_type": "application/zip",
             "summary": "Archive file",
+            "parse_warning": "Nested archive contents were not extracted beyond two archive levels.",
         }
 
     try:
@@ -521,12 +504,19 @@ def _parse_zip_archive(file_name: str, raw_content: bytes, depth: int = 0) -> di
             _validate_zip_archive(archive)
             file_entries = [info for info in archive.infolist() if not info.is_dir()]
             preview_names = [info.filename for info in file_entries[:20]]
-            sections = ["Archive contents:", *[f"- {name}" for name in preview_names]]
+            sections = [
+                f"Archive contents (preview: {len(preview_names)} of {len(file_entries)} entries; "
+                "text from at most 12 members under 1 MB, up to 6,000 characters each):",
+                *[f"- {name}" for name in preview_names],
+            ]
             parsed_members = 0
 
             parse_warnings: list[str] = []
+            if len(file_entries) > 12:
+                parse_warnings.append(f"Only the first 12 of {len(file_entries)} members were considered for text extraction")
             for info in file_entries[:12]:
                 if info.file_size > 1_000_000:
+                    parse_warnings.append(f"{info.filename}: text extraction skipped because the member exceeds 1 MB")
                     continue
                 member_bytes = archive.read(info.filename)
                 if not _supports_embedded_parse(info.filename):
@@ -541,11 +531,17 @@ def _parse_zip_archive(file_name: str, raw_content: bytes, depth: int = 0) -> di
                 member_error = str(parsed.get("parse_error") or "").strip()
                 if member_error:
                     parse_warnings.append(f"{info.filename}: {member_error}")
+                    continue
+                member_warning = str(parsed.get("parse_warning") or "").strip()
+                if member_warning:
+                    parse_warnings.append(f"{info.filename}: {member_warning}")
                 member_text = str(parsed.get("full_text", "")).strip()
-                if not member_text or _is_parse_error_text(member_text):
+                if not member_text:
                     continue
                 parsed_members += 1
                 sections.append(f"\n## {info.filename}\n{member_text[:6000]}")
+                if len(member_text) > 6000:
+                    parse_warnings.append(f"{info.filename}: extracted text limited to 6,000 of {len(member_text):,} characters")
 
             full_text = "\n".join(sections).strip()
     except AttachmentSecurityError:
@@ -558,14 +554,14 @@ def _parse_zip_archive(file_name: str, raw_content: bytes, depth: int = 0) -> di
         "title": Path(file_name).stem,
         "full_text": full_text or f"Archive contents unavailable for {file_name}",
         "format": "zip",
-        "pages": max(1, len(file_entries) if "file_entries" in locals() else 1),
+        "pages": len(file_entries),
         "kind": "archive",
         "media_type": "application/zip",
-        "summary": f"Archive with {len(file_entries)} files" if "file_entries" in locals() else "Archive file",
-        "parsed_members": parsed_members if "parsed_members" in locals() else 0,
+        "summary": f"Archive with {len(file_entries)} files",
+        "parsed_members": parsed_members,
         **(
-            {"parse_error": f"Some archive members could not be fully parsed: {'; '.join(parse_warnings[:8])}"}
-            if "parse_warnings" in locals() and parse_warnings
+            {"parse_warning": f"Some archive members could not be fully parsed: {'; '.join(parse_warnings[:8])}"}
+            if parse_warnings
             else {}
         ),
     }
@@ -663,10 +659,7 @@ def _read_xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:
     except KeyError:
         return []
 
-    try:
-        root = ElementTree.fromstring(xml_bytes)
-    except ElementTree.ParseError:
-        return []
+    root = ElementTree.fromstring(xml_bytes)
 
     strings: list[str] = []
     for item in root.iter():
@@ -677,62 +670,38 @@ def _read_xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:
 
 
 def _read_xlsx_sheets(archive: zipfile.ZipFile, shared_strings: list[str]) -> list[str]:
-    workbook_names = _read_xlsx_sheet_map(archive)
-    if not workbook_names:
-        workbook_names = [
-            (f"Sheet {index + 1}", name)
-            for index, name in enumerate(
-                sorted(
-                    entry.filename
-                    for entry in archive.infolist()
-                    if entry.filename.startswith("xl/worksheets/") and entry.filename.endswith(".xml")
-                )
-            )
-        ]
-
+    workbook_names = _read_openxml_parts(archive, "xl/workbook.xml", "sheet")
     sheets: list[str] = []
     for sheet_name, sheet_path in workbook_names:
-        try:
-            xml_bytes = archive.read(sheet_path)
-        except KeyError:
-            continue
+        xml_bytes = archive.read(sheet_path)
         rows = _extract_xlsx_rows(xml_bytes, shared_strings)
         if not rows:
             continue
         lines = [f"## Sheet: {sheet_name}"]
-        for row in rows[:200]:
-            row_values = [value for value in row if value]
-            if row_values:
-                lines.append(" | ".join(row_values[:20]))
-        if len(lines) > 1:
-            sheets.append("\n".join(lines))
+        lines.extend(rows)
+        sheets.append("\n".join(lines))
     return sheets
 
 
-def _read_xlsx_sheet_map(archive: zipfile.ZipFile) -> list[tuple[str, str]]:
-    try:
-        workbook_xml = archive.read("xl/workbook.xml")
-        rels_xml = archive.read("xl/_rels/workbook.xml.rels")
-    except KeyError:
-        return []
-
-    try:
-        workbook_root = ElementTree.fromstring(workbook_xml)
-        rels_root = ElementTree.fromstring(rels_xml)
-    except ElementTree.ParseError:
-        return []
+def _read_openxml_parts(archive: zipfile.ZipFile, manifest: str, element: str) -> list[tuple[str, str]]:
+    """Resolve ordered OPC relationships for workbooks and slide decks."""
+    directory, name = posixpath.split(manifest)
+    root = ElementTree.fromstring(archive.read(manifest))
+    rels_root = ElementTree.fromstring(archive.read(f"{directory}/_rels/{name}.rels"))
 
     relationships: dict[str, str] = {}
     for rel in rels_root.iter():
         if rel.tag.endswith("}Relationship"):
             rel_id = rel.attrib.get("Id", "").strip()
             target = rel.attrib.get("Target", "").strip()
-            if rel_id and target:
-                relationships[rel_id] = f"xl/{target.lstrip('/')}"
+            if rel_id and target and rel.attrib.get("TargetMode") != "External":
+                relationships[rel_id] = posixpath.normpath(
+                    target.lstrip("/") if target.startswith("/") else posixpath.join(directory, target)
+                )
 
     sheets: list[tuple[str, str]] = []
-    for sheet in workbook_root.iter():
-        if not sheet.tag.endswith("}sheet"):
+    for sheet in root.iter():
+        if not sheet.tag.endswith(f"}}{element}"):
             continue
         name = sheet.attrib.get("name", "Sheet").strip() or "Sheet"
         rel_id = ""
@@ -740,47 +709,59 @@ def _read_xlsx_sheet_map(archive: zipfile.ZipFile) -> list[tuple[str, str]]:
             if key.endswith("}id"):
                 rel_id = value.strip()
                 break
-        target = relationships.get(rel_id)
-        if target:
-            sheets.append((name, target))
+        sheets.append((name, relationships[rel_id]))
     return sheets
 
 
-def _extract_xlsx_rows(xml_bytes: bytes, shared_strings: list[str]) -> list[list[str]]:
-    try:
-        root = ElementTree.fromstring(xml_bytes)
-    except ElementTree.ParseError:
-        return []
+def _extract_xlsx_rows(xml_bytes: bytes, shared_strings: list[str]) -> list[str]:
+    root = ElementTree.fromstring(xml_bytes)
 
-    rows: list[list[str]] = []
+    rows: list[str] = []
     for row in root.iter():
         if not row.tag.endswith("}row"):
             continue
         values: list[str] = []
+        column = 0
         for cell in row:
             if not cell.tag.endswith("}c"):
                 continue
             cell_type = cell.attrib.get("t", "")
+            reference = cell.attrib.get("r", "")
+            if reference:
+                letters = re.match(r"[A-Za-z]+", reference).group()
+                column = 0
+                for letter in letters.upper():
+                    column = column * 26 + ord(letter) - ord("A") + 1
+            else:
+                column += 1
+                number = column
+                letters = ""
+                while number:
+                    number, digit = divmod(number - 1, 26)
+                    letters = chr(ord("A") + digit) + letters
+                reference = f"{letters}{row.attrib.get('r', len(rows) + 1)}"
             value = ""
             if cell_type == "inlineStr":
                 texts = [node.text or "" for node in cell.iter() if node.tag.endswith("}t") and node.text]
                 value = "".join(texts).strip()
             else:
                 raw_value = ""
+                formula = ""
                 for node in cell:
                     if node.tag.endswith("}v") and node.text:
                         raw_value = node.text.strip()
-                        break
+                    elif node.tag.endswith("}f") and node.text:
+                        formula = node.text.strip()
                 if raw_value:
                     if cell_type == "s":
-                        try:
-                            value = shared_strings[int(raw_value)]
-                        except (ValueError, IndexError):
-                            value = raw_value
+                        value = shared_strings[int(raw_value)]
                     else:
                         value = raw_value
-            values.append(value)
-        rows.append(values)
+                elif formula:
+                    value = f"={formula}"
+            values.append(f"{reference}: {value}")
+        if values:
+            rows.append(" | ".join(values))
     return rows
 
 
@@ -840,7 +821,7 @@ def _parser_failure_document(file_name: str, error: Exception) -> dict[str, Any]
         "title": Path(file_name).stem or Path(file_name).name,
         "full_text": _unavailable_text_fallback(file_name, media_type, kind),
         "format": suffix.lstrip(".") or "binary",
-        "pages": 1,
+        "pages": 0,
         "kind": kind,
         "media_type": media_type,
         "summary": summary,
@@ -854,16 +835,6 @@ def _unavailable_text_fallback(file_name: str, media_type: str, kind: str) -> st
         f"Media type: {media_type}\n"
         "No extractable text is available. The original attachment is preserved."
     )
-
-
-def _count_pdf_pages_bytes(raw_content: bytes) -> int:
-    """Count /Type /Page markers without spawning a parser (bounded scan)."""
-    import re as _re
-
-    if not raw_content:
-        return 0
-    sample = raw_content[: 8 * 1024 * 1024]
-    return len(_re.findall(rb"/Type\s*/Page[^s]", sample))
 
 
 def _guess_media_type(file_name: str) -> str:

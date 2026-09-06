@@ -410,6 +410,7 @@ export interface AttachmentPreviewResponse {
   size_bytes: number;
   summary: string;
   parse_error: string;
+  parse_warning?: string;
   content: string;
   content_chars: number;
   truncated: boolean;
@@ -437,6 +438,25 @@ export const fetchAttachmentPreview = async (
     throw new ApiError(res.status, errorMessageFromResponseText(text, res.statusText));
   }
   return (await res.json()) as AttachmentPreviewResponse;
+};
+
+export const fetchAttachmentOriginal = async (
+  sessionId: string,
+  conversationId: string,
+  artifactId: string,
+): Promise<Blob> => {
+  const url = new URL(`${apiBase()}/api/attachments/raw`);
+  url.searchParams.set("session_id", sessionId);
+  url.searchParams.set("conversation_id", conversationId);
+  url.searchParams.set("artifact_id", artifactId);
+  url.searchParams.set("download", "true");
+  const response = await fetchWithTimeout(url.toString(), { headers: authHeaders() }, {
+    timeoutMessage: "原文件下载超时，请重试。",
+  });
+  if (!response.ok) {
+    throw new ApiError(response.status, errorMessageFromResponseText(await response.text(), response.statusText));
+  }
+  return response.blob();
 };
 
 export type AttachmentUploadPhase = "uploading" | "processing";

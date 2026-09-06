@@ -14,7 +14,12 @@ from threading import Lock
 from typing import Any
 
 from backend.artifact.store import ArtifactStore
-from backend.atomic_io import file_mutation_locks
+from backend.atomic_io import (
+    atomic_write_bytes,
+    file_mutation_locks,
+    normalize_text_newlines,
+    preserve_text_line_endings,
+)
 from backend.permissions.context import ToolExecutionContext
 from backend.security.sensitive_files import is_protected_write_path
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
@@ -24,7 +29,6 @@ from backend.workspace.path_filters import is_windows_reserved_path
 
 
 from backend.tools.file_tools_common import (
-    _atomic_write_text,
     _emit_write_diff,
     _generate_limited_unified_diff,
     _path_arg,
@@ -185,6 +189,69 @@ def _closest_edit_excerpt(content: str, old_string: str) -> str:
         f"Closest current file excerpt (lines {excerpt_start + 1}-{excerpt_end}):\n"
         f"{excerpt}\n"
         "Retry once with a smaller old_string copied exactly from this excerpt."
+    )
+
+
+def prepare_edit_content(
+    content: str,
+    old_string: str,
+    new_string: str,
+    *,
+    file_path: str,
+    replace_all: bool | str = False,
+) -> tuple[str, int]:
+    """Compute the same replacement for approval and execution."""
+    original_content = content
+    content = normalize_text_newlines(content)
+    old_string = normalize_text_newlines(old_string)
+    new_string = normalize_text_newlines(new_string)
+    bom = "\ufeff" if content.startswith("\ufeff") else ""
+    match_content = content[len(bom):]
+    if isinstance(replace_all, str):
+        replace_all = replace_all.strip().lower() in {"true", "1", "yes", "y", "on"}
+
+    count = match_content.count(old_string)
+    normalized_matches: list[tuple[int, int]] = []
+    if count == 0:
+        normalized_matches = _normalized_quote_matches(match_content, old_string)
+        if not normalized_matches:
+            excerpt = _closest_edit_excerpt(match_content, old_string)
+            diagnostic = f"\n{excerpt}" if excerpt else ""
+            raise ValueError(
+                f"old_string was not found in {file_path}. "
+                "Make sure whitespace and line endings match exactly "
+                "(watch for smart/curly quotes vs straight quotes). "
+                f"Current content_hash: {content_hash(content)}."
+                f"{diagnostic}"
+            )
+        count = len(normalized_matches)
+    if not replace_all and count > 1:
+        raise ValueError(
+            f"old_string matched {count} places in {file_path}. "
+            "Provide more surrounding context so it matches exactly once, or use replace_all=true."
+        )
+
+    if normalized_matches:
+        replacement_spans = normalized_matches if replace_all else normalized_matches[:1]
+        chunks: list[str] = []
+        cursor = 0
+        for start, length in replacement_spans:
+            chunks.append(match_content[cursor:start])
+            actual_old_string = match_content[start : start + length]
+            chunks.append(_preserve_quote_style(old_string, actual_old_string, new_string))
+            cursor = start + length
+        chunks.append(match_content[cursor:])
+        new_content = bom + "".join(chunks)
+    else:
+        new_content = bom + match_content.replace(old_string, new_string, -1 if replace_all else 1)
+
+    if new_content == content:
+        raise ValueError(
+            f"No changes made to {file_path}: the replacement produced identical content."
+        )
+    return (
+        preserve_text_line_endings(new_content, original_content.encode("utf-8")),
+        count if replace_all else 1,
     )
 
 
@@ -394,98 +461,32 @@ class EditFileTool(BaseTool):
             if is_current_plan_file(path, context):
                 return self._error_result(f"Refusing to edit a plan-file symlink: {file_path}")
 
-        ok, message = _validate_expected_hash(path, args.get("expected_hash"))
-        if not ok:
-            return self._error_result(message)
-
         try:
-            content = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            return self._error_result(f"Cannot read binary or non-UTF-8 file: {file_path}")
-
-        # Pi strips an invisible UTF-8 BOM before matching because the model
-        # will not include it in old_string, then restores it on write. Keep
-        # the raw content for hashes/diffs while performing all match offsets
-        # against the BOM-free body.
-        bom = "\ufeff" if content.startswith("\ufeff") else ""
-        match_content = content[len(bom):]
-
-        # Determine replacement mode.
-        replace_all = args.get("replace_all", False)
-        if isinstance(replace_all, str):
-            replace_all = replace_all.strip().lower() in {"true", "1", "yes", "y", "on"}
-
-        count = match_content.count(old_string)
-        normalized_matches: list[tuple[int, int]] = []  # (start, length) in original content
-        if count == 0:
-            # Fallback (cc findActualString parity): tolerate smart/curly vs
-            # straight quote differences, common in docs/markdown and macOS
-            # auto-correct. Preserve each actual occurrence's quote style.
-            normalized_matches = _normalized_quote_matches(match_content, old_string)
-            if normalized_matches and not replace_all and len(normalized_matches) > 1:
-                return self._error_result(
-                    f"old_string matched {len(normalized_matches)} places in {file_path}. "
-                    "Provide more surrounding context so it matches exactly once, or use replace_all=true."
-                )
-            if not normalized_matches:
-                excerpt = _closest_edit_excerpt(match_content, old_string)
-                diagnostic = f"\n{excerpt}" if excerpt else ""
-                return self._error_result(
-                    f"old_string was not found in {file_path}. "
-                    "Make sure whitespace and line endings match exactly "
-                    "(watch for smart/curly quotes vs straight quotes). "
-                    f"Current content_hash: {content_hash(content)}."
-                    f"{diagnostic}"
-                )
-        elif not replace_all and count > 1:
-            return self._error_result(
-                f"old_string matched {count} places in {file_path}. "
-                "Provide more surrounding context so it matches exactly once, or use replace_all=true."
-            )
-
-        # Perform the replacement. Quote-normalized matches are assembled from
-        # original slices so CRLF/BOM/typography outside the target stays
-        # untouched, including when replace_all is requested.
-        if normalized_matches:
-            replacement_spans = normalized_matches if replace_all else normalized_matches[:1]
-            chunks: list[str] = []
-            cursor = 0
-            for start, length in replacement_spans:
-                chunks.append(match_content[cursor:start])
-                actual_old_string = match_content[start : start + length]
-                chunks.append(_preserve_quote_style(old_string, actual_old_string, new_string))
-                cursor = start + length
-            chunks.append(match_content[cursor:])
-            new_content = bom + "".join(chunks)
-        elif replace_all:
-            new_content = bom + match_content.replace(old_string, new_string)
-        else:
-            new_content = bom + match_content.replace(old_string, new_string, 1)
-
-        if new_content == content:
-            return self._error_result(
-                f"No changes made to {file_path}: the replacement produced identical content."
-            )
-
-        try:
-            # Recheck freshness while holding the process-wide same-file queue.
-            # The first check protects the review flow; this second check makes
-            # the check-and-replace commit indivisible across sessions and the
-            # workspace editor API (Pi file-mutation-queue / CC critical-section
-            # semantics). No await is allowed before this lock is released.
+            # Read, prepare, and publish the reviewed edit in the same-file queue.
             with file_mutation_locks([path]):
                 ok, message = _validate_expected_hash(path, args.get("expected_hash"))
                 if not ok:
                     return self._error_result(message)
-                _atomic_write_text(path, new_content)
+                content = path.read_bytes().decode("utf-8")
+                new_content, replaced_count = prepare_edit_content(
+                    content, old_string, new_string,
+                    file_path=file_path, replace_all=args.get("replace_all", False),
+                )
+                atomic_write_bytes(path, new_content.encode("utf-8"))
 
                 # Invalidate file caches before another queued mutation can
                 # observe the newly committed file through a stale cache.
                 cache = get_global_file_cache()
                 cache.invalidate(path)
-                invalidate_workspace_file_caches()
+                invalidate_workspace_file_caches(file_tree_changed=path.name == ".gitignore")
+        except UnicodeDecodeError:
+            return self._error_result(f"Cannot read binary or non-UTF-8 file: {file_path}")
+        except ValueError as exc:
+            return self._error_result(str(exc))
         except PermissionError:
             return self._error_result(f"No permission to write file: {file_path}")
+        except OSError as exc:
+            return self._error_result(f"Failed to edit file: {exc}")
 
         from backend.agent.plans import is_current_plan_file
         if not is_current_plan_file(path, context):
@@ -497,9 +498,6 @@ class EditFileTool(BaseTool):
                 display_path=_workspace_display_path(path, file_path, context),
             )
 
-        replaced_count = (
-            len(normalized_matches) if normalized_matches and replace_all else count if replace_all else 1
-        )
         _, additions, deletions, _ = _generate_limited_unified_diff(
             content,
             new_content,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -291,3 +292,58 @@ def test_lsp_parsers_skip_malformed_external_positions_and_symbols() -> None:
 
     symbols = asyncio.run(scenario())
     assert [symbol.name for symbol in symbols] == ["good"]
+
+
+@pytest.mark.parametrize("server_id,method", [
+    (1, "workspace/configuration"),
+    ("server-request", "workspace/configuration"),
+    (1, "workspace/unsupported"),
+])
+def test_lsp_server_requests_do_not_consume_client_response_ids(server_id, method) -> None:
+    async def scenario() -> None:
+        client = LSPClient("unused", [], ".")
+        client._process = SimpleNamespace(returncode=None)
+        stream = asyncio.StreamReader()
+        client._stdout = stream
+        sent: list[dict] = []
+        written = asyncio.Event()
+
+        class Writer:
+            def write(self, data: bytes) -> None:
+                header, body = data.split(b"\r\n\r\n", 1)
+                assert int(header.split(b":", 1)[1]) == len(body)
+                sent.append(json.loads(body))
+                written.set()
+
+            async def drain(self) -> None:
+                pass
+
+        client._stdin = Writer()
+        read_task = asyncio.create_task(client._read_loop())
+        query = asyncio.create_task(client._send_request("textDocument/hover", {}))
+        await written.wait()
+        query_id = sent[0]["id"]
+        actual_result = {"contents": "Actual type information"}
+        for message in [
+            {"jsonrpc": "2.0", "method": "window/logMessage", "params": {"type": 3, "message": "Indexing"}},
+            {"jsonrpc": "2.0", "id": server_id, "method": method, "params": {"items": [{"section": "python"}, {"section": "typescript"}]}},
+            {"jsonrpc": "2.0", "id": query_id, "result": actual_result},
+        ]:
+            body = json.dumps(message).encode("utf-8")
+            frame = f"Content-Length: {len(body)}\r\n\r\n".encode() + body
+            stream.feed_data(frame[:17])
+            await asyncio.sleep(0)
+            stream.feed_data(frame[17:])
+        stream.feed_eof()
+
+        assert await query == actual_result
+        await read_task
+        assert len(sent) == 2
+        assert sent[1]["id"] == server_id
+        if method == "workspace/configuration":
+            assert sent[1]["result"] == [None, None]
+        else:
+            assert sent[1]["error"]["code"] == -32601
+        assert client._pending == {}
+
+    asyncio.run(scenario())

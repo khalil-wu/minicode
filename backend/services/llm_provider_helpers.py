@@ -1,4 +1,4 @@
-"""Pure helper functions for LLM model discovery, normalization, and persistence."""
+"""Helper functions for LLM model discovery and connection checks."""
 
 from __future__ import annotations
 
@@ -10,12 +10,6 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from backend.config import (
-    get_provider_model_metadata,
-    get_llm_settings_payload,
-    load_config,
-    save_llm_settings,
-)
 from backend.secret_redaction import redact_secrets
 from backend.llm.capabilities import is_gpt_image_model
 from backend.llm.proxy_policy import provider_httpx_proxy_kwargs
@@ -332,43 +326,6 @@ def _select_refreshed_model(provider_id: str, models: list[str], current_model: 
 def _manual_models_from_payload(payload: Any) -> list[str]:
     available = getattr(payload, "available_models", [])
     return [model.strip() for model in available if isinstance(model, str) and model.strip()]
-
-
-def _persist_refreshed_models(
-    provider: str,
-    models: list[str],
-    current_model: str,
-    model_metadata: dict[str, dict[str, Any]] | None = None,
-) -> Any | None:
-    if not models:
-        return None
-
-    payload = get_llm_settings_payload()
-    provider_key = "custom" if provider == "custom" else provider
-    section = payload.get(provider_key)
-    if not isinstance(section, dict):
-        return None
-
-    next_section = dict(section)
-    next_section["available_models"] = _merge_models(models, current_model)
-    next_section["models_source"] = "live"
-    if current_model:
-        next_section["model"] = current_model
-    # A successful live refresh replaces the capability catalog.  An empty
-    # catalog is meaningful: the provider returned models but did not declare
-    # context/reasoning metadata, so stale capabilities must be cleared.
-    next_section["model_metadata"] = dict(model_metadata or {})
-    selected_metadata = get_provider_model_metadata(next_section, current_model)
-    next_section["reasoning_effort_levels"] = selected_metadata[
-        "reasoning_effort_levels"
-    ]
-
-    # Model discovery edits one saved profile; it must not activate that
-    # provider or replay every effective provider section. Replaying the full
-    # settings payload used to turn environment-only endpoints (for example a
-    # temporary localhost Anthropic proxy) into unrelated saved history cards.
-    save_llm_settings({provider_key: next_section})
-    return load_config()
 
 
 # ── HTTP model fetching ──

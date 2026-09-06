@@ -7,6 +7,14 @@ export const handleCommandCatalogEvent = (e: ServerEvent): boolean => {
   const s = useAppStore.getState();
   switch (e.type) {
     case "skills.list": {
+      const owner = typeof e.conversation_id === "string"
+        ? e.conversation_id.trim() || null
+        : null;
+      const activeConversationId = String(s.conversationId || "").trim() || null;
+      // Skill discovery is workspace/session scoped. An explicit owner keeps a
+      // response from a previous conversation from replacing the active picker;
+      // legacy payloads without an owner remain accepted for compatibility.
+      if (owner && owner !== activeConversationId) return true;
       if (e.skills) {
         s.setAvailableSkills(normalizeSkillList(e.skills));
       }

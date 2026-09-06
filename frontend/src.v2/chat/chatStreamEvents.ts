@@ -71,12 +71,17 @@ const clearMissingWorkspaceBinding = (conversationId?: string) => {
   if (!owner) return;
   useAppStore.setState((state) => {
     const targetId = owner;
+    const ownsActiveWorkspace = state.conversationId === targetId;
     return {
-      workingDirectory: "",
-      workspaceGit: null,
-      fileTreeVersion: state.fileTreeVersion + 1,
+      ...(ownsActiveWorkspace
+        ? {
+            workingDirectory: "",
+            workspaceGit: null,
+            fileTreeVersion: state.fileTreeVersion + 1,
+          }
+        : {}),
       conversations: state.conversations.map((conversation) =>
-        !targetId || conversation.id === targetId
+        conversation.id === targetId
           ? { ...conversation, workspaceRoot: "", worktreePath: "", gitIsolated: false }
           : conversation,
       ),

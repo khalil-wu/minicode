@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from backend.agent.message import AgentEvent
 from backend.artifact.store import ArtifactStore
 from backend.bootstrap.app import AppBootstrap
-from backend.config import PROJECT_ROOT, load_config
+from backend.config import DATA_ROOT, PROJECT_ROOT, load_config
 from backend.runtime_env import ensure_utf8_console_logging
 from backend.version import __version__
 from backend.llm.model_registry import create_session_llm as _create_session_llm
@@ -273,6 +273,14 @@ def _websocket_origin_allowed(websocket: WebSocket) -> bool:
         # Windows. Keep it behind the same runtime-token check as packaged
         # Electron instead of rejecting an otherwise authenticated desktop.
         return _is_websocket_authorized(websocket)
+    # The HTTP server also serves the production UI. Its own loopback origin
+    # remains valid when the backend uses a port outside the dev-server range.
+    scheme = "https" if websocket.url.scheme == "wss" else "http"
+    if (
+        websocket.url.hostname in {"localhost", "127.0.0.1", "::1"}
+        and origin == f"{scheme}://{websocket.url.netloc}"
+    ):
+        return True
     allowed = _build_cors_origins()
     if origin in allowed:
         return True
@@ -410,6 +418,12 @@ async def favicon():
     )
 
 
+@app.get("/theme-boot.js")
+async def theme_boot():
+    root = FRONTEND_DIST if IS_PRODUCTION else FRONTEND_SRC / "public"
+    return FileResponse(root / "theme-boot.js", media_type="application/javascript")
+
+
 @app.get("/")
 async def index():
     """Serve the frontend index page."""
@@ -433,7 +447,7 @@ async def index():
 @app.get("/api/ui/preferences")
 async def get_ui_preferences(session_id: str = Query(..., min_length=1)) -> dict[str, Any]:
     """Get user UI preferences (layout, panel sizes, theme overrides)."""
-    store = UIPreferencesStore(Path("data/ui_preferences"))
+    store = UIPreferencesStore(DATA_ROOT / "ui_preferences")
     prefs = store.get(session_id)
     return prefs.to_dict()
 
@@ -444,7 +458,7 @@ async def update_ui_preferences(
     session_id: str = Query(..., min_length=1)
 ) -> dict[str, Any]:
     """Save UI preferences."""
-    store = UIPreferencesStore(Path("data/ui_preferences"))
+    store = UIPreferencesStore(DATA_ROOT / "ui_preferences")
     updated = store.update(session_id, preferences)
     return {"status": "ok", "preferences": updated.to_dict()}
 

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "./index";
+import { clearEditorWorkspaceBufferCacheForTests } from "./shared-helpers";
 
 vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommand: vi.fn(),
@@ -8,6 +9,7 @@ vi.mock("../protocol/ws-outbox", () => ({
 const storage = new Map<string, string>();
 
 beforeEach(() => {
+  clearEditorWorkspaceBufferCacheForTests();
   storage.clear();
   vi.stubGlobal("localStorage", {
     getItem: (key: string) => storage.get(key) ?? null,
@@ -35,6 +37,23 @@ beforeEach(() => {
 });
 
 describe("editor workspace isolation", () => {
+  it("preserves dirty buffers when switching away and back", () => {
+    useAppStore.getState().setWorkingDirectory("C:\\projects\\alpha");
+    useAppStore.getState().openEditorTab("src/alpha.ts");
+    useAppStore.getState().markTabLoaded("src/alpha.ts", "const original = true;", null);
+    useAppStore.getState().updateTabContent("src/alpha.ts", "const edited = true;");
+
+    useAppStore.getState().setWorkingDirectory("C:\\projects\\beta");
+    useAppStore.getState().setWorkingDirectory("C:\\projects\\alpha");
+
+    expect(useAppStore.getState().editorTabs[0]).toMatchObject({
+      path: "src/alpha.ts",
+      content: "const edited = true;",
+      original: "const original = true;",
+      loading: false,
+    });
+  });
+
   it("keeps open editor tabs scoped to the active workspace", () => {
     useAppStore.getState().setWorkingDirectory("C:\\projects\\alpha");
     useAppStore.getState().openEditorTab("src/alpha.ts");
@@ -58,7 +77,7 @@ describe("editor workspace isolation", () => {
 
     expect(useAppStore.getState().editorTabs.map((tab) => tab.path)).toEqual(["src/alpha.ts"]);
     expect(useAppStore.getState().activeTabPath).toBe("src/alpha.ts");
-    expect(useAppStore.getState().activeEditorPath).toBeNull();
+    expect(useAppStore.getState().activeEditorPath).toBe("src/alpha.ts");
   });
 
   it("migrates persisted workspace-local absolute tab paths", () => {

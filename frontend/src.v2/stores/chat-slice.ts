@@ -41,6 +41,7 @@ import {
   thinkingMetadataMatches,
   mergeResumeToolCalls,
   conversationWorkspacePath,
+  cacheEditorStateForWorkspace,
   editorStateForWorkspace,
   conversationResetPayload,
   visibleDiffReviewForConversation,
@@ -355,9 +356,12 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     set((s) => {
       const targetId = options?.conversationId || s.conversationId || undefined;
       const isActive = !targetId || targetId === s.conversationId;
-      const sourceMessages = targetId && !isActive
-        ? s.conversationMessages[targetId] ?? []
-        : s.messages;
+      const sideChat = targetId ? s.sideChats[targetId] : undefined;
+      const sourceMessages = sideChat
+        ? sideChat.messages
+        : targetId && !isActive
+          ? s.conversationMessages[targetId] ?? []
+          : s.messages;
       const existingIdx = sourceMessages.findIndex((message) =>
         message.id === id ||
         (options?.replacePrefix && message.role === "system" && message.content.startsWith(options.replacePrefix))
@@ -374,6 +378,14 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         nextMessages[existingIdx] = { ...nextMessages[existingIdx], ...nextMessage };
       } else {
         nextMessages.push(nextMessage);
+      }
+      if (sideChat) {
+        return {
+          sideChats: {
+            ...s.sideChats,
+            [targetId!]: { ...sideChat, messages: nextMessages },
+          },
+        };
       }
       if (targetId && !isActive) {
         return {
@@ -598,9 +610,18 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     }
     const targetConversation = get().conversations.find((c) => c.id === id);
     const targetWorkspace = conversationWorkspacePath(targetConversation);
+    const workspaceChanged = !workspaceRootsEqual(targetWorkspace, get().workingDirectory);
+    if (workspaceChanged) {
+      const current = get();
+      cacheEditorStateForWorkspace(
+        current.workingDirectory,
+        current.editorTabs,
+        current.activeTabPath,
+        current.activeEditorPath,
+      );
+    }
     set((s) => {
       const sameConversation = s.conversationId === id;
-      const workspaceChanged = !workspaceRootsEqual(targetWorkspace, s.workingDirectory);
       const currentStillKnown = Boolean(
         s.conversationId &&
         s.conversations.some((conversation) => conversation.id === s.conversationId),

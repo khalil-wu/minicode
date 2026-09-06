@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { FileText } from "../lib/icons";
+import { X } from "lucide-react";
 import { useAppStore } from "../stores";
 import { isDesktop, fsSearchFiles } from "../desktop/runtime";
 import { searchWorkspaceFiles } from "../protocol/workspace";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { workspaceRootsEqual } from "../lib/workspace-path";
 
 const fileNameOf = (path: string) => path.split(/[\\/]/).pop() || path;
 
@@ -13,12 +15,13 @@ export const QuickOpen = () => {
   const storeResults = useAppStore((s) => s.quickOpenResults);
   const storeLoading = useAppStore((s) => s.quickOpenLoading);
   const editorTabs = useAppStore((s) => s.editorTabs);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
   const enabled = capabilityFeatureEnabled(runtimeCapabilities, "global_search", true);
   const [query, setQuery] = useState("");
   const [activeIdx, setActiveIdx] = useState(0);
+  const [searchError, setSearchError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
-  const debounceRef = useRef<number>(0);
   const dialogRef = useFocusTrap(visible && enabled);
 
   useEffect(() => {
@@ -29,44 +32,46 @@ export const QuickOpen = () => {
     if (visible) {
       setQuery("");
       setActiveIdx(0);
+      setSearchError("");
       useAppStore.setState({ quickOpenResults: [], quickOpenLoading: false });
     }
   }, [visible, enabled]);
 
-  // Clear the debounce timer on unmount so a pending setState cannot fire
-  // after the component is gone.
   useEffect(() => {
-    return () => clearTimeout(debounceRef.current);
-  }, []);
-
-  const close = () => useAppStore.setState({ quickOpenVisible: false });
-
-  const search = (q: string) => {
-    setQuery(q);
+    let cancelled = false;
+    const isCurrent = () => !cancelled
+      && useAppStore.getState().quickOpenVisible
+      && workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory);
+    const requestedQuery = query.trim();
+    setSearchError("");
     setActiveIdx(0);
-    if (!q.trim()) {
+    if (!visible || !enabled || !requestedQuery || !workingDirectory) {
       useAppStore.setState({ quickOpenResults: [], quickOpenLoading: false });
       return;
     }
-    clearTimeout(debounceRef.current);
-    debounceRef.current = window.setTimeout(() => {
-      useAppStore.setState({ quickOpenLoading: true });
-      if (isDesktop()) {
-        const workingDirectory = useAppStore.getState().workingDirectory || "";
-        fsSearchFiles(workingDirectory, q, 20).then((results) => {
+    useAppStore.setState({ quickOpenResults: [], quickOpenLoading: true });
+    const timer = window.setTimeout(() => {
+      const request = isDesktop()
+        ? fsSearchFiles(workingDirectory, requestedQuery, 20, "file")
+        : searchWorkspaceFiles(workingDirectory, requestedQuery, 20, "file");
+      request.then((results) => {
+        if (isCurrent()) {
           useAppStore.setState({ quickOpenResults: results, quickOpenLoading: false });
-        }).catch(() => {
-          useAppStore.setState({ quickOpenResults: [], quickOpenLoading: false });
-        });
-      } else {
-        const workingDirectory = useAppStore.getState().workingDirectory || "";
-        searchWorkspaceFiles(workingDirectory, q, 20).then((results) => {
-          useAppStore.setState({ quickOpenResults: results, quickOpenLoading: false });
-        }).catch(() => {
-          useAppStore.setState({ quickOpenResults: [], quickOpenLoading: false });
-        });
-      }
+        }
+      }).catch((error: unknown) => {
+        if (!isCurrent()) return;
+        setSearchError(error instanceof Error ? error.message : "文件搜索失败，请重试。");
+        useAppStore.setState({ quickOpenResults: [], quickOpenLoading: false });
+      });
     }, 200);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [query, workingDirectory, visible, enabled]);
+
+  const close = () => {
+    useAppStore.setState({ quickOpenVisible: false, quickOpenLoading: false });
   };
 
   const openFile = (file: { path: string; name: string }) => {
@@ -110,6 +115,7 @@ export const QuickOpen = () => {
     >
       <div
         ref={dialogRef}
+        className="quick-open-surface"
         role="dialog"
         aria-modal="true"
         aria-label="快速打开文件"
@@ -124,6 +130,7 @@ export const QuickOpen = () => {
         }}
         style={{
           width: "min(600px, 100%)",
+          maxHeight: "calc(90dvh - 16px)",
           background: "var(--surface-raised)",
           border: "1px solid var(--border-subtle)",
           borderRadius: "var(--radius-lg)",
@@ -134,10 +141,11 @@ export const QuickOpen = () => {
           pointerEvents: "auto",
         }}
       >
+        <div style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>
         <input
           ref={inputRef}
           value={query}
-          onChange={(e) => search(e.target.value)}
+          onChange={(e) => setQuery(e.target.value)}
           role="combobox"
           aria-label="搜索文件"
           aria-expanded={results.length > 0}
@@ -146,7 +154,7 @@ export const QuickOpen = () => {
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") {
               e.preventDefault();
-              setActiveIdx((i) => Math.min(i + 1, results.length - 1));
+              setActiveIdx((i) => Math.max(0, Math.min(i + 1, results.length - 1)));
             } else if (e.key === "ArrowUp") {
               e.preventDefault();
               setActiveIdx((i) => Math.max(i - 1, 0));
@@ -160,6 +168,8 @@ export const QuickOpen = () => {
           }}
           placeholder="搜索文件…"
           style={{
+            minWidth: 0,
+            flex: 1,
             background: "transparent",
             border: 0,
             padding: "14px 16px",
@@ -168,7 +178,11 @@ export const QuickOpen = () => {
             outline: 0,
           }}
         />
-        <div id="quick-open-results" role="listbox" style={{ borderTop: "1px solid var(--border-subtle)", maxHeight: 360, overflowY: "auto" }}>
+        <button type="button" className="mc-icon-btn" onClick={close} title="关闭快速打开" aria-label="关闭快速打开" style={{ width: 32, height: 32, flexShrink: 0, marginRight: 8 }}>
+          <X size={16} />
+        </button>
+        </div>
+        <div id="quick-open-results" role="listbox" style={{ borderTop: "1px solid var(--border-subtle)", maxHeight: 360, minHeight: 0, overflowY: "auto" }}>
           {storeLoading && (
             <div style={{ padding: 14, color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
               正在搜索…
@@ -185,8 +199,8 @@ export const QuickOpen = () => {
             </div>
           )}
           {!storeLoading && !showingOpenTabs && results.length === 0 && (
-            <div style={{ padding: 14, color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
-              未找到文件。
+            <div role={searchError ? "alert" : undefined} style={{ padding: 14, color: searchError ? "var(--state-danger)" : "var(--text-muted)", fontSize: "var(--text-sm)" }}>
+              {searchError || "未找到文件。"}
             </div>
           )}
           {results.map((file, i) => (
@@ -212,9 +226,11 @@ export const QuickOpen = () => {
               }}
             >
               <FileText size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} aria-hidden="true" />
-              <span style={{ color: "var(--accent-primary)", fontWeight: "var(--fw-medium)" }}>{file.name}</span>
-              <span style={{ flex: 1, color: "var(--text-muted)", fontSize: "var(--text-xs)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {file.path}
+              <span title={file.path} style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: "block", color: "var(--accent-primary)", fontWeight: "var(--fw-medium)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.name}</span>
+                <span style={{ display: "block", color: "var(--text-muted)", fontSize: "var(--text-xs)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {file.path}
+                </span>
               </span>
             </button>
           ))}
@@ -223,6 +239,8 @@ export const QuickOpen = () => {
           aria-hidden="true"
           style={{
             display: "flex",
+            flexWrap: "wrap",
+            flexShrink: 0,
             alignItems: "center",
             gap: 12,
             padding: "8px 16px",

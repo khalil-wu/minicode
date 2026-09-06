@@ -37,6 +37,7 @@ import {
   normalizePanelSlots,
   persistPanelSlots,
   preferredRightSidebarWidth,
+  cacheEditorStateForWorkspace,
   editorStateForWorkspace,
 } from "./shared-helpers";
 import { clampTextScale } from "../lib/text-scale";
@@ -559,6 +560,14 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   setWorkingDirectory: (d) => {
     set((s) => {
       const workspaceChanged = !workspaceRootsEqual(d, s.workingDirectory);
+      if (workspaceChanged) {
+        cacheEditorStateForWorkspace(
+          s.workingDirectory,
+          s.editorTabs,
+          s.activeTabPath,
+          s.activeEditorPath,
+        );
+      }
       return {
         ...(workspaceChanged ? editorStateForWorkspace(d) : {}),
         workingDirectory: d,
@@ -943,7 +952,10 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   setQuickOpenResults: (results) => set({ quickOpenResults: results, quickOpenLoading: false }),
   setQuickOpenLoading: (loading) => set({ quickOpenLoading: loading }),
   addFileChange: (change) =>
-    set((s) => ({ fileChanges: [...s.fileChanges.slice(-99), change] })),
+    set((s) => {
+      const sequence = (s.fileChanges.at(-1)?.sequence ?? 0) + 1;
+      return { fileChanges: [...s.fileChanges.slice(-99), { ...change, sequence }] };
+    }),
   bumpFileTreeVersion: () =>
     set((s) => ({ fileTreeVersion: s.fileTreeVersion + 1 })),
   requestFileTreeReveal: (path, kind = "folder") =>

@@ -380,11 +380,8 @@ class LSPClient:
         message = {"jsonrpc": "2.0", "id": msg_id, "method": method, "params": params}
         future: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
         self._pending[msg_id] = future
-        body = json.dumps(message)
-        header = f"Content-Length: {len(body.encode('utf-8'))}\r\n\r\n"
         try:
-            self._stdin.write(header.encode("utf-8") + body.encode("utf-8"))
-            await self._stdin.drain()
+            await self._write_message(message)
             return await asyncio.wait_for(future, timeout=30.0)
         except asyncio.TimeoutError:
             self._pending.pop(msg_id, None)
@@ -397,10 +394,21 @@ class LSPClient:
         if not self._stdin or not self._process or self._process.returncode is not None:
             return
         message = {"jsonrpc": "2.0", "method": method, "params": params}
-        body = json.dumps(message)
-        header = f"Content-Length: {len(body.encode('utf-8'))}\r\n\r\n"
-        self._stdin.write(header.encode("utf-8") + body.encode("utf-8"))
+        await self._write_message(message)
+
+    async def _write_message(self, message: dict[str, Any]) -> None:
+        body = json.dumps(message).encode("utf-8")
+        header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+        self._stdin.write(header + body)
         await self._stdin.drain()
+
+    async def _respond_to_server_request(self, message: dict[str, Any]) -> None:
+        response: dict[str, Any] = {"jsonrpc": "2.0", "id": message["id"]}
+        if message["method"] == "workspace/configuration":
+            response["result"] = [None for _ in message["params"]["items"]]
+        else:
+            response["error"] = {"code": -32601, "message": f"Unsupported client method: {message['method']}"}
+        await self._write_message(response)
 
     async def _read_loop(self) -> None:
         buffer = b""
@@ -426,6 +434,12 @@ class LSPClient:
                     except json.JSONDecodeError:
                         continue
                     msg_id = message.get("id")
+                    # Each peer owns its request IDs; an inbound request can
+                    # legitimately share an ID with one of our pending queries.
+                    if "method" in message:
+                        if msg_id is not None:
+                            await self._respond_to_server_request(message)
+                        continue
                     if msg_id is not None and msg_id in self._pending:
                         future = self._pending.pop(msg_id)
                         if not future.done():

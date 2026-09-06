@@ -430,6 +430,23 @@ def test_workspace_root_persists_across_state_reload(monkeypatch, tmp_path) -> N
     clear_active_workspace_root()
 
 
+def test_workspace_state_keeps_previous_activation_when_persistence_fails(monkeypatch, tmp_path) -> None:
+    from backend.workspace import state as workspace_state
+
+    previous = tmp_path / "previous"
+    target = tmp_path / "target"
+    previous.mkdir()
+    target.mkdir()
+    workspace_state._active_workspace_root = previous  # type: ignore[attr-defined]
+    def fail_write(_root):
+        raise OSError("disk full")
+    with monkeypatch.context() as failure:
+        failure.setattr(workspace_state, "_write_persisted_workspace_root", fail_write)
+        with pytest.raises(OSError, match="disk full"):
+            workspace_state.set_active_workspace_root(target)
+    assert workspace_state._active_workspace_root == previous  # type: ignore[attr-defined]
+
+
 def test_missing_persisted_workspace_falls_back_to_default(monkeypatch, tmp_path) -> None:
     from backend.workspace import state as workspace_state
 

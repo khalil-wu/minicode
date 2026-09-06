@@ -28,6 +28,7 @@ import { deriveCommandPrefix } from "./commandPrefix";
 import { pushToast } from "../overlays/ToastContainer";
 import { MarkdownRenderer } from "./messages/MarkdownRenderer";
 import { Button } from "../components/Button";
+import { parseUnifiedDiffLines, type UnifiedDiffLine } from "../lib/unified-diff";
 
 export const InlineAgentPrompt = () => {
   const pendingApproval = useAppStore((s) => s.pendingApproval);
@@ -645,8 +646,8 @@ const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
 
       <div style={diffPreviewStyle}>
         {stats.preview.length > 0 ? stats.preview.map((line, index) => (
-          <div key={`${index}-${line}`} style={diffLineStyle(line)}>
-            {line}
+          <div key={`${index}-${line.text}`} style={diffLineStyle(line)}>
+            {line.text}
           </div>
         )) : <span style={{ color: "var(--text-muted)" }}>打开差异面板检查拟议更改。</span>}
       </div>
@@ -832,14 +833,14 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
 };
 
 const diffStats = (diff: string) => {
-  const lines = diff.split("\n");
+  const lines = parseUnifiedDiffLines(diff);
   let plus = 0;
   let minus = 0;
-  const preview: string[] = [];
+  const preview: UnifiedDiffLine[] = [];
   for (const line of lines) {
-    if (line.startsWith("+") && !line.startsWith("+++")) plus++;
-    else if (line.startsWith("-") && !line.startsWith("---")) minus++;
-    if (preview.length < 8 && (line.startsWith("@@") || line.startsWith("+") || line.startsWith("-"))) {
+    if (line.kind === "add") plus++;
+    else if (line.kind === "del") minus++;
+    if (preview.length < 8 && (line.kind === "hunk" || line.kind === "add" || line.kind === "del" || line.kind === "marker")) {
       preview.push(line);
     }
   }
@@ -1201,12 +1202,12 @@ const diffPreviewStyle: React.CSSProperties = {
   fontSize: "var(--text-xs)",
 };
 
-const diffLineStyle = (line: string): React.CSSProperties => ({
-  color: line.startsWith("+") && !line.startsWith("+++")
+const diffLineStyle = (line: UnifiedDiffLine): React.CSSProperties => ({
+  color: line.kind === "add"
     ? "var(--state-success)"
-    : line.startsWith("-") && !line.startsWith("---")
+    : line.kind === "del"
       ? "var(--state-danger)"
-      : line.startsWith("@@")
+      : line.kind === "hunk"
         ? "var(--accent-primary)"
         : "var(--text-secondary)",
   whiteSpace: "pre",

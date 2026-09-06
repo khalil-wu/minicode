@@ -9,10 +9,11 @@ and never rereads the workspace.
 from __future__ import annotations
 
 import asyncio
-import difflib
 import hashlib
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+
+from backend.diff.unified import iter_unified_diff, split_diff_lines
 
 
 ZERO_OID = "0000000000000000000000000000000000000000"
@@ -303,29 +304,15 @@ class TurnDiffTracker:
         ):
             parts.extend(self._coarse_unified_diff(left, right, old_label, new_label))
         else:
-            unified = list(
-                difflib.unified_diff(
-                    left.splitlines(keepends=True),
-                    right.splitlines(keepends=True),
+            parts.extend(
+                iter_unified_diff(
+                    left,
+                    right,
                     fromfile=old_label,
                     tofile=new_label,
-                    n=3,
-                    lineterm="\n",
                 )
             )
-            parts.extend(self._with_no_newline_markers(unified))
         return "".join(parts)
-
-    @staticmethod
-    def _with_no_newline_markers(lines: list[str]) -> list[str]:
-        output: list[str] = []
-        for line in lines:
-            if line.startswith(("+", "-", " ")) and not line.endswith(("\n", "\r")):
-                output.append(f"{line}\n")
-                output.append("\\ No newline at end of file\n")
-            else:
-                output.append(line)
-        return output
 
     @staticmethod
     def _coarse_unified_diff(
@@ -336,18 +323,18 @@ class TurnDiffTracker:
     ) -> list[str]:
         """Content-exact whole-file fallback for pathological rewrites."""
 
-        left_lines = left.splitlines(keepends=True)
-        right_lines = right.splitlines(keepends=True)
+        left_lines = split_diff_lines(left)
+        right_lines = split_diff_lines(right)
         old_range = f"-1,{len(left_lines)}" if left_lines else "-0,0"
         new_range = f"+1,{len(right_lines)}" if right_lines else "+0,0"
         output = [f"--- {old_label}\n", f"+++ {new_label}\n", f"@@ {old_range} {new_range} @@\n"]
         for line in left_lines:
             output.append(f"-{line}")
-            if not line.endswith(("\n", "\r")):
+            if not line.endswith("\n"):
                 output.append("\n\\ No newline at end of file\n")
         for line in right_lines:
             output.append(f"+{line}")
-            if not line.endswith(("\n", "\r")):
+            if not line.endswith("\n"):
                 output.append("\n\\ No newline at end of file\n")
         return output
 

@@ -1975,6 +1975,30 @@
 /* 详情页面板的边框/底色由 ui-polish 归零接管。 */
 .provider-settings-detail {
   gap: 22px;
+  min-width: 0;
+  container-type: inline-size;
+}
+
+.provider-model-mapping {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px auto auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.provider-model-mapping > * {
+  min-width: 0;
+}
+
+@container (max-width: 560px) {
+  .provider-model-mapping {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .provider-model-mapping > :first-child {
+    grid-column: 1 / -1;
+  }
 }
 
 .provider-detail-header {

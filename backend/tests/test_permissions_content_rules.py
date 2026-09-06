@@ -153,6 +153,56 @@ def test_content_deny_rule_overrides_bypass():
     assert level == PermissionLevel.ALWAYS_DENY
 
 
+@pytest.mark.parametrize("allow_rule", ["run_command", "run_command(Write-Output:*)"])
+@pytest.mark.parametrize("with_tool", [False, True])
+def test_remembered_allow_cannot_lower_command_substitution_boundary(tmp_path, allow_rule, with_tool):
+    checker = _checker(str(tmp_path), content_allow_rules=[allow_rule])
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts")) if with_tool else None
+    level = checker.check(
+        "run_command",
+        {"command": 'Write-Output "$(Write-Output SECOND_COMMAND)"'},
+        context=PermissionContext(mode="confirm"),
+        tool=tool,
+    )
+    assert level == PermissionLevel.CONFIRM
+
+
+def test_windows_remembered_prefix_does_not_approve_second_command(tmp_path, monkeypatch):
+    monkeypatch.setattr("backend.permissions.content_rules._BACKSLASH_ESCAPES", False)
+    checker = _checker(str(tmp_path), content_allow_rules=["run_command(Write-Output:*)"])
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    level = checker.check(
+        "run_command",
+        {"command": r"Write-Output approved\; Write-Output SECOND_COMMAND"},
+        context=PermissionContext(mode="confirm"),
+        tool=tool,
+    )
+    assert level == PermissionLevel.CONFIRM
+
+
+@pytest.mark.parametrize("command", [
+    'Write-Output "$(Write-Host SECOND_COMMAND)"',
+    'Write-Host "$(Write-Output marker)"',
+    'Write-Output (Write-Host SECOND_COMMAND)',
+])
+@pytest.mark.parametrize("mode", ["confirm", "bypass"])
+def test_nested_command_deny_applies_in_every_mode(tmp_path, command, mode):
+    checker = _checker(str(tmp_path), content_deny_rules=["run_command(Write-Host:*)"])
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    assert checker.check(
+        "run_command", {"command": command}, context=PermissionContext(mode=mode), tool=tool,
+    ) == PermissionLevel.ALWAYS_DENY
+
+
+def test_remembered_prefix_does_not_approve_parenthesized_command(tmp_path):
+    checker = _checker(str(tmp_path), content_allow_rules=["run_command(Write-Output:*)"])
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    assert checker.check(
+        "run_command", {"command": "Write-Output (Write-Host SECOND_COMMAND)"},
+        context=PermissionContext(mode="confirm"), tool=tool,
+    ) == PermissionLevel.CONFIRM
+
+
 def test_content_allow_does_not_force_auto_in_plan_mode():
     td = tempfile.mkdtemp()
     checker = _checker(td, content_allow_rules=["edit_file(src/**)"])

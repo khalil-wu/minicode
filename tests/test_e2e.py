@@ -8,9 +8,14 @@ MiniCode 端到端测试脚本
 
 import asyncio
 import json
+import os
+import socket
 import time
 import sys
 from pathlib import Path
+from urllib.request import urlopen
+
+from websockets.asyncio.client import connect as websocket_connect
 
 # 设置输出编码。不要替换 sys.stdout 本身；pytest 的捕获器依赖这个对象。
 try:
@@ -19,9 +24,10 @@ except (AttributeError, ValueError):
     pass
 
 # 测试配置
-BACKEND_WS_URL = "ws://localhost:8765"
-FRONTEND_URL = "http://localhost:5173"
-DESKTOP_URL = "http://localhost:3000"
+BACKEND_PORT = int(os.environ.get("MINICODE_BACKEND_PORT", "8000"))
+FRONTEND_PORT = int(os.environ.get("MINICODE_FRONTEND_PORT", "5173"))
+BACKEND_WS_URL = os.environ.get("MINICODE_WS_URL", f"ws://127.0.0.1:{BACKEND_PORT}")
+FRONTEND_URL = os.environ.get("MINICODE_FRONTEND_URL", f"http://127.0.0.1:{FRONTEND_PORT}")
 
 class Colors:
     GREEN = '\033[92m'
@@ -55,23 +61,10 @@ def check_backend_health():
     """测试后端是否运行"""
     print_section("测试 1: 后端健康检查")
 
-    # 检查后端进程
-    import subprocess
     try:
-        result = subprocess.run(
-            ["netstat", "-an"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-
-        if "8765" in result.stdout:
-            print_success("后端 WebSocket 服务运行在 8765 端口")
+        with socket.create_connection(("127.0.0.1", BACKEND_PORT), timeout=5):
+            print_success(f"后端 WebSocket 服务运行在 {BACKEND_PORT} 端口")
             return True
-        else:
-            print_error("后端 WebSocket 服务未运行")
-            print_info("请运行: python -m backend.main")
-            return False
     except Exception as e:
         print_error(f"检查后端失败: {e}")
         return False
@@ -84,29 +77,13 @@ def check_frontend_health():
     """测试前端是否运行"""
     print_section("测试 2: 前端健康检查")
 
-    import subprocess
     try:
-        result = subprocess.run(
-            ["netstat", "-an"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-
-        checks = {
-            "5173": "前端开发服务器 (Vite)",
-            "3000": "桌面端 (Electron)",
-        }
-
-        all_ok = True
-        for port, name in checks.items():
-            if port in result.stdout:
-                print_success(f"{name} 运行在 {port} 端口")
-            else:
-                print_error(f"{name} 未运行")
-                all_ok = False
-
-        return all_ok
+        with urlopen(FRONTEND_URL, timeout=5) as response:
+            if response.status < 400:
+                print_success(f"前端开发服务器可访问：{FRONTEND_URL}")
+                return True
+        print_error(f"前端开发服务器返回错误：{FRONTEND_URL}")
+        return False
     except Exception as e:
         print_error(f"检查前端失败: {e}")
         return False
@@ -122,7 +99,7 @@ async def check_websocket_connection():
     try:
         print_info(f"尝试连接到 {BACKEND_WS_URL}...")
 
-        async with websockets.connect(BACKEND_WS_URL, timeout=5) as ws:
+        async with websocket_connect(BACKEND_WS_URL, open_timeout=5) as ws:
             print_success("WebSocket 连接成功")
 
             # 测试 ping/pong
@@ -160,10 +137,10 @@ def check_agent_guidance():
 
     # 检查关键指导内容
     checks = {
-        "todo_write": "任务管理工具",
-        "≥2 steps": "多步骤任务判断",
-        "in_progress": "任务状态管理",
-        "Example": "具体示例",
+        "update_plan": "任务计划工具",
+        "multi-step": "多步骤任务判断",
+        "completed": "任务状态管理",
+        "Persist until the task is fully handled": "完整任务生命周期",
     }
 
     all_ok = True
@@ -185,9 +162,10 @@ def check_frontend_components():
     print_section("测试 5: 前端任务组件")
 
     components = {
-        "frontend/src.v2/chat/components/InlineTaskList.tsx": "对话内联任务列表",
-        "frontend/src.v2/chat/components/inline-task-list.css": "任务列表样式",
-        "frontend/src.v2/panels/TaskManagerPanel.tsx": "侧栏任务面板",
+        "frontend/src.v2/chat/components/TurnPlanProgress.tsx": "对话任务进度",
+        "frontend/src.v2/chat/components/turn-plan-progress.css": "任务进度样式",
+        "frontend/src.v2/panels/DiffPanel.tsx": "变更审阅面板",
+        "frontend/src.v2/shell/FileTree.tsx": "工作区文件树",
     }
 
     all_ok = True
@@ -246,9 +224,9 @@ def check_style_files():
 
     styles = {
         "frontend/src.v2/styles/breakpoints.css": "响应式断点",
-        "frontend/src.v2/styles/scroll.css": "滚动优化",
         "frontend/src.v2/styles/z-index.css": "Z-Index 系统",
         "frontend/src.v2/styles/animations.css": "动画",
+        "frontend/src.v2/styles/ui-polish.css": "界面层级样式",
     }
 
     all_ok = True
@@ -312,11 +290,9 @@ def check_documentation():
 
     docs = {
         "README.md": "项目说明",
-        "AGENT_UX_OPTIMIZATION_COMPLETE.md": "Agent UX 报告",
-        "UI_UX_OPTIMIZATION_COMPLETE.md": "UI/UX 报告",
-        "CLEANUP_COMPLETE.md": "清理报告",
-        "WORK_SUMMARY.md": "工作总结",
-        "TESTING_PLAN.md": "测试计划",
+        "pyproject.toml": "Python 工程配置",
+        "frontend/package.json": "前端工程配置",
+        "frontend/playwright.config.ts": "浏览器验证配置",
     }
 
     all_ok = True
@@ -338,31 +314,14 @@ def check_project_cleanliness():
     """检查项目清洁度"""
     print_section("测试 10: 项目清洁度")
 
-    # 检查是否有 __pycache__
-    import subprocess
-    result = subprocess.run(
-        ["find", ".", "-type", "d", "-name", "__pycache__"],
-        capture_output=True,
-        text=True,
-        timeout=10
-    )
-
-    pycache_count = len([l for l in result.stdout.strip().split('\n') if l])
+    pycache_count = sum(1 for path in Path(".").rglob("__pycache__") if path.is_dir())
 
     if pycache_count == 0:
         print_success("无 __pycache__ 目录")
     else:
         print_warning(f"发现 {pycache_count} 个 __pycache__ 目录")
 
-    # 检查是否有 .pyc 文件
-    result = subprocess.run(
-        ["find", ".", "-name", "*.pyc"],
-        capture_output=True,
-        text=True,
-        timeout=10
-    )
-
-    pyc_count = len([l for l in result.stdout.strip().split('\n') if l])
+    pyc_count = sum(1 for path in Path(".").rglob("*.pyc") if path.is_file())
 
     if pyc_count == 0:
         print_success("无 .pyc 文件")

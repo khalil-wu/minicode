@@ -19,6 +19,7 @@ from backend.owner_scope import (
 
 ATTACHMENT_DATA_DIR = DATA_ROOT / "attachments"
 ATTACHMENT_INDEX_FILE = "index.json"
+ATTACHMENT_INDEX_VERSION = 2
 ARTIFACT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # Upload size limits are enforced in bytes on the wire (api/routes_chat.py)
 # and in characters once content has been decoded into text (below). Keeping
@@ -92,8 +93,8 @@ class AttachmentStore:
         self._base_dir.mkdir(parents=True, exist_ok=True)
         self._index_path = self._base_dir / ATTACHMENT_INDEX_FILE
         self._lock = threading.RLock()
+        self._index_ready = False
         self._index = self._load_index()
-        self._index_ready = self._index_path.exists()
 
     def save(
         self,
@@ -129,10 +130,13 @@ class AttachmentStore:
         # instance-local lock would still let two sessions overwrite a stale
         # index.json snapshot.
         with self._lock, file_mutation_locks([self._index_path, path]):
+            self._index = self._load_index()
+            if not self._index_ready:
+                self._rebuild_index()
             atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
-            # Rebuild from the newly published payload so aliases removed by
-            # an overwrite do not remain as stale index entries.
-            self._rebuild_index()
+            self._remove_index_id(safe_id)
+            self._index_payload(payload)
+            self._persist_index()
 
     def get(self, artifact_id: str, *, conversation_id: str = "", workspace_root: str = "") -> str | None:
         payload = self.get_payload(
@@ -188,6 +192,35 @@ class AttachmentStore:
         metadata = payload.get("metadata") if payload else None
         return dict(metadata) if isinstance(metadata, dict) else {}
 
+    def update_extraction(
+        self,
+        artifact_id: str,
+        parsed: dict[str, Any],
+        *,
+        conversation_id: str,
+        workspace_root: str,
+    ) -> str | None:
+        """Refresh derived text without changing bytes, aliases, or owner grants."""
+        content = str(parsed["full_text"])
+        if len(content) > MAX_ATTACHMENT_CONTENT_CHARS:
+            raise ValueError("Attachment content exceeds the 50 MB limit.")
+        path = self._path_for(artifact_id)
+        with self._lock, file_mutation_locks([path]):
+            payload = self.get_payload(artifact_id, conversation_id=conversation_id, workspace_root=workspace_root)
+            if payload is None:
+                return None
+            payload["content"] = content
+            attachment = payload["metadata"].setdefault("attachment", {})
+            attachment.update({
+                "parse_error": str(parsed.get("parse_error") or ""),
+                "parse_warning": str(parsed.get("parse_warning") or ""),
+                "page_count": int(parsed.get("pages") or 0),
+                "title": str(parsed.get("title") or attachment.get("title") or ""),
+                "summary": str(parsed.get("summary") or attachment.get("summary") or ""),
+            })
+            atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+            return payload["content"]
+
     def get_native_data(
         self,
         artifact_id: str,
@@ -222,41 +255,40 @@ class AttachmentStore:
             return payload
 
         with self._lock, file_mutation_locks([self._index_path]):
-            # Another session may have published an alias since this store was
-            # constructed. Reload the durable index before resolving it.
             self._index = self._load_index()
-            indexed_id = self._index.get(needle.casefold())
-        if indexed_id:
-            indexed_payload = self.get_payload(indexed_id, conversation_id=conversation_id, workspace_root=workspace_root)
-            if indexed_payload is not None:
-                return indexed_payload
-            # The durable alias can outlive its payload when another session
-            # deletes or replaces the attachment between the index read and
-            # this lookup. Force a rebuild instead of treating the stale id as
-            # a successful index hit.
-            indexed_id = ""
-
-        with self._lock, file_mutation_locks([self._index_path]):
-            self._index = self._load_index()
-            if not indexed_id or not self._index_ready:
+            if not self._index_ready:
                 self._rebuild_index()
-            indexed_id = self._index.get(needle.casefold())
-        if indexed_id:
-            return self.get_payload(indexed_id, conversation_id=conversation_id, workspace_root=workspace_root) if indexed_id else None
+            candidates = self._index.get(needle.casefold(), [])
+        for indexed_id in candidates:
+            payload = self.get_payload(indexed_id, conversation_id=conversation_id, workspace_root=workspace_root)
+            if payload is not None:
+                return payload
         return None
 
-    def _load_index(self) -> dict[str, str]:
+    def _load_index(self) -> dict[str, list[str]]:
+        self._index_ready = False
         try:
             payload = json.loads(self._index_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (FileNotFoundError, json.JSONDecodeError):
             return {}
-        if not isinstance(payload, dict):
+        if not isinstance(payload, dict) or payload.get("version") != ATTACHMENT_INDEX_VERSION:
             return {}
-        return {
-            str(key): str(value)
-            for key, value in payload.items()
-            if isinstance(key, str) and isinstance(value, str)
-        }
+        aliases = payload.get("aliases")
+        if not isinstance(aliases, dict) or any(
+            not isinstance(ids, list) or any(not isinstance(value, str) for value in ids)
+            for ids in aliases.values()
+        ):
+            return {}
+        self._index_ready = True
+        return aliases
+
+    def _remove_index_id(self, artifact_id: str) -> None:
+        for ref in list(self._index):
+            remaining = [candidate for candidate in self._index[ref] if candidate != artifact_id]
+            if remaining:
+                self._index[ref] = remaining
+            else:
+                del self._index[ref]
 
     def _index_payload(self, payload: dict[str, Any]) -> None:
         artifact_id = str(payload.get("artifact_id") or "").strip()
@@ -270,19 +302,22 @@ class AttachmentStore:
                 str(attachment.get(key) or "").strip()
                 for key in ("doc_id", "artifact_id", "file_name")
             )
-        for ref in refs:
-            if ref:
-                self._index[ref.casefold()] = artifact_id
+        for ref in {value.casefold() for value in refs if value}:
+            self._index.setdefault(ref, []).insert(0, artifact_id)
 
     def _persist_index(self) -> None:
         atomic_write_text(
             self._index_path,
-            json.dumps(self._index, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(
+                {"version": ATTACHMENT_INDEX_VERSION, "aliases": self._index},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
         )
 
     def _rebuild_index(self) -> None:
         self._index = {}
-        for path in sorted(self._base_dir.glob("*.json"), reverse=True):
+        for path in sorted(self._base_dir.glob("*.json"), key=lambda path: (path.stat().st_mtime_ns, path.name)):
             if path == self._index_path:
                 continue
             try:
@@ -346,7 +381,9 @@ class AttachmentStore:
         removed = 0
         candidate_paths = [path for path in self._base_dir.glob("*.json") if path != self._index_path]
         with self._lock, file_mutation_locks([self._index_path, *candidate_paths]):
-            self._rebuild_index()
+            self._index = self._load_index()
+            if not self._index_ready:
+                self._rebuild_index()
             for path in self._base_dir.glob("*.json"):
                 if path == self._index_path:
                     continue
@@ -376,8 +413,9 @@ class AttachmentStore:
                 except FileNotFoundError:
                     continue
                 removed += 1
-            self._index_ready = False
-            self._rebuild_index()
+                self._remove_index_id(path.stem)
+            if removed:
+                self._persist_index()
         return removed
 
     def share_for_conversation(
@@ -395,7 +433,6 @@ class AttachmentStore:
         shared = 0
         candidate_paths = [path for path in self._base_dir.glob("*.json") if path != self._index_path]
         with self._lock, file_mutation_locks([self._index_path, *candidate_paths]):
-            self._rebuild_index()
             for path in self._base_dir.glob("*.json"):
                 if path == self._index_path:
                     continue
@@ -424,8 +461,6 @@ class AttachmentStore:
                 payload["metadata"] = metadata
                 atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
                 shared += 1
-            self._index_ready = False
-            self._rebuild_index()
         return shared
 
     def _path_for(self, artifact_id: str) -> Path:

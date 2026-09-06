@@ -20,6 +20,7 @@ export interface WorkspaceFilePreviewResponse {
   size_bytes: number;
   summary: string;
   parse_error: string;
+  parse_warning?: string;
   content: string;
   content_chars: number;
   truncated: boolean;
@@ -81,20 +82,12 @@ const ws = (
   return url.toString();
 };
 
-export const readWorkspaceFile = async (path: string, workspaceRoot: string): Promise<WorkspaceFileResponse | null> => {
-  try {
-    const r = await fetchWithTimeout(ws("/file", workspaceRoot, { path }), { headers: authHeaders() });
-    if (!r.ok) {
-      const detail = await errorMessageFromWorkspaceResponse(r);
-      throw new Error(detail || `Workspace file request failed (${r.status} ${r.statusText || "error"}).`);
-    }
-    return (await r.json()) as WorkspaceFileResponse;
-  } catch (err) {
-    if (err instanceof Error && /workspace folder is missing|too large|only utf-8|permission denied|outside workspace/i.test(err.message)) {
-      throw err;
-    }
-    return null;
+export const readWorkspaceFile = async (path: string, workspaceRoot: string): Promise<WorkspaceFileResponse> => {
+  const r = await fetchWithTimeout(ws("/file", workspaceRoot, { path }), { headers: authHeaders() });
+  if (!r.ok) {
+    throw new Error(await errorMessageFromWorkspaceResponse(r));
   }
+  return (await r.json()) as WorkspaceFileResponse;
 };
 
 export const fetchWorkspaceFilePreview = async (
@@ -249,7 +242,7 @@ export const listWorkspaceTree = async (
 };
 
 const errorMessageFromWorkspaceResponse = async (response: Response): Promise<string> => {
-  const fallback = `Workspace tree request failed (${response.status} ${response.statusText || "error"}).`;
+  const fallback = `Workspace request failed (${response.status} ${response.statusText || "error"}).`;
   const text = await response.text().catch(() => "");
   const trimmed = text.trim();
   if (!trimmed) return fallback;
@@ -323,17 +316,15 @@ export const searchWorkspaceFiles = async (
   limit: number = 20,
   kind: "file" | "folder" | "all" = "file",
 ): Promise<WorkspaceSearchResult[]> => {
-  try {
-    const r = await fetchWithTimeout(
-      ws("/search", workspaceRoot, { query, limit, kind }),
-      { headers: authHeaders() },
-    );
-    if (!r.ok) return [];
-    const data = await r.json();
-    return data.results ?? [];
-  } catch {
-    return [];
+  const r = await fetchWithTimeout(
+    ws("/search", workspaceRoot, { query, limit, kind }),
+    { headers: authHeaders() },
+  );
+  if (!r.ok) {
+    throw new Error(await errorMessageFromWorkspaceResponse(r));
   }
+  const data = await r.json();
+  return data.results;
 };
 
 export interface WorkspaceGitWorktreeResponse {
@@ -356,14 +347,16 @@ export interface WorkspaceGitWorktreeResponse {
   error?: string;
 }
 
-export const fetchWorkspaceGitWorktree = async (workspaceRoot: string, path = ""): Promise<WorkspaceGitWorktreeResponse | null> => {
-  try {
-    const r = await fetchWithTimeout(ws("/git/worktree", workspaceRoot, { path }), { headers: authHeaders() });
-    if (!r.ok) return null;
-    return (await r.json()) as WorkspaceGitWorktreeResponse;
-  } catch {
-    return null;
-  }
+const readWorkspaceGitResponse = async <T extends { error?: string | null }>(response: Response): Promise<T> => {
+  if (!response.ok) throw new Error(await errorMessageFromWorkspaceResponse(response));
+  const payload = await response.json() as T;
+  if (payload.error) throw new Error(payload.error);
+  return payload;
+};
+
+export const fetchWorkspaceGitWorktree = async (workspaceRoot: string, path = ""): Promise<WorkspaceGitWorktreeResponse> => {
+  const r = await fetchWithTimeout(ws("/git/worktree", workspaceRoot, { path }), { headers: authHeaders() });
+  return readWorkspaceGitResponse<WorkspaceGitWorktreeResponse>(r);
 };
 
 export interface WorkspaceGitStatusResponse {
@@ -374,27 +367,17 @@ export interface WorkspaceGitStatusResponse {
   error?: string;
 }
 
-export const fetchWorkspaceGitStatus = async (workspaceRoot: string, path = ""): Promise<WorkspaceGitStatusResponse | null> => {
-  try {
-    const r = await fetchWithTimeout(ws("/git/status", workspaceRoot, { path }), { headers: authHeaders() });
-    if (!r.ok) return null;
-    return (await r.json()) as WorkspaceGitStatusResponse;
-  } catch {
-    return null;
-  }
+export const fetchWorkspaceGitStatus = async (workspaceRoot: string, path = ""): Promise<WorkspaceGitStatusResponse> => {
+  const r = await fetchWithTimeout(ws("/git/status", workspaceRoot, { path }), { headers: authHeaders() });
+  return readWorkspaceGitResponse<WorkspaceGitStatusResponse>(r);
 };
 
-export const fetchWorkspaceGitDiff = async (workspaceRoot: string, file = "", path = ""): Promise<{ diff: string; error?: string } | null> => {
-  try {
-    const r = await fetchWithTimeout(
-      ws("/git/diff", workspaceRoot, { file, path }),
-      { headers: authHeaders() },
-    );
-    if (!r.ok) return null;
-    return (await r.json()) as { diff: string; error?: string };
-  } catch {
-    return null;
-  }
+export const fetchWorkspaceGitDiff = async (workspaceRoot: string, file = "", path = ""): Promise<{ diff: string; error?: string }> => {
+  const r = await fetchWithTimeout(
+    ws("/git/diff", workspaceRoot, { file, path }),
+    { headers: authHeaders() },
+  );
+  return readWorkspaceGitResponse<{ diff: string; error?: string }>(r);
 };
 
 export const switchWorkspaceGitWorktree = async (
@@ -419,14 +402,9 @@ export const removeWorkspaceGitWorktree = async (
   path: string,
   force = false,
 ): Promise<{ removed: boolean; path: string; branch?: string; error?: string } | null> => {
-  try {
-    const r = await fetchWithTimeout(
-      ws("/git/worktree", workspaceRoot, { path, force }),
-      { method: "DELETE", headers: authHeaders() },
-    );
-    if (!r.ok) return null;
-    return (await r.json()) as { removed: boolean; path: string; branch?: string; error?: string };
-  } catch {
-    return null;
-  }
+  const r = await fetchWithTimeout(
+    ws("/git/worktree", workspaceRoot, { path, force }),
+    { method: "DELETE", headers: authHeaders() },
+  );
+  return readWorkspaceGitResponse<{ removed: boolean; path: string; branch?: string; error?: string }>(r);
 };

@@ -1050,6 +1050,34 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     });
   });
 
+  it("does not clear the active workspace for a background conversation failure", () => {
+    useAppStore.setState({
+      conversationId: "conv-active",
+      workingDirectory: "C:\\active",
+      conversations: [
+        { id: "conv-active", title: "Active", updatedAt: "2026-08-16T00:00:00Z", workspaceRoot: "C:\\active" },
+        { id: "conv-background", title: "Background", updatedAt: "2026-08-16T00:00:00Z", workspaceRoot: "C:\\background" },
+      ],
+    });
+
+    expect(handleChatStreamEvent({
+      type: "error",
+      conversation_id: "conv-background",
+      message_id: "assistant-background",
+      message: "Workspace is unavailable",
+      error_type: "tool",
+      error_code: "workspace_missing",
+      recoverable: false,
+    } as unknown as ServerEvent, "conv-background", handlers)).toBe(true);
+
+    const state = useAppStore.getState();
+    expect(state.workingDirectory).toBe("C:\\active");
+    expect(state.conversations.find((item) => item.id === "conv-background")).toMatchObject({
+      workspaceRoot: "",
+      worktreePath: "",
+    });
+  });
+
   it("does not delete a conversation when conversation.not_found is replayed", () => {
     useAppStore.setState({
       conversations: [{

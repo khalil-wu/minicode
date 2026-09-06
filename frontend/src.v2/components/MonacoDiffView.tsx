@@ -1,6 +1,7 @@
 import { lazy, Suspense, useRef, useEffect, useState, useMemo } from "react";
 import type React from "react";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
+import { parseUnifiedDiffLines, type UnifiedDiffLine } from "../lib/unified-diff";
 
 const MonacoDiffEditor = lazy(async () => {
   const scope = globalThis as typeof globalThis & { MonacoEnvironment?: { getWorker?: () => Worker } };
@@ -28,11 +29,12 @@ const MonacoDiffEditor = lazy(async () => {
 export function parseUnifiedDiffToOriginalModified(
   patch: string,
 ): { original: string; modified: string; filePath: string } {
-  const lines = patch.split(/\r?\n/);
+  const lines = parseUnifiedDiffLines(patch);
   let filePath = "";
 
   // Extract file path from header
-  for (const line of lines) {
+  for (const { text: line, kind } of lines) {
+    if (kind !== "meta") continue;
     if (line.startsWith("+++ b/")) {
       filePath = line.slice(6);
       break;
@@ -46,34 +48,34 @@ export function parseUnifiedDiffToOriginalModified(
   const origParts: string[] = [];
   const modParts: string[] = [];
 
-  for (const line of lines) {
-    if (
-      line.startsWith("diff ") ||
-      line.startsWith("index ") ||
-      line.startsWith("--- ") ||
-      line.startsWith("+++ ") ||
-      line.startsWith("@@")
-    ) {
+  let previousBodyKind: UnifiedDiffLine["kind"] | undefined;
+  for (const { text: line, kind } of lines) {
+    if (kind === "marker") {
+      if (previousBodyKind === "del" || previousBodyKind === "context") {
+        origParts[origParts.length - 1] = origParts[origParts.length - 1].replace(/\n$/, "");
+      }
+      if (previousBodyKind === "add" || previousBodyKind === "context") {
+        modParts[modParts.length - 1] = modParts[modParts.length - 1].replace(/\n$/, "");
+      }
       continue;
     }
-    if (line.startsWith("+")) {
-      modParts.push(line.slice(1));
-    } else if (line.startsWith("-")) {
-      origParts.push(line.slice(1));
-    } else if (line.startsWith(" ")) {
-      origParts.push(line.slice(1));
-      modParts.push(line.slice(1));
-    } else if (line === "") {
-      // skip empty lines between hunks
+    if (kind === "add") {
+      modParts.push(line.slice(1) + "\n");
+    } else if (kind === "del") {
+      origParts.push(line.slice(1) + "\n");
+    } else if (kind === "context" && line.startsWith(" ")) {
+      origParts.push(line.slice(1) + "\n");
+      modParts.push(line.slice(1) + "\n");
     } else {
-      origParts.push(line);
-      modParts.push(line);
+      previousBodyKind = undefined;
+      continue;
     }
+    previousBodyKind = kind;
   }
 
   return {
-    original: origParts.join("\n"),
-    modified: modParts.join("\n"),
+    original: origParts.join(""),
+    modified: modParts.join(""),
     filePath,
   };
 }

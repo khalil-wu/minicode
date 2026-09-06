@@ -391,7 +391,10 @@ class MCPClient:
             "tool_timeout",
         )
         self._token_store = token_store
-        self._tokens = token_store.get(server_name) if token_store is not None else None
+        self._tokens = (
+            token_store.for_server(self._url or "", self._oauth_client_id).get(server_name)
+            if token_store is not None else None
+        )
         self._interactive_oauth = interactive_oauth
         self._elicitation_handler = elicitation_handler
         self._on_disconnect = on_disconnect

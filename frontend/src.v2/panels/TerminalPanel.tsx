@@ -62,13 +62,13 @@ export const mergeTerminalOutputByCursor = (
   live: string,
   liveEndCursor: number | undefined,
 ): { output: string; endCursor?: number } => {
-  if (snapshotStartCursor == null || snapshotEndCursor == null || liveEndCursor == null) {
+  if (snapshotStartCursor == null || snapshotEndCursor == null) {
     return { output: mergeTerminalOutputSnapshot(snapshot, live), endCursor: snapshotEndCursor ?? liveEndCursor };
   }
-  const liveStartCursor = liveEndCursor - live.length;
-  if (liveEndCursor <= snapshotEndCursor) {
+  if (liveEndCursor == null || liveEndCursor <= snapshotEndCursor) {
     return { output: snapshot.slice(-TERMINAL_OUTPUT_BUFFER_CHARS), endCursor: snapshotEndCursor };
   }
+  const liveStartCursor = liveEndCursor - live.length;
   const liveSuffixOffset = Math.max(0, snapshotEndCursor - liveStartCursor);
   return {
     output: `${snapshot}${live.slice(liveSuffixOffset)}`.slice(-TERMINAL_OUTPUT_BUFFER_CHARS),
@@ -201,10 +201,10 @@ export const TerminalPanel = () => {
   const terminalSessions = useAppStore((s) => s.terminalSessions);
   const activeTerminalSessionId = useAppStore((s) => s.activeTerminalSessionId);
   const conversationId = useAppStore((s) => s.conversationId);
-  const workingDirectory = useAppStore((s) => s.workingDirectory);
   const resolvedTheme = useAppStore((s) => s.resolvedTheme);
   const terminalSnapshots = useAppStore((s) => s.terminalSnapshots);
   const [booting, setBooting] = useState(true);
+  const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
   const [autoCreating, setAutoCreating] = useState(false);
   const creatingRef = useRef(false);
   const [terminalReady, setTerminalReady] = useState(false);
@@ -218,6 +218,8 @@ export const TerminalPanel = () => {
     session.id === activeTerminalSessionId && session.conversationId === conversationId
   )) ?? null;
   const liveUrl = detectedUrls[0];
+  const isCurrentConversation = (owner: string) => mountedRef.current
+    && useAppStore.getState().conversationId === owner;
 
   const mirrorTerminalCreated = (session: TerminalSessionInfo) => {
     if (!isDesktop() || !session.conversationId) return;
@@ -258,8 +260,6 @@ export const TerminalPanel = () => {
 
   const removeMirroredTerminal = (sessionId: string, conversationOwner: string) => {
     if (!isDesktop() || !conversationOwner) return;
-    const activeConversationId = useAppStore.getState().conversationId || "";
-    if (activeConversationId !== conversationOwner) return;
     // The Electron process owns and kills the real PTY. The backend only owns
     // its reconnectable mirror, so delete that mirror through the existing
     // terminal.kill lifecycle after the local PTY has been removed. Without
@@ -270,7 +270,6 @@ export const TerminalPanel = () => {
         type: "terminal.kill",
         session_id: sessionId,
         conversation_id: conversationOwner,
-        workspace_root: useAppStore.getState().workingDirectory || undefined,
       },
       { silent: true },
     );
@@ -323,7 +322,7 @@ export const TerminalPanel = () => {
             writeToSession(sessionId, input);
             return;
           }
-          writeWebFallbackInput(input);
+          if (outputBufferRef.current["web-fallback"] !== undefined) writeWebFallbackInput(input);
         });
         requestAnimationFrame(() => {
           fitAddon.fit();
@@ -419,7 +418,7 @@ export const TerminalPanel = () => {
         if (!owner) return;
         const acceptedCursor = outputCursorRef.current[sessionId];
         if (endCursor != null && acceptedCursor != null && endCursor <= acceptedCursor) return;
-        appendOutput(sessionId, data, startCursor, endCursor);
+        appendOutput(sessionId, data, startCursor, endCursor, owner);
         mirrorTerminalOutput(sessionId, owner, data);
       }) as (() => void) | undefined;
       desktopExitCleanup = d?.pty.onExit(({ sessionId, conversationId: owner, exitCode }) => {
@@ -441,6 +440,9 @@ export const TerminalPanel = () => {
 
   useEffect(() => {
     autoCreateAttemptedRef.current = false;
+    webLineRef.current = "";
+    delete outputBufferRef.current["web-fallback"];
+    setDetectedUrls([]);
     // restoreWorkbenchState has already projected the target conversation's
     // cached sessions and preferred terminal. Keep them visible until the
     // authoritative list for this owner arrives and reconciles the cache.
@@ -468,10 +470,6 @@ export const TerminalPanel = () => {
   }, [activeSession, statusMessage]);
 
   useEffect(() => {
-    redrawActiveSession();
-  }, [statusMessage]);
-
-  useEffect(() => {
     const onVisibilityFit = () => {
       requestAnimationFrame(() => {
         safeFit();
@@ -487,17 +485,20 @@ export const TerminalPanel = () => {
   }, []);
 
   useEffect(() => {
-    if (!terminalReady || booting || terminalSessions.length > 0 || autoCreateAttemptedRef.current) return;
+    if (!terminalReady || booting || autoCreating || loadedConversationId !== conversationId
+      || terminalSessions.length > 0 || autoCreateAttemptedRef.current) return;
     if (hasPendingNewTerminalSessionRequest()) return;
     if (!termRef.current) return;
     autoCreateAttemptedRef.current = true;
     void createSession();
-  }, [terminalReady, booting, terminalSessions.length]);
+  }, [terminalReady, booting, autoCreating, loadedConversationId, conversationId, terminalSessions.length]);
 
   const refreshSessions = async () => {
     const refreshEpoch = ++refreshEpochRef.current;
     const ownerConversationId = useAppStore.getState().conversationId || "";
+    const isCurrent = () => isCurrentConversation(ownerConversationId) && refreshEpoch === refreshEpochRef.current;
     setBooting(true);
+    setLoadedConversationId(null);
     setStatusMessage("");
     try {
       if (!ownerConversationId) {
@@ -507,16 +508,12 @@ export const TerminalPanel = () => {
       }
       if (isDesktop()) {
         const listedSessions = await ptyList(ownerConversationId);
-        const sessions = await Promise.all(listedSessions.map(async (session) => (
-          await ptySnapshot(session.sessionId, ownerConversationId, TERMINAL_OUTPUT_BUFFER_CHARS) ?? session
-        )));
-        if (
-          !mountedRef.current
-          || refreshEpoch !== refreshEpochRef.current
-          || useAppStore.getState().conversationId !== ownerConversationId
-        ) return;
+        const sessions = (await Promise.all(listedSessions.map((session) => (
+          ptySnapshot(session.sessionId, ownerConversationId, TERMINAL_OUTPUT_BUFFER_CHARS)
+        )))).filter((session) => session !== null);
+        if (!isCurrent()) return;
         for (const session of sessions) {
-          if (!session.output) continue;
+          if (session.output === undefined) continue;
           const merged = mergeTerminalOutputByCursor(
             session.output,
             session.outputStartCursor,
@@ -552,13 +549,15 @@ export const TerminalPanel = () => {
           },
           "terminal.list",
         );
+        if (!isCurrent()) return;
         if (!commandResultSucceeded(result)) {
-          useAppStore.getState().setTerminalSessions([]);
           setStatusMessage(result.message || "刷新终端失败。");
+          return;
         }
       }
+      setLoadedConversationId(ownerConversationId);
     } catch (error) {
-      setStatusMessage(`刷新终端失败：${String(error)}`);
+      if (isCurrent()) setStatusMessage(`刷新终端失败：${String(error)}`);
     } finally {
       if (mountedRef.current && refreshEpoch === refreshEpochRef.current) setBooting(false);
     }
@@ -575,11 +574,12 @@ export const TerminalPanel = () => {
     creatingRef.current = true;
     setAutoCreating(true);
     setStatusMessage("");
-    const cwd = workingDirectory || undefined;
+    const cwd = useAppStore.getState().workingDirectory || undefined;
     try {
       if (isDesktop()) {
         const session = await ptySpawn(cwd, ownerConversationId);
         if (!session) {
+          if (!isCurrentConversation(ownerConversationId)) return;
           setStatusMessage("命令运行器已就绪。输入命令后按 Enter。");
           if (!outputBufferRef.current["web-fallback"]) {
             outputBufferRef.current["web-fallback"] = "命令运行器。命令在当前工作区运行，不支持交互式操作。\r\n$ ";
@@ -621,6 +621,7 @@ export const TerminalPanel = () => {
           },
           "terminal.create",
         );
+        if (!isCurrentConversation(ownerConversationId)) return;
         if (commandResultSucceeded(result)) {
           setStatusMessage("正在启动后端 Shell...");
         } else {
@@ -637,6 +638,7 @@ export const TerminalPanel = () => {
         });
       }
     } catch (error) {
+      if (!isCurrentConversation(ownerConversationId)) return;
       setStatusMessage(`启动终端失败：${String(error)}`);
       useAppStore.getState().setActiveTerminalSession(null);
       redrawActiveSession();
@@ -662,6 +664,7 @@ export const TerminalPanel = () => {
     if (terminatingSessionIdsRef.current.has(sessionId)) return false;
     terminatingSessionIdsRef.current.add(sessionId);
     setTerminatingSessionIds((current) => new Set(current).add(sessionId));
+    const owner = useAppStore.getState().conversationId || "";
     try {
       if (isDesktop()) {
         const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
@@ -672,18 +675,20 @@ export const TerminalPanel = () => {
             ? await ptyAckExit(sessionId, session.conversationId)
             : await ptyKill(sessionId, session.conversationId);
           if (!removed) {
-            setStatusMessage("无法删除终端，因为该会话已不属于当前对话。");
-            await refreshSessionsRef.current();
+            if (isCurrentConversation(owner)) {
+              setStatusMessage("无法删除终端，因为该会话已不属于当前对话。");
+              await refreshSessionsRef.current();
+            }
             return false;
           }
           delete outputBufferRef.current[sessionId];
           delete outputCursorRef.current[sessionId];
           hydratedSnapshotRef.current.delete(sessionId);
-          useAppStore.getState().removeTerminalSession(sessionId);
           removeMirroredTerminal(sessionId, session.conversationId);
+          if (isCurrentConversation(owner)) useAppStore.getState().removeTerminalSession(sessionId);
           return true;
         } catch (error) {
-          setStatusMessage(`停止终端失败：${String(error)}`);
+          if (isCurrentConversation(owner)) setStatusMessage(`停止终端失败：${String(error)}`);
           return false;
         }
       }
@@ -699,12 +704,12 @@ export const TerminalPanel = () => {
           "terminal.kill",
         );
         if (!commandResultSucceeded(result)) {
-          setStatusMessage(result.message || "停止终端失败。");
+          if (isCurrentConversation(owner)) setStatusMessage(result.message || "停止终端失败。");
           return false;
         }
         return true;
       } catch (error) {
-        setStatusMessage(`停止终端失败：${String(error)}`);
+        if (isCurrentConversation(owner)) setStatusMessage(`停止终端失败：${String(error)}`);
         return false;
       }
     } finally {
@@ -718,61 +723,65 @@ export const TerminalPanel = () => {
   };
 
   const restartSession = async (sessionId: string) => {
-    if (!isDesktop()) {
-      setStatusMessage("");
-      try {
+    const state = useAppStore.getState();
+    const session = state.terminalSessions.find((item) => item.id === sessionId);
+    if (!session?.conversationId) return;
+    const owner = session.conversationId;
+    setStatusMessage("");
+    try {
+      if (!isDesktop()) {
         const result = await sendClientCommandAwaitResult(
           {
             type: "terminal.restart",
             session_id: sessionId,
-            conversation_id: useAppStore.getState().conversationId || undefined,
-            workspace_root: useAppStore.getState().workingDirectory || undefined,
+            conversation_id: owner,
+            workspace_root: state.workingDirectory || undefined,
           },
           "terminal.restart",
         );
         if (!commandResultSucceeded(result)) {
-          setStatusMessage(result.message || "重新启动终端失败。");
+          if (isCurrentConversation(owner)) setStatusMessage(result.message || "重新启动终端失败。");
           return;
         }
         delete outputBufferRef.current[sessionId];
         delete outputCursorRef.current[sessionId];
         hydratedSnapshotRef.current.delete(sessionId);
-      } catch (error) {
-        setStatusMessage(`重新启动终端失败：${String(error)}`);
+        return;
       }
-      return;
+      const replacement = await ptyRestart(sessionId, owner);
+      if (!replacement) {
+        if (isCurrentConversation(owner)) setStatusMessage("重新启动终端失败。请新建终端后继续。");
+        return;
+      }
+      delete outputBufferRef.current[sessionId];
+      delete outputCursorRef.current[sessionId];
+      hydratedSnapshotRef.current.delete(sessionId);
+      removeMirroredTerminal(sessionId, owner);
+      const terminalSession: TerminalSessionInfo = {
+        id: replacement.sessionId,
+        conversationId: replacement.conversationId,
+        pid: replacement.pid,
+        shell: replacement.shell,
+        cwd: replacement.cwd,
+        status: "running",
+        createdAt: Date.now(),
+        terminalMode: "pty",
+      };
+      mirrorTerminalCreated(terminalSession);
+      if (!isCurrentConversation(owner)) return;
+      const store = useAppStore.getState();
+      store.removeTerminalSession(sessionId);
+      store.upsertTerminalSession(terminalSession);
+      store.setActiveTerminalSession(terminalSession.id);
+    } catch (error) {
+      if (isCurrentConversation(owner)) setStatusMessage(`重新启动终端失败：${String(error)}`);
     }
-    const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
-    if (!session?.conversationId) return;
-    setStatusMessage("");
-    const replacement = await ptyRestart(sessionId, session.conversationId);
-    if (!replacement) {
-      setStatusMessage("重新启动终端失败。请新建终端后继续。");
-      return;
-    }
-    delete outputBufferRef.current[sessionId];
-    delete outputCursorRef.current[sessionId];
-    hydratedSnapshotRef.current.delete(sessionId);
-    removeMirroredTerminal(sessionId, session.conversationId);
-    const terminalSession: TerminalSessionInfo = {
-      id: replacement.sessionId,
-      conversationId: replacement.conversationId,
-      pid: replacement.pid,
-      shell: replacement.shell,
-      cwd: replacement.cwd,
-      status: "running",
-      createdAt: Date.now(),
-      terminalMode: "pty",
-    };
-    mirrorTerminalCreated(terminalSession);
-    const store = useAppStore.getState();
-    store.removeTerminalSession(sessionId);
-    if (store.conversationId !== session.conversationId) return;
-    store.upsertTerminalSession(terminalSession);
-    store.setActiveTerminalSession(terminalSession.id);
   };
 
-  const appendOutput = (sessionId: string, data: string, startCursor?: number, endCursor?: number) => {
+  const appendOutput = (
+    sessionId: string, data: string, startCursor?: number, endCursor?: number,
+    owner = useAppStore.getState().conversationId || "",
+  ) => {
     let appendedData = data;
     let redrawRequired = false;
     const currentCursor = outputCursorRef.current[sessionId];
@@ -795,6 +804,7 @@ export const TerminalPanel = () => {
     } else {
       outputBufferRef.current[sessionId] = `${outputBufferRef.current[sessionId] ?? ""}${appendedData}`.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
     }
+    if (!isCurrentConversation(owner)) return;
     const found = Array.from(appendedData.matchAll(DEV_SERVER_URL_RE), (match) => normalizeDetectedUrl(match[0]));
     if (found.length > 0) {
       const store = useAppStore.getState();
@@ -817,6 +827,11 @@ export const TerminalPanel = () => {
   };
 
   const runWebFallbackCommand = (command: string) => {
+    const state = useAppStore.getState();
+    if (!state.conversationId) {
+      setStatusMessage("请先选择会话，再运行命令。");
+      return;
+    }
     const trimmed = command.trim();
     if (!trimmed) {
       appendOutput("web-fallback", "\r\n$ ");
@@ -826,9 +841,9 @@ export const TerminalPanel = () => {
     sendClientCommand({
       type: "terminal.exec",
       command: trimmed,
-      cwd: workingDirectory || undefined,
-      conversation_id: conversationId || undefined,
-      workspace_root: workingDirectory || undefined,
+      cwd: state.workingDirectory || undefined,
+      conversation_id: state.conversationId,
+      workspace_root: state.workingDirectory || undefined,
     });
   };
 
@@ -905,13 +920,18 @@ export const TerminalPanel = () => {
   const writeToSession = (sessionId: string, data: string) => {
     const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
     if (!session || session.status === "exited") {
-      appendOutput("web-fallback", statusMessage ? "" : "\r\n终端会话未运行，已切换到命令运行器。\r\n$ ");
-      activeRef.current = null;
-      useAppStore.getState().setActiveTerminalSession(null);
-      writeWebFallbackInput(data);
+      setStatusMessage("终端会话已停止，请重新启动或新建终端。");
       return;
     }
-    if (isDesktop()) void ptyWrite(sessionId, data, session.conversationId);
+    if (isDesktop()) {
+      void Promise.resolve(ptyWrite(sessionId, data, session.conversationId)).then((written) => {
+        if (written === false && isCurrentConversation(session.conversationId)) {
+          setStatusMessage("终端输入未写入，请刷新终端列表。");
+        }
+      }).catch((error) => {
+        if (isCurrentConversation(session.conversationId)) setStatusMessage(`终端输入失败：${String(error)}`);
+      });
+    }
     else sendClientCommand({
       type: "terminal.input",
       session_id: sessionId,
@@ -932,7 +952,11 @@ export const TerminalPanel = () => {
   const resizeSession = (sessionId: string, cols: number, rows: number) => {
     if (isDesktop()) {
       const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
-      if (session?.conversationId) void ptyResize(sessionId, cols, rows, session.conversationId);
+      if (session?.conversationId) {
+        void Promise.resolve(ptyResize(sessionId, cols, rows, session.conversationId)).catch((error) => {
+          if (isCurrentConversation(session.conversationId)) setStatusMessage(`终端尺寸更新失败：${String(error)}`);
+        });
+      }
     } else {
       const state = useAppStore.getState();
       sendClientCommand({
@@ -949,9 +973,15 @@ export const TerminalPanel = () => {
   const copyTerminalSelection = async (term = termRef.current) => {
     const text = term?.getSelection?.() ?? "";
     if (!text) return;
-    await navigator.clipboard?.writeText(text);
-    term?.clearSelection?.();
-    term?.focus?.();
+    const owner = useAppStore.getState().conversationId || "";
+    try {
+      await navigator.clipboard.writeText(text);
+      if (!isCurrentConversation(owner)) return;
+      term?.clearSelection?.();
+      term?.focus?.();
+    } catch (error) {
+      if (isCurrentConversation(owner)) setStatusMessage(`复制终端文本失败：${String(error)}`);
+    }
   };
 
   const clearActiveTerminal = async () => {
@@ -959,68 +989,77 @@ export const TerminalPanel = () => {
     const sessionId = state.activeTerminalSessionId;
     const session = state.terminalSessions.find((item) => item.id === sessionId);
     if (!sessionId || !session) {
-      outputBufferRef.current["web-fallback"] = "$ ";
       webLineRef.current = "";
       termRef.current?.clear();
-      termRef.current?.write("$ ");
+      if (outputBufferRef.current["web-fallback"] !== undefined) {
+        outputBufferRef.current["web-fallback"] = "$ ";
+        termRef.current?.write("$ ");
+      }
       termRef.current?.focus?.();
       return;
     }
 
     setStatusMessage("");
-    if (isDesktop()) {
-      const result = await ptyClear(session.id, session.conversationId);
-      if (!result.cleared) {
-        setStatusMessage("无法清空终端，因为该会话已不属于当前对话。");
-        await refreshSessionsRef.current();
-        return;
+    try {
+      if (isDesktop()) {
+        const result = await ptyClear(session.id, session.conversationId);
+        if (!result.cleared) {
+          if (isCurrentConversation(session.conversationId)) {
+            setStatusMessage("无法清空终端，因为该会话已不属于当前对话。");
+            await refreshSessionsRef.current();
+          }
+          return;
+        }
+        outputCursorRef.current[session.id] = result.outputCursor;
+        // Keep the backend's reconnectable mirror consistent with the Electron
+        // PTY. A disconnected backend does not invalidate the local clear.
+        sendClientCommand(
+          {
+            type: "terminal.clear",
+            session_id: session.id,
+            conversation_id: session.conversationId,
+            workspace_root: state.workingDirectory || undefined,
+          },
+          { silent: true },
+        );
+      } else {
+        const result = await sendClientCommandAwaitResult(
+          {
+            type: "terminal.clear",
+            session_id: session.id,
+            conversation_id: session.conversationId,
+            workspace_root: state.workingDirectory || undefined,
+          },
+          "terminal.clear",
+        );
+        if (!commandResultSucceeded(result)) {
+          if (isCurrentConversation(session.conversationId)) setStatusMessage(result.message || "清空终端失败。");
+          return;
+        }
       }
-      outputCursorRef.current[session.id] = result.outputCursor;
-      // Keep the backend's reconnectable mirror consistent with the Electron
-      // PTY. A disconnected backend does not invalidate the local clear.
-      sendClientCommand(
-        {
-          type: "terminal.clear",
-          session_id: session.id,
-          conversation_id: session.conversationId,
-          workspace_root: state.workingDirectory || undefined,
-        },
-        { silent: true },
-      );
-    } else {
-      const result = await sendClientCommandAwaitResult(
-        {
-          type: "terminal.clear",
-          session_id: session.id,
-          conversation_id: session.conversationId,
-          workspace_root: state.workingDirectory || undefined,
-        },
-        "terminal.clear",
-      );
-      if (!commandResultSucceeded(result)) {
-        setStatusMessage(result.message || "清空终端失败。");
-        return;
-      }
-    }
 
-    outputBufferRef.current[session.id] = "";
-    hydratedSnapshotRef.current.delete(session.id);
-    state.upsertTerminalSnapshot({
-      id: session.id,
-      conversationId: session.conversationId,
-      pid: session.pid,
-      shell: session.shell,
-      cwd: session.cwd,
-      status: session.status,
-      terminalMode: session.terminalMode,
-      output: "",
-      outputChars: 0,
-      totalOutputChars: 0,
-      truncated: false,
-      capturedAt: Date.now(),
-    });
-    termRef.current?.clear();
-    termRef.current?.focus?.();
+      outputBufferRef.current[session.id] = "";
+      hydratedSnapshotRef.current.delete(session.id);
+      if (!isCurrentConversation(session.conversationId)) return;
+      state.upsertTerminalSnapshot({
+        id: session.id,
+        conversationId: session.conversationId,
+        pid: session.pid,
+        shell: session.shell,
+        cwd: session.cwd,
+        status: session.status,
+        terminalMode: session.terminalMode,
+        output: "",
+        outputChars: 0,
+        totalOutputChars: 0,
+        truncated: false,
+        capturedAt: Date.now(),
+      });
+      termRef.current?.clear();
+      termRef.current?.focus?.();
+    } catch (error) {
+      if (isCurrentConversation(session.conversationId)) setStatusMessage(`清空终端失败：${String(error)}`);
+    }
   };
 
   return (
@@ -1158,6 +1197,7 @@ export const TerminalPanel = () => {
           </IconButton>
         )}
       </div>
+      {statusMessage && <div role="status" style={{ color: "var(--text-secondary)", fontSize: "var(--text-xs)" }}>{statusMessage}</div>}
       <div
         ref={containerRef}
         className="flex-1 w-full min-h-0 p-0.5 overflow-hidden"

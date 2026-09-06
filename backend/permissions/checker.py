@@ -1128,7 +1128,7 @@ class PermissionChecker:
             injection_reason = command_injection_risk(shell_command)
             if injection_reason:
                 static_auto = None
-                static_floor.append((PermissionLevel.CONFIRM, "injection_risk", injection_reason))
+                raise_floor(PermissionLevel.CONFIRM, "injection_risk", injection_reason)
 
         if context is not None and context.mode == "plan":
             if tool is None or tool_level is None:

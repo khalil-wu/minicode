@@ -36,6 +36,12 @@ describe("terminal scrollback hydration", () => {
   it("keeps legacy metadata-only runtimes compatible", () => {
     expect(mergeTerminalOutputSnapshot("hello ", "world")).toBe("hello world");
   });
+
+  it("uses an authoritative empty snapshot after the terminal was cleared", () => {
+    expect(mergeTerminalOutputByCursor("", 42, 42, "old restored scrollback", undefined)).toEqual({
+      output: "", endCursor: 42,
+    });
+  });
 });
 
 describe("terminal session labels", () => {

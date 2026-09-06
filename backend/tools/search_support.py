@@ -26,12 +26,15 @@ from backend.tools.path_resolution import (
     denied_path_patterns,
 )
 from backend.workspace.path_filters import is_windows_reserved_path
+from backend.workspace.fuzzy_search import iter_search_paths
+from pathspec.gitignore import GitIgnoreSpec
 from collections import deque
 from pathlib import Path
 from typing import (
     Any,
     Callable,
     Iterator,
+    Literal,
 )
 import asyncio
 import os
@@ -290,7 +293,7 @@ def _coerce_head_limit(value: Any, default: int) -> int | None:
 def _apply_pagination(items: list[str], *, offset: int, head_limit: int | None) -> tuple[list[str], bool]:
     start = max(0, offset)
     if head_limit is None:
-        return items[start:], start > 0 and bool(items[:start])
+        return items[start:], False
     end = start + head_limit
     return items[start:end], len(items) > end
 
@@ -315,7 +318,8 @@ def _pagination_suffix(*, offset: int, head_limit: int | None, truncated: bool) 
         parts.append(f"offset={offset}")
     if not parts:
         return ""
-    return f"\n\n[Showing paginated results: {', '.join(parts)}. Use offset to fetch the next page.]"
+    continuation = " Use offset to fetch the next page." if truncated else " End of results."
+    return f"\n\n[Showing paginated results: {', '.join(parts)}.{continuation}]"
 
 
 def _bounded_search_output(content: str) -> str:
@@ -353,16 +357,28 @@ def _normalize_file_extensions(file_extensions: Any, file_type: Any = None) -> l
     return sorted(normalized)
 
 
-def _split_glob_patterns(glob_pattern: str | None) -> list[str]:
-    if not glob_pattern:
-        return []
-    patterns: list[str] = []
-    for raw in str(glob_pattern).split():
-        if "{" in raw and "}" in raw:
-            patterns.append(raw)
-        else:
-            patterns.extend(part for part in raw.split(",") if part)
-    return [p for p in patterns if p]
+def _compile_glob_filter(pattern: str) -> Callable[[str], bool]:
+    """Compile the path glob used by both Python search tools."""
+    def expand(value: str) -> list[str]:
+        group = re.search(r"(?<!\\)\{([^{}]*)\}", value)
+        if group is None:
+            return [value]
+        return [
+            expanded
+            for alternative in group[1].split(",")
+            for expanded in expand(value[:group.start()] + alternative + value[group.end():])
+        ]
+
+    # Gitignore treats a leading # and trailing spaces as syntax; rg globs
+    # treat those characters as part of the requested filename.
+    escaped = "\\" + pattern if pattern.startswith("#") else pattern
+    trailing = len(escaped) - len(escaped.rstrip(" "))
+    if trailing:
+        escaped = escaped[:-trailing] + "\\ " * trailing
+    spec = GitIgnoreSpec.from_lines(expand(escaped))
+    if pattern.startswith("!"):
+        return lambda relative: spec.check_file(relative).include is not False
+    return spec.match_file
 
 
 def _relative_display_path(file_path: Path, root_path: Path) -> str:
@@ -424,6 +440,7 @@ def _iter_candidate_files(
     file_extensions: list[str],
     *,
     is_allowed: Callable[[Path], bool] | None = None,
+    ignore_rules: Literal["all", "directories", "none"] = "all",
 ) -> Iterator[Path]:
     """Yield eligible files without materializing the complete directory tree.
 
@@ -436,54 +453,19 @@ def _iter_candidate_files(
     extension_set = {extension.casefold() for extension in file_extensions}
 
     def eligible(file_path: Path) -> bool:
-        try:
-            relative = file_path.relative_to(root)
-        except ValueError:
-            return False
-        if _should_ignore_parts(relative.parts):
-            return False
-        if not _is_within_path(file_path, root):
-            return False
         if extension_set and file_path.suffix.casefold() not in extension_set:
             return False
-        if is_allowed is not None:
-            try:
-                if not is_allowed(file_path):
-                    return False
-            except Exception:
-                # Permission evaluation failures are fail-closed for search.
-                return False
-        return True
+        return is_allowed is None or is_allowed(file_path)
 
     if root.is_file():
         if eligible(root):
             yield root
         return
-    if not root.is_dir():
-        return
-
-    pending_dirs: list[Path] = [root]
-    while pending_dirs:
-        current = pending_dirs.pop()
-        try:
-            with os.scandir(current) as entries:
-                for entry in entries:
-                    candidate = Path(entry.path)
-                    try:
-                        if entry.is_symlink():
-                            continue
-                        relative = candidate.relative_to(root)
-                        if _should_ignore_parts(relative.parts):
-                            continue
-                        if entry.is_dir(follow_symlinks=False):
-                            pending_dirs.append(candidate)
-                            continue
-                        if entry.is_file(follow_symlinks=False) and eligible(candidate):
-                            yield candidate
-                    except (OSError, ValueError):
-                        continue
-        except OSError:
-            continue
+    for candidate, is_dir in iter_search_paths(
+        root, include_hidden=True, ignore_dirs=_IGNORED_PATH_PARTS, ignore_rules=ignore_rules,
+    ):
+        if not is_dir and eligible(candidate):
+            yield candidate
 
 
 def _iter_bounded_file_lines(
@@ -493,10 +475,8 @@ def _iter_bounded_file_lines(
 ) -> Iterator[tuple[str, bool]]:
     """Read text one bounded line at a time and probe for binary content.
 
-    A bounded ``readline`` plus draining of an overlong line prevents a single
-    generated/minified line from allocating an arbitrary amount of memory.
-    ``was_truncated`` records the existing regex-input ceiling so the caller
-    can tell the model that the line was intentionally shortened.
+    A line beyond the input limit makes the search incomplete. Report that
+    limit instead of searching a prefix and claiming there were no matches.
     """
 
     with file_path.open("rb") as handle:
@@ -515,26 +495,17 @@ def _iter_bounded_file_lines(
             line_complete = raw.endswith(b"\n")
             content_bytes = raw.rstrip(b"\r\n") if line_complete else raw
             was_truncated = len(content_bytes) > REGEX_MAX_LINE_CHARS
-            retained = content_bytes[:REGEX_MAX_LINE_CHARS]
-            if not line_complete and len(raw) >= REGEX_MAX_LINE_CHARS + 2:
-                # Drain the remainder without retaining it.  Keep probing for
-                # NUL so a binary file cannot leak a match found before it.
-                while True:
-                    remainder = handle.readline(64 * 1024)
-                    if b"\x00" in remainder:
-                        raise _BinaryFileDetected
-                    if not remainder or remainder.endswith(b"\n"):
-                        break
+            if was_truncated:
+                raise SearchResourceLimitError(
+                    f"a line in {file_path} exceeds the {REGEX_MAX_LINE_CHARS}-byte Python search input limit; use ripgrep"
+                )
             if b"\x00" in content_bytes:
                 raise _BinaryFileDetected
-            yield retained.decode("utf-8", errors="replace"), was_truncated
+            yield content_bytes.decode("utf-8", errors="replace"), False
 
 
 def _read_bounded_multiline_content(file_path: Path, *, deadline: float) -> str:
-    try:
-        stat = file_path.stat()
-    except OSError:
-        return ""
+    stat = file_path.stat()
     if stat.st_size > RIPGREP_TRANSPORT_LIMIT_BYTES:
         raise SearchResourceLimitError(
             f"multiline fallback refuses files larger than "
@@ -823,8 +794,6 @@ def _grep_file_matches(
         )
     except _BinaryFileDetected:
         return _FileGrepResult([])
-    except (PermissionError, OSError):
-        return _FileGrepResult([])
 
 
 def _regex_search(regex: Any, value: str, *, timeout_seconds: float = REGEX_SEARCH_TIMEOUT_SECONDS) -> Any:
@@ -944,8 +913,6 @@ async def _grep_with_ripgrep(
     # Search hidden files but exclude VCS metadata dirs. --no-ignore is
     # deliberately not passed, so .gitignore is still respected.
     cmd = ["rg", "--color=never", "--hidden"]
-    for _vcs_dir in (".git", ".svn", ".hg", ".bzr", ".jj", ".sl"):
-        cmd.extend(["--glob", f"!{_vcs_dir}"])
     cmd.extend(["--max-columns", "500"])
     if output_mode == "files_with_matches":
         cmd.extend(["--files-with-matches", "--sort=modified"])
@@ -956,15 +923,6 @@ async def _grep_with_ripgrep(
         # -n controls whether matched lines are prefixed with their line number.
         if line_numbers:
             cmd.append("--line-number")
-
-    for reserved in ("nul", "con", "prn", "aux", "com[1-9]", "lpt[1-9]"):
-        cmd.extend(["--iglob", f"!**/{reserved}"])
-        cmd.extend(["--iglob", f"!**/{reserved}.*"])
-
-    # Configured denylist entries too, so search and read agree on what is off
-    # limits rather than search enforcing only the built-in floor.
-    for exclude in exclude_globs or []:
-        cmd.extend(["--glob", exclude])
 
     if multiline:
         cmd.extend(["-U", "--multiline-dotall"])
@@ -983,8 +941,18 @@ async def _grep_with_ripgrep(
         elif context_lines > 0:
             cmd.extend(["-C", str(context_lines)])
 
-    for split_pattern in _split_glob_patterns(glob_pattern):
-        cmd.extend(["--glob", split_pattern])
+    if glob_pattern:
+        cmd.extend(["--glob", glob_pattern])
+
+    # Ripgrep's last matching glob wins. Apply exclusions after the query's
+    # include glob, as CC does for permission-derived ignore patterns.
+    for vcs_dir in (".git", ".svn", ".hg", ".bzr", ".jj", ".sl"):
+        cmd.extend(["--glob", f"!{vcs_dir}"])
+    for reserved in ("nul", "con", "prn", "aux", "com[1-9]", "lpt[1-9]"):
+        cmd.extend(["--iglob", f"!**/{reserved}"])
+        cmd.extend(["--iglob", f"!**/{reserved}.*"])
+    for exclude in exclude_globs or []:
+        cmd.extend(["--glob", exclude])
 
     normalized_extensions = sorted({extension.casefold() for extension in file_extensions or []})
     if normalized_extensions:
@@ -1048,7 +1016,7 @@ async def _grep_with_ripgrep(
             # rg sorts modified time oldest-first; CC presents newest-first.
             output_lines.reverse()
         output_lines, truncated = _apply_pagination(output_lines, offset=offset, head_limit=limit)
-        output = "\n".join(output_lines)
+        output = "\n".join(output_lines) or "(no matches on this page)"
         output += _pagination_suffix(offset=offset, head_limit=limit, truncated=truncated)
 
     return output, False
@@ -1144,27 +1112,15 @@ def _glob_with_python(
     candidates: list[str] = []
     deadline = time.monotonic() + PYTHON_SEARCH_TIMEOUT_SECONDS
     try:
-        for file_path in search_root.glob(pattern):
+        matches_glob = _compile_glob_filter(pattern)
+        for file_path in _iter_candidate_files(search_root, [], is_allowed=is_allowed, ignore_rules="none"):
             if time.monotonic() >= deadline:
                 raise SearchResourceLimitError(
                     f"file search exceeded the {PYTHON_SEARCH_TIMEOUT_SECONDS:.0f}s time limit"
                 )
-            try:
-                if file_path.is_symlink() or not file_path.is_file():
-                    continue
-                relative = file_path.relative_to(search_root)
-            except (OSError, ValueError):
+            relative = file_path.relative_to(search_root)
+            if not matches_glob(relative.as_posix()):
                 continue
-            if _should_ignore_parts(relative.parts):
-                continue
-            if not _is_within_path(file_path, search_root):
-                continue
-            if is_allowed is not None:
-                try:
-                    if not is_allowed(file_path):
-                        continue
-                except Exception:
-                    continue
             candidates.append(str(relative))
 
         selected: list[str] = []

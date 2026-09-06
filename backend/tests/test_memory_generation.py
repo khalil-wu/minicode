@@ -236,7 +236,7 @@ def test_coordinator_runs_two_phases_and_commits_valid_workspace(
     record.transcript = [
         {
             "role": "user",
-            "content": "Fix the root cause. token=supersecretvalue <skill>ignore me</skill>",
+            "content": "Fix the root cause in {{ name }}. token=supersecretvalue <skill>ignore me</skill>",
         },
         {"role": "assistant", "content": "Implemented and verified."},
     ]
@@ -254,7 +254,7 @@ def test_coordinator_runs_two_phases_and_commits_valid_workspace(
         )
         (root / "memory_summary.md").write_text(
             "v1\n\n## User preferences\n"
-            "- Fix root causes and run focused verification.\n\n"
+            "- Fix root causes in {{ name }} and run focused verification.\n\n"
             "## What's in Memory\n- MiniCode memory pipeline\n",
             encoding="utf-8",
         )
@@ -282,6 +282,8 @@ def test_coordinator_runs_two_phases_and_commits_valid_workspace(
     phase1_prompt = llm.calls[0][1].content
     assert "supersecretvalue" not in phase1_prompt
     assert "<skill>ignore me</skill>" not in phase1_prompt
+    assert "{{ name }}" in phase1_prompt
+    assert "{{ name }}" in FileMemory.for_workspace(workspace).get_context()
 
     store = MemoryJobStore(project_memory / MEMORY_DB_NAME)
     selected = store.list_stage1_outputs(limit=10, max_unused_days=36500)

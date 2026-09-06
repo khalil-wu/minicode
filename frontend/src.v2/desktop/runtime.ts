@@ -246,7 +246,7 @@ interface MiniCodeDesktop {
   };
   pty: {
     spawn(cwd: string | undefined, conversationId?: string): Promise<{ sessionId?: string; session_id?: string; conversationId?: string; conversation_id?: string; pid?: number; shell?: string; cwd?: string }>;
-    write(sessionId: string, data: string, conversationId: string): Promise<void>;
+    write(sessionId: string, data: string, conversationId: string): Promise<boolean>;
     resize(sessionId: string, cols: number, rows: number, conversationId: string): Promise<void>;
     kill(sessionId: string, conversationId: string): Promise<boolean>;
     restart(sessionId: string, conversationId: string): Promise<Record<string, unknown> | null>;
@@ -437,12 +437,10 @@ const normalizeFsListTreeResult = (path: string, payload: unknown): FsListTreeRe
 };
 
 export const fsListTreeResult = async (path: string): Promise<FsListTreeResult> => {
-  try {
-    return normalizeFsListTreeResult(path, await desktop()?.fs.listTree(path));
-  } catch (err) {
-    console.warn("[fsListTree] failed for", path, err);
-    return { workspaceRoot: path, requestedPath: path, entries: [] };
-  }
+  // A filesystem permission/missing-root failure must reach FileTree's error
+  // state. Returning an empty tree turns "access denied" into a false empty
+  // workspace and prevents the user from retrying the real operation.
+  return normalizeFsListTreeResult(path, await desktop()?.fs.listTree(path));
 };
 
 export const fsListTree = async (path: string): Promise<FsEntry[]> =>
@@ -454,15 +452,11 @@ export const fsSearchFiles = async (
   limit = 20,
   kind: "file" | "folder" | "all" = "file",
 ): Promise<FsSearchResult[]> => {
-  try {
-    const fs = desktop()?.fs;
-    const result = kind !== "all" && fs?.searchFilesByKind
-      ? await fs.searchFilesByKind(rootPath, query, limit, kind)
-      : await fs?.searchFiles(rootPath, query, limit);
-    return normalizeFsSearchResult(result);
-  } catch {
-    return [];
-  }
+  const fs = desktop()?.fs;
+  const result = kind !== "all" && fs?.searchFilesByKind
+    ? await fs.searchFilesByKind(rootPath, query, limit, kind)
+    : await fs?.searchFiles(rootPath, query, limit);
+  return normalizeFsSearchResult(result);
 };
 
 const normalizeFsSearchResult = (payload: unknown): FsSearchResult[] => {
@@ -566,15 +560,11 @@ const normalizePtySession = (session: unknown, fallbackCwd = ""): PtySession | n
 export const ptySpawn = async (cwd: string | undefined, conversationId: string): Promise<PtySession | null> => {
   const owner = conversationId.trim();
   if (!owner) return null;
-  try {
-    const pty = desktop()?.pty;
-    if (!pty) return null;
-    const raw = await pty.spawn(cwd, owner);
-    const session = normalizePtySession(raw, cwd ?? "");
-    return session?.conversationId === owner ? session : null;
-  } catch {
-    return null;
-  }
+  const pty = desktop()?.pty;
+  if (!pty) return null;
+  const raw = await pty.spawn(cwd, owner);
+  const session = normalizePtySession(raw, cwd ?? "");
+  return session?.conversationId === owner ? session : null;
 };
 export const ptyWrite = (sessionId: string, data: string, conversationId: string) => desktop()?.pty.write(sessionId, data, conversationId);
 export const ptyResize = (sessionId: string, cols: number, rows: number, conversationId: string) => desktop()?.pty.resize(sessionId, cols, rows, conversationId);
@@ -582,38 +572,26 @@ export const ptyKill = (sessionId: string, conversationId: string) => desktop()?
 export const ptyRestart = async (sessionId: string, conversationId: string): Promise<PtySession | null> => {
   const owner = conversationId.trim();
   if (!owner) return null;
-  try {
-    const session = normalizePtySession(await desktop()?.pty.restart(sessionId, owner));
-    return session?.conversationId === owner ? session : null;
-  } catch {
-    return null;
-  }
+  const session = normalizePtySession(await desktop()?.pty.restart(sessionId, owner));
+  return session?.conversationId === owner ? session : null;
 };
 export const ptyKillConversation = (conversationId: string) => desktop()?.pty.killConversation(conversationId);
 export const ptyAckExit = (sessionId: string, conversationId: string) => desktop()?.pty.ackExit(sessionId, conversationId);
 export const ptyList = async (conversationId: string): Promise<PtySession[]> => {
   const owner = conversationId.trim();
   if (!owner) return [];
-  try {
-    const pty = desktop()?.pty;
-    if (!pty) return [];
-    const sessions = await pty.list(owner);
-    return (sessions ?? [])
-      .map((session) => normalizePtySession(session))
-      .filter((session): session is PtySession => session?.conversationId === owner);
-  } catch {
-    return [];
-  }
+  const pty = desktop()?.pty;
+  if (!pty) return [];
+  const sessions = await pty.list(owner);
+  return (sessions ?? [])
+    .map((session) => normalizePtySession(session))
+    .filter((session): session is PtySession => session?.conversationId === owner);
 };
 export const ptySnapshot = async (sessionId: string, conversationId: string, maxChars = 80_000): Promise<PtySession | null> => {
   const owner = conversationId.trim();
   if (!owner) return null;
-  try {
-    const session = normalizePtySession(await desktop()?.pty.snapshot(sessionId, maxChars, owner));
-    return session?.conversationId === owner ? session : null;
-  } catch {
-    return null;
-  }
+  const session = normalizePtySession(await desktop()?.pty.snapshot(sessionId, maxChars, owner));
+  return session?.conversationId === owner ? session : null;
 };
 export const ptyClear = async (
   sessionId: string,
@@ -621,15 +599,11 @@ export const ptyClear = async (
 ): Promise<{ cleared: boolean; outputCursor: number }> => {
   const owner = conversationId.trim();
   if (!owner) return { cleared: false, outputCursor: 0 };
-  try {
-    const result = await desktop()?.pty.clear(sessionId, owner);
-    return {
-      cleared: result?.cleared === true,
-      outputCursor: Number.isFinite(result?.outputCursor) ? Number(result?.outputCursor) : 0,
-    };
-  } catch {
-    return { cleared: false, outputCursor: 0 };
-  }
+  const result = await desktop()?.pty.clear(sessionId, owner);
+  return {
+    cleared: result?.cleared === true,
+    outputCursor: Number.isFinite(result?.outputCursor) ? Number(result?.outputCursor) : 0,
+  };
 };
 
 // --- Shell / OS ---

@@ -6,16 +6,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const fsListTree = vi.fn();
 const fsSearchFiles = vi.fn();
 const listWorkspaceTree = vi.fn();
+const searchWorkspaceFiles = vi.fn();
+const isDesktop = vi.fn(() => true);
 
 vi.mock("../desktop/runtime", () => ({
-  isDesktop: () => true,
+  isDesktop: () => isDesktop(),
   fsListTree: (path: string) => fsListTree(path),
   fsSearchFiles: (...args: unknown[]) => fsSearchFiles(...args),
 }));
 
 vi.mock("../protocol/workspace", () => ({
-  listWorkspaceTree: (path: string) => listWorkspaceTree(path),
-  searchWorkspaceFiles: vi.fn(),
+  listWorkspaceTree: (...args: unknown[]) => listWorkspaceTree(...args),
+  searchWorkspaceFiles: (...args: unknown[]) => searchWorkspaceFiles(...args),
 }));
 
 import { useAppStore } from "../stores";
@@ -37,6 +39,9 @@ describe("MenuOverlay mentions", () => {
     fsListTree.mockReset();
     fsSearchFiles.mockReset();
     listWorkspaceTree.mockReset();
+    searchWorkspaceFiles.mockReset().mockResolvedValue([]);
+    isDesktop.mockReturnValue(true);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ plugins: [] }))));
     __clearMentionFileCacheForTests();
     useAppStore.setState({
       workingDirectory: "",
@@ -49,6 +54,30 @@ describe("MenuOverlay mentions", () => {
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps files available when plugins fail and supports retrying the plugin request", async () => {
+    useAppStore.setState({ workingDirectory: "C:\\workspace" });
+    fsListTree.mockResolvedValue([{ name: "app.ts", path: "app.ts", isDirectory: false }]);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: "Plugin service unavailable" }), { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ plugins: [{ name: "helper", enabled: true }] })));
+    vi.stubGlobal("fetch", fetchMock);
+    const select = vi.fn();
+    render(<MenuOverlay open kind="mention" filter="@" onSelect={select} />);
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Plugin service unavailable");
+    expect(screen.getByRole("option", { name: /app\.ts/ })).toBeTruthy();
+    const retry = screen.getByRole("button", { name: "重试加载插件" });
+    fireEvent.keyDown(retry, { key: "Enter" });
+    expect(select).not.toHaveBeenCalled();
+    fireEvent.click(retry);
+
+    expect(await screen.findByRole("option", { name: /@helper/ })).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fsListTree).toHaveBeenCalledTimes(1);
   });
 
   it("lists the active desktop workspace for an empty @ query", async () => {
@@ -106,6 +135,34 @@ describe("MenuOverlay mentions", () => {
 
     expect(fsSearchFiles).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("option", { name: /README\.md/ })).toBeTruthy();
+  });
+
+  it("isolates Web mention caches by workspace and clears the old list while loading", async () => {
+    isDesktop.mockReturnValue(false);
+    useAppStore.setState({ workingDirectory: "C:\\project-a" });
+    let resolveNext!: (value: unknown) => void;
+    listWorkspaceTree.mockResolvedValueOnce({ children: [{ name: "old.ts", path: "old.ts", is_dir: false }] })
+      .mockReturnValueOnce(new Promise((resolve) => { resolveNext = resolve; }));
+    render(<MenuOverlay open kind="mention" filter="@" onSelect={() => {}} />);
+    await screen.findByRole("option", { name: /old\.ts/ });
+
+    act(() => useAppStore.setState({ workingDirectory: "C:\\project-b" }));
+
+    expect(screen.queryByRole("option", { name: /old\.ts/ })).toBeNull();
+    await act(async () => resolveNext({ children: [{ name: "new.ts", path: "new.ts", is_dir: false }] }));
+    expect(screen.getByRole("option", { name: /new\.ts/ })).toBeTruthy();
+    expect(listWorkspaceTree).toHaveBeenLastCalledWith("C:\\project-b", ".");
+  });
+
+  it("keeps a file search error visible beside matching plugin suggestions", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ plugins: [{ name: "helper", description: "Helper plugin" }] }))));
+    fsListTree.mockRejectedValueOnce(new Error("Workspace access denied"));
+    useAppStore.setState({ workingDirectory: "C:\\project-a" });
+    render(<MenuOverlay open kind="mention" filter="@" onSelect={() => {}} />);
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Workspace access denied");
+    expect(await screen.findByRole("option", { name: /helper/i })).toBeTruthy();
+    expect(screen.queryByText("未找到文件")).toBeNull();
   });
 
   it("lists skills for the explicit $ picker without searching files", async () => {

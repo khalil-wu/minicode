@@ -84,14 +84,17 @@ def create_workspace_router() -> APIRouter:
         workspace_root: str = Query(..., min_length=1),
     ) -> WorkspaceSearchResponse:
         service = _service(workspace_root)
-        payload = await asyncio.to_thread(
-            workspace_search_payload,
-            root=service.workspace_root_path(),
-            query=query,
-            limit=limit,
-            include_tests=include_tests,
-            kind=kind,
-        )
+        try:
+            payload = await asyncio.to_thread(
+                workspace_search_payload,
+                root=service.workspace_root_path(),
+                query=query,
+                limit=limit,
+                include_tests=include_tests,
+                kind=kind,
+            )
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Workspace search failed: {exc}") from exc
         return WorkspaceSearchResponse(**payload)
 
     @router.get("/file", response_model=WorkspaceFileResponse)
@@ -242,11 +245,12 @@ def create_workspace_router() -> APIRouter:
     ) -> WorkspaceGitWorktreeRemoveResponse:
         """Remove a MiniCode isolated worktree."""
         return WorkspaceGitWorktreeRemoveResponse(
-            **remove_workspace_git_worktree_payload(
+            **(await asyncio.to_thread(
+                remove_workspace_git_worktree_payload,
                 root=_service(workspace_root).workspace_root_path(),
                 path=path,
                 force=force,
-            )
+            ))
         )
 
     @router.get("/git/worktree/snapshots", response_model=WorkspaceGitWorktreeSnapshotsResponse)
@@ -270,11 +274,12 @@ def create_workspace_router() -> APIRouter:
     ) -> WorkspaceGitWorktreeRestoreResponse:
         """Restore a worktree snapshot to a detached worktree."""
         return WorkspaceGitWorktreeRestoreResponse(
-            **restore_workspace_git_worktree_snapshot_payload(
+            **(await asyncio.to_thread(
+                restore_workspace_git_worktree_snapshot_payload,
                 root=_service(workspace_root).workspace_root_path(),
                 snapshot_id=request.snapshot_id,
                 dest=request.dest,
-            )
+            ))
         )
 
     return router

@@ -65,3 +65,45 @@ describe("listWorkspaceTree", () => {
     await expect(listWorkspaceTree("C:\\Desktop\\MiniCode", ".")).rejects.toThrow(/Could not load file tree.*API request failed/i);
   });
 });
+
+describe("workspace request errors", () => {
+  it.each(["fetchWorkspaceGitStatus", "fetchWorkspaceGitWorktree", "fetchWorkspaceGitDiff"] as const)(
+    "%s reports Git failures returned inside a successful HTTP response",
+    async (operation) => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        error: "fatal: not a git repository",
+      }), { status: 200 })));
+      const workspace = await loadWorkspace();
+      await expect(workspace[operation]("C:\\repo")).rejects.toThrow("not a git repository");
+    },
+  );
+
+  it.each(["fetchWorkspaceGitStatus", "fetchWorkspaceGitWorktree", "fetchWorkspaceGitDiff", "searchWorkspaceFiles", "readWorkspaceFile"] as const)(
+    "%s retains the server's actionable HTTP error",
+    async (operation) => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        detail: "Workspace folder is not trusted.",
+      }), { status: 403 })));
+      const workspace = await loadWorkspace();
+      await expect(workspace[operation]("C:\\repo", "file.txt")).rejects.toThrow("Workspace folder is not trusted.");
+    },
+  );
+
+  it("does not turn a failed search into no matches", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    const { searchWorkspaceFiles } = await loadWorkspace();
+    await expect(searchWorkspaceFiles("C:\\repo", "name")).rejects.toThrow("Failed to fetch");
+  });
+
+  it("preserves workspace ownership and literal filenames in diff requests", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ diff: "selected patch" })));
+    vi.stubGlobal("fetch", fetchMock);
+    const { fetchWorkspaceGitDiff } = await loadWorkspace();
+
+    await expect(fetchWorkspaceGitDiff("C:\\项目 A", "报告[1].txt")).resolves.toEqual({ diff: "selected patch" });
+
+    const url = new URL(fetchMock.mock.calls[0][0]);
+    expect(url.searchParams.get("workspace_root")).toBe("C:\\项目 A");
+    expect(url.searchParams.get("file")).toBe("报告[1].txt");
+  });
+});

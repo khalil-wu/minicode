@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -114,7 +115,8 @@ class FuzzySearchTool(BaseTool):
         engine = get_global_fuzzy_search(workspace_root)
 
         # 执行搜索
-        matches = engine.search(
+        matches = await asyncio.to_thread(
+            engine.search,
             query=query,
             max_results=max_results,
             include_tests=include_tests,

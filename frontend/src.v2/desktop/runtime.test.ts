@@ -4,12 +4,34 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
-import { openPath, ptyList, ptySnapshot, ptySpawn, revealPath } from "./runtime";
+import { fsListTreeResult, fsSearchFiles, openPath, ptyClear, ptyList, ptyRestart, ptySnapshot, ptySpawn, revealPath } from "./runtime";
 import { pushToast } from "../overlays/ToastContainer";
 
 const spawn = vi.fn();
 const list = vi.fn();
 const snapshot = vi.fn();
+const restart = vi.fn();
+const clear = vi.fn();
+
+describe("desktop filesystem error projection", () => {
+  afterEach(() => { delete window.__MINICODE_RUNTIME__; });
+
+  it("propagates a tree read failure instead of returning an empty workspace", async () => {
+    const failure = new Error("Directory is outside the trusted workspace.");
+    window.__MINICODE_RUNTIME__ = {
+      desktop: { fs: { listTree: vi.fn().mockRejectedValue(failure) } } as never,
+    };
+    await expect(fsListTreeResult("C:/private")).rejects.toBe(failure);
+  });
+
+  it("propagates a search failure to every caller", async () => {
+    const failure = new Error("Search service unavailable");
+    window.__MINICODE_RUNTIME__ = {
+      desktop: { fs: { searchFiles: vi.fn().mockRejectedValue(failure) } } as never,
+    };
+    await expect(fsSearchFiles("C:/repo", "file")).rejects.toBe(failure);
+  });
+});
 
 describe("desktop PTY owner normalization", () => {
   beforeEach(() => {
@@ -21,6 +43,8 @@ describe("desktop PTY owner normalization", () => {
           spawn,
           list,
           snapshot,
+          restart,
+          clear,
         },
       } as never,
     };
@@ -63,6 +87,17 @@ describe("desktop PTY owner normalization", () => {
     await expect(ptySnapshot("term_other", "conv_owned")).resolves.toBeNull();
     expect(spawn).toHaveBeenCalledWith("C:/owned", "conv_owned");
     expect(snapshot).toHaveBeenCalledWith("term_other", 80_000, "conv_owned");
+  });
+
+  it("propagates PTY service failures instead of reporting missing sessions or success", async () => {
+    const failure = new Error("PTY service unavailable");
+    for (const operation of [list, spawn, snapshot, restart, clear]) operation.mockRejectedValue(failure);
+
+    await expect(ptyList("conv_owned")).rejects.toBe(failure);
+    await expect(ptySpawn("C:/owned", "conv_owned")).rejects.toBe(failure);
+    await expect(ptySnapshot("term_owned", "conv_owned")).rejects.toBe(failure);
+    await expect(ptyRestart("term_owned", "conv_owned")).rejects.toBe(failure);
+    await expect(ptyClear("term_owned", "conv_owned")).rejects.toBe(failure);
   });
 });
 

@@ -2187,7 +2187,7 @@ def generate_diff(
     if tool_name == "write_file":
         file_path = args.get("file_path", "")
         content = args.get("content", "")
-        if file_path and content:
+        if file_path:
             resolved_path = _resolve_workspace_path_for_diff(
                 str(file_path), workspace_root
             )
@@ -2204,7 +2204,7 @@ def generate_diff(
                 str(resolved_path),
                 old_string,
                 new_string,
-                replace_all=bool((args or {}).get("replace_all")),
+                replace_all=args.get("replace_all", False),
             )
     elif tool_name == "apply_patch":
         from backend.tools.apply_patch import build_apply_patch_diff_payload

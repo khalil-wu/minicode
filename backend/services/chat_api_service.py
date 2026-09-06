@@ -495,6 +495,7 @@ def attachment_preview_payload(
         "size_bytes": int(attachment.get("size_bytes") or 0),
         "summary": str(attachment.get("summary") or ""),
         "parse_error": str(attachment.get("parse_error") or ""),
+        "parse_warning": str(attachment.get("parse_warning") or ""),
         "content": visible_content,
         "content_chars": len(content),
         "truncated": len(visible_content) < len(content),
@@ -519,7 +520,7 @@ def attachment_native_payload(
     )
     native_data = payload.get("native_data")
     if not isinstance(native_data, str) or not native_data:
-        raise ChatApiServiceError(404, "A native preview is not available for this attachment.")
+        raise ChatApiServiceError(404, "The original file is not available for this attachment. Upload it again to restore the original.")
     try:
         content = base64.b64decode(native_data, validate=True)
     except (ValueError, binascii.Error) as exc:

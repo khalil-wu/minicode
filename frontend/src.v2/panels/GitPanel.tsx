@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ExternalLink, GitBranch, GitCompare, RefreshCw, Trash2 } from "lucide-react";
 import { useAppStore } from "../stores";
 import {
@@ -6,11 +6,12 @@ import {
   fetchWorkspaceGitStatus,
   fetchWorkspaceGitWorktree,
   removeWorkspaceGitWorktree,
-  switchWorkspaceGitWorktree,
   type WorkspaceGitWorktreeResponse,
 } from "../protocol/workspace";
 import { branchDisplayName, workspaceDisplayName } from "../lib/workspace-display";
-import { workspaceFilePathsEqual, workspacePathsEqual, workspaceRootsEqual } from "../lib/workspace-path";
+import { normalizeWorkspaceRoot, workspaceFilePathsEqual, workspaceRootsEqual } from "../lib/workspace-path";
+import { activateWorkspaceFolder } from "../workspace/openWorkspaceFolder";
+import { parseUnifiedDiffLines } from "../lib/unified-diff";
 
 interface GitStatus {
   branch: string;
@@ -29,87 +30,77 @@ const toFileRows = (status: GitStatus | null) => {
   ];
 };
 
-/** unified diff 每行的语义分类，用于套用全站 --diff-* 配色。 */
-const diffLineTone = (line: string) => {
-  if (line.startsWith("+++") || line.startsWith("---")) return "meta";
-  if (line.startsWith("@@")) return "hunk";
-  if (line.startsWith("+")) return "add";
-  if (line.startsWith("-")) return "remove";
-  if (line.startsWith("diff ") || line.startsWith("index ")) return "meta";
-  return "context";
-};
-
 const DIFF_TONE_STYLE: Record<string, { background?: string; color: string }> = {
   add: { background: "var(--diff-add-bg)", color: "var(--diff-add-text)" },
-  remove: { background: "var(--diff-del-bg)", color: "var(--diff-del-text)" },
+  del: { background: "var(--diff-del-bg)", color: "var(--diff-del-text)" },
   hunk: { color: "var(--accent-primary)" },
   meta: { color: "var(--text-muted)" },
+  marker: { color: "var(--text-muted)" },
   context: { color: "var(--text-secondary)" },
 };
 
 export const GitPanel = () => {
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
+  return <WorkspaceGitPanel key={normalizeWorkspaceRoot(workingDirectory)} workingDirectory={workingDirectory} />;
+};
+
+const WorkspaceGitPanel = ({ workingDirectory }: { workingDirectory: string }) => {
   const activeBottomTab = useAppStore((s) => s.activeBottomTab);
   const workspaceGit = useAppStore((s) => s.workspaceGit);
-  const workingDirectory = useAppStore((s) => s.workingDirectory);
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [worktree, setWorktree] = useState<WorkspaceGitWorktreeResponse | null>(null);
   const [selectedFile, setSelectedFile] = useState("");
   const [diff, setDiff] = useState("");
   const [loading, setLoading] = useState(false);
+  const [diffLoading, setDiffLoading] = useState(false);
   const [repoError, setRepoError] = useState("");
   const [diffError, setDiffError] = useState("");
-  const repoEpochRef = useRef(0);
-  const diffEpochRef = useRef(0);
+  const [refreshVersion, setRefreshVersion] = useState(0);
   const [worktreeAction, setWorktreeAction] = useState("");
+  const refresh = () => setRefreshVersion((version) => version + 1);
 
-  const refresh = useCallback(async () => {
-    const epoch = ++repoEpochRef.current;
-    const directory = workingDirectory;
+  useEffect(() => {
+    if (!workingDirectory) return;
+    let cancelled = false;
+    const isCurrent = () => !cancelled && workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory);
     setLoading(true);
     setRepoError("");
-    try {
-      const [nextStatus, nextWorktree] = await Promise.all([
-        fetchWorkspaceGitStatus(workingDirectory),
-        fetchWorkspaceGitWorktree(workingDirectory),
-      ]);
-      if (epoch !== repoEpochRef.current || !workspaceRootsEqual(directory, useAppStore.getState().workingDirectory)) return;
-      if (!nextStatus || !nextWorktree) {
-        setRepoError("无法读取 Git 仓库状态。");
-        return;
-      }
+    void Promise.all([
+      fetchWorkspaceGitStatus(workingDirectory),
+      fetchWorkspaceGitWorktree(workingDirectory),
+    ]).then(([nextStatus, nextWorktree]) => {
+      if (!isCurrent()) return;
       setStatus(nextStatus);
       setWorktree(nextWorktree);
-    } finally {
-      if (epoch === repoEpochRef.current) setLoading(false);
-    }
-  }, [workingDirectory]);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  useEffect(() => {
-    if (activeBottomTab === "git") void refresh();
-  }, [activeBottomTab, refresh]);
-
-  useEffect(() => {
-    const epoch = ++diffEpochRef.current;
-    const file = selectedFile;
-    const directory = workingDirectory;
-    setDiffError("");
-    void fetchWorkspaceGitDiff(directory, file).then((result) => {
-      if (
-        epoch !== diffEpochRef.current
-        || !workspaceFilePathsEqual(file, selectedFile, directory)
-        || !workspaceRootsEqual(directory, useAppStore.getState().workingDirectory)
-      ) return;
-      if (!result) {
-        setDiffError("无法读取 Git 差异。");
-        return;
-      }
-      setDiff(result.diff ?? "");
+      setSelectedFile((file) => toFileRows(nextStatus).some((row) => workspaceFilePathsEqual(file, row.path, workingDirectory)) ? file : "");
+    }).catch((error: unknown) => {
+      if (!isCurrent()) return;
+      setStatus(null);
+      setWorktree(null);
+      setSelectedFile("");
+      setRepoError(error instanceof Error ? error.message : "无法读取 Git 仓库状态。");
+    }).finally(() => {
+      if (isCurrent()) setLoading(false);
     });
-  }, [selectedFile, workingDirectory]);
+    return () => { cancelled = true; };
+  }, [workingDirectory, refreshVersion, activeBottomTab]);
+
+  useEffect(() => {
+    if (!workingDirectory) return;
+    let cancelled = false;
+    const isCurrent = () => !cancelled && workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory);
+    setDiff("");
+    setDiffError("");
+    setDiffLoading(true);
+    void fetchWorkspaceGitDiff(workingDirectory, selectedFile).then((result) => {
+      if (isCurrent()) setDiff(result.diff);
+    }).catch((error: unknown) => {
+      if (isCurrent()) setDiffError(error instanceof Error ? error.message : "无法读取 Git 差异。");
+    }).finally(() => {
+      if (isCurrent()) setDiffLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [selectedFile, workingDirectory, refreshVersion, activeBottomTab]);
 
   const fileRows = useMemo(() => toFileRows(status), [status]);
   const branch = branchDisplayName(status?.branch || workspaceGit?.branch) || "无分支";
@@ -117,14 +108,9 @@ export const GitPanel = () => {
   const switchWorktree = async (path: string) => {
     setWorktreeAction(path);
     try {
-      const result = await switchWorkspaceGitWorktree(workingDirectory, path);
-      if (result?.success) {
-        useAppStore.getState().setWorkingDirectory(result.project?.root_path || path);
-        await refresh();
-      } else {
-        const { showAlert } = await import("../overlays/DialogService");
-        await showAlert({ title: "切换失败", message: result?.error || "无法切换工作区。" });
-      }
+      // The websocket activation also rebinds the conversation and its runtime.
+      // The REST import endpoint only changes the process-wide default folder.
+      await activateWorkspaceFolder(path);
     } finally {
       setWorktreeAction("");
     }
@@ -139,13 +125,16 @@ export const GitPanel = () => {
       danger: true,
     });
     if (!ok) return;
+    if (!workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)) return;
     setWorktreeAction(path);
     try {
       const result = await removeWorkspaceGitWorktree(workingDirectory, path);
       if (!result?.removed) {
         await showAlert({ title: "移除失败", message: result?.error || "无法移除工作树。" });
       }
-      await refresh();
+      if (workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)) refresh();
+    } catch (error: unknown) {
+      await showAlert({ title: "移除失败", message: error instanceof Error ? error.message : "无法移除工作树。" });
     } finally {
       setWorktreeAction("");
     }
@@ -174,7 +163,7 @@ export const GitPanel = () => {
         <SectionTitle label="变更" count={fileRows.length} />
         {fileRows.length === 0 ? (
           <div className="py-1 pb-3" style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>
-            {loading ? "正在加载…" : repoError ? "Git 状态不可用" : "工作树干净"}
+            {!workingDirectory ? "请先打开工作区。" : loading ? "正在加载…" : repoError ? "Git 状态不可用" : "工作树干净"}
           </div>
         ) : (
           <div className="flex flex-col gap-0.5 mb-3.5">
@@ -237,7 +226,7 @@ export const GitPanel = () => {
                   </span>
                   <button
                     onClick={() => void switchWorktree(item.path)}
-                     disabled={item.is_current || workspacePathsEqual(worktreeAction, item.path)}
+                    disabled={item.is_current || Boolean(worktreeAction)}
                     title="切换工作区"
                     aria-label="切换工作区"
                     className="bg-transparent border rounded cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm)", color: "var(--text-muted)", fontSize: "var(--text-xs)", padding: "1px 7px" }}
@@ -247,7 +236,7 @@ export const GitPanel = () => {
                   {item.can_remove && (
                     <button
                       onClick={() => void removeWorktree(item.path, item.branch)}
-                       disabled={workspacePathsEqual(worktreeAction, item.path)}
+                      disabled={Boolean(worktreeAction)}
                       title="移除隔离工作区"
                       aria-label="移除隔离工作区"
                       className="inline-flex items-center justify-center p-0 bg-transparent cursor-pointer border rounded" style={{ width: 22, height: 22, borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", color: "var(--state-danger)" }}
@@ -310,15 +299,16 @@ export const GitPanel = () => {
           }}
         >
           {diff && !diffError
-            ? diff.split("\n").map((line, index) => (
+            ? parseUnifiedDiffLines(diff).map((line, index) => (
                 <span
-                  key={`${index}-${line}`}
-                  style={{ display: "block", ...DIFF_TONE_STYLE[diffLineTone(line)] }}
+                  key={`${index}-${line.text}`}
+                  style={{ display: "block", ...DIFF_TONE_STYLE[line.kind] }}
                 >
-                  {line || " "}
+                  {line.text || " "}
                 </span>
               ))
-            : diffError || (loading ? "正在加载差异…" : "当前选择没有差异。")}
+            : diffError ? <span role="alert">{diffError}</span>
+            : diffLoading ? "正在加载差异…" : "当前选择没有差异。"}
         </pre>
       </main>
     </div>

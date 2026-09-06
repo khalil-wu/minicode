@@ -77,15 +77,13 @@ def build_attachment_input_plan(
         artifact_id = str(attachment.get("artifact_id") or "").strip()
         data = str(attachment.get("data") or "").strip()
         stored_attachment: dict[str, Any] = {}
+        payload = None
         if artifact_id and attachment_store is not None:
-            try:
-                payload = attachment_store.get_payload(
-                    artifact_id,
-                    conversation_id=conversation_id,
-                    workspace_root=workspace_root,
-                )
-            except Exception:  # noqa: BLE001 - a missing native body falls back to extracted text
-                payload = None
+            payload = attachment_store.get_payload(
+                artifact_id,
+                conversation_id=conversation_id,
+                workspace_root=workspace_root,
+            )
             if payload is None:
                 # Owner-scoped runtime inputs must resolve through the durable
                 # store. Unscoped SDK/local ingestion may still pass a direct
@@ -96,7 +94,6 @@ def build_attachment_input_plan(
                         {"artifact_id": artifact_id, "file_name": file_name}
                     )
                     continue
-                payload = None
             if payload is not None:
                 metadata = payload.get("metadata")
                 if isinstance(metadata, dict):
@@ -117,15 +114,20 @@ def build_attachment_input_plan(
             or attachment.get("size_bytes")
             or 0
         )
-        parse_error = str(attachment.get("parse_error") or "").strip()
+        source_metadata = stored_attachment or attachment
+        parse_error = str(source_metadata.get("parse_error") or "").strip()
+        parse_warning = str(source_metadata.get("parse_warning") or "").strip()
         try:
             page_count = max(
                 0,
-                int(attachment.get("page_count") or attachment.get("pages") or 0),
+                int(source_metadata.get("page_count") or source_metadata.get("pages") or 0),
             )
         except (TypeError, ValueError):
             page_count = 0
         input_source = str(attachment.get("input_source") or "").strip()
+
+        if parse_warning:
+            hints.append(f"- {file_name}: extracted text may be incomplete: {parse_warning}")
 
         used_native = False
         if kind == "image" and data:
@@ -206,7 +208,7 @@ def build_attachment_input_plan(
                 hints.append(
                     f"- {file_name}: PDF/text extraction failed and no native PDF was attached to this model request. "
                     f"Do not summarize or interpret the document body from the title alone. "
-                    f"Use {diagnostic_hint} only to inspect the diagnostic, or ask the user to retry with a supported PDF parser/model."
+                    f"Use {diagnostic_hint} to retry extraction from the stored original, or ask the user to retry with a supported parser/model."
                 )
             continue
 
@@ -214,20 +216,13 @@ def build_attachment_input_plan(
         # user turn. Size changes must not turn the user's message into a
         # compulsory follow-up tool call with different semantics.
         if (
-            attachment_store is not None
-            and artifact_id
+            payload is not None
             and kind != "image"
             and not used_native
         ):
-            inlined = _inline_text(
-                attachment_store,
-                artifact_id,
-                file_name,
-                conversation_id=conversation_id,
-                workspace_root=workspace_root,
-            )
-            if inlined is not None:
-                inlined_texts.append(inlined)
+            content = str(payload.get("content") or "")
+            if content.strip():
+                inlined_texts.append({"file_name": file_name, "artifact_id": artifact_id, "content": content})
                 continue
 
         if artifact_id and kind != "image":
@@ -258,28 +253,6 @@ def build_attachment_input_plan(
         inlined_texts=inlined_texts,
         unavailable=unavailable,
     )
-
-
-def _inline_text(
-    attachment_store: Any,
-    artifact_id: str,
-    file_name: str,
-    *,
-    conversation_id: str = "",
-    workspace_root: str = "",
-) -> dict[str, str] | None:
-    """Return the complete owner-scoped text attachment for user projection."""
-    try:
-        content = attachment_store.get(
-            artifact_id,
-            conversation_id=conversation_id,
-            workspace_root=workspace_root,
-        )
-    except Exception:  # noqa: BLE001 — never break the turn on store read errors
-        return None
-    if not content or not content.strip():
-        return None
-    return {"file_name": file_name, "artifact_id": artifact_id, "content": content}
 
 
 def _primary_llm_adapter(llm: Any | None) -> Any | None:

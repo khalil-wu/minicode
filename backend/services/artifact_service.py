@@ -23,6 +23,9 @@ class ArtifactContentResult:
     conversation_id: str = ""
     workspace_root: str = ""
     request_id: str = ""
+    has_native: bool = False
+    parse_error: str = ""
+    parse_warning: str = ""
 
     def to_event(self) -> AgentEvent:
         data: dict[str, Any] = {
@@ -42,6 +45,9 @@ class ArtifactContentResult:
             data["url"] = f"data:{self.media_type};base64,{self.content}"
         if self.is_attachment:
             data["is_attachment"] = True
+            data["has_native"] = self.has_native
+            data["parse_error"] = self.parse_error
+            data["parse_warning"] = self.parse_warning
         if self.conversation_id:
             data["conversation_id"] = self.conversation_id
         data["workspace_root"] = self.workspace_root
@@ -61,64 +67,44 @@ def read_artifact_content(
     request_id: str = "",
 ) -> ArtifactContentResult:
     clean_artifact_id = str(artifact_id or "")
-    content = artifact_store.get(
+    attachment_payload = attachment_store.find_payload(
         clean_artifact_id,
         conversation_id=conversation_id,
         workspace_root=workspace_root,
     )
-    meta = artifact_store.get_meta(
-        clean_artifact_id,
-        conversation_id=conversation_id,
-        workspace_root=workspace_root,
-    )
-    if content is None:
-        meta = None
-    preview = (
-        artifact_store.get_preview(
-            clean_artifact_id,
-            conversation_id=conversation_id,
-            workspace_root=workspace_root,
-        )
-        or ""
-    )
-    media_type = (
-        str(getattr(meta, "media_type", "") or "").strip()
-        or ("image/png" if getattr(meta, "type", "") == "image" else "")
-    )
-    name = ""
-    is_attachment = False
-
-    attachment_payload = attachment_store.get_payload(
-        clean_artifact_id,
-        conversation_id=conversation_id,
-        workspace_root=workspace_root,
-    )
-    attachment_metadata = attachment_payload.get("metadata") if attachment_payload else {}
-    attachment = attachment_metadata.get("attachment") if isinstance(attachment_metadata, dict) else None
-    if isinstance(attachment, dict):
-        is_attachment = True
-        attachment_media_type = str(attachment.get("media_type") or "").strip()
-        media_type = attachment_media_type or media_type
-        name = str(attachment.get("file_name") or attachment.get("title") or "").strip()
+    attachment = {}
+    if attachment_payload is not None:
+        clean_artifact_id = attachment_payload["artifact_id"]
+        attachment = attachment_payload["metadata"].get("attachment", {})
+        media_type = str(attachment.get("media_type") or "").strip()
         # Uploaded binary bodies are served by the session-owned HTTP preview
         # endpoint. Keep artifact_content reference/text-only so opening a large
         # image or PDF cannot stall the WebSocket event stream.
         content = str(attachment_payload.get("content") or "")
-        if not preview:
-            preview = attachment_store.get_preview(
-                clean_artifact_id,
-                conversation_id=conversation_id,
-                workspace_root=workspace_root,
-            ) or ""
-
-    if content is None:
-        content = str(attachment_payload.get("content") or "") if attachment_payload else None
-        if not preview:
-            preview = attachment_store.get_preview(
-                clean_artifact_id,
-                conversation_id=conversation_id,
-                workspace_root=workspace_root,
-            ) or ""
+        lines = content.split("\n")
+        preview = "\n".join(lines[:5])
+        if len(lines) > 5:
+            preview += f"\n... ({len(lines)} lines total)"
+    else:
+        content = artifact_store.get(
+            clean_artifact_id,
+            conversation_id=conversation_id,
+            workspace_root=workspace_root,
+        )
+        meta = artifact_store.get_meta(
+            clean_artifact_id,
+            conversation_id=conversation_id,
+            workspace_root=workspace_root,
+        )
+        preview = artifact_store.get_preview(
+            clean_artifact_id,
+            conversation_id=conversation_id,
+            workspace_root=workspace_root,
+        ) or ""
+        media_type = (
+            str(getattr(meta, "media_type", "") or "").strip()
+            or ("image/png" if getattr(meta, "type", "") == "image" else "")
+        )
     if content is None:
         raise ValueError(f"Artifact '{clean_artifact_id}' does not exist or has been cleared")
 
@@ -128,9 +114,12 @@ def read_artifact_content(
         preview=preview,
         media_type=media_type,
         purpose=str(purpose or "").strip(),
-        name=name,
-        is_attachment=is_attachment,
+        name=str(attachment.get("file_name") or attachment.get("title") or "").strip(),
+        is_attachment=attachment_payload is not None,
         conversation_id=str(conversation_id or "").strip(),
         workspace_root=str(workspace_root or "").strip(),
         request_id=str(request_id or "").strip(),
+        has_native=bool(attachment_payload and attachment_payload.get("native_data")),
+        parse_error=str(attachment.get("parse_error") or ""),
+        parse_warning=str(attachment.get("parse_warning") or ""),
     )

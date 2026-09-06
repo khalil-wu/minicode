@@ -185,17 +185,20 @@ def _contains_unquoted_shell_control(command: str) -> bool:
         if escaped:
             escaped = False
             continue
-        if char == "\\" and quote != "'":
+        if char == "\\" and quote != "'" and _BACKSLASH_ESCAPES:
             escaped = True
             continue
         if char in {"'", '"'}:
             quote = "" if quote == char else (char if not quote else quote)
             continue
-        if quote:
-            continue
-        if char in {";", "|", "&", "`", "\n", "<", ">"}:
+        # Substitutions execute inside double quotes too. Single quotes keep
+        # them literal in both supported shell families.
+        if quote != "'" and (
+            char == "`"
+            or (char == "$" and index + 1 < len(command) and command[index + 1] == "(")
+        ):
             return True
-        if char == "$" and index + 1 < len(command) and command[index + 1] == "(":
+        if not quote and char in {";", "|", "&", "\n", "<", ">", "(", ")"}:
             return True
     return False
 
@@ -204,8 +207,7 @@ def _split_unquoted_subcommands(command: str) -> list[str]:
     """Split a shell command on unquoted control operators.
 
     Splitting keeps deny/ask rules matchable against each subcommand of a
-    compound expression, so ``echo hi; curl evil.com`` cannot smuggle a denied
-    command past ``run_command(curl:*)``.
+    compound expression, including substitutions inside double quotes.
 
     Redirections and subshell parentheses are separators here too. They are
     already treated as control characters by ``_contains_unquoted_shell_control``,
@@ -216,6 +218,7 @@ def _split_unquoted_subcommands(command: str) -> list[str]:
     parts: list[str] = []
     current: list[str] = []
     quote = ""
+    nested: list[tuple[str, str, list[str]]] = []
     escaped = False
     index = 0
     while index < len(command):
@@ -230,14 +233,28 @@ def _split_unquoted_subcommands(command: str) -> list[str]:
             escaped = True
             index += 1
             continue
+        if nested and not quote and char == nested[-1][0]:
+            parts.append("".join(current))
+            _, quote, current = nested.pop()
+            index += 1
+            continue
+        is_substitution = quote != "'" and command.startswith("$(", index)
+        if is_substitution or (char == "`" and quote != "'") or (char == "(" and not quote):
+            # A substitution has its own quoting context, including when its
+            # parent is double-quoted. Retain the parent command so trailing
+            # literal arguments are not mistaken for another executable.
+            nested.append(("`" if char == "`" else ")", quote, current))
+            current = []
+            quote = ""
+            index += 2 if is_substitution else 1
+            continue
         if char in {"'", '"'}:
             current.append(char)
             quote = "" if quote == char else (char if not quote else quote)
             index += 1
             continue
         if not quote:
-            is_substitution = char == "$" and index + 1 < len(command) and command[index + 1] == "("
-            if char in _SUBCOMMAND_SEPARATORS or is_substitution:
+            if char in _SUBCOMMAND_SEPARATORS:
                 parts.append("".join(current))
                 current = []
                 if char in {";", "\n"}:

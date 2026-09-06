@@ -240,17 +240,25 @@ def _atomic_write_text_unlocked(
     overwrite: bool = True,
 ) -> None:
     path = Path(path)
-    line_ending = "\n"
-    if path.exists():
-        try:
-            with path.open("rb") as handle:
-                sample = handle.read(4096)
-        except OSError:
-            sample = b""
-        crlf_count = sample.count(b"\r\n")
-        bare_lf_count = sample.count(b"\n") - crlf_count
-        if crlf_count > bare_lf_count:
-            line_ending = "\r\n"
-    if line_ending == "\r\n":
-        content = content.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
+    try:
+        with path.open("rb") as handle:
+            sample = handle.read(4096)
+    except FileNotFoundError:
+        sample = b""
+    content = preserve_text_line_endings(content, sample)
     _atomic_write_bytes_unlocked(path, content.encode(encoding), overwrite=overwrite)
+
+
+def normalize_text_newlines(content: str) -> str:
+    """Use the universal-newline representation exposed by text file reads."""
+    return content.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def preserve_text_line_endings(content: str, original: bytes) -> str:
+    """Apply the existing file's CRLF preference before preview or publication."""
+    sample = original[:4096]
+    crlf_count = sample.count(b"\r\n")
+    bare_lf_count = sample.count(b"\n") - crlf_count
+    if crlf_count > bare_lf_count:
+        return normalize_text_newlines(content).replace("\n", "\r\n")
+    return content

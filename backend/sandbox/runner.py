@@ -34,7 +34,13 @@ from backend.sandbox.policy import (
     SandboxPolicy,
 )
 from backend.sandbox.result import SandboxResult
-from backend.subprocesses import communicate, spawn_exec, spawn_shell, terminate_process_tree
+from backend.subprocesses import (
+    communicate,
+    record_unproven_cleanup,
+    spawn_exec,
+    spawn_shell,
+    terminate_process_tree,
+)
 from backend.tools.base import (
     MAX_TOOL_RESULT_BYTES,
     MAX_TOOL_RESULT_LINES,
@@ -196,46 +202,40 @@ class _OutputCapture:
         self.total_bytes += len(data)
         self._completed_lines += data.count(b"\n")
         self._has_open_line = not data.endswith(b"\n")
-        _append_bounded_output(self._tail, data)
+        self._tail.extend(data)
+        del self._tail[:-_CAPTURED_OUTPUT_BYTES]
 
-        if self._file is not None:
-            self._file.write(data)
-            return
-        if self._preserve_full_output:
-            self._raw_chunks.append(data)
-            if self.total_bytes > MAX_TOOL_RESULT_BYTES or self.total_lines > MAX_TOOL_RESULT_LINES:
-                self._ensure_file()
+        try:
+            if self._file is not None:
+                self._file.write(data)
+            elif self._preserve_full_output:
+                self._raw_chunks.append(data)
+                if self.total_bytes > MAX_TOOL_RESULT_BYTES or self.total_lines > MAX_TOOL_RESULT_LINES:
+                    self._ensure_file()
+        except OSError:
+            self.close()
+            raise
 
     def finish(self) -> None:
-        if (
-            self._preserve_full_output
-            and (self.total_bytes > MAX_TOOL_RESULT_BYTES or self.total_lines > MAX_TOOL_RESULT_LINES)
-        ):
-            try:
-                self._ensure_file()
-            except OSError:
-                logger.warning("Sandbox output capture could not create full-output file", exc_info=True)
         if self._file is not None:
             try:
-                for chunk in self._raw_chunks:
-                    self._file.write(chunk)
-                self._raw_chunks.clear()
                 self._file.flush()
                 os.fsync(self._file.fileno())
                 self._file.close()
             except OSError:
-                # The command result remains authoritative even if the optional
-                # full-output persistence fails. Keep the bounded snapshot and
-                # report persistence through the existing empty path contract.
-                logger.warning(
-                    "Sandbox output capture could not persist full output",
-                    exc_info=True,
-                )
-                with suppress(OSError):
-                    self._file.close()
-                self._path = None
-            finally:
-                self._file = None
+                self.close()
+                raise
+            self._file = None
+
+    def close(self) -> None:
+        """Discard an unfinished file; it cannot represent the complete stream."""
+        if self._file is not None:
+            with suppress(OSError):
+                self._file.close()
+            self._file = None
+            cleanup_captured_output(self.path)
+            self._path = None
+        self._raw_chunks.clear()
 
     def snapshot(self) -> str:
         raw_tail = bytes(self._tail)
@@ -698,6 +698,7 @@ class SandboxRunner:
         stdout_task: asyncio.Task[int] | None = None
         stderr_task: asyncio.Task[int] | None = None
         stdin_task: asyncio.Task[None] | None = None
+        wait_task: asyncio.Task[int] | None = None
         cancel_task: asyncio.Task[None] | None = None
         completion_task: asyncio.Future[tuple[None, int, int, int]] | None = None
         stdout_capture = _OutputCapture(
@@ -731,24 +732,13 @@ class SandboxRunner:
                 proc = await spawn_shell(wrapped_command, **spawn_kwargs)
             await self._await_sandbox_ready(proc)
             if process_ready_callback is not None:
-                try:
-                    ready_result = process_ready_callback(proc)
-                    if asyncio.iscoroutine(ready_result):
-                        await ready_result
-                except Exception:
-                    await self._kill_tree(proc)
-                    raise
+                ready_result = process_ready_callback(proc)
+                if inspect.isawaitable(ready_result):
+                    await ready_result
             if process_started_callback is not None:
-                try:
-                    started_result = process_started_callback(proc.pid)
-                    if asyncio.iscoroutine(started_result):
-                        await started_result
-                except Exception:
-                    # A started process without a durable owner cannot be
-                    # recovered or safely cancelled after restart. Tear down
-                    # the exact process tree before exposing the failure.
-                    await self._kill_tree(proc)
-                    raise
+                started_result = process_started_callback(proc.pid)
+                if inspect.isawaitable(started_result):
+                    await started_result
 
             if cancel_event:
                 async def _wait_cancel() -> None:
@@ -804,9 +794,9 @@ class SandboxRunner:
                     chunk = await stream.read(4096)
                     if not chunk:
                         break
-                    capture.append(chunk)
                     total += len(chunk)
                     stream_totals[stream_name] = total
+                    capture.append(chunk)
                     if stream_callback:
                         piece = decoder.decode(chunk)
                         await _forward_stream(piece, stream_name)
@@ -838,11 +828,12 @@ class SandboxRunner:
                 stderr_task = asyncio.create_task(
                     _read_stream(proc.stderr, stderr_capture, stream_name="stderr")
                 )
+                wait_task = asyncio.create_task(proc.wait())
                 completion_task = asyncio.gather(
                     stdin_task,
                     stdout_task,
                     stderr_task,
-                    proc.wait(),
+                    wait_task,
                 )
                 if self._policy.timeout is not None and self._policy.timeout > 0:
                     _, stdout_total, stderr_total, _ = await asyncio.wait_for(
@@ -944,8 +935,6 @@ class SandboxRunner:
                     "" if tree_reaped else "process_tree_survived_cancellation_kill"
                 ),
             )
-        except FileNotFoundError:
-            return SandboxResult(stdout="", stderr=f"Command not found: {command}", exit_code=127)
         except SandboxUnavailableError as exc:
             return SandboxResult(
                 stdout="",
@@ -954,24 +943,47 @@ class SandboxRunner:
                 sandbox_unavailable=True,
             )
         except OSError as exc:
-            return SandboxResult(stdout="", stderr=str(exc), exit_code=1)
+            tree_reaped = True
+            if proc is not None:
+                tree_reaped = await asyncio.shield(self._kill_tree(proc))
+            stdout_capture.close()
+            stderr_capture.close()
+            cleanup_captured_output(stdout_capture.path, stderr_capture.path)
+            return SandboxResult(
+                stdout=stdout_capture.snapshot(),
+                stderr="\n".join(filter(None, (stderr_capture.snapshot(), str(exc)))),
+                exit_code=127 if proc is None and isinstance(exc, FileNotFoundError) else 1,
+                stdout_total_bytes=stream_totals["stdout"],
+                stderr_total_bytes=stream_totals["stderr"],
+                cleanup_pending=not tree_reaped,
+                cleanup_reason="" if tree_reaped else "process_tree_survived_execution_error_kill",
+            )
+        except Exception as exc:
+            # Startup callbacks and stream readers share the process owner.
+            # Propagate their error only after releasing that owned process.
+            if proc is not None:
+                tree_reaped = await asyncio.shield(self._kill_tree(proc))
+                record_unproven_cleanup(exc, reaped=tree_reaped, proc=proc)
+            stdout_capture.close()
+            stderr_capture.close()
+            cleanup_captured_output(stdout_capture.path, stderr_capture.path)
+            raise
         finally:
-            if cancel_task is not None and not cancel_task.done():
-                cancel_task.cancel()
-            if completion_task is not None and not completion_task.done():
-                completion_task.cancel()
             pending = [
                 task
-                for task in (cancel_task, completion_task)
+                for task in (cancel_task, completion_task, stdin_task, stdout_task, stderr_task, wait_task)
                 if task is not None
             ]
+            for task in pending:
+                if not task.done():
+                    task.cancel()
             if pending:
                 await asyncio.gather(
                     *pending,
                     return_exceptions=True,
                 )
-            stdout_capture.finish()
-            stderr_capture.finish()
+            stdout_capture.close()
+            stderr_capture.close()
             # A cancelled Proactor StreamReader may retain its pipe transport
             # even after the process exits. Close that private transport only
             # as a final Windows cleanup fallback; normal EOF/drain paths above

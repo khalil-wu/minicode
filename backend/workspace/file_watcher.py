@@ -185,27 +185,24 @@ class WorkspaceFileWatcher:
                 # 等待稳定期
                 await asyncio.sleep(self.stability_threshold)
 
-                # 触发回调
+                # Invalidate derived state, then notify consumers.
                 try:
-                    if asyncio.iscoroutinefunction(self.on_change):
-                        await self.on_change(path, event_type)
-                    else:
-                        self.on_change(path, event_type)
-
                     # 使文件缓存失效
                     if event_type in ("modified", "deleted"):
                         cache = get_global_file_cache()
                         cache.invalidate(path)
 
                     # 使模糊搜索缓存失效
-                    if event_type in ("created", "deleted", "moved"):
+                    if event_type in ("created", "deleted", "moved") or (
+                        event_type == "modified" and path.name == ".gitignore"
+                    ):
                         invalidate_global_fuzzy_search()
 
-                    # 使搜索结果缓存失效，避免返回过时 grep/glob 结果
-                    if event_type in ("modified", "created", "deleted", "moved"):
-                        from backend.tools.search_tools import clear_search_caches
-
-                        clear_search_caches()
+                    # Publish the change only after readers can see fresh indexes.
+                    if asyncio.iscoroutinefunction(self.on_change):
+                        await self.on_change(path, event_type)
+                    else:
+                        self.on_change(path, event_type)
 
                     logger.debug(f"File changed: {path} ({event_type})")
                 except Exception as e:

@@ -557,9 +557,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   useEffect(() => {
     for (const request of editorOpenRequests) {
       consumeEditorOpenRequest(request.id);
-      void resolveUnqualifiedEditorPath(request.path, workingDirectory).catch(() => (
-        workspaceRelativePath(request.path, workingDirectory) || request.path
-      )).then((resolvedPath) => {
+      void resolveUnqualifiedEditorPath(request.path, workingDirectory).then((resolvedPath) => {
         if (!workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)) return;
         openEditorTab(resolvedPath);
         loadFileIfNeeded(resolvedPath);
@@ -568,6 +566,9 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
           line: request.line,
           column: request.column,
         });
+      }).catch((error: unknown) => {
+        if (!workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)) return;
+        pushToast(`无法定位文件：${errorMessage(error)}`, "error", 5000);
       });
     }
   }, [editorOpenRequests, consumeEditorOpenRequest, openEditorTab, workingDirectory]);
@@ -825,14 +826,16 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   // External changes follow the same contract as established editors: clean
   // buffers track disk automatically; dirty buffers keep user edits and expose
   // an explicit reload decision.
-  const lastFileChangeLen = useRef(fileChanges.length);
+  const lastFileChangeSequence = useRef(fileChanges.at(-1)?.sequence ?? 0);
   useEffect(() => {
-    if (fileChanges.length <= lastFileChangeLen.current) {
-      lastFileChangeLen.current = fileChanges.length;
+    const latestSequence = fileChanges.at(-1)?.sequence ?? 0;
+    if (latestSequence < lastFileChangeSequence.current) {
+      lastFileChangeSequence.current = latestSequence;
       return;
     }
-    const newChanges = fileChanges.slice(lastFileChangeLen.current);
-    lastFileChangeLen.current = fileChanges.length;
+    if (latestSequence === lastFileChangeSequence.current) return;
+    const newChanges = fileChanges.filter((change) => change.sequence > lastFileChangeSequence.current);
+    lastFileChangeSequence.current = latestSequence;
     for (const change of newChanges) {
       const currentState = useAppStore.getState();
       const tab = currentState.editorTabs.find((candidate) =>

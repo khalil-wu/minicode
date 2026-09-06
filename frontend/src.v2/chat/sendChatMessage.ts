@@ -33,19 +33,12 @@ export const resetSendDeduplication = () => {
   lastSendAt = 0;
 };
 
-const addSystemNotice = (content: string) => {
-  useAppStore.setState((state) => ({
-    messages: [
-      ...state.messages,
-      {
-        id: `m-${Date.now().toString(36)}-sys`,
-        role: "system" as const,
-        content,
-        artifacts: [],
-        timestamp: Date.now(),
-      },
-    ],
-  }));
+const addSystemNotice = (content: string, conversationId?: string) => {
+  useAppStore.getState().upsertSystemMessage(
+    uniqueMessageId("send-error"),
+    content,
+    conversationId ? { conversationId } : undefined,
+  );
 };
 
 const isAttachmentRef = (value: unknown): value is MessageAttachmentRef => {
@@ -475,7 +468,7 @@ export const sendChatMessage = ({
       useAppStore.getState().finishStreaming(conversationId, undefined, "failed");
     }
     const message = normalizeAgentErrorMessage(err instanceof Error ? err.message : "消息发送失败。");
-    addSystemNotice(`错误：${message}`);
+    addSystemNotice(`错误：${message}`, targetConversationId);
     pushToast(message, "error");
     return false;
   }

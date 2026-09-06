@@ -5,7 +5,6 @@ ReadFile/WriteFile/EditFile/ListFiles. Path resolution lives in path_resolution.
 """
 from __future__ import annotations
 
-import difflib
 import logging
 import hashlib
 from dataclasses import dataclass
@@ -14,8 +13,9 @@ from threading import Lock
 from typing import Any
 
 from backend.agent.turn_diff_tracker import TurnDiffTracker
+from backend.diff.unified import count_unified_diff_changes as _count_unified_diff_changes, iter_unified_diff
 from backend.permissions.context import ToolExecutionContext
-from backend.atomic_io import atomic_write_text, canonical_file_path_key
+from backend.atomic_io import atomic_write_text, canonical_file_path_key, normalize_text_newlines
 from backend.tools.base import (
     MAX_TOOL_RESULT_BYTES,
     MAX_TOOL_RESULT_CHARS,
@@ -235,17 +235,10 @@ def _generate_limited_unified_diff(
     max_chars: int | None,
 ) -> tuple[str, int, int, bool]:
     """Generate a unified diff preview while counting the full change size."""
-    old_lines = old_content.splitlines(keepends=True)
-    new_lines = new_content.splitlines(keepends=True)
-
-    # difflib.unified_diff requires each line to end with '\n'.
-    old_lines = [line if line.endswith('\n') else line + '\n' for line in old_lines]
-    new_lines = [line if line.endswith('\n') else line + '\n' for line in new_lines]
-
     path_str = str(file_path)
-    diff = difflib.unified_diff(
-        old_lines,
-        new_lines,
+    diff = iter_unified_diff(
+        old_content,
+        new_content,
         fromfile=f"a/{path_str}",
         tofile=f"b/{path_str}",
     )
@@ -255,13 +248,16 @@ def _generate_limited_unified_diff(
     kept: list[str] = []
     kept_chars = 0
     truncated = False
+    in_hunk = False
     for line in diff:
-        if not line.startswith(("+++", "---")):
+        if line.startswith("@@ "):
+            in_hunk = True
+        elif in_hunk:
             if line.startswith("+"):
                 additions += 1
             elif line.startswith("-"):
                 deletions += 1
-        if max_chars is None or kept_chars + len(line) <= max_chars:
+        if not truncated and (max_chars is None or kept_chars + len(line) <= max_chars):
             kept.append(line)
             kept_chars += len(line)
         else:
@@ -273,19 +269,6 @@ def _generate_limited_unified_diff(
             "the full content is available on disk] ...\n"
         )
     return ''.join(kept), additions, deletions, truncated
-
-
-def _count_unified_diff_changes(patch: str) -> tuple[int, int]:
-    additions = 0
-    deletions = 0
-    for line in patch.splitlines():
-        if line.startswith("+++") or line.startswith("---"):
-            continue
-        if line.startswith("+"):
-            additions += 1
-        elif line.startswith("-"):
-            deletions += 1
-    return additions, deletions
 
 
 def _workspace_display_path(path: Path, raw_path: str, context: ToolExecutionContext | None) -> str:
@@ -358,7 +341,8 @@ async def _emit_write_diff(
 
 
 def content_hash(content: str) -> str:
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    # The tool read/write contract uses the same universal newlines as read_file.
+    return hashlib.sha256(normalize_text_newlines(content).encode("utf-8")).hexdigest()
 
 
 def _atomic_write_text(path: Path, content: str) -> None:

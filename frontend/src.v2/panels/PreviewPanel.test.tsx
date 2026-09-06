@@ -1,12 +1,19 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn() }));
 vi.mock("../hooks/useWebSocket", () => ({
   getWebSocket: () => ({ sessionId: "session-preview-image" }),
 }));
+
+const downloadMocks = vi.hoisted(() => ({ original: vi.fn(), toast: vi.fn() }));
+vi.mock("../protocol/api", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../protocol/api")>(),
+  fetchAttachmentOriginal: downloadMocks.original,
+}));
+vi.mock("../overlays/ToastContainer", () => ({ pushToast: downloadMocks.toast }));
 
 import { useAppStore } from "../stores";
 import { PreviewPanel } from "./PreviewPanel";
@@ -22,12 +29,20 @@ const resetPreviewState = () => {
     previewVerification: null,
     workingDirectory: "C:\\Desktop\\MiniCode",
     isConnected: false,
+    conversationWorkbenchStates: {},
+    previewOwnerConversationId: null,
   });
+  downloadMocks.original.mockReset();
+  downloadMocks.toast.mockReset();
 };
 
 describe("PreviewPanel", () => {
   beforeEach(resetPreviewState);
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
 
   it("is file-only and does not expose the removed application page", () => {
     render(<PreviewPanel />);
@@ -193,5 +208,45 @@ describe("PreviewPanel", () => {
 
     const image = screen.getByRole("img", { name: "legacy-screenshot.png" });
     expect(image.getAttribute("src")).toContain("artifact_id=legacy-browser-screenshot");
+  });
+
+  it("downloads original bytes using the preview conversation owner", async () => {
+    const original = new Blob(["original Word bytes"], { type: "application/octet-stream" });
+    let resolveDownload!: (blob: Blob) => void;
+    downloadMocks.original.mockReturnValue(new Promise<Blob>((resolve) => { resolveDownload = resolve; }));
+    const createObjectURL = vi.fn(() => "blob:original-document");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", Object.assign(class extends URL {}, { createObjectURL, revokeObjectURL }));
+    const clicks: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function () { clicks.push(this.download); });
+    useAppStore.setState({
+      previewOwnerConversationId: "conv-preview-owner",
+      conversationWorkbenchStates: {
+        "conv-preview-owner": {
+          previewArtifact: { artifactId: "document", name: "report.docx", content: "Extracted text", source: "attachment", hasNative: true, loadedAt: 1 },
+        } as never,
+      },
+    });
+    render(<PreviewPanel />);
+    const button = screen.getByRole("button", { name: "下载原文件" }) as HTMLButtonElement;
+    fireEvent.click(button);
+    expect(button.disabled).toBe(true);
+    expect(downloadMocks.original).toHaveBeenCalledWith("session-preview-image", "conv-preview-owner", "document");
+
+    await act(async () => resolveDownload(original));
+
+    expect(createObjectURL).toHaveBeenCalledWith(original);
+    expect(clicks).toEqual(["report.docx"]);
+    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith("blob:original-document"));
+    expect(button.disabled).toBe(false);
+  });
+
+  it("surfaces download errors and leaves the original available for retry", async () => {
+    downloadMocks.original.mockRejectedValueOnce(new Error("Original file unavailable"));
+    useAppStore.setState({ previewArtifact: { artifactId: "document", name: "report.docx", content: "Extracted text", source: "attachment", hasNative: true, loadedAt: 1 } });
+    render(<PreviewPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "下载原文件" }));
+    await waitFor(() => expect(downloadMocks.toast).toHaveBeenCalledWith("Original file unavailable", "error"));
+    expect((screen.getByRole("button", { name: "下载原文件" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

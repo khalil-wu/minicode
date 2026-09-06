@@ -65,6 +65,7 @@ from backend.tools.search_support import (
     _bounded_search_output,
     _coerce_head_limit,
     _coerce_nonnegative_int,
+    _compile_glob_filter,
     _denied_path_patterns,
     _denylist_ripgrep_globs,
     _glob_with_python,
@@ -273,7 +274,7 @@ class GrepFilesTool(BaseTool):
     activity_kind = "workspaceSearch"
     display_label = "Search"
     description = (
-        "Search file contents with ripgrep-style regex; returns matching lines with paths and line numbers by default. "
+        "Search file contents with ripgrep-style regex; returns matching file paths by default. "
         "Use for content search instead of shell grep/rg. Supports regex, glob/type filters, output modes ('content', 'files_with_matches', 'count'), context, and multiline."
     )
     permission = PermissionLevel.AUTO
@@ -284,7 +285,7 @@ class GrepFilesTool(BaseTool):
         self._workspace_root = workspace_root
 
     def model_description(self) -> str:
-        return "Regex-search file contents; returns matching paths, line numbers, and lines by default."
+        return "Regex-search file contents; returns matching file paths by default. Use output_mode='content' for lines."
 
     def model_schema(self) -> ToolSchema:
         # A narrower model-facing schema is not a cosmetic difference here:
@@ -526,6 +527,7 @@ class GrepFilesTool(BaseTool):
         candidate_files: Iterator[Path] = _iter_candidate_files(
             path,
             file_extensions,
+            ignore_rules="directories" if glob_filter and not glob_filter.startswith("!") else "all",
             is_allowed=(
                 (lambda candidate: checker.is_path_allowed(str(candidate), context=permission))
                 if checker is not None and denied_patterns
@@ -534,12 +536,11 @@ class GrepFilesTool(BaseTool):
         )
         if glob_filter:
             root = path.resolve()
+            glob_matches = _compile_glob_filter(glob_filter)
 
             def matches_glob(candidate: Path) -> bool:
-                try:
-                    return candidate.relative_to(root).match(str(glob_filter))
-                except ValueError:
-                    return False
+                relative = candidate.relative_to(root) if root.is_dir() else Path(candidate.name)
+                return glob_matches(relative.as_posix())
 
             candidate_files = (candidate for candidate in candidate_files if matches_glob(candidate))
         try:
@@ -564,6 +565,8 @@ class GrepFilesTool(BaseTool):
             return self._error_result(
                 f"Search resource limit reached: {exc}. Narrow the path or pattern."
             )
+        except OSError as exc:
+            return self._error_result(f"Search could not read the requested files: {exc}")
 
         display_matches, truncated = _apply_pagination(
             batch.matches,

@@ -247,14 +247,6 @@ class WriteFileTool(BaseTool):
             # Validate the resolved parent before creating it. A failed boundary
             # check must not leave a new directory outside the workspace.
             path.parent.mkdir(parents=True, exist_ok=True)
-            # Capture old content before overwriting (for diff in result).
-            old_content = None
-            if path.exists():
-                try:
-                    old_content = path.read_text(encoding="utf-8")
-                except (UnicodeDecodeError, OSError):
-                    pass
-
             # Repeat the guard inside the process-wide same-file queue. This
             # prevents two sessions that reviewed the same hash from both
             # committing, and also makes two simultaneous creates deterministic.
@@ -263,11 +255,7 @@ class WriteFileTool(BaseTool):
                 if not ok:
                     return self._error_result(message)
                 file_existed_before_write = path.exists()
-                if file_existed_before_write:
-                    try:
-                        old_content = path.read_text(encoding="utf-8")
-                    except (UnicodeDecodeError, OSError):
-                        old_content = None
+                old_content = path.read_bytes().decode("utf-8") if file_existed_before_write else None
                 # Whole-file Write honors the exact line endings supplied by
                 # the model. CC and Pi both distinguish this from Edit, which
                 # preserves the existing file's line-ending style.
@@ -277,13 +265,15 @@ class WriteFileTool(BaseTool):
                 # cannot consume stale model/editor state.
                 cache = get_global_file_cache()
                 cache.invalidate(path)
-                invalidate_workspace_file_caches(file_tree_changed=not file_existed_before_write)
+                invalidate_workspace_file_caches(
+                    file_tree_changed=not file_existed_before_write or path.name == ".gitignore"
+                )
+        except UnicodeDecodeError:
+            return self._error_result(f"Cannot read binary or non-UTF-8 file: {file_path}")
         except PermissionError:
             return self._error_result(f"No permission to write file: {file_path}")
         except OSError as exc:
-            return self._error_result(
-                f"Failed to write file ({type(exc).__name__}, errno={exc.errno})."
-            )
+            return self._error_result(f"Failed to write file: {exc}")
 
         if not plan_file:
             await _emit_write_diff(

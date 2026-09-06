@@ -144,28 +144,54 @@ export const BrowserPanel = () => {
   const [tabs, setTabs] = useState<BrowserTab[]>(() => [blankTab()]);
   const [activeId, setActiveId] = useState(() => tabs[0].id);
   const [browserHydrated, setBrowserHydrated] = useState(false);
-  const [annotationOpen, setAnnotationOpen] = useState(false);
+  const [annotationPage, setAnnotationPage] = useState<string | null>(null);
   const [annotationNote, setAnnotationNote] = useState("");
   const [annotationSelector, setAnnotationSelector] = useState("");
   const [pickedElement, setPickedElement] = useState<PickedElement | null>(null);
   const [pickerMode, setPickerMode] = useState<"element" | "region" | null>(null);
-  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorPage, setInspectorPage] = useState<string | null>(null);
   const [inspectorKind, setInspectorKind] = useState<InspectorKind>("console");
   const [diagnostics, setDiagnostics] = useState<BrowserDiagnosticItem[]>([]);
   const [inspectorLoading, setInspectorLoading] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [inspectorError, setInspectorError] = useState("");
+  const [settingsPage, setSettingsPage] = useState<string | null>(null);
   const [browserSettings, setBrowserSettings] = useState<EmbeddedBrowserSettings>(DEFAULT_BROWSER_SETTINGS);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const addressRef = useRef<HTMLInputElement>(null);
   const activeIdRef = useRef(activeId);
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
   const createdIdsRef = useRef(new Set<string>());
   const visibleIdsRef = useRef(new Set<string>());
   const ownerRef = useRef(conversationId);
   const ownerGenerationRef = useRef(0);
+  const pageGenerationRef = useRef(0);
+  const inspectorRequestRef = useRef(0);
+  const navigationRequestsRef = useRef(new Map<string, number>());
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeId) ?? tabs[0],
     [activeId, tabs],
   );
+  const pageKey = JSON.stringify([conversationId, activeId, activeTab.url]);
+  const annotationOpen = annotationPage === pageKey;
+  const inspectorOpen = inspectorPage === pageKey;
+  const settingsOpen = settingsPage === pageKey;
+
+  useEffect(() => {
+    pageGenerationRef.current += 1;
+    inspectorRequestRef.current += 1;
+    setAnnotationPage(null);
+    setAnnotationNote("");
+    setAnnotationSelector("");
+    setPickedElement(null);
+    setPickerMode(null);
+    setInspectorPage(null);
+    setInspectorLoading(false);
+    setInspectorError("");
+    setDiagnostics([]);
+    setSettingsPage(null);
+    setBrowserSettings(DEFAULT_BROWSER_SETTINGS);
+  }, [conversationId, activeId, activeTab.url]);
 
   useEffect(() => {
     activeIdRef.current = activeId;
@@ -190,13 +216,14 @@ export const BrowserPanel = () => {
     const initialTab = blankTab();
     createdIdsRef.current.clear();
     visibleIdsRef.current.clear();
+    navigationRequestsRef.current.clear();
     activeIdRef.current = initialTab.id;
     setTabs([initialTab]);
     setActiveId(initialTab.id);
     setBrowserHydrated(false);
-    setAnnotationOpen(false);
-    setInspectorOpen(false);
-    setSettingsOpen(false);
+    setAnnotationPage(null);
+    setInspectorPage(null);
+    setSettingsPage(null);
     setPickerMode(null);
     setInspectorLoading(false);
     setDiagnostics([]);
@@ -261,9 +288,12 @@ export const BrowserPanel = () => {
   const reconcileNativeTab = useCallback(async (tabId: string): Promise<boolean> => {
     const owner = ownerRef.current;
     const generation = ownerGenerationRef.current;
+    const navigationRequest = navigationRequestsRef.current.get(tabId);
     if (!owner) return false;
     const targets = await embeddedBrowserList(owner);
-    if (ownerRef.current !== owner || ownerGenerationRef.current !== generation) return false;
+    if (ownerRef.current !== owner || ownerGenerationRef.current !== generation
+      || navigationRequestsRef.current.get(tabId) !== navigationRequest
+      || !tabsRef.current.some((tab) => tab.id === tabId)) return false;
     if (!Array.isArray(targets)) return false;
     const target = targets.find((item) => item.id === tabId);
     if (!target) {
@@ -274,11 +304,7 @@ export const BrowserPanel = () => {
     createdIdsRef.current.add(tabId);
     if (target.url && target.url !== "about:blank") visibleIdsRef.current.add(tabId);
     else visibleIdsRef.current.delete(tabId);
-    setTabs((current) => {
-      const existing = current.find((tab) => tab.id === tabId);
-      if (!existing) return [...current, updateTabFromEvent(blankTab(tabId), target)];
-      return current.map((tab) => tab.id === tabId ? updateTabFromEvent(tab, target) : tab);
-    });
+    setTabs((current) => current.map((tab) => tab.id === tabId ? updateTabFromEvent(tab, target) : tab));
     return true;
   }, []);
 
@@ -286,12 +312,16 @@ export const BrowserPanel = () => {
     const owner = ownerRef.current;
     const generation = ownerGenerationRef.current;
     if (!owner) return false;
+    const request = (navigationRequestsRef.current.get(tabId) ?? 0) + 1;
+    navigationRequestsRef.current.set(tabId, request);
+    const isCurrent = () => ownerRef.current === owner
+      && ownerGenerationRef.current === generation
+      && navigationRequestsRef.current.get(tabId) === request;
     try {
       const state = await embeddedBrowserNavigate(owner, tabId, url);
+      if (!isCurrent()) return false;
       if (
-        ownerRef.current !== owner
-        || ownerGenerationRef.current !== generation
-        || !state
+        !state
         || state.id !== tabId
         || state.conversationId !== owner
       ) throw new Error("Desktop browser did not confirm the navigation.");
@@ -300,12 +330,19 @@ export const BrowserPanel = () => {
       setTabs((current) => current.map((tab) => (
         tab.id === tabId ? updateTabFromEvent(tab, state) : tab
       )));
-      activeIdRef.current = tabId;
+      if (activeIdRef.current !== tabId) {
+        if (createdIdsRef.current.has(activeIdRef.current)) {
+          await embeddedBrowserActivate(owner, activeIdRef.current);
+        } else {
+          await embeddedBrowserSetBounds({ id: tabId, conversationId: owner, x: 0, y: 0, width: 0, height: 0 });
+        }
+      }
       syncBounds();
       return true;
     } catch (error) {
-      if (ownerRef.current !== owner || ownerGenerationRef.current !== generation) return false;
+      if (!isCurrent()) return false;
       await reconcileNativeTab(tabId).catch(() => false);
+      if (!isCurrent()) return false;
       setTabs((current) => current.map((tab) => (
         tab.id === tabId
           ? { ...tab, loading: false, error: error instanceof Error ? error.message : "页面加载失败。" }
@@ -452,27 +489,29 @@ export const BrowserPanel = () => {
     const owner = ownerRef.current;
     const generation = ownerGenerationRef.current;
     if (!owner) return;
+    const request = (navigationRequestsRef.current.get(tabId) ?? 0) + 1;
+    navigationRequestsRef.current.set(tabId, request);
+    const isCurrent = () => ownerRef.current === owner
+      && ownerGenerationRef.current === generation
+      && navigationRequestsRef.current.get(tabId) === request;
     try {
       const accepted = await embeddedBrowserRunAction(owner, tabId, action);
-      if (ownerRef.current !== owner || ownerGenerationRef.current !== generation) return;
+      if (!isCurrent()) return;
       if (accepted) return;
       await reconcileNativeTab(tabId);
+      if (!isCurrent()) return;
       setTabs((current) => current.map((tab) => tab.id === tabId
         ? { ...tab, loading: false, error: `浏览器未接受${action === "reload" ? "刷新" : action === "stop" ? "停止" : action === "back" ? "后退" : "前进"}操作。` }
         : tab));
     } catch (error) {
-      if (ownerRef.current !== owner || ownerGenerationRef.current !== generation) return;
+      if (!isCurrent()) return;
       await reconcileNativeTab(tabId).catch(() => false);
+      if (!isCurrent()) return;
       setTabs((current) => current.map((tab) => tab.id === tabId
         ? { ...tab, loading: false, error: error instanceof Error ? error.message : "浏览器操作失败。" }
         : tab));
     }
   };
-
-  // Latest-value ref so closeTab's post-await decisions use current tabs,
-  // not the ones captured when the click fired (tab list may change mid-await).
-  const tabsRef = useRef(tabs);
-  tabsRef.current = tabs;
 
   const closeTab = async (tabId: string) => {
     const index = tabs.findIndex((tab) => tab.id === tabId);
@@ -486,13 +525,16 @@ export const BrowserPanel = () => {
         if (ownerRef.current !== owner || ownerGenerationRef.current !== generation) return;
         if (!closed) {
           await reconcileNativeTab(tabId);
+          if (ownerRef.current !== owner || ownerGenerationRef.current !== generation) return;
           setTabs((current) => current.map((tab) => (
             tab.id === tabId ? { ...tab, error: "Desktop browser rejected the close request." } : tab
           )));
           return;
         }
       } catch (error) {
+        if (ownerRef.current !== owner || ownerGenerationRef.current !== generation) return;
         await reconcileNativeTab(tabId).catch(() => false);
+        if (ownerRef.current !== owner || ownerGenerationRef.current !== generation) return;
         setTabs((current) => current.map((tab) => (
           tab.id === tabId
             ? { ...tab, error: error instanceof Error ? error.message : "关闭标签页失败。" }
@@ -503,6 +545,7 @@ export const BrowserPanel = () => {
     }
     visibleIdsRef.current.delete(tabId);
     createdIdsRef.current.delete(tabId);
+    navigationRequestsRef.current.delete(tabId);
     const liveTabs = tabsRef.current.filter((tab) => tab.id !== tabId);
     if (liveTabs.length === 0) {
       const replacement = blankTab();
@@ -560,7 +603,7 @@ export const BrowserPanel = () => {
       viewportWidth: annotation.viewportWidth,
       viewportHeight: annotation.viewportHeight,
     });
-    setAnnotationOpen(false);
+    setAnnotationPage(null);
     setAnnotationNote("");
     setAnnotationSelector("");
     setPickedElement(null);
@@ -569,45 +612,43 @@ export const BrowserPanel = () => {
   const pickPageTarget = async (kind: "element" | "region") => {
     if (!activeTab?.url || pickerMode) return;
     const owner = ownerRef.current;
-    const generation = ownerGenerationRef.current;
+    const generation = pageGenerationRef.current;
     const tabId = activeTab.id;
     setPickerMode(kind);
     try {
       const result = await embeddedBrowserInspect(owner, tabId, kind);
-      if (ownerRef.current !== owner || ownerGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
+      if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
       const value = result?.value as PickedElement | null | undefined;
       if (!value?.rect || !value.viewport) throw new Error("页面没有返回可用的选取结果。");
       setPickedElement(value);
       setAnnotationSelector(value.selector || "");
       if (!annotationNote.trim() && value.text) setAnnotationNote(value.text);
     } catch (error) {
-      if (ownerRef.current !== owner || ownerGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
+      if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
       setTabs((current) => current.map((tab) => tab.id === tabId
         ? { ...tab, error: error instanceof Error ? error.message : "页面目标选取失败。" }
         : tab));
     } finally {
-      if (ownerRef.current === owner && ownerGenerationRef.current === generation && activeIdRef.current === tabId) {
+      if (pageGenerationRef.current === generation && activeIdRef.current === tabId) {
         setPickerMode(null);
       }
     }
   };
 
   const updateBrowserSettings = async (payload: Parameters<typeof embeddedBrowserSetSettings>[0]) => {
-    const owner = ownerRef.current;
-    const generation = ownerGenerationRef.current;
+    const generation = pageGenerationRef.current;
     const tabId = activeTab.id;
     const url = activeTab.url;
     try {
       const next = await embeddedBrowserSetSettings(payload);
       if (
-        ownerRef.current !== owner
-        || ownerGenerationRef.current !== generation
+        pageGenerationRef.current !== generation
         || activeIdRef.current !== tabId
         || !next
       ) return;
       setBrowserSettings(next);
     } catch (error) {
-      if (ownerRef.current !== owner || ownerGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
+      if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
       setTabs((current) => current.map((tab) => tab.id === tabId && tab.url === url
         ? { ...tab, error: error instanceof Error ? error.message : "站点设置更新失败。" }
         : tab));
@@ -616,23 +657,22 @@ export const BrowserPanel = () => {
 
   const clearActiveSiteData = async () => {
     const owner = ownerRef.current;
-    const generation = ownerGenerationRef.current;
+    const generation = pageGenerationRef.current;
     const tabId = activeTab.id;
     const url = activeTab.url;
     if (!owner || !url) return;
     try {
       const cleared = await embeddedBrowserClearSiteData(owner, tabId);
-      if (ownerRef.current !== owner || ownerGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
+      if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
       if (!cleared) throw new Error("桌面浏览器未确认清除站点数据。");
       const settings = await embeddedBrowserGetSettings(url);
       if (
-        ownerRef.current === owner
-        && ownerGenerationRef.current === generation
+        pageGenerationRef.current === generation
         && activeIdRef.current === tabId
         && settings
       ) setBrowserSettings(settings);
     } catch (error) {
-      if (ownerRef.current !== owner || ownerGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
+      if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
       setTabs((current) => current.map((tab) => tab.id === tabId && tab.url === url
         ? { ...tab, error: error instanceof Error ? error.message : "清除站点数据失败。" }
         : tab));
@@ -642,20 +682,20 @@ export const BrowserPanel = () => {
   const refreshInspector = useCallback(async () => {
     if (!activeTab?.url) return;
     const owner = ownerRef.current;
-    const generation = ownerGenerationRef.current;
+    const request = ++inspectorRequestRef.current;
     const tabId = activeTab.id;
     setInspectorLoading(true);
+    setInspectorError("");
+    setDiagnostics([]);
     try {
       const result = await embeddedBrowserInspect(owner, tabId, inspectorKind);
-      if (ownerRef.current !== owner || ownerGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
+      if (inspectorRequestRef.current !== request) return;
       setDiagnostics(Array.isArray(result?.value) ? result.value as BrowserDiagnosticItem[] : []);
     } catch (error) {
-      if (ownerRef.current !== owner || ownerGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
-      setTabs((current) => current.map((tab) => tab.id === tabId
-        ? { ...tab, error: error instanceof Error ? error.message : "页面诊断读取失败。" }
-        : tab));
+      if (inspectorRequestRef.current !== request) return;
+      setInspectorError(error instanceof Error ? error.message : "页面诊断读取失败。");
     } finally {
-      if (ownerRef.current === owner && ownerGenerationRef.current === generation && activeIdRef.current === tabId) {
+      if (inspectorRequestRef.current === request) {
         setInspectorLoading(false);
       }
     }
@@ -665,29 +705,31 @@ export const BrowserPanel = () => {
     if (!inspectorOpen) return;
     void refreshInspector();
     window.requestAnimationFrame(syncBounds);
+    return () => { inspectorRequestRef.current += 1; };
   }, [inspectorOpen, inspectorKind, refreshInspector, syncBounds]);
 
   useEffect(() => {
     if (!settingsOpen || !activeTab?.url) return;
-    const owner = ownerRef.current;
-    const generation = ownerGenerationRef.current;
+    let cancelled = false;
+    const generation = pageGenerationRef.current;
     const tabId = activeTab.id;
     const url = activeTab.url;
     void Promise.resolve(embeddedBrowserGetSettings(url)).then((settings) => {
       if (
-        ownerRef.current === owner
-        && ownerGenerationRef.current === generation
+        !cancelled
+        && pageGenerationRef.current === generation
         && activeIdRef.current === tabId
         && settings
       ) setBrowserSettings(settings);
     }).catch((error) => {
-      if (ownerRef.current !== owner || ownerGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
+      if (cancelled || pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
       setTabs((current) => current.map((tab) => tab.id === tabId && tab.url === url
         ? { ...tab, error: error instanceof Error ? error.message : "无法读取站点设置。" }
         : tab));
     });
     window.requestAnimationFrame(syncBounds);
-  }, [activeTab?.url, settingsOpen, syncBounds]);
+    return () => { cancelled = true; };
+  }, [activeTab.id, activeTab.url, settingsOpen, syncBounds]);
 
   if (!isDesktop()) {
     return (
@@ -792,9 +834,9 @@ export const BrowserPanel = () => {
           title="添加页面批注"
           disabled={!activeTab.url}
           onClick={() => {
-            setAnnotationOpen((current) => !current);
-            setInspectorOpen(false);
-            setSettingsOpen(false);
+            setAnnotationPage(annotationOpen ? null : pageKey);
+            setInspectorPage(null);
+            setSettingsPage(null);
           }}
         >
           <MessageSquarePlus size={16} />
@@ -806,9 +848,9 @@ export const BrowserPanel = () => {
           disabled={!activeTab.url}
           aria-pressed={inspectorOpen}
           onClick={() => {
-            setInspectorOpen((current) => !current);
-            setAnnotationOpen(false);
-            setSettingsOpen(false);
+            setInspectorPage(inspectorOpen ? null : pageKey);
+            setAnnotationPage(null);
+            setSettingsPage(null);
           }}
         >
           <Bug size={16} />
@@ -820,9 +862,9 @@ export const BrowserPanel = () => {
           disabled={!activeTab.url}
           aria-pressed={settingsOpen}
           onClick={() => {
-            setSettingsOpen((current) => !current);
-            setAnnotationOpen(false);
-            setInspectorOpen(false);
+            setSettingsPage(settingsOpen ? null : pageKey);
+            setAnnotationPage(null);
+            setInspectorPage(null);
           }}
         >
           <Settings2 size={16} />
@@ -900,7 +942,11 @@ export const BrowserPanel = () => {
             </button>
           </div>
           <div className="mc-browser-inspector-list">
-            {diagnostics.length === 0 ? (
+            {inspectorError ? (
+              <span role="alert" className="mc-browser-inspector-empty">{inspectorError}</span>
+            ) : inspectorLoading ? (
+              <span className="mc-browser-inspector-empty">正在读取页面诊断…</span>
+            ) : diagnostics.length === 0 ? (
               <span className="mc-browser-inspector-empty">尚未记录{inspectorKind === "console" ? "控制台" : "网络"}事件</span>
             ) : diagnostics.slice(-50).reverse().map((item, index) => (
               <div className="mc-browser-inspector-row" key={`${item.timestamp ?? "event"}-${index}`}>
@@ -968,7 +1014,7 @@ export const BrowserPanel = () => {
             autoFocus
           />
           <div className="mc-browser-annotation-actions">
-            <button type="button" onClick={() => setAnnotationOpen(false)}>取消</button>
+            <button type="button" onClick={() => setAnnotationPage(null)}>取消</button>
             <button type="button" disabled={!annotationNote.trim()} onClick={saveAnnotation}>加入智能体上下文</button>
           </div>
         </div>

@@ -233,6 +233,21 @@ def test_workspace_set_accepts_camel_case_workspace_root_alias(monkeypatch) -> N
     assert captured["command"] == "workspace.set"
 
 
+@pytest.mark.parametrize("command", ["workspace.import", "workspace.switch", "workspace.set"])
+def test_workspace_activation_errors_reply_to_the_requested_command(tmp_path, command: str) -> None:
+    session = SimpleNamespace(send_event=AsyncMock())
+
+    handled = asyncio.run(workspace_handlers.HANDLERS[command](
+        session, {"path": str(tmp_path / "missing-project")},
+    ))
+
+    assert handled is True
+    event = session.send_event.await_args.args[0]
+    assert event.type == "command.result"
+    assert event.data["command"] == command
+    assert event.data["level"] == "error"
+
+
 def test_generated_image_artifact_preserves_media_type_after_cold_reload(tmp_path) -> None:
     artifact_dir = tmp_path / "artifacts"
     owner = "conv-image-media"
@@ -251,7 +266,7 @@ def test_generated_image_artifact_preserves_media_type_after_cold_reload(tmp_pat
     cold_store = ArtifactStore(storage_dir=artifact_dir)
     result = read_artifact_content(
         cold_store,
-        SimpleNamespace(get_payload=lambda *_args, **_kwargs: None),
+        SimpleNamespace(find_payload=lambda *_args, **_kwargs: None),
         artifact_id,
         conversation_id=owner,
         workspace_root=str(workspace),

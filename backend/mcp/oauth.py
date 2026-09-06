@@ -70,6 +70,12 @@ class TokenStore:
         self._path = path
         self._service = f"minicode-mcp:{hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:20]}"
 
+    def for_server(self, server_url: str, client_id: str = "") -> "TokenStore":
+        endpoint = urlunsplit(urlsplit(server_url.strip())._replace(fragment=""))
+        identity = json.dumps([endpoint, client_id.strip()], separators=(",", ":"))
+        scope = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+        return TokenStore(self._path.with_name(f"{self._path.stem}-{scope}{self._path.suffix}"))
+
     def _load(self) -> dict[str, dict[str, Any]]:
         with file_mutation_locks([self._path]):
             return self._load_unlocked()
@@ -390,7 +396,8 @@ async def create_sdk_oauth_provider(
             token_endpoint_auth_method="none",
             client_name="MiniCode Desktop",
         )
-        storage = store.sdk_storage(server_name)
+        # Name-only credentials cannot establish which endpoint owns them.
+        storage = store.for_server(server_url, client_id).sdk_storage(server_name)
         if client_id:
             await storage.set_client_info(
                 OAuthClientInformationFull(

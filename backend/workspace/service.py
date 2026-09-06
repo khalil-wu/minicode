@@ -213,7 +213,10 @@ class WorkspaceService:
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Failed to read file: {exc}") from exc
 
-        parsed = parse_document_preview(target.name, raw_content)
+        try:
+            parsed = parse_document_preview(target.name, raw_content)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         content = str(parsed.get("full_text") or "")
         # Match uploaded-attachment preview bounds so a large workspace file
         # cannot flood the right rail or the clipboard.
@@ -228,6 +231,7 @@ class WorkspaceService:
             "size_bytes": int(stat.st_size),
             "summary": str(parsed.get("summary") or ""),
             "parse_error": str(parsed.get("parse_error") or ""),
+            "parse_warning": str(parsed.get("parse_warning") or ""),
             "content": visible_content,
             "content_chars": len(content),
             "truncated": len(visible_content) < len(content),
@@ -314,7 +318,9 @@ class WorkspaceService:
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Failed to write file: {exc}") from exc
 
-        self._invalidate_derived_caches(file_tree_changed=not file_existed_before_write)
+        self._invalidate_derived_caches(
+            file_tree_changed=not file_existed_before_write or target.name == ".gitignore"
+        )
 
         return WorkspaceFileResponse(
             workspace_root=str(self.workspace_root_path()),

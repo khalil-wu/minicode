@@ -357,6 +357,7 @@ const ContextTab = () => {
   const [gitStatus, setGitStatus] = useState<WorkspaceGitStatusResponse | null>(null)
   const [gitLoading, setGitLoading] = useState(false)
   const [gitError, setGitError] = useState<string | null>(null)
+  const gitRequestRef = useRef(0)
 
   const conversation = conversations.find((c) => c.id === conversationId)
   const workspacePath = conversation?.worktreePath || conversation?.workspaceRoot || workingDirectory || workspaceGit?.currentPath || ''
@@ -369,7 +370,7 @@ const ContextTab = () => {
   const visibleLedgerEntries = contextLedger?.entries.filter((entry) =>
     entry.estimated_tokens > 0 || entry.item_count > 0 || entry.source_count > 0
   ) ?? []
-  const changedCount = gitStatus ? gitStatus.modified.length + gitStatus.staged.length + gitStatus.untracked.length : null
+  const changedCount = gitStatus ? new Set([...gitStatus.modified, ...gitStatus.staged, ...gitStatus.untracked]).size : null
   const hasSessionRows = Boolean(conversationId)
   const hasWorkspaceRows = hasWorkspacePath
   const hasRuntimeRows =
@@ -379,18 +380,25 @@ const ContextTab = () => {
     Boolean(activeEditorPath)
 
   const refreshGitStatus = () => {
+    const requestId = ++gitRequestRef.current
     setGitLoading(true)
     setGitError(null)
     fetchWorkspaceGitStatus(workspacePath)
-      .then((result) => setGitStatus(result))
+      .then((result) => {
+        if (requestId === gitRequestRef.current) setGitStatus(result)
+      })
       .catch((error) => {
+        if (requestId !== gitRequestRef.current) return
         setGitStatus(null)
         setGitError(error instanceof Error ? error.message : String(error))
       })
-      .finally(() => setGitLoading(false))
+      .finally(() => {
+        if (requestId === gitRequestRef.current) setGitLoading(false)
+      })
   }
 
   useEffect(() => {
+    setGitStatus(null)
     if (!hasWorkspacePath) {
       setGitStatus(null)
       setGitError(null)
@@ -398,6 +406,7 @@ const ContextTab = () => {
       return
     }
     refreshGitStatus()
+    return () => { gitRequestRef.current += 1 }
   }, [workspacePath, hasWorkspacePath])
 
   if (!hasSessionRows && !hasWorkspaceRows && !hasRuntimeRows) return null
@@ -438,7 +447,7 @@ const ContextTab = () => {
             <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
               <SmallButton icon={<FolderOpen size={14} />} label="打开位置" disabled={!isDesktop()} onClick={() => void revealPath(workspacePath)} />
               <SmallButton icon={<Copy size={14} />} label="复制路径" onClick={() => void navigator.clipboard?.writeText(workspacePath)} />
-              <SmallButton icon={<GitBranch size={14} />} label="刷新" onClick={refreshGitStatus} />
+              <SmallButton icon={<GitBranch size={14} />} label="刷新" onClick={refreshGitStatus} disabled={gitLoading} />
             </div>
           </InfoCard>
         </>

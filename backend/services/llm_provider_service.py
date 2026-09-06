@@ -5,7 +5,6 @@ from collections.abc import Mapping
 from typing import Any, Awaitable, Callable
 
 from backend.config import (
-    SETTINGS_FILE,
     get_anthropic_settings,
     get_custom_settings,
     get_openai_settings,
@@ -14,7 +13,6 @@ from backend.config import (
     resolve_provider_api_key_for_base_url,
     resolve_provider_image_api_key_for_base_url,
 )
-from backend.hooks.runtime import raise_if_config_change_blocked, run_config_change_hook
 from backend.llm.capabilities import is_gpt_image_model
 from backend.llm.reasoning_effort import normalize_reasoning_effort, reasoning_effort_levels
 from backend.llm.proxy_policy import normalize_provider_proxy_mode
@@ -31,7 +29,6 @@ from backend.services.llm_provider_helpers import (
     _manual_models_from_payload,
     _merge_models,
     _normalize_provider_value,
-    _persist_refreshed_models,
     _select_refreshed_model,
     _status_hint_for_provider,
 )
@@ -42,7 +39,6 @@ FetchModels = Callable[..., Awaitable[list[str]]]
 CheckGeneration = Callable[..., Awaitable[None]]
 CheckAnthropicGeneration = Callable[..., Awaitable[None]]
 CheckImageGeneration = Callable[..., Awaitable[None]]
-ConfigChangeHook = Callable[..., Awaitable[Any]]
 
 
 async def _call_provider_helper(
@@ -436,8 +432,8 @@ async def refresh_llm_models(
     *,
     fetch_anthropic_models: FetchModels = _fetch_anthropic_models,
     fetch_openai_models: FetchModels = _fetch_openai_compatible_models,
-    config_change_hook: ConfigChangeHook = run_config_change_hook,
 ) -> dict[str, Any]:
+    """Discover candidates for a provider draft without changing saved settings."""
     provider = _normalize_provider_value(request.provider)
 
     if provider == "anthropic":
@@ -445,12 +441,12 @@ async def refresh_llm_models(
         proxy_mode = _request_proxy_mode(request.anthropic, current)
         headers = _request_headers(request.anthropic, current)
         auth_header = _request_auth_header(request.anthropic, current)
-        base_url = request.anthropic.base_url.strip() or current["base_url"]
+        base_url = _request_text_value(request.anthropic, current, "base_url", blank_is_value=True)
         api_key = (
             request.anthropic.api_key.strip()
             or resolve_provider_api_key_for_base_url("anthropic", base_url)
         )
-        current_model = request.anthropic.model.strip() or current["model"]
+        current_model = _request_text_value(request.anthropic, current, "model", blank_is_value=True)
         provider_id = "anthropic"
         models: list[str] = []
         discovered_model_metadata: dict[str, dict[str, Any]] = {}
@@ -502,29 +498,10 @@ async def refresh_llm_models(
         model_metadata = (
             discovered_model_metadata
             if source == "live"
-            else dict(
-                getattr(request.anthropic, "model_metadata", {})
-                or current.get("model_metadata", {})
-                or {}
-            )
+            else dict(request.anthropic.model_metadata
+                      if _request_field_was_set(request.anthropic, "model_metadata")
+                      else current.get("model_metadata", {}))
         )
-        config = None
-        if source == "live":
-            hook_result = await config_change_hook(
-                source="llm",
-                file_path=str(SETTINGS_FILE),
-            )
-            raise_if_config_change_blocked(
-                hook_result,
-                source="llm",
-                file_path=str(SETTINGS_FILE),
-            )
-            config = _persist_refreshed_models(
-                provider,
-                final_models,
-                selected_model,
-                model_metadata,
-            )
         payload = {
             "provider": provider,
             "provider_id": provider_id,
@@ -542,8 +519,6 @@ async def refresh_llm_models(
                 live_refresh=source == "live",
             ),
         }
-        if config is not None:
-            payload["_config"] = config
         return payload
 
     current = get_custom_settings() if provider == "custom" else get_openai_settings()
@@ -551,9 +526,9 @@ async def refresh_llm_models(
     proxy_mode = _request_proxy_mode(incoming, current)
     headers = _request_headers(incoming, current)
     auth_header = _request_auth_header(incoming, current)
-    base_url = incoming.base_url.strip() or str(current.get("base_url", "")).strip()
+    base_url = _request_text_value(incoming, current, "base_url", blank_is_value=True)
     api_key = incoming.api_key.strip() or resolve_provider_api_key_for_base_url(provider, base_url)
-    current_model = incoming.model.strip() or str(current.get("model", "")).strip()
+    current_model = _request_text_value(incoming, current, "model", blank_is_value=True)
     raw_wire_api = str(getattr(incoming, "wire_api", "") or current.get("wire_api", "") or "").strip().lower()
     wire_api = normalize_custom_wire_api(base_url, raw_wire_api, str(current.get("wire_api", "chat")))
     custom_anthropic = provider == "custom" and wire_api == "anthropic"
@@ -630,29 +605,10 @@ async def refresh_llm_models(
     model_metadata = (
         discovered_model_metadata
         if source == "live"
-        else dict(
-            getattr(incoming, "model_metadata", {})
-            or current.get("model_metadata", {})
-            or {}
-        )
+        else dict(incoming.model_metadata
+                  if _request_field_was_set(incoming, "model_metadata")
+                  else current.get("model_metadata", {}))
     )
-    config = None
-    if source == "live":
-        hook_result = await config_change_hook(
-            source="llm",
-            file_path=str(SETTINGS_FILE),
-        )
-        raise_if_config_change_blocked(
-            hook_result,
-            source="llm",
-            file_path=str(SETTINGS_FILE),
-        )
-        config = _persist_refreshed_models(
-            provider,
-            final_models,
-            selected_model,
-            model_metadata,
-        )
     payload = {
         "provider": provider,
         "provider_id": provider_id,
@@ -663,15 +619,15 @@ async def refresh_llm_models(
         "source_message": source_message,
         **discovery_failure,
         **_selected_model_capability_payload(
-            current,
+            {**current, "reasoning_effort": _request_text_value(
+                incoming, current, "reasoning_effort", blank_is_value=True,
+            )},
             selected_model=selected_model,
             model_metadata=model_metadata,
             wire_api="anthropic" if custom_anthropic else wire_api,
             live_refresh=source == "live",
         ),
     }
-    if config is not None:
-        payload["_config"] = config
     return payload
 
 
@@ -692,9 +648,9 @@ async def check_llm_connection(
         proxy_mode = _request_proxy_mode(incoming, current)
         headers = _request_headers(incoming, current)
         auth_header = _request_auth_header(incoming, current)
-        base_url = incoming.base_url.strip() or str(current.get("base_url", "")).strip()
+        base_url = _request_text_value(incoming, current, "base_url", blank_is_value=True)
         api_key = incoming.api_key.strip() or resolve_provider_api_key_for_base_url("anthropic", base_url)
-        model = incoming.model.strip() or str(current.get("model", "")).strip()
+        model = _request_text_value(incoming, current, "model", blank_is_value=True)
         wire_api = "anthropic"
         provider_id = "anthropic"
         fetch_models = fetch_anthropic_models
@@ -704,9 +660,9 @@ async def check_llm_connection(
         proxy_mode = _request_proxy_mode(incoming, current)
         headers = _request_headers(incoming, current)
         auth_header = _request_auth_header(incoming, current)
-        base_url = incoming.base_url.strip() or str(current.get("base_url", "")).strip()
+        base_url = _request_text_value(incoming, current, "base_url", blank_is_value=True)
         api_key = incoming.api_key.strip() or resolve_provider_api_key_for_base_url(provider, base_url)
-        model = incoming.model.strip() or str(current.get("model", "")).strip()
+        model = _request_text_value(incoming, current, "model", blank_is_value=True)
         raw_wire_api = str(
             getattr(incoming, "wire_api", "")
             or current.get("wire_api", "")

@@ -1153,8 +1153,8 @@ def test_git_stage_all_commands_are_scoped_to_workspace(monkeypatch) -> None:
     asyncio.run(scenario())
 
     assert calls == [
-        ("workspace", ("git", "add", "--all", "--", ".")),
-        ("workspace", ("git", "reset", "HEAD", "--", ".")),
+        ("workspace", ("git", "--literal-pathspecs", "add", "--all", "--", ".")),
+        ("workspace", ("git", "--literal-pathspecs", "reset", "--", ".")),
     ]
 
 

@@ -1248,6 +1248,31 @@ describe("sendChatMessage attachment feedback", () => {
     expect(state.messages.some((message) => message.role === "system" && /后端连接尚未就绪/.test(message.content))).toBe(true);
   });
 
+  it("keeps a side-chat send failure in the side-chat transcript", () => {
+    wsMock.throwOnSend = true;
+    useAppStore.setState({
+      conversationId: "conv-main",
+      messages: [{ id: "main-message", role: "user", content: "main", artifacts: [], timestamp: 1 }],
+      conversationMessages: { "side-1": [] },
+      conversationStreaming: { "side-1": false },
+      sideChats: { "side-1": { id: "side-1", messages: [], isStreaming: false, draft: "" } },
+      isStreaming: false,
+      isConnected: true,
+    });
+
+    expect(sendChatMessage({
+      displayContent: "side question",
+      backendContent: "side question",
+      conversationId: "side-1",
+    })).toBe(false);
+
+    const state = useAppStore.getState();
+    expect(state.messages.some((message) => message.role === "system")).toBe(false);
+    expect(state.sideChats["side-1"]?.messages.some((message) => (
+      message.role === "system" && /socket closed/i.test(message.content)
+    ))).toBe(true);
+  });
+
   it("hands explicit messages to the websocket queue while reconnecting", () => {
     useAppStore.setState({ isConnected: false });
 

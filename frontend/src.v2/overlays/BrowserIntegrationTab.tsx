@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Download, Globe2, PanelRightOpen, RefreshCw, ShieldCheck } from "lucide-react";
 import { embeddedBrowserGetSettings, embeddedBrowserList, embeddedBrowserSetSettings, isDesktop, type EmbeddedBrowserSettings, type EmbeddedBrowserState } from "../desktop/runtime";
 import { openRightPanelFromSettings } from "../lib/settings-navigation";
@@ -14,8 +14,11 @@ export const BrowserIntegrationTab = () => {
   const [savingDownloadPolicy, setSavingDownloadPolicy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const loadSequenceRef = useRef(0);
 
   const loadBrowserState = useCallback(async (showFeedback = false) => {
+    const requestId = ++loadSequenceRef.current;
+    const requestConversationId = conversationId;
     setLoading(true);
     setLoadError("");
     try {
@@ -23,16 +26,18 @@ export const BrowserIntegrationTab = () => {
         conversationId ? Promise.resolve(embeddedBrowserList(conversationId)) : Promise.resolve([]),
         isDesktop() ? Promise.resolve(embeddedBrowserGetSettings("")) : Promise.resolve(null),
       ]);
+      if (requestId !== loadSequenceRef.current || useAppStore.getState().conversationId !== requestConversationId) return;
       setTabs(Array.isArray(items) ? items : []);
       if (settings?.downloadPolicy) setDownloadPolicy(settings.downloadPolicy);
       if (showFeedback) pushToast("浏览器状态已刷新", "success");
     } catch (error) {
+      if (requestId !== loadSequenceRef.current || useAppStore.getState().conversationId !== requestConversationId) return;
       const message = error instanceof Error ? error.message : String(error || "未知错误");
       setTabs([]);
       setLoadError(message);
       if (showFeedback) pushToast(`浏览器状态刷新失败：${message}`, "error");
     } finally {
-      setLoading(false);
+      if (requestId === loadSequenceRef.current) setLoading(false);
     }
   }, [conversationId]);
 

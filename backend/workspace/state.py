@@ -23,23 +23,20 @@ def _read_persisted_workspace_root() -> Path | None:
             if not root:
                 return None
             return Path(root).resolve()
-        except Exception:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError, TypeError):
             return None
 
 
 def _write_persisted_workspace_root(root: Path | None) -> None:
     with file_mutation_locks([WORKSPACE_STATE_FILE]):
-        try:
-            WORKSPACE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            if root is None:
-                WORKSPACE_STATE_FILE.unlink(missing_ok=True)
-                return
-            atomic_write_text(
-                WORKSPACE_STATE_FILE,
-                json.dumps({"root": str(root.resolve())}, ensure_ascii=False, indent=2) + "\n",
-            )
-        except Exception:
-            pass
+        WORKSPACE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if root is None:
+            WORKSPACE_STATE_FILE.unlink(missing_ok=True)
+            return
+        atomic_write_text(
+            WORKSPACE_STATE_FILE,
+            json.dumps({"root": str(root.resolve())}, ensure_ascii=False, indent=2) + "\n",
+        )
 
 
 def get_active_workspace_root(default_root: str | Path | None = None) -> Path:
@@ -89,13 +86,13 @@ def set_active_workspace_root(root: str | Path | None) -> Path | None:
     global _active_workspace_root
     with _WORKSPACE_STATE_LOCK:
         if root is None:
-            _active_workspace_root = None
             _write_persisted_workspace_root(None)
+            _active_workspace_root = None
             return None
 
         resolved = Path(root).resolve()
-        _active_workspace_root = resolved
         _write_persisted_workspace_root(resolved)
+        _active_workspace_root = resolved
         return resolved
 
 

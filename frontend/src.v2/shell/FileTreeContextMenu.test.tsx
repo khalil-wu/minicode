@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   deletePath: vi.fn(),
   showConfirm: vi.fn(),
+  showAlert: vi.fn(),
 }));
 
 vi.mock("../desktop/runtime", () => ({
@@ -21,7 +22,7 @@ vi.mock("../desktop/runtime", () => ({
 vi.mock("../overlays/DialogService", () => ({
   showConfirm: mocks.showConfirm,
   showPrompt: vi.fn(),
-  showAlert: vi.fn(),
+  showAlert: mocks.showAlert,
 }));
 
 import { FileContextMenu } from "./FileTreeContextMenu";
@@ -97,6 +98,28 @@ describe("FileContextMenu desktop deletion", () => {
     await waitFor(() => expect(mocks.showConfirm).toHaveBeenCalledTimes(2));
     expect(mocks.deletePath).toHaveBeenCalledTimes(1);
     expect(mocks.deletePath).toHaveBeenCalledWith("C:/repo/vendor", true, false);
+    expect(onRefresh).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it.each([false, true])("shows the IPC failure when deletion fails after large-directory confirmation=%s", async (largeDirectory) => {
+    const onRefresh = vi.fn();
+    const onClose = vi.fn();
+    mocks.showConfirm.mockResolvedValue(true);
+    if (largeDirectory) {
+      mocks.deletePath.mockResolvedValueOnce({ needsConfirmation: true, path: "C:/repo/vendor", entryCount: 51 });
+    }
+    mocks.deletePath.mockRejectedValueOnce(new Error("Path targets a protected path and cannot be modified."));
+    render(
+      <FileContextMenu
+        menu={{ path: "C:/repo/vendor", isDir: true, x: 0, y: 0 }}
+        workingDirectory="C:/repo" onRefresh={onRefresh} onClose={onClose}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    await waitFor(() => expect(mocks.showAlert).toHaveBeenCalledWith({
+      title: "删除失败", message: "Path targets a protected path and cannot be modified.",
+    }));
     expect(onRefresh).not.toHaveBeenCalled();
     expect(onClose).toHaveBeenCalled();
   });

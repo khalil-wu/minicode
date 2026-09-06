@@ -1329,7 +1329,7 @@ class MCPServerManager:
             raise RuntimeError(
                 f"MCP server '{name}' is still shutting down and cannot log out"
             )
-        self._token_store.clear(name)
+        self._token_store.for_server(state.config.url or "", state.config.oauth_client_id).clear(name)
         state.auth_status = (
             MCPAuthStatus.NOT_LOGGED_IN
             if state.config.oauth_client_id
@@ -1635,9 +1635,10 @@ class MCPServerManager:
     def _stored_auth_status(self, config: MCPServerConfig) -> MCPAuthStatus:
         if config.transport not in {"sse", "http"}:
             return MCPAuthStatus.UNSUPPORTED
-        if self._token_store.has_sdk_tokens(config.name):
+        token_store = self._token_store.for_server(config.url or "", config.oauth_client_id)
+        if token_store.has_sdk_tokens(config.name):
             return MCPAuthStatus.OAUTH
-        tokens = self._token_store.get(config.name)
+        tokens = token_store.get(config.name)
         if tokens is None:
             return (
                 MCPAuthStatus.NOT_LOGGED_IN

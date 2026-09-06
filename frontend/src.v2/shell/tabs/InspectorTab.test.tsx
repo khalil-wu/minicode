@@ -60,7 +60,7 @@ const successfulPermissionResult = () => ({
 
 describe('InspectorTab control-plane refresh', () => {
   beforeEach(() => {
-    fetchWorkspaceGitStatusMock.mockClear()
+    fetchWorkspaceGitStatusMock.mockReset().mockResolvedValue({ branch: 'main', modified: [], staged: [], untracked: [] })
     sendClientCommandMock.mockReset()
     sendClientCommandMock.mockReturnValue(true)
     sendClientCommandAwaitResultMock.mockReset()
@@ -94,6 +94,23 @@ describe('InspectorTab control-plane refresh', () => {
   })
 
   afterEach(() => cleanup())
+
+  it('keeps Git counts in their workspace and counts staged-plus-modified files once', async () => {
+    let resolveOld!: (value: unknown) => void
+    fetchWorkspaceGitStatusMock.mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve }))
+      .mockResolvedValueOnce({ branch: 'main', modified: ['shared.ts'], staged: ['shared.ts'], untracked: ['new.ts'] })
+    render(<InspectorTab />)
+
+    act(() => useAppStore.setState({
+      workingDirectory: 'C:\\project-b',
+      conversations: [{ id: 'conv-inspector', title: 'New workspace', updatedAt: '2026-09-06T00:00:00Z', workspaceRoot: 'C:\\project-b' }],
+    }))
+    expect(await screen.findByText('2 项')).toBeTruthy()
+    await act(async () => resolveOld({ branch: 'old', modified: ['a', 'b', 'c'], staged: [], untracked: [] }))
+
+    expect(screen.getByText('2 项')).toBeTruthy()
+    expect(screen.queryByText('3 项')).toBeNull()
+  })
 
   it('waits while offline and automatically refreshes after the websocket reconnects', async () => {
     render(<InspectorTab />)

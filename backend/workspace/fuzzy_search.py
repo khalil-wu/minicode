@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from pathspec.gitignore import GitIgnoreSpec
 
@@ -22,6 +24,61 @@ from backend.security.sensitive_files import is_protected_write_path
 from backend.workspace.path_filters import is_windows_reserved_path
 
 logger = logging.getLogger(__name__)
+
+_IGNORE_DIRS = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
+    ".idea", ".vscode", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+}
+_IndexedFile = tuple[Path, str, frozenset[str]]
+
+
+def iter_search_paths(
+    root: Path,
+    *,
+    include_hidden: bool = False,
+    ignore_dirs: set[str] = _IGNORE_DIRS,
+    ignore_rules: Literal["all", "directories", "none"] = "all",
+) -> Iterator[tuple[Path, bool]]:
+    """Walk searchable files and folders, pruning ignored and linked directories."""
+    pending: list[tuple[Path, tuple[tuple[Path, GitIgnoreSpec], ...]]] = [(root, ())]
+    while pending:
+        directory, ignore_specs = pending.pop()
+        ignore_lines = []
+        if ignore_rules != "none":
+            try:
+                ignore_lines = (directory / ".gitignore").read_text(encoding="utf-8").splitlines()
+            except FileNotFoundError:
+                pass
+        if ignore_lines:
+            ignore_specs = (*ignore_specs, (directory, GitIgnoreSpec.from_lines(ignore_lines)))
+
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if (not include_hidden and entry.name.startswith(".")) or entry.is_symlink():
+                    continue
+                path = Path(entry.path)
+                if is_windows_reserved_path(path.name):
+                    continue
+                is_dir = entry.is_dir(follow_symlinks=False)
+                if is_dir and (
+                    entry.name.casefold() in ignore_dirs
+                    or (os.name == "nt" and entry.stat(follow_symlinks=False).st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT)
+                ):
+                    continue
+
+                ignored = False
+                for base, spec in ignore_specs:
+                    relative = path.relative_to(base).as_posix() + ("/" if is_dir else "")
+                    decision = spec.check_file(relative).include
+                    if decision is not None:
+                        ignored = decision
+                if ignored and (is_dir or ignore_rules == "all"):
+                    continue
+                if is_dir:
+                    pending.append((path, ignore_specs))
+                    yield path, True
+                elif entry.is_file(follow_symlinks=False):
+                    yield path, False
 
 
 @dataclass
@@ -59,9 +116,8 @@ class FuzzySearchEngine:
             workspace_root: 工作区根目录
         """
         self.workspace_root = workspace_root.resolve()
-        self._file_cache: list[Path] = []
-        self._file_cache_metadata: dict[Path, tuple[str, frozenset[str]]] = {}
-        self._cache_valid = False
+        self._generation = 0
+        self._file_cache: tuple[int, tuple[_IndexedFile, ...]] = (-1, ())
 
         logger.info(f"Initialized fuzzy search engine for {workspace_root}")
 
@@ -88,8 +144,9 @@ class FuzzySearchEngine:
         query_lower = query.lower()
 
         # 刷新文件缓存
-        if not self._cache_valid:
-            self._refresh_file_cache()
+        generation, files = self._file_cache
+        if generation != self._generation:
+            files = self._refresh_file_cache()
 
         # The cache stores the normalized path and its character index once.
         # Rebuilding those sets for every query made repeated searches scale
@@ -99,104 +156,40 @@ class FuzzySearchEngine:
         # 评分和排序
         matches: list[FuzzyMatch] = []
 
-        for path in self._file_cache:
-            path_str, path_chars = self._file_cache_metadata[path]
+        for path, path_str, path_chars in files:
             # 快速检查：查询中的所有字符是否都在路径中
             if not query_chars.issubset(path_chars):
                 continue
             match = self._score_match(path, query_lower, path_str=path_str)
             if match is not None:
-                # 测试文件惩罚
-                if not include_tests and self._is_test_file(path):
-                    continue
+                if self._is_test_file(path):
+                    if not include_tests:
+                        continue
+                    match.score += self.PENALTY_TEST_FILE
 
                 matches.append(match)
 
         # 按分数降序排序，取 top-k
-        matches.sort(key=lambda m: m.score, reverse=True)
+        matches.sort(key=lambda m: (-m.score, m.path.as_posix()))
         return matches[:max_results]
 
     def invalidate_cache(self) -> None:
         """使文件缓存失效"""
-        self._cache_valid = False
+        self._generation += 1
         logger.debug("File cache invalidated")
 
-    def _refresh_file_cache(self) -> None:
-        """刷新文件缓存"""
-        self._file_cache.clear()
-        self._file_cache_metadata.clear()
-
-        # 忽略的目录
-        ignore_dirs = {
-            ".git",
-            "node_modules",
-            "__pycache__",
-            ".venv",
-            "venv",
-            "dist",
-            "build",
-            ".idea",
-            ".vscode",
-            ".pytest_cache",
-            ".mypy_cache",
-            ".ruff_cache",
-        }
-        gitignore_path = self.workspace_root / ".gitignore"
-        try:
-            gitignore = GitIgnoreSpec.from_lines(
-                gitignore_path.read_text(encoding="utf-8").splitlines()
-                if gitignore_path.is_file()
-                else []
-            )
-        except OSError:
-            logger.warning("Failed to read .gitignore for fuzzy search", exc_info=True)
-            gitignore = GitIgnoreSpec.from_lines([])
-
-        pending = [self.workspace_root]
-        while pending:
-            directory = pending.pop()
-            try:
-                entries = os.scandir(directory)
-            except OSError:
-                logger.debug("Unable to scan fuzzy-search directory %s", directory, exc_info=True)
-                continue
-            with entries:
-                for entry in entries:
-                    path = Path(entry.path)
-                    try:
-                        rel_path = path.relative_to(self.workspace_root)
-                    except ValueError:
-                        continue
-                    rel_parts = rel_path.parts
-
-                    # Never follow links out of the workspace. A fuzzy search
-                    # is read-only, but returning a linked secret file is still
-                    # an information disclosure.
-                    if entry.is_symlink():
-                        continue
-
-                    hidden = any(part.startswith(".") for part in rel_parts)
-                    ignored_name = any(part in ignore_dirs for part in rel_parts)
-                    ignored_by_spec = gitignore.match_file(rel_path.as_posix())
-                    if entry.is_dir(follow_symlinks=False):
-                        if not hidden and not ignored_name and not ignored_by_spec:
-                            pending.append(path)
-                        continue
-
-                    if hidden or ignored_name or ignored_by_spec:
-                        continue
-                    if is_protected_write_path(rel_path) or is_windows_reserved_path(rel_path):
-                        continue
-
-                    self._file_cache.append(path)
-                    normalized = rel_path.as_posix()
-                    self._file_cache_metadata[path] = (
-                        normalized,
-                        frozenset(normalized.lower()),
-                    )
-
-        self._cache_valid = True
-        logger.info("Refreshed file cache: %d files", len(self._file_cache))
+    def _refresh_file_cache(self) -> tuple[_IndexedFile, ...]:
+        """Publish a complete index; invalidation during a scan remains effective."""
+        generation = self._generation
+        files: list[_IndexedFile] = []
+        for path, is_dir in iter_search_paths(self.workspace_root):
+            if not is_dir and not is_protected_write_path(path.relative_to(self.workspace_root)):
+                normalized = path.relative_to(self.workspace_root).as_posix()
+                files.append((path, normalized, frozenset(normalized.lower())))
+        snapshot = tuple(files)
+        self._file_cache = (generation, snapshot)
+        logger.info("Refreshed file cache: %d files", len(snapshot))
+        return snapshot
 
 
     def _score_match(
@@ -216,19 +209,21 @@ class FuzzySearchEngine:
         Returns:
             匹配结果，如果不匹配则返回 None
         """
-        path_str = path_str or str(path.relative_to(self.workspace_root))
+        path_str = path_str or path.relative_to(self.workspace_root).as_posix()
         path_lower = path_str.lower()
+        original_indices = [index for index, char in enumerate(path_str) for _ in char.lower()]
 
         # 查找匹配位置
         matched_indices: list[int] = []
         query_idx = 0
-        path_idx = 0
-
-        while query_idx < len(query) and path_idx < len(path_lower):
-            if query[query_idx] == path_lower[path_idx]:
-                matched_indices.append(path_idx)
+        for lower_idx, char in enumerate(path_lower):
+            if query[query_idx] == char:
+                path_idx = original_indices[lower_idx]
+                if not matched_indices or matched_indices[-1] != path_idx:
+                    matched_indices.append(path_idx)
                 query_idx += 1
-            path_idx += 1
+            if query_idx == len(query):
+                break
 
         # 如果没有匹配所有查询字符，返回 None
         if query_idx < len(query):
@@ -278,19 +273,16 @@ class FuzzySearchEngine:
         Returns:
             True 如果是测试文件
         """
-        try:
-            path_str = path.relative_to(self.workspace_root).as_posix().lower()
-        except ValueError:
-            path_str = path.as_posix().lower()
+        relative = path.relative_to(self.workspace_root)
+        if any(part.lower() in {"tests", "test", "__tests__"} for part in relative.parts[:-1]):
+            return True
+        path_str = relative.name.lower()
         test_patterns = [
             "test_",
             "_test.",
             ".test.",
             "spec.",
             ".spec.",
-            "/tests/",
-            "/test/",
-            "__tests__",
         ]
         return any(pattern in path_str for pattern in test_patterns)
 
@@ -313,13 +305,12 @@ def get_global_fuzzy_search(workspace_root: Optional[Path] = None) -> FuzzySearc
 
     resolved_root = workspace_root.resolve() if workspace_root is not None else Path.cwd().resolve()
 
-    if (
-        _global_engine is None
-        or _global_engine.workspace_root != resolved_root
-    ):
-        _global_engine = FuzzySearchEngine(resolved_root)
+    engine = _global_engine
+    if engine is None or engine.workspace_root != resolved_root:
+        engine = FuzzySearchEngine(resolved_root)
+        _global_engine = engine
 
-    return _global_engine
+    return engine
 
 
 def invalidate_global_fuzzy_search() -> None:

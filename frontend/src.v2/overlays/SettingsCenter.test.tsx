@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
@@ -1473,6 +1473,84 @@ describe("SettingsCenter reasoning effort visibility", () => {
     fireEvent.click(screen.getByRole("button", { name: /实际请求模型，当前/ }));
     expect(screen.getByRole("option", { name: "mimo-v2.5-pro" })).toBeTruthy();
     expect(screen.getByRole("option", { name: "grok-4.3" })).toBeTruthy();
+  });
+
+  it("preserves model capabilities when leaving an unchanged model ID", async () => {
+    const initialPayload = await fetchLLMSettingsMock() as LLMSettingsPayload;
+    const metadata = { context_window: 128000, reasoning_effort_levels: ["low", "high"], source: "provider" };
+    initialPayload.provider_history![0].model_metadata = { "deepseek-v4-flash": metadata };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(initialPayload)));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ProviderTab selectedProvider="custom" settingsPayload={initialPayload} settingsPayloadRef={{ current: initialPayload }} onProviderChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "编辑 DeepSeek" }));
+
+    const modelInput = screen.getByRole("textbox", { name: "deepseek-v4-flash 实际请求模型" });
+    fireEvent.focus(modelInput);
+    fireEvent.blur(modelInput);
+    expect((screen.getByRole("spinbutton", { name: "deepseek-v4-flash 上下文窗口" }) as HTMLInputElement).value).toBe("128000");
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(JSON.parse(String(init.body)).custom.model_metadata["deepseek-v4-flash"]).toEqual(metadata);
+  });
+
+  it("keeps discovered capabilities in the draft until an explicit save", async () => {
+    const initialPayload = await fetchLLMSettingsMock() as LLMSettingsPayload;
+    initialPayload.provider_history![0].model_metadata = { "deepseek-v4-flash": { context_window: 128000 } };
+    const before = structuredClone(initialPayload);
+    const payloadRef = { current: initialPayload };
+    const onChange = vi.fn();
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      source: "live", models: ["deepseek-v4-flash"], selected_model: "deepseek-v4-flash", model_metadata: {},
+    })));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ProviderTab selectedProvider="custom" settingsPayload={initialPayload} settingsPayloadRef={payloadRef} onProviderChange={vi.fn()} onSettingsPayloadChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "编辑 DeepSeek" }));
+    expect((screen.getByRole("spinbutton", { name: "deepseek-v4-flash 上下文窗口" }) as HTMLInputElement).value).toBe("128000");
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+
+    await screen.findByText("已获取 1 个候选模型");
+    expect((screen.getByRole("spinbutton", { name: "deepseek-v4-flash 上下文窗口" }) as HTMLInputElement).value).toBe("");
+    expect(payloadRef.current).toEqual(before);
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "返回提供商列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "编辑 DeepSeek" }));
+    expect((screen.getByRole("spinbutton", { name: "deepseek-v4-flash 上下文窗口" }) as HTMLInputElement).value).toBe("128000");
+  });
+
+  it.each(["接口地址", "API 密钥"])("serializes model checks and clears their result when %s changes", async (field) => {
+    const initialPayload = await fetchLLMSettingsMock() as LLMSettingsPayload;
+    let completeCheck!: (response: Response) => void;
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => { completeCheck = resolve; }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ProviderTab selectedProvider="custom" settingsPayload={initialPayload} settingsPayloadRef={{ current: initialPayload }} onProviderChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "编辑 DeepSeek" }));
+    fireEvent.click(screen.getByRole("button", { name: "鉴权" }));
+
+    expect((screen.getByRole("button", { name: "保存" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "返回提供商列表" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("textbox", { name: field }) as HTMLInputElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => { completeCheck(new Response(JSON.stringify({ ok: true }))); });
+    expect(await screen.findByRole("button", { name: "已通过" })).toBeTruthy();
+
+    fireEvent.change(screen.getByRole("textbox", { name: field }), { target: { value: field === "接口地址" ? "https://new.example/v1" : "changed-test-key" } });
+    expect(screen.queryByRole("button", { name: "已通过" })).toBeNull();
+    expect(screen.getByRole("button", { name: "鉴权" })).toBeTruthy();
+  });
+
+  it("drops old model capabilities when the actual model ID changes", async () => {
+    const initialPayload = await fetchLLMSettingsMock() as LLMSettingsPayload;
+    initialPayload.provider_history![0].model_metadata = { "deepseek-v4-flash": { context_window: 128000 } };
+    render(<ProviderTab selectedProvider="custom" settingsPayload={initialPayload} settingsPayloadRef={{ current: initialPayload }} onProviderChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "编辑 DeepSeek" }));
+    const modelInput = screen.getByRole("textbox", { name: "deepseek-v4-flash 实际请求模型" });
+    fireEvent.change(modelInput, { target: { value: "another-model" } });
+    fireEvent.blur(modelInput);
+    expect((screen.getByRole("spinbutton", { name: "another-model 上下文窗口" }) as HTMLInputElement).value).toBe("");
+    expect(screen.queryByRole("textbox", { name: "deepseek-v4-flash 实际请求模型" })).toBeNull();
   });
 
   it("keeps the configured manual model list selectable when discovery is unavailable", async () => {

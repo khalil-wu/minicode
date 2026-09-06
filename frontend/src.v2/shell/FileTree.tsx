@@ -54,7 +54,6 @@ import {
   normalizeChangePath,
   parentTreePath,
   countVisibleNodes,
-  hasLoadedDirectoryNode,
 } from "./fileTreeHelpers";
 import { TreeNode } from "./FileTreeNode";
 import { FileContextMenu } from "./FileTreeContextMenu";
@@ -92,6 +91,8 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const [query, setQuery] = useState("");
   const [searchResults, setSearchResults] = useState<{ path: string; name: string; score?: number; kind?: "file" | "folder" }[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const [searchVersion, setSearchVersion] = useState(0);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [toolbarMenuOpen, setToolbarMenuOpen] = useState(false);
   const toolbarTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -114,7 +115,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const fileChanges = useAppStore((s) => s.fileChanges);
   const gitChanges = useAppStore((s) => s.gitChanges);
   const requestGitChanges = useAppStore((s) => s.requestGitChanges);
-  const lastChangeCount = useRef(0);
+  const lastChangeSequence = useRef(0);
   const refreshEpochRef = useRef(0);
   const searchEpochRef = useRef(0);
   const gitMap = useMemo(() => {
@@ -158,29 +159,29 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
         const persistedExpanded = Array.from(normalizeDesktopExpandedPaths(rootPath, readExpandedPaths(rootPath)))
           .filter((path) => !isSameTreePath(path, rootPath, rootPath))
           .sort((a, b) => a.split(/[/\\]/).length - b.split(/[/\\]/).length);
-        // Fetch every persisted expanded directory concurrently; the sequential
-        // loop used to serialize N+1 round trips on the startup path.
-        const settled = await Promise.all(
-          persistedExpanded.map((path) =>
-            hasLoadedDirectoryNode(nextTree, path)
-              ? fsListTree(path)
-                .then((children): [string, WorkspaceTreeNode] => [path, { name: path, path, is_dir: true, children: nodesFromEntries(children) }])
-                .catch(() => null)
-              : Promise.resolve(null),
-          ),
-        );
-        const retainedExpanded = new Set<string>();
-        for (const loaded of settled) {
-          if (!loaded) continue;
-          const [path, node] = loaded;
-          nextTree = replaceNodeChildren(nextTree, path, node.children ?? []);
-          retainedExpanded.add(path);
+        const retainedExpanded = new Set(persistedExpanded);
+        let directoryError = "";
+        // Fetch persisted directories concurrently, then merge by depth so an
+        // ancestor exists in the tree before its descendant is replaced.
+        const settled = await Promise.allSettled(persistedExpanded.map((path) => fsListTree(path)));
+        for (const [index, result] of settled.entries()) {
+          const path = persistedExpanded[index];
+          if (result.status === "fulfilled") {
+            nextTree = replaceNodeChildren(nextTree, path, nodesFromEntries(result.value));
+          } else if (isMissingWorkspaceError(result.reason)) {
+            retainedExpanded.delete(path);
+          } else {
+            directoryError ||= `无法加载 ${path}：${result.reason instanceof Error ? result.reason.message : String(result.reason)}`;
+          }
         }
-        if (retainedExpanded.size !== persistedExpanded.length) {
-          writeExpandedPaths(rootPath, retainedExpanded);
-          setExpandedPaths(retainedExpanded);
+        if (isCurrent()) {
+          setTree(nextTree);
+          setError(directoryError);
+          if (retainedExpanded.size !== persistedExpanded.length) {
+            writeExpandedPaths(rootPath, retainedExpanded);
+            setExpandedPaths(retainedExpanded);
+          }
         }
-        if (isCurrent()) setTree(nextTree);
       } else {
         const result = await listWorkspaceTree(workingDirectory, ".");
         if (result) {
@@ -188,19 +189,26 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
           const persistedExpanded = Array.from(readExpandedPaths(workingDirectory || "."))
             .filter((path) => path !== "." && !isSameTreePath(path, workingDirectory, workingDirectory))
             .sort((a, b) => a.split(/[/\\]/).length - b.split(/[/\\]/).length);
-          const settled = await Promise.all(
-            persistedExpanded.map((path) =>
-              listWorkspaceTree(workingDirectory, path)
-                .then((node): [string, WorkspaceTreeNode] | null => (node ? [path, node] : null))
-                .catch(() => null),
-            ),
-          );
-          for (const loaded of settled) {
-            if (!loaded) continue;
-            const [path, node] = loaded;
-            nextTree = replaceNodeChildren(nextTree, path, sortNodes(node.children ?? []));
+          const retainedExpanded = new Set(persistedExpanded);
+          let directoryError = "";
+          const settled = await Promise.allSettled(persistedExpanded.map((path) => listWorkspaceTree(workingDirectory, path)));
+          for (const [index, loaded] of settled.entries()) {
+            const path = persistedExpanded[index];
+            if (loaded.status === "fulfilled" && loaded.value) {
+              nextTree = replaceNodeChildren(nextTree, path, sortNodes(loaded.value.children ?? []));
+            } else if (loaded.status === "rejected") {
+              if (isMissingWorkspaceError(loaded.reason)) retainedExpanded.delete(path);
+              else directoryError ||= `无法加载 ${path}：${loaded.reason instanceof Error ? loaded.reason.message : String(loaded.reason)}`;
+            }
           }
-          if (isCurrent()) setTree(nextTree);
+          if (isCurrent()) {
+            setTree(nextTree);
+            setError(directoryError);
+            if (retainedExpanded.size !== persistedExpanded.length) {
+              writeExpandedPaths(workingDirectory, retainedExpanded);
+              setExpandedPaths(retainedExpanded);
+            }
+          }
         } else {
           if (isCurrent()) setError("无法加载文件列表");
         }
@@ -275,6 +283,10 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
 
   useEffect(() => { refresh(); }, [refresh, workingDirectory, fileTreeVersion]);
   useEffect(() => {
+    setTree(null);
+    setError("");
+    setQuery("");
+    setSearchResults([]);
     const stored = readExpandedPaths(workingDirectory || ".");
     setExpandedPaths(isDesktop() && workingDirectory ? normalizeDesktopExpandedPaths(workingDirectory, stored) : stored);
   }, [workingDirectory]);
@@ -396,9 +408,14 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   ]);
 
   useEffect(() => {
-    if (fileChanges.length > lastChangeCount.current) {
-      const changes = fileChanges.slice(lastChangeCount.current);
-      lastChangeCount.current = fileChanges.length;
+    const latestSequence = fileChanges.at(-1)?.sequence ?? 0;
+    if (latestSequence < lastChangeSequence.current) {
+      lastChangeSequence.current = latestSequence;
+      return;
+    }
+    if (latestSequence > lastChangeSequence.current) {
+      const changes = fileChanges.filter((change) => change.sequence > lastChangeSequence.current);
+      lastChangeSequence.current = latestSequence;
       pendingChangesRef.current = [...pendingChangesRef.current, ...changes];
       const timer = window.setTimeout(() => {
         const batch = pendingChangesRef.current;
@@ -448,6 +465,8 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     const trimmed = query.trim();
     const epoch = ++searchEpochRef.current;
     const directory = workingDirectory;
+    setSearchError("");
+    setSearchResults([]);
     if (!trimmed) { setSearchResults([]); setSearchLoading(false); return; }
     setSearchLoading(true);
     const timer = window.setTimeout(() => {
@@ -463,15 +482,17 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
             setSearchResults(results.filter((result) => !isHiddenSearchResult(result)));
           }
         })
-        .catch(() => {
-          if (epoch === searchEpochRef.current) setSearchResults([]);
+        .catch((error: unknown) => {
+          if (epoch !== searchEpochRef.current || !workspaceRootsEqual(directory, useAppStore.getState().workingDirectory)) return;
+          setSearchResults([]);
+          setSearchError(error instanceof Error ? error.message : "文件搜索失败，请重试。");
         })
         .finally(() => {
           if (epoch === searchEpochRef.current) setSearchLoading(false);
         });
     }, 160);
-    return () => { window.clearTimeout(timer); };
-  }, [query, workingDirectory]);
+    return () => { searchEpochRef.current += 1; window.clearTimeout(timer); };
+  }, [query, workingDirectory, searchVersion]);
 
   const createFile = async () => {
     const { showPrompt, showAlert } = await import("../overlays/DialogService");
@@ -524,7 +545,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     const isMissingWorkspace = /workspace folder is missing|工作区文件夹不存在/i.test(error);
     return (
       <div style={{ padding: 12, fontSize: "var(--text-sm)" }}>
-        <div style={{ color: "var(--text-muted)", marginBottom: 8 }}>{error}</div>
+        <div role="alert" style={{ color: "var(--text-muted)", marginBottom: 8 }}>{error}</div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {isDesktop() && <button onClick={() => void openWorkspaceFolder()} style={refreshBtn}>打开文件夹</button>}
           {!isMissingWorkspace && <button onClick={refresh} style={refreshBtn}>重试</button>}
@@ -580,11 +601,17 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
           <Search size={14} aria-hidden="true" />
           <input aria-label="搜索工作区文件" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文件" style={fileTreeSearchInputStyle} />
         </div>
-        <button type="button" title="刷新文件" aria-label="刷新文件" onClick={() => void refresh()} disabled={loading} className="mc-icon-button mc-icon-button-compact file-tree-action">
+        <button type="button" title="刷新文件" aria-label="刷新文件" onClick={() => { void refresh(); setSearchVersion((version) => version + 1); }} disabled={loading} className="mc-icon-button mc-icon-button-compact file-tree-action">
           <RefreshCw size={14} className={loading ? "animate-spin" : undefined} />
         </button>
         {renderToolbarMenu()}
       </div>
+      {error && (
+        <div role="alert" style={{ padding: "8px 12px", fontSize: "var(--text-xs)", color: "var(--state-danger)", overflowWrap: "anywhere" }}>
+          <div>{error}</div>
+          <button type="button" onClick={() => void refresh()} disabled={loading} style={refreshBtn}>重试</button>
+        </div>
+      )}
       <div
         ref={listRef}
         role="tree"
@@ -612,6 +639,11 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       {hasQuery ? (
         searchLoading ? (
           <div style={fileTreeEmptyStyle}>正在搜索工作区…</div>
+        ) : searchError ? (
+          <div role="alert" style={{ ...fileTreeEmptyStyle, color: "var(--state-danger)" }}>
+            <div>{searchError}</div>
+            <button type="button" onClick={() => setSearchVersion((version) => version + 1)} style={refreshBtn}>重试搜索</button>
+          </div>
         ) : searchResults.length > 0 ? (
           searchResults.map((result) => (
             <SearchResultRow

@@ -321,6 +321,7 @@ export interface SchedulerListEvent {
 
 export interface SkillsListEvent {
   type: "skills.list";
+  conversation_id?: string;
   skills: {
     name: string;
     description: string;

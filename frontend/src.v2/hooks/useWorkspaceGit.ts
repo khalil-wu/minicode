@@ -14,10 +14,6 @@ export const useWorkspaceGit = () => {
     }
     fetchWorkspaceGitWorktree(workingDirectory).then((result) => {
       if (cancelled) return;
-      if (!result) {
-        setWorkspaceGit(null);
-        return;
-      }
       setWorkspaceGit({
         branch: result.current_branch ?? "",
         isWorktree: Boolean(result.is_worktree),
@@ -26,6 +22,14 @@ export const useWorkspaceGit = () => {
         worktreeCount: result.worktree_count,
         isolatedCount: result.worktrees?.filter((item) => item.is_isolated).length ?? 0,
         error: result.error,
+      });
+    }).catch((error: unknown) => {
+      if (cancelled) return;
+      setWorkspaceGit({
+        branch: "",
+        isWorktree: false,
+        currentPath: workingDirectory,
+        error: error instanceof Error ? error.message : String(error),
       });
     });
     return () => {

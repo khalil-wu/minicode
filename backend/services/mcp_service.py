@@ -311,6 +311,8 @@ async def update_mcp_server(
         current_entry = servers_data.get(original_name)
         if not isinstance(current_entry, dict):
             raise MCPServiceError(f"MCP server '{original_name}' is not editable")
+        if original_name != config.name and config.name in servers_data:
+            raise MCPServiceError(f"MCP server '{config.name}' already exists. Choose a different name.")
         next_entry = _server_entry_from_payload(config, data, existing=current_entry)
         if original_name != config.name:
             servers_data.pop(original_name, None)

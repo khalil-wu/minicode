@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { BrowserPanel, normalizeBrowserInput } from "./BrowserPanel";
@@ -76,6 +76,20 @@ class ResizeObserverMock {
   observe() {}
   disconnect() {}
 }
+
+const pending = <T,>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+};
+
+const page = (id: string, title: string, url: string, active = false) => ({
+  id, title, url, active,
+  conversationId: "conv-browser",
+  type: "updated" as const,
+  loading: false, canGoBack: false, canGoForward: false,
+});
 
 describe("BrowserPanel", () => {
   beforeEach(() => {
@@ -242,5 +256,199 @@ describe("BrowserPanel", () => {
     expect(annotation.widthPercent).toBeCloseTo(0.2);
     expect(annotation.heightPercent).toBeCloseTo(0.2);
     expect(useAppStore.getState().selectedMentions[0]?.kind).toBe("browser_annotation");
+  });
+
+  it("keeps the selected tab visible when a background navigation completes", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([
+      page("a", "Page A", "https://a.example/", true),
+      page("b", "Page B", "https://b.example/"),
+    ]);
+    const navigation = pending<ReturnType<typeof page>>();
+    runtimeMocks.navigate.mockReturnValueOnce(navigation.promise);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page A" });
+    const address = screen.getByRole("textbox", { name: "地址栏" }) as HTMLInputElement;
+    fireEvent.change(address, { target: { value: "https://slow.example/" } });
+    fireEvent.submit(address.closest("form")!);
+    fireEvent.click(screen.getByRole("tab", { name: "Page B" }));
+    await waitFor(() => expect(runtimeMocks.activate).toHaveBeenLastCalledWith("conv-browser", "b"));
+    runtimeMocks.activate.mockClear();
+    runtimeMocks.setBounds.mockClear();
+
+    await act(async () => navigation.resolve(page("a", "Slow A", "https://slow.example/")));
+
+    expect(address.value).toBe("https://b.example/");
+    expect(screen.getByRole("tab", { name: "Page B" }).getAttribute("aria-selected")).toBe("true");
+    expect(runtimeMocks.activate).toHaveBeenCalledWith("conv-browser", "b");
+    expect(runtimeMocks.setBounds.mock.calls.at(-1)?.[0]).toMatchObject({ id: "b" });
+  });
+
+  it("ignores an earlier navigation failure after a newer navigation succeeded", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("a", "Page A", "https://a.example/", true)]);
+    const earlier = pending<ReturnType<typeof page>>();
+    runtimeMocks.navigate.mockReturnValueOnce(earlier.promise);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page A" });
+    const address = screen.getByRole("textbox", { name: "地址栏" }) as HTMLInputElement;
+    fireEvent.change(address, { target: { value: "https://first.example/" } });
+    fireEvent.submit(address.closest("form")!);
+    fireEvent.change(address, { target: { value: "https://latest.example/" } });
+    fireEvent.submit(address.closest("form")!);
+    await waitFor(() => expect(address.value).toBe("https://latest.example/"));
+
+    await act(async () => earlier.reject(new Error("net::ERR_ABORTED")));
+
+    expect(address.value).toBe("https://latest.example/");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it.each(["navigate", "reload", "reload-rejected"])("keeps a newer page when an old %s reconciliation finishes", async (operation) => {
+    runtimeMocks.list.mockResolvedValueOnce([page("a", "Page A", "https://a.example/", true)]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page A" });
+    const reconciliation = pending<ReturnType<typeof page>[]>();
+    runtimeMocks.list.mockReturnValueOnce(reconciliation.promise);
+    const address = screen.getByRole("textbox", { name: "地址栏" }) as HTMLInputElement;
+    if (operation === "navigate") {
+      runtimeMocks.navigate.mockRejectedValueOnce(new Error("Old navigation failed"));
+      fireEvent.change(address, { target: { value: "https://old.example/" } });
+      fireEvent.submit(address.closest("form")!);
+    } else {
+      if (operation === "reload-rejected") runtimeMocks.runAction.mockRejectedValueOnce(new Error("Old reload failed"));
+      else runtimeMocks.runAction.mockResolvedValueOnce(false);
+      fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    }
+    await waitFor(() => expect(runtimeMocks.list).toHaveBeenCalledTimes(2));
+    fireEvent.change(address, { target: { value: "https://latest.example/" } });
+    fireEvent.submit(address.closest("form")!);
+    await screen.findByRole("tab", { name: "https://latest.example/" });
+
+    await act(async () => reconciliation.resolve([page("a", "Stale page", "https://old.example/", true)]));
+
+    expect(address.value).toBe("https://latest.example/");
+    expect(screen.getByRole("tab", { name: "https://latest.example/" })).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("ignores a pending reload rejection after another navigation succeeds", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("a", "Page A", "https://a.example/", true)]);
+    const reload = pending<boolean>();
+    runtimeMocks.runAction.mockReturnValueOnce(reload.promise);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page A" });
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    const address = screen.getByRole("textbox", { name: "地址栏" }) as HTMLInputElement;
+    fireEvent.change(address, { target: { value: "https://latest.example/" } });
+    fireEvent.submit(address.closest("form")!);
+    await screen.findByRole("tab", { name: "https://latest.example/" });
+
+    await act(async () => reload.reject(new Error("Old reload failed")));
+
+    expect(runtimeMocks.list).toHaveBeenCalledTimes(1);
+    expect(address.value).toBe("https://latest.example/");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("does not restore a closed tab from an earlier activation reconciliation", async () => {
+    const pages = [page("a", "Page A", "https://a.example/", true), page("b", "Page B", "https://b.example/")];
+    const reconciliation = pending<ReturnType<typeof page>[]>();
+    runtimeMocks.list.mockResolvedValueOnce(pages).mockReturnValueOnce(reconciliation.promise);
+    runtimeMocks.activate.mockResolvedValueOnce(false);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page A" });
+    await waitFor(() => expect(runtimeMocks.list).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "关闭 Page A" }));
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "Page A" })).toBeNull());
+
+    await act(async () => reconciliation.resolve(pages));
+
+    expect(screen.queryByRole("tab", { name: "Page A" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Page B" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("does not carry an annotation or pending page selection into another tab", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([
+      page("a", "Page A", "https://a.example/", true),
+      page("b", "Page B", "https://b.example/"),
+    ]);
+    const selection = pending<{ ok: boolean; value: unknown }>();
+    runtimeMocks.inspect.mockReturnValueOnce(selection.promise);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page A" });
+    fireEvent.click(screen.getByRole("button", { name: "添加页面批注" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), { target: { value: "Only for page A" } });
+    fireEvent.click(screen.getByRole("button", { name: "选择元素" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Page B" }));
+    fireEvent.click(screen.getByRole("button", { name: "添加页面批注" }));
+
+    expect((screen.getByRole("textbox", { name: "批注内容" }) as HTMLTextAreaElement).value).toBe("");
+    expect((screen.getByRole("button", { name: "选择元素" }) as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => selection.resolve({ ok: true, value: { selector: "#page-a", text: "Old A", rect: { x: 1, y: 2, width: 3, height: 4 }, viewport: { width: 100, height: 100 } } }));
+
+    expect((screen.getByRole("textbox", { name: "元素选择器" }) as HTMLInputElement).value).toBe("");
+    fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), { target: { value: "Only for page B" } });
+    fireEvent.click(screen.getByRole("button", { name: "加入智能体上下文" }));
+    expect(useAppStore.getState().browserAnnotations[0]).toMatchObject({ targetId: "b", url: "https://b.example/", note: "Only for page B" });
+    expect(useAppStore.getState().browserAnnotations[0].selector).toBeUndefined();
+  });
+
+  it("keeps diagnostics bound to the selected kind and reports retryable read failures", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("a", "Page A", "https://a.example/", true)]);
+    const consoleResult = pending<{ ok: boolean; value: unknown[] }>();
+    runtimeMocks.inspect.mockReturnValueOnce(consoleResult.promise).mockResolvedValueOnce({ ok: true, value: [{ url: "https://current-network.example/", statusCode: 200 }] });
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page A" });
+    fireEvent.click(screen.getByRole("button", { name: "打开页面诊断" }));
+    fireEvent.click(screen.getByRole("tab", { name: "网络" }));
+    await screen.findByText("https://current-network.example/");
+
+    await act(async () => consoleResult.resolve({ ok: true, value: [{ url: "https://stale-console.example/", message: "Old console" }] }));
+
+    expect(screen.getByText("https://current-network.example/")).toBeTruthy();
+    expect(screen.queryByText("https://stale-console.example/")).toBeNull();
+    runtimeMocks.inspect.mockRejectedValueOnce(new Error("Diagnostics unavailable"));
+    fireEvent.click(within(screen.getByRole("region", { name: "页面诊断" })).getByRole("button", { name: "刷新" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("Diagnostics unavailable");
+  });
+
+  it("ignores a site's settings after the user moves to another tab", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([
+      page("a", "Page A", "https://a.example/", true),
+      page("b", "Page B", "https://b.example/"),
+    ]);
+    const oldSettings = pending<{ downloadPolicy: "block"; origin: string; permissions: string[] }>();
+    runtimeMocks.getSettings.mockReturnValueOnce(oldSettings.promise).mockResolvedValueOnce({ downloadPolicy: "block", origin: "https://b.example", permissions: [] });
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page A" });
+    fireEvent.click(screen.getByRole("button", { name: "打开站点设置" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Page B" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开站点设置" }));
+    await screen.findByText("https://b.example");
+
+    await act(async () => oldSettings.resolve({ downloadPolicy: "block", origin: "https://a.example", permissions: ["geolocation"] }));
+
+    expect(screen.queryByText("https://a.example")).toBeNull();
+    fireEvent.click(screen.getByRole("checkbox", { name: "位置" }));
+    await waitFor(() => expect(runtimeMocks.setSettings).toHaveBeenCalledWith({ origin: "https://b.example", permission: "geolocation", allowed: true }));
+  });
+
+  it("does not reconcile a failed close against a new conversation", async () => {
+    const closing = pending<boolean>();
+    runtimeMocks.list.mockResolvedValueOnce([page("a", "Page A", "https://a.example/", true)]);
+    runtimeMocks.close.mockReturnValueOnce(closing.promise);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page A" });
+    fireEvent.click(screen.getByRole("button", { name: "关闭 Page A" }));
+    await waitFor(() => expect(runtimeMocks.close).toHaveBeenCalledWith("conv-browser", "a"));
+    runtimeMocks.list.mockResolvedValueOnce([{ ...page("a", "Page B", "https://b.example/", true), conversationId: "conv-other" }]);
+    act(() => useAppStore.setState({ conversationId: "conv-other" }));
+    await screen.findByRole("tab", { name: "Page B" });
+    const listCalls = runtimeMocks.list.mock.calls.length;
+
+    await act(async () => closing.reject(new Error("Old conversation close failed")));
+
+    expect(runtimeMocks.list.mock.calls.length).toBe(listCalls);
+    expect(screen.queryByText("Old conversation close failed")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Page B" })).toBeTruthy();
   });
 });

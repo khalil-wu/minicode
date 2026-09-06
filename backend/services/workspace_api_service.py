@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import os
 from pathlib import Path
 import subprocess
 from typing import Any
@@ -10,42 +12,22 @@ from backend.runtime_env import sanitized_git_env
 
 
 def search_workspace_directories(root: Path, query: str, limit: int) -> list[dict[str, Any]]:
+    from backend.workspace.fuzzy_search import iter_search_paths
+
     query_lower = query.strip().lower()
     if not query_lower:
         return []
 
-    ignored = {
-        ".git",
-        ".idea",
-        ".vscode",
-        ".venv",
-        "venv",
-        "node_modules",
-        "__pycache__",
-        "dist",
-        "build",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".ruff_cache",
-    }
-    query_chars = set(query_lower)
     results: list[dict[str, Any]] = []
 
-    for path in root.rglob("*"):
-        if not path.is_dir():
+    for path, is_dir in iter_search_paths(root):
+        if not is_dir:
             continue
-        try:
-            rel_parts = path.relative_to(root).parts
-        except ValueError:
-            continue
-        if not rel_parts:
-            continue
-        if any(part in ignored or part.startswith(".") for part in rel_parts):
-            continue
-
-        rel = path.relative_to(root).as_posix()
+        relative = path.relative_to(root)
+        rel = relative.as_posix()
         rel_lower = rel.lower()
-        if query_lower not in rel_lower and not query_chars.issubset(set(rel_lower)):
+        remaining = iter(rel_lower)
+        if not all(char in remaining for char in query_lower):
             continue
 
         name_lower = path.name.lower()
@@ -58,7 +40,7 @@ def search_workspace_directories(root: Path, query: str, limit: int) -> list[dic
             score += 50
         if query_lower in rel_lower:
             score += 20
-        score -= min(len(rel_parts), 12) * 1.5
+        score -= min(len(relative.parts), 12) * 1.5
 
         results.append(
             {
@@ -206,20 +188,27 @@ def resolve_workspace_git_root(path: str, fallback_root: Path) -> Path:
     return fallback_root
 
 
+def _run_workspace_git(root: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "--literal-pathspecs", *args],
+        cwd=root,
+        env=sanitized_git_env(root),
+        input="",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+        check=True,
+    ).stdout
+
+
 def workspace_git_status_payload(root: Path) -> dict[str, Any]:
     try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain=v1", "--branch"],
-            cwd=root,
-            env=sanitized_git_env(),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=5,
-        )
-        return parse_workspace_git_status(result.stdout)
-    except Exception as exc:
-        return {"branch": "", "modified": [], "staged": [], "untracked": [], "error": str(exc)}
+        return parse_workspace_git_status(_run_workspace_git(
+            root, "status", "--porcelain=v1", "--branch", "-z", "--untracked-files=all",
+        ))
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"branch": "", "modified": [], "staged": [], "untracked": [], "error": str(getattr(exc, "stderr", None) or exc).strip()}
 
 
 def parse_workspace_git_status(stdout: str) -> dict[str, Any]:
@@ -227,13 +216,17 @@ def parse_workspace_git_status(stdout: str) -> dict[str, Any]:
     modified: list[str] = []
     staged: list[str] = []
     untracked: list[str] = []
-    for line in stdout.splitlines():
+    records = iter(stdout.rstrip("\0").split("\0"))
+    for line in records:
         if line.startswith("## "):
             branch = line[3:].split("...")[0].strip()
+            branch = branch.removeprefix("No commits yet on ").removeprefix("Initial commit on ")
         elif line.startswith("??"):
-            untracked.append(line[3:].strip())
+            untracked.append(line[3:])
         elif len(line) >= 2:
-            xy, file_path = line[:2], line[3:].strip()
+            xy, file_path = line[:2], line[3:]
+            if "R" in xy or "C" in xy:
+                next(records)  # In porcelain -z the destination precedes the source.
             if xy[1] != " ":
                 modified.append(file_path)
             if xy[0] != " " and xy[0] != "?":
@@ -243,19 +236,32 @@ def parse_workspace_git_status(stdout: str) -> dict[str, Any]:
 
 def workspace_git_diff_payload(root: Path, file: str) -> dict[str, Any]:
     try:
-        cmd = ["git", "diff", "HEAD", "--", file] if file else ["git", "diff", "HEAD"]
-        result = subprocess.run(
-            cmd,
-            cwd=root,
-            env=sanitized_git_env(),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=10,
-        )
-        return {"diff": result.stdout}
-    except Exception as exc:
-        return {"diff": "", "error": str(exc)}
+        # Verify the repository separately: an unborn HEAD is a normal state,
+        # while a failed Git command must never look like an empty diff.
+        _run_workspace_git(root, "rev-parse", "--show-toplevel")
+        try:
+            baseline = _run_workspace_git(root, "rev-parse", "--verify", "--quiet", "HEAD").strip()
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode != 1:
+                raise
+            baseline = _run_workspace_git(root, "hash-object", "-t", "tree", "--stdin").strip()
+
+        paths = (file,) if file else ()
+        diff_args = ("diff", "--no-color", "--no-textconv", "--no-ext-diff")
+        patches = [_run_workspace_git(root, *diff_args, baseline, "--", *paths)]
+        untracked = _run_workspace_git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", *paths)
+        for path in untracked.split("\0"):
+            if not path:
+                continue
+            try:
+                patches.append(_run_workspace_git(root, *diff_args, "--no-index", "--", os.devnull, path))
+            except subprocess.CalledProcessError as exc:
+                if exc.returncode != 1:  # --no-index returns 1 when there are differences.
+                    raise
+                patches.append(exc.stdout)
+        return {"diff": "".join(patches)}
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"diff": "", "error": str(getattr(exc, "stderr", None) or exc).strip()}
 
 
 def workspace_git_worktree_payload(root: Path) -> dict[str, Any]:
@@ -328,8 +334,8 @@ async def switch_workspace_git_worktree_payload(current_root: Path, target_path:
         return _project_import_failure()
 
     try:
-        manager = WorktreeManager(current_root)
-        allowed_paths = {item.path.resolve() for item in manager.list_worktrees()}
+        worktrees = await asyncio.to_thread(lambda: WorktreeManager(current_root).list_worktrees())
+        allowed_paths = {item.path.resolve() for item in worktrees}
         if target not in allowed_paths:
             return _project_import_failure()
 

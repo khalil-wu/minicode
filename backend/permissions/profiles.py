@@ -110,26 +110,11 @@ def sandbox_capability_for_context(
     reported as externally managed and unknown to this process.
     """
 
-    from backend.sandbox.policy import sandbox_policy_from_config_snapshot
+    from backend.sandbox.policy import sandbox_policy_for_permission_context
     from backend.sandbox.runner import SandboxRunner
 
     workspace = Path(workspace_root).expanduser().resolve()
-    mode = str(getattr(permission_context, "sandbox_mode", "") or "workspace-write").strip().lower()
-    if str(getattr(permission_context, "mode", "") or "").strip().lower() == "bypass":
-        mode = "danger-full-access"
-    policy = sandbox_policy_from_config_snapshot(
-        workspace,
-        sandbox_mode=mode,
-        managed_sandbox_settings={
-            "enabled": mode not in {"danger-full-access", "external-sandbox"},
-            "allowUnsandboxedCommands": bool(getattr(permission_context, "allow_unsandboxed_commands", False)),
-            "failIfUnavailable": bool(getattr(permission_context, "sandbox_fail_if_unavailable", True)),
-        },
-        workspace_write_settings={
-            "network_access": bool(getattr(permission_context, "allow_network", False)),
-        },
-        filesystem_constraints=getattr(permission_context, "filesystem_constraints", {}) or {},
-    )
+    policy = sandbox_policy_for_permission_context(workspace, permission_context)
     resolved = policy.resolve(cwd=workspace)
     requested_filesystem = resolved.enforcement.value == "managed"
     requested_network = not resolved.allow_network

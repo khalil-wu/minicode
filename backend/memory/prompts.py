@@ -60,13 +60,7 @@ def _render_template(source: str, values: Mapping[str, str], *, name: str) -> st
             f"unknown={sorted(unknown)}"
         )
 
-    rendered = _PLACEHOLDER_RE.sub(lambda match: values[match.group(1)], source)
-    unresolved = _PLACEHOLDER_RE.findall(rendered)
-    if unresolved:
-        raise RuntimeError(
-            f"Unresolved {name} template values: {sorted(set(unresolved))}"
-        )
-    return rendered
+    return _PLACEHOLDER_RE.sub(lambda match: values[match.group(1)], source)
 
 
 STAGE1_SYSTEM_PROMPT = _load_template("stage_one_system.md")

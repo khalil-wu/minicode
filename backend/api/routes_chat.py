@@ -147,12 +147,17 @@ def _native_body_response(
     body: bytes,
     media_type: str,
     file_name: str,
+    download: bool = False,
 ) -> Response:
     total = len(body)
+    inline_media = media_type == "application/pdf" or media_type in {
+        "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp", "image/avif",
+    }
+    disposition = "inline" if inline_media and not download else "attachment"
     headers = {
         "Accept-Ranges": "bytes",
         "Cache-Control": "private, max-age=300",
-        "Content-Disposition": f"inline; filename*=UTF-8''{quote(file_name, safe='')}",
+        "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(file_name, safe='')}",
         "X-Content-Type-Options": "nosniff",
     }
     selected = _byte_range(request.headers.get("range", ""), total)
@@ -172,8 +177,9 @@ async def raw_attachment(
     conversation_id: str = Query(..., min_length=1),
     artifact_id: str = Query(..., min_length=1),
     asset_token: str | None = Query(None),
+    download: bool = Query(False),
 ) -> Response:
-    """Stream a native image/PDF body for the internal attachment viewer."""
+    """Return the owner-scoped original for native preview or download."""
     # The HTTP auth middleware validates this short-lived token against the
     # session and artifact before routing the request. Keeping the query
     # parameter here makes that authorization boundary explicit.
@@ -195,6 +201,7 @@ async def raw_attachment(
         body=body,
         media_type=media_type,
         file_name=file_name,
+        download=download,
     )
 
 

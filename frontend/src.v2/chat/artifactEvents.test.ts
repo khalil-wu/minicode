@@ -108,6 +108,8 @@ describe("handleArtifactEvent", () => {
       name: "report.pdf",
       purpose: "attachment",
       is_attachment: true,
+      has_native: true,
+      parse_warning: "Only some slides were readable",
       request_id: ACTIVE_PREVIEW_REQUEST_ID,
     } as never)).toBe(true);
 
@@ -117,6 +119,8 @@ describe("handleArtifactEvent", () => {
       mediaType: "application/pdf",
       name: "report.pdf",
       source: "attachment",
+      hasNative: true,
+      warning: "Only some slides were readable",
     });
   });
 

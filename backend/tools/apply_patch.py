@@ -15,7 +15,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from backend.atomic_io import canonical_path_mapping_key, file_mutation_locks
+from backend.atomic_io import (
+    atomic_write_bytes,
+    canonical_path_mapping_key,
+    file_mutation_locks,
+    normalize_text_newlines,
+    preserve_text_line_endings,
+)
 from backend.permissions.context import ToolExecutionContext
 from backend.security.sensitive_files import is_protected_write_path
 from backend.tools.apply_patch_parser import (
@@ -31,7 +37,6 @@ from backend.tools.path_resolution import PathTraversalError, _is_bypass_mode, _
 from backend.workspace.file_state_cache import get_global_file_cache
 
 from backend.tools.file_tools_common import (
-    _atomic_write_text,
     _emit_write_diff,
     _generate_limited_unified_diff,
     _workspace_display_path,
@@ -227,6 +232,7 @@ class ApplyPatchTool(BaseTool):
                 invalidate_workspace_file_caches(
                     file_tree_changed=any(
                         plan.kind in {ChangeKind.ADD, ChangeKind.DELETE} or plan.move_to_path is not None
+                        or plan.path.name == ".gitignore"
                         for plan in plans
                     )
                 )
@@ -236,6 +242,7 @@ class ApplyPatchTool(BaseTool):
                 invalidate_workspace_file_caches(
                     file_tree_changed=any(
                         plan.kind in {ChangeKind.ADD, ChangeKind.DELETE} or plan.move_to_path is not None
+                        or plan.path.name == ".gitignore"
                         for plan in plans
                     )
                 )
@@ -244,6 +251,7 @@ class ApplyPatchTool(BaseTool):
         invalidate_workspace_file_caches(
             file_tree_changed=any(
                 plan.kind in {ChangeKind.ADD, ChangeKind.DELETE} or plan.move_to_path is not None
+                or plan.path.name == ".gitignore"
                 for plan in plans
             )
         )
@@ -316,7 +324,7 @@ class ApplyPatchTool(BaseTool):
             if not path.exists():
                 return f"Delete File '{change.path}': file does not exist."
             try:
-                old_content = path.read_text(encoding="utf-8")
+                old_content = path.read_bytes().decode("utf-8")
             except UnicodeDecodeError:
                 return f"Delete File '{change.path}': cannot read binary or non-UTF-8 file."
             return _ChangePlan(
@@ -332,12 +340,15 @@ class ApplyPatchTool(BaseTool):
         if not path.exists():
             return f"Update File '{change.path}': file does not exist."
         try:
-            old_content = path.read_text(encoding="utf-8")
+            old_content = path.read_bytes().decode("utf-8")
         except UnicodeDecodeError:
             return f"Update File '{change.path}': cannot read binary or non-UTF-8 file."
 
         try:
-            new_content = apply_update_hunks(old_content, change.hunks, change.path)
+            new_content = apply_update_hunks(
+                normalize_text_newlines(old_content), change.hunks, change.path,
+            )
+            new_content = preserve_text_line_endings(new_content, old_content.encode("utf-8"))
         except ApplyPatchError as exc:
             return str(exc)
 
@@ -450,7 +461,7 @@ class ApplyPatchTool(BaseTool):
         target = plan.move_to_path or plan.path
         if plan.move_to_path is not None:
             plan.move_to_path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(target, plan.new_content)
+        atomic_write_bytes(target, plan.new_content.encode("utf-8"))
         cache.invalidate(plan.path)
         if plan.move_to_path is not None and plan.move_to_path != plan.path:
             # Rename: remove the original after writing the destination.

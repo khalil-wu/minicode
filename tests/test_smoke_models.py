@@ -877,7 +877,7 @@ def test_refresh_models_keeps_current_custom_model_when_live_discovery_omits_it(
     assert payload["models"] == ["gpt-5.4-mini"]
 
 
-def test_refresh_models_uses_saved_custom_key_and_persists_live_models(monkeypatch, tmp_path) -> None:
+def test_refresh_models_uses_saved_custom_key_without_persisting_candidates(monkeypatch, tmp_path) -> None:
     seen: dict[str, str] = {}
 
     async def _live_models(base_url: str, api_key: str, **_transport):
@@ -929,7 +929,10 @@ def test_refresh_models_uses_saved_custom_key_and_persists_live_models(monkeypat
     assert payload["models"] == ["claude-opus-4-6", "claude-sonnet-4-6"]
 
     saved = settings_response.json()
-    assert saved["custom"]["available_models"] == ["claude-opus-4-6", "claude-sonnet-4-6"]
+    # The endpoint itself includes the explicitly selected model in its
+    # response projection; the persisted profile is unchanged apart from the
+    # value it already contained.
+    assert saved["custom"]["available_models"] == ["claude-opus-4-6", "stale-model"]
 
 
 def test_refresh_models_uses_anthropic_discovery_for_custom_anthropic_wire_api(monkeypatch, tmp_path) -> None:
@@ -1035,11 +1038,7 @@ def test_refresh_models_replaces_stale_openai_model_for_custom_anthropic(monkeyp
 
     saved = get_custom_settings()
     assert saved["model"] == "gpt-5.4-mini"
-    assert saved["available_models"] == [
-        "claude-opus-4-6",
-        "claude-sonnet-4-6",
-        "gpt-5.4-mini",
-    ]
+    assert saved["available_models"] == ["gpt-5.4-mini"]
 
 
 def test_save_custom_messages_preserves_provider_model_id(monkeypatch, tmp_path) -> None:

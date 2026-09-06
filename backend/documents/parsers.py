@@ -9,86 +9,61 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _is_parse_error(text: str) -> bool:
-    return str(text or "").strip().lower().startswith(("error:", "错误:", "閿欒:"))
+MAX_PDF_PAGES = 100
 
 
-def _count_pdf_pages(file_path: str) -> int:
-    try:
-        import pymupdf
-
-        doc = pymupdf.open(file_path)
-        try:
-            return len(doc)
-        finally:
-            doc.close()
-    except Exception:
-        return 0
+class PDFPageLimitError(ValueError):
+    """The upload exceeds the supported PDF page budget."""
 
 
 def _parse_pdf(file_path: str) -> dict[str, Any]:
-    """Parse PDF to Markdown when available, then fall back to plain text."""
-    try:
-        import pymupdf4llm
+    """Count the PDF page tree before extracting any page content."""
+    import pymupdf
 
-        md_text = pymupdf4llm.to_markdown(file_path)
-        if _is_parse_error(md_text):
-            raise RuntimeError(md_text)
-        return {
-            "title": Path(file_path).stem,
-            "full_text": md_text,
-            "format": "pdf",
-            "pages": _count_pdf_pages(file_path),
-        }
-    except Exception as exc:
-        logger.warning("pymupdf4llm failed, fallback to pymupdf: %s", exc)
-
-    try:
-        import pymupdf
-
-        doc = pymupdf.open(file_path)
+    with pymupdf.open(file_path) as doc:
+        if doc.needs_pass:
+            raise ValueError("The PDF is encrypted and requires a password.")
+        pages = len(doc)
+        if pages > MAX_PDF_PAGES:
+            raise PDFPageLimitError(f"PDF has {pages} pages; the limit is {MAX_PDF_PAGES}.")
         try:
-            pages_text = [page.get_text() for page in doc]
-            full_text = "\n\n".join(pages_text)
-            if not full_text.strip():
-                raise RuntimeError("PDF contains no extractable text")
-            return {
-                "title": Path(file_path).stem,
-                "full_text": full_text,
-                "format": "pdf",
-                "pages": len(pages_text),
-            }
-        finally:
-            doc.close()
-    except Exception as exc:
+            import pymupdf4llm
+
+            full_text = pymupdf4llm.to_markdown(doc)
+        except (ImportError, RuntimeError, ValueError) as exc:
+            logger.warning("PDF Markdown extraction unavailable; reading page text: %s", exc)
+            full_text = "\n\n".join(page.get_text() for page in doc)
         return {
             "title": Path(file_path).stem,
-            "full_text": f"错误: PDF 解析失败。请安装依赖或检查文件: {exc}",
+            "full_text": full_text,
             "format": "pdf",
-            "pages": 0,
+            "pages": pages,
         }
 
 
 def _parse_docx(file_path: str) -> dict[str, Any]:
-    """Parse a Word document into plain paragraph text."""
-    try:
-        from docx import Document
+    """Read paragraphs and tables in document order, including nested tables."""
+    from docx import Document
+    from docx.table import Table
 
-        doc = Document(file_path)
-        paragraphs = [paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()]
-        return {
-            "title": Path(file_path).stem,
-            "full_text": "\n\n".join(paragraphs),
-            "format": "docx",
-            "pages": max(1, len(paragraphs) // 30),
-        }
-    except Exception as exc:
-        return {
-            "title": Path(file_path).stem,
-            "full_text": f"错误: 需要安装 python-docx 或 Word 解析失败: {exc}",
-            "format": "docx",
-            "pages": 0,
-        }
+    def block_text(parent: Any) -> list[str]:
+        blocks = []
+        for block in parent.iter_inner_content():
+            if isinstance(block, Table):
+                rows = [" | ".join(" / ".join(block_text(cell)) for cell in row.cells) for row in block.rows]
+                blocks.append("\n".join(rows))
+            elif block.text.strip():
+                blocks.append(block.text)
+        return blocks
+
+    doc = Document(file_path)
+    return {
+        "title": Path(file_path).stem,
+        "full_text": "\n\n".join(block_text(doc)),
+        "format": "docx",
+        # Word pagination depends on layout, fonts, and the rendering engine.
+        "pages": 0,
+    }
 
 
 __all__ = ["_parse_docx", "_parse_pdf"]

@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any
+import copy
+
+import pytest
 
 from backend.services import mcp_service
 
@@ -130,4 +133,43 @@ def test_toggle_mcp_server_updates_auto_start_and_reloads(monkeypatch) -> None:
     ))
 
     assert memory["data"]["servers"]["docs"]["auto_start"] is True
+    assert manager.reloaded == 1
+
+
+def test_renaming_to_an_existing_server_preserves_both_configurations(monkeypatch) -> None:
+    original = {"servers": {
+        "docs": {"transport": "stdio", "command": "node", "args": ["docs.js"]},
+        "existing": {"transport": "stdio", "command": "node", "args": ["existing.js"]},
+    }}
+    memory = _install_memory_config(monkeypatch, copy.deepcopy(original))
+    manager = _Manager()
+
+    with pytest.raises(mcp_service.MCPServiceError, match="already exists"):
+        asyncio.run(mcp_service.update_mcp_server(manager, {
+            "original_name": "docs", "name": "existing", "transport": "stdio",
+            "command": "node", "args": ["docs.js"],
+        }, config_change_hook=_noop_hook))
+
+    assert memory["data"] == original
+    assert manager.removed == []
+    assert manager.reloaded == 0
+
+
+def test_renaming_to_an_available_name_preserves_unrelated_servers(monkeypatch) -> None:
+    other = {"transport": "stdio", "command": "node", "args": ["other.js"]}
+    memory = _install_memory_config(monkeypatch, {"servers": {
+        "docs": {"transport": "stdio", "command": "node", "args": ["docs.js"]},
+        "other": other,
+    }})
+    manager = _Manager()
+
+    asyncio.run(mcp_service.update_mcp_server(manager, {
+        "original_name": "docs", "name": "renamed", "transport": "stdio",
+        "command": "node", "args": ["docs.js"],
+    }, config_change_hook=_noop_hook))
+
+    assert "docs" not in memory["data"]["servers"]
+    assert memory["data"]["servers"]["renamed"]["args"] == ["docs.js"]
+    assert memory["data"]["servers"]["other"] == other
+    assert manager.removed == ["docs"]
     assert manager.reloaded == 1

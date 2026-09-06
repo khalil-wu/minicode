@@ -119,7 +119,7 @@ type ProviderCard = {
   source: "saved" | "history" | "preset";
 };
 
-type ProviderOperation = "" | "save" | "models" | "delete" | "oauth";
+type ProviderOperation = "" | "save" | "models" | "delete" | "oauth" | "check";
 
 export const ProviderTab = ({
   selectedProvider,
@@ -196,6 +196,11 @@ export const ProviderTab = ({
 
   const providerConfig = PROVIDERS.find((p) => p.id === provider)!;
   const effectiveWireApi = effectiveCustomWireApi(provider, baseUrl, customWireApi);
+
+  useEffect(() => {
+    setModelAuthState({});
+  }, [provider, baseUrl, apiKey, effectiveWireApi, proxyMode, providerHeaders, providerAuthHeader]);
+
   const responsesCachingEnabled = effectiveWireApi === "responses";
   const showApiFormat = canChooseApiFormat(provider, baseUrl);
   const showFixedAnthropicFormat = backendProvider(provider) === "anthropic";
@@ -756,16 +761,17 @@ export const ProviderTab = ({
 
   const updateModelMappingId = (previousId: string, rawNextId: string) => {
     const nextId = String(rawNextId || "").trim();
-    if (!nextId || isDraftModelId(nextId)) return;
+    if (!nextId || isDraftModelId(nextId)) return isDraftModelId(previousId) ? "" : previousId;
+    if (nextId === previousId) return previousId;
     if (availableModelList.some((item) => item === nextId && item !== previousId)) {
       pushToast("这个模型已经添加。", "warning");
-      return;
+      return previousId;
     }
 
     setAvailableModelList((current) => current.map((item) => item === previousId ? nextId : item));
     setModelMetadata((current) => {
       const next = { ...current };
-      next[nextId] = next[previousId] ?? next[nextId] ?? {};
+      next[nextId] = next[nextId] ?? {};
       delete next[previousId];
       return next;
     });
@@ -777,13 +783,13 @@ export const ProviderTab = ({
     });
     setModelAuthState((current) => {
       const next = { ...current };
-      if (next[previousId]) next[nextId] = next[previousId];
       delete next[previousId];
       return next;
     });
     if (!modelName.trim() || isDraftModelId(modelName) || modelName === previousId) {
       selectModel(nextId);
     }
+    return nextId;
   };
 
   const removeModelMapping = (modelId: string) => {
@@ -820,7 +826,7 @@ export const ProviderTab = ({
   };
 
   const checkModelAuth = async (modelId: string) => {
-    if (modelAuthState[modelId] === "checking") return;
+    if (!beginOperation("check")) return;
     setModelAuthState((current) => ({ ...current, [modelId]: "checking" }));
     try {
       const draft = draftFromState();
@@ -839,6 +845,8 @@ export const ProviderTab = ({
     } catch (error) {
       setModelAuthState((current) => ({ ...current, [modelId]: "error" }));
       pushToast(`模型鉴权失败：${formatProviderError(error)}`, "error");
+    } finally {
+      endOperation("check");
     }
   };
 
@@ -865,21 +873,16 @@ export const ProviderTab = ({
         const nextModel = models.includes(modelName) ? modelName : models[0] || "";
         setDiscoveredModelList(discovered);
         setModelsSource("live");
-        setModelMetadata((current) => ({ ...current, ...(data.model_metadata ?? {}) }));
-        setConfiguredReasoningEffort(data.configured_reasoning_effort || "");
-        setReasoningEffortLevels(normalizeEffortLevels(data.reasoning_effort_levels));
-        const bp = backendProvider(provider);
-        const previousPayload = settingsPayloadRef.current ?? {};
-        const previousSection = previousPayload[bp] ?? {};
         const nextSection: ProviderSection = {
-          ...previousSection,
+          base_url: baseUrl,
+          wire_api: effectiveWireApi,
           proxy_mode: data.proxy_mode ?? proxyMode,
           available_models: models,
           model: nextModel,
           models_source: "live",
-          model_metadata: { ...modelMetadata, ...(data.model_metadata ?? {}) },
+          model_metadata: data.model_metadata ?? {},
           model_labels: Object.fromEntries(models.map((id) => [id, id])),
-          configured_reasoning_effort: data.configured_reasoning_effort || "",
+          configured_reasoning_effort: configuredReasoningEffort,
           effective_reasoning_effort: data.effective_reasoning_effort || "",
           reasoning_effort_supported: Boolean(data.reasoning_effort_supported),
           reasoning_effort_levels: normalizeEffortLevels(data.reasoning_effort_levels),
@@ -895,12 +898,6 @@ export const ProviderTab = ({
           default_reasoning_effort: data.default_reasoning_effort || "",
           default_reasoning_summary: data.default_reasoning_summary || "",
         };
-        const nextPayload: LLMSettingsPayload = {
-          ...previousPayload,
-          [bp]: nextSection,
-        };
-        settingsPayloadRef.current = nextPayload;
-        onSettingsPayloadChange?.(nextPayload);
         setModelsStatus("success");
         applyCapabilitySection(provider, nextSection, nextModel);
         pushToast(`已获取 ${discovered.length} 个模型，可在新增映射中选择。`, "success");
@@ -1253,7 +1250,7 @@ export const ProviderTab = ({
               ? [modelId, ...discoveredModelList]
               : discoveredModelList;
             return (
-              <div key={modelId} style={{ display: "grid", gridTemplateColumns: "minmax(220px, 1fr) 120px auto auto", gap: 6, alignItems: "center" }}>
+              <div key={modelId} className="provider-model-mapping">
                 {discoveredModelList.length > 0 ? (
                   <SelectMenu
                     ariaLabel={`${modelId} 实际请求模型`}
@@ -1278,7 +1275,9 @@ export const ProviderTab = ({
                     aria-label={`${modelId} 实际请求模型`}
                     defaultValue={isDraft ? "" : modelId}
                     disabled={busy}
-                    onBlur={(event) => updateModelMappingId(modelId, event.target.value)}
+                    onBlur={(event) => {
+                      event.target.value = updateModelMappingId(modelId, event.target.value);
+                    }}
                     placeholder="实际请求模型 ID"
                     spellCheck={false}
                     style={{ ...inputStyle, fontFamily: "var(--font-mono)" }}
@@ -1289,9 +1288,9 @@ export const ProviderTab = ({
                   min={0}
                   step={1024}
                   aria-label={`${modelId} 上下文窗口`}
-                  defaultValue={metadata.context_window || ""}
+                  value={metadata.context_window || ""}
                   disabled={busy}
-                  onBlur={(event) => updateModelContext(modelId, event.target.value)}
+                  onChange={(event) => updateModelContext(modelId, event.target.value)}
                   placeholder="例如 128000"
                   style={inputStyle}
                 />

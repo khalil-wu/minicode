@@ -150,6 +150,8 @@ export const handleArtifactEvent = (e: ServerEvent, conversationId?: string): bo
           url: ev.url || sameArtifact?.url,
           name: ev.name || sameArtifact?.name,
           source: ev.is_attachment ? "attachment" as const : "artifact" as const,
+          hasNative: ev.has_native ?? sameArtifact?.hasNative,
+          warning: ev.is_attachment ? ev.parse_error || ev.parse_warning || undefined : sameArtifact?.warning,
           loading: false,
           error: undefined,
           loadedAt: Date.now(),

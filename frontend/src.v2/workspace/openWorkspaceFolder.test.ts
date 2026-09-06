@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { sendChatMessage, resetSendDeduplication } from "../chat/sendChatMessage";
-import { sendClientCommand } from "../protocol/ws-outbox";
+import { sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
 import { openWorkspaceFolder } from "./openWorkspaceFolder";
 import { handlePeripheralEvent } from "../chat/peripheralEvents";
@@ -35,6 +35,8 @@ vi.mock("../overlays/ToastContainer", () => ({
 vi.mock("../protocol/ws-outbox", () => ({
   createClientCommandId: vi.fn(() => "test-client-command-id"),
   sendClientCommand: vi.fn(() => true),
+  sendClientCommandAwaitResult: vi.fn(async () => ({ command: "workspace.set", level: "success", message: "Workspace activated.", data: {} })),
+  commandResultSucceeded: vi.fn(() => true),
 }));
 
 describe("openWorkspaceFolder", () => {
@@ -73,10 +75,10 @@ describe("openWorkspaceFolder", () => {
     const opened = await openWorkspaceFolder();
 
     expect(opened).toBe("C:\\Desktop\\MiniCode");
-    expect(sendClientCommand).toHaveBeenCalledWith({
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({
       type: "workspace.set",
       path: "C:\\Desktop\\MiniCode",
-    });
+    }, "workspace.set");
 
     const state = useAppStore.getState();
     expect(state.appMode).toBe("code");

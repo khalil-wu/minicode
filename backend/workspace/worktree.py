@@ -117,7 +117,7 @@ class WorktreeManager:
         """
         try:
             result = subprocess.run(
-                ["git", "worktree", "list", "--porcelain"],
+                ["git", "worktree", "list", "--porcelain", "-z"],
                 cwd=self.repo_root,
                 env=sanitized_git_env(),
                 capture_output=True,
@@ -129,7 +129,7 @@ class WorktreeManager:
             worktrees: list[WorktreeInfo] = []
             current_worktree: dict[str, str] = {}
 
-            for line in result.stdout.strip().split("\n"):
+            for line in result.stdout.split("\0"):
                 if not line:
                     # 空行表示一个 worktree 结束
                     if current_worktree:
@@ -156,7 +156,7 @@ class WorktreeManager:
 
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             logger.error(f"Failed to list worktrees: {e.stderr}")
-            return []
+            raise
 
     def create_worktree(
         self,
