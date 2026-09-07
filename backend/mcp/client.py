@@ -805,6 +805,8 @@ class MCPClient:
     async def list_tools(self) -> list[MCPToolDef]:
         if not self._connected:
             raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
+        if not self._server_capabilities.tools:
+            return []
         raw_tools = await self._paged("tools/list", "tools")
         tools: list[MCPToolDef] = []
         for item in raw_tools:
@@ -926,8 +928,7 @@ class MCPClient:
             return self._tool_error("Tool call timed out")
         if isinstance(exc, McpError):
             return self._tool_error(f"MCP RPC error: {exc.error.message} (code={exc.error.code})")
-        self._mark_disconnected()
-        return self._tool_error(f"MCP transport error: {exc}")
+        return self._tool_error(f"MCP tool call failed: {exc}")
 
     @staticmethod
     def _tool_error(message: str) -> MCPCallResult:

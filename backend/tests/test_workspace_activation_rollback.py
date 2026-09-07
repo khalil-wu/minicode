@@ -4,6 +4,8 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from backend.commands.registry import CommandRegistry
 from backend.workspace.state import (
     clear_active_workspace_root,
@@ -108,6 +110,40 @@ def test_workspace_activation_failure_rolls_back_context_root_and_watcher(monkey
     assert active_root == old_root.resolve()
     assert session.restarted == [new_root.resolve(), old_root.resolve()]
     assert session.events and "index failed" in session.events[-1].data["message"]
+
+
+@pytest.mark.parametrize("wait_for_initialize", [False, True], ids=["conversation-switch", "explicit-activation"])
+@pytest.mark.parametrize("workspace_state", ["untrusted", "missing"])
+def test_failed_workspace_admission_keeps_only_the_correct_runtime_owner(
+    monkeypatch, tmp_path: Path, wait_for_initialize: bool, workspace_state: str,
+) -> None:
+    previous_root = tmp_path / "previous"
+    previous_root.mkdir()
+    target_root = tmp_path / "target"
+    if workspace_state == "untrusted":
+        target_root.mkdir()
+    monkeypatch.setattr("backend.workspace.trust.TRUSTED_WORKSPACES_FILE", tmp_path / "absent-ledger.json")
+    previous_context = _Context(previous_root)
+    session = _Session(previous_context)
+    previous_mcp = object()
+    session.mcp_manager = previous_mcp
+    stopped = []
+    watcher = SimpleNamespace(stop=lambda: stopped.append(True))
+    lifecycle = session.session_lifecycle
+    lifecycle.workspace_root = previous_root
+    lifecycle.file_watcher = watcher
+
+    result = asyncio.run(lifecycle.activate_workspace_path(
+        str(target_root), wait_for_initialize=wait_for_initialize,
+    ))
+
+    assert result is False
+    assert lifecycle.workspace_context is (previous_context if wait_for_initialize else None)
+    assert lifecycle.workspace_root == (previous_root if wait_for_initialize else None)
+    assert session.mcp_manager is (previous_mcp if wait_for_initialize else None)
+    assert lifecycle.file_watcher is (watcher if wait_for_initialize else None)
+    assert bool(stopped) is not wait_for_initialize
+    assert session.events[-1].data["error_code"] == f"workspace_{workspace_state}"
 
 
 def test_background_workspace_index_failure_keeps_the_committed_new_owner(

@@ -495,11 +495,11 @@ class LSPManager:
         ext = Path(file_path).suffix.lstrip(".")
         return _LANGUAGE_SERVERS.get(ext)
 
-    def is_available(self, file_path: str) -> bool:
+    def is_available(self, file_path: str, workspace_root: str) -> bool:
         server = self.server_for_file(file_path)
         if not server:
             return False
-        workspace_root = str(Path(file_path).resolve().parent)
+        workspace_root = str(Path(workspace_root).expanduser().resolve())
         executable = _resolve_server_executable(server, workspace_root)
         if executable is None:
             return False

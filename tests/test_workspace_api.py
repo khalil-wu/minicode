@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -575,3 +576,34 @@ def test_workspace_recent_project_can_be_removed(monkeypatch, tmp_path) -> None:
     assert [project["path"] for project in list_response.json()["projects"]] == [
         str(other_dir.resolve())
     ]
+
+
+@pytest.mark.parametrize("limit, expected_status", [(8, 413), (64, 200)])
+def test_workspace_preview_snapshot_remains_bounded_through_http(monkeypatch, tmp_path, limit, expected_status):
+    target = tmp_path / "sample.txt"
+    replacement = tmp_path / "replacement.txt"
+    target.write_bytes(b"old\n")
+    expected = "中文预览\r\n".encode("utf-8")
+    replacement.write_bytes(expected)
+    original_open = Path.open
+
+    def replacing_open(path, mode="r", *args, **kwargs):
+        if path == target and mode == "rb":
+            replacement.replace(target)
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", replacing_open)
+    monkeypatch.setattr("backend.workspace.service.WORKSPACE_MAX_PREVIEW_BYTES", limit)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/workspace/preview",
+            params=_workspace_params(tmp_path, path="sample.txt"),
+        )
+
+    assert response.status_code == expected_status
+    if expected_status == 413:
+        assert "too large" in response.json()["detail"]
+    else:
+        assert response.json()["content"] == "中文预览"
+        assert response.json()["size_bytes"] == len(expected)

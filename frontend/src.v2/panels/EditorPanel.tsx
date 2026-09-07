@@ -471,7 +471,6 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const markTabLoaded = useAppStore((s) => s.markTabLoaded);
   const markTabSaved = useAppStore((s) => s.markTabSaved);
   const markTabExternalChanged = useAppStore((s) => s.markTabExternalChanged);
-  const reloadTab = useAppStore((s) => s.reloadTab);
 
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
   const [saving, setSaving] = useState(false);
@@ -528,6 +527,12 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   }, [activeTabPath]);
 
   useEffect(() => {
+    if (saveStatus !== "saved") return;
+    const timer = window.setTimeout(() => setSaveStatus("idle"), 1400);
+    return () => window.clearTimeout(timer);
+  }, [saveStatus]);
+
+  useEffect(() => {
     if (
       monacoUnavailable ||
       editorRef.current ||
@@ -581,7 +586,6 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     }
   }, [activeEditorPath, activeTabPath, tabs, setActiveTab, workingDirectory]);
 
-  // Load persisted tabs on mount
   useEffect(() => {
     for (const tab of tabs) {
       if (tab.loading) {
@@ -589,7 +593,18 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [workingDirectory]);
+
+  const applyFileSnapshot = (path: string, snapshot: FileSnapshot) => {
+    const warning = largeFileReason(snapshot);
+    markTabLoaded(path, warning ? "" : snapshot.content, null, snapshot.contentHash, {
+      largeFile: Boolean(warning),
+      loadWarning: warning,
+      sizeBytes: snapshot.sizeBytes,
+      readOnly: snapshot.readOnly,
+    });
+    return warning;
+  };
 
   const loadFileContent = async (path: string) => {
     const directory = workingDirectory;
@@ -614,22 +629,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     try {
       const snapshot = await readFileSnapshot(path, directory);
       if (snapshot != null) {
-        const warning = largeFileReason(snapshot);
-        if (warning) {
-          commit(() => markTabLoaded(path, "", null, snapshot.contentHash, {
-            largeFile: true,
-            loadWarning: warning,
-            sizeBytes: snapshot.sizeBytes,
-            readOnly: snapshot.readOnly,
-          }));
-        } else {
-          commit(() => markTabLoaded(path, snapshot.content, null, snapshot.contentHash, {
-            largeFile: false,
-            loadWarning: null,
-            sizeBytes: snapshot.sizeBytes,
-            readOnly: snapshot.readOnly,
-          }));
-        }
+        commit(() => applyFileSnapshot(path, snapshot));
       } else {
         commit(() => markTabLoaded(path, "", `Could not read ${path}`));
       }
@@ -729,7 +729,6 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     if (!dirty) {
       setSaveStatus("saved");
       pushToast(`${basename(activeTab.path)} 已保存。`, "info", 1400);
-      window.setTimeout(() => setSaveStatus("idle"), 1000);
       return;
     }
     if (saving) return;
@@ -762,15 +761,12 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       const result = await compareWriteWorkspaceFile(savePath, expectedHash, saveContent, saveWorkspace);
       if (result.ok) {
         if (!canCommitSave()) return;
-        const savedFile = result.file as { contentHash?: string; content_hash?: string };
-        const nextHash = savedFile.contentHash ?? savedFile.content_hash;
         // Mark exactly the payload acknowledged by disk as the baseline. If
         // the user typed again while this request was in flight, current
         // content remains newer than original and the tab correctly stays dirty.
-        markTabSaved(savePath, saveContent, nextHash);
+        markTabSaved(savePath, saveContent, result.file.content_hash, result.file.size_bytes ?? result.file.size);
         setSaveStatus("saved");
         pushToast(`已保存 ${basename(savePath)}`, "success", 1600);
-        window.setTimeout(() => setSaveStatus("idle"), 1400);
       } else {
         if (!canCommitSave()) return;
         setSaveStatus("error");
@@ -814,12 +810,17 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       const snapshot = await readFileSnapshot(path, directory);
       if (snapshot == null) throw new Error(`无法读取 ${path}`);
       if (!canCommit()) return;
-      reloadTab(path, snapshot.content, snapshot.contentHash);
-      if (!silent) pushToast(`已从磁盘重新加载 ${basename(path)}。`, "success", 1800);
+      const warning = applyFileSnapshot(path, snapshot);
+      if (!silent) pushToast(warning || `已从磁盘重新加载 ${basename(path)}。`, warning ? "warning" : "success", warning ? 3500 : 1800);
     } catch (error) {
       if (!canCommit()) return;
-      markTabExternalChanged(path);
-      if (!silent) pushToast(errorMessage(error) || `无法重新加载 ${basename(path)}。`, "error", 3500);
+      const message = errorMessage(error);
+      if (isLargeFileError(message)) {
+        markTabLoaded(path, "", null, undefined, { largeFile: true, loadWarning: message });
+      } else {
+        markTabExternalChanged(path);
+      }
+      if (!silent) pushToast(message || `无法重新加载 ${basename(path)}。`, "error", 3500);
     }
   };
 

@@ -546,6 +546,8 @@ class SessionLifecycle:
 
         request = parse_workspace_activation_request(path_str)
         if request.error_event is not None:
+            if not wait_for_initialize:
+                self.clear_workspace_runtime()
             await self._session.send_event(request.error_event)
             return False
         project_path = request.project_path

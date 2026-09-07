@@ -133,21 +133,18 @@ class WorkspaceService:
         self.ensure_not_sensitive_file(target)
 
         try:
-            stat = target.stat()
-        except PermissionError as exc:
-            raise HTTPException(status_code=403, detail=f"Permission denied: {path}") from exc
-
-        if stat.st_size > self._max_file_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=(
-                    f"File is too large ({stat.st_size} bytes). "
-                    f"Max supported size is {self._max_file_bytes} bytes."
-                ),
-            )
-
-        try:
-            content = target.read_bytes().decode("utf-8")
+            with target.open("rb") as handle:
+                stat = os.fstat(handle.fileno())
+                raw = handle.read(self._max_file_bytes + 1)
+            if len(raw) > self._max_file_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        "File is too large. "
+                        f"Max supported size is {self._max_file_bytes} bytes."
+                    ),
+                )
+            content = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise HTTPException(status_code=400, detail="Only UTF-8 text files are supported.") from exc
         except PermissionError as exc:
@@ -159,7 +156,7 @@ class WorkspaceService:
             name=target.name,
             content=content,
             content_hash=self.content_hash(content),
-            size_bytes=stat.st_size,
+            size_bytes=len(raw),
             modified_at=self.iso_timestamp(stat.st_mtime),
             language_hint=self.infer_language_hint(target),
         )
@@ -196,16 +193,16 @@ class WorkspaceService:
         self.ensure_not_sensitive_file(target)
 
         try:
-            stat = target.stat()
-            if stat.st_size > WORKSPACE_MAX_PREVIEW_BYTES:
+            with target.open("rb") as handle:
+                raw_content = handle.read(WORKSPACE_MAX_PREVIEW_BYTES + 1)
+            if len(raw_content) > WORKSPACE_MAX_PREVIEW_BYTES:
                 raise HTTPException(
                     status_code=413,
                     detail=(
-                        f"File is too large ({stat.st_size} bytes). "
+                        "File is too large. "
                         "Max supported preview size is 50 MB."
                     ),
                 )
-            raw_content = target.read_bytes()
         except HTTPException:
             raise
         except PermissionError as exc:
@@ -228,7 +225,7 @@ class WorkspaceService:
             "path": self.to_workspace_relative(target),
             "media_type": media_type,
             "kind": kind,
-            "size_bytes": int(stat.st_size),
+            "size_bytes": len(raw_content),
             "summary": str(parsed.get("summary") or ""),
             "parse_error": str(parsed.get("parse_error") or ""),
             "parse_warning": str(parsed.get("parse_warning") or ""),

@@ -167,7 +167,6 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
     )
     restored_conversation = result.get("conversation") if isinstance(result.get("conversation"), dict) else None
     restored_conversation_id = restored_conversation.get("id") if restored_conversation else None
-    restored_workspace = result.get("workspace") if isinstance(result.get("workspace"), dict) else None
     active_payload = restored_conversation
     is_hydrating = False
     if restored_conversation_id:
@@ -182,7 +181,12 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
                 conversation=target,
             ) or target
             session.active_conversation_id = target.id
-            await session.switch_workspace_for_conversation(target, announce=False)
+            workspace_activated = await session.switch_workspace_for_conversation(target, announce=False)
+            if not workspace_activated:
+                result["error"] = result.get("error") or (
+                    "The conversation was restored, but its workspace could not be activated. "
+                    "Reopen or trust the workspace before using workspace tools."
+                )
             # Session restore publishes the same hydration lifecycle as an
             # explicit conversation switch.  Without the completion callback
             # the renderer can remain in the restoring state indefinitely.
@@ -203,11 +207,16 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
 
         _clear_active_conversation_runtime(session)
 
+    workspace_root = session.session_lifecycle.current_workspace_root() if session.active_conversation_id else None
+    restored_workspace = (
+        {"root_path": str(workspace_root), "name": workspace_root.name}
+        if workspace_root is not None
+        else None
+    )
     runtime_snapshot = build_restored_runtime_snapshot(
         session.runtime_snapshot(),
         restored_conversation_id=restored_conversation_id,
         active_payload=active_payload,
-        restored_workspace=restored_workspace,
     )
     provider_capabilities = runtime_snapshot.get("provider_capabilities") if isinstance(runtime_snapshot, dict) else {}
     provider_id = str((provider_capabilities or {}).get("provider_id") or "").strip()
@@ -309,7 +318,7 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
         session_id=session.session_id,
         session_snapshot=session.runtime_snapshot(),
     )
-    workspace_root = session.session_lifecycle.workspace_root_for_conversation()
+    workspace_root = session.session_lifecycle.current_workspace_root() if session.active_conversation_id else None
     runtime_snapshot = result.get("session") if isinstance(result.get("session"), dict) else {}
     provider_capabilities = runtime_snapshot.get("provider_capabilities") if isinstance(runtime_snapshot, dict) else {}
     provider_id = str((provider_capabilities or {}).get("provider_id") or "").strip()

@@ -444,6 +444,14 @@ class MCPServerState:
 
 
 
+def _has_tool_catalog_error(state: MCPServerState) -> bool:
+    return (
+        state.status == ServerStatus.ERROR
+        and "tool_catalog" in state.operation_failures
+        and not state.operation_failures.keys() & {"connect", "reconnect", "cleanup"}
+    )
+
+
 class MCPServerManager:
     def __init__(
         self,
@@ -468,6 +476,7 @@ class MCPServerManager:
         )
         self._reconnect_tasks: dict[str, asyncio.Task[Any]] = {}
         self._tool_refresh_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._pending_tool_refreshes: dict[str, MCPClient] = {}
         self._cleanup_reaper_tasks: dict[str, asyncio.Task[Any]] = {}
         self._connection_locks: dict[str, asyncio.Lock] = {}
         self._reload_lock = asyncio.Lock()
@@ -1525,6 +1534,7 @@ class MCPServerManager:
             state.last_error = ""
             state.last_exception = None
             state.operation_failures.pop("connect", None)
+            state.operation_failures.pop("reconnect", None)
             if restore_failures:
                 failed_uris = [uri for uri, _ in restore_failures]
                 state.operation_failures["resource_restore"] = {
@@ -1701,45 +1711,66 @@ class MCPServerManager:
         return client
 
     def _schedule_tool_refresh(self, name: str, client: MCPClient) -> None:
+        state = self._servers.get(name)
+        if state is None or state.client is not client:
+            return
+        self._pending_tool_refreshes[name] = client
         active = self._tool_refresh_tasks.get(name)
         if active is not None and not active.done():
             return
         task = asyncio.create_task(
-            self._refresh_server_tools(name, client),
+            self._refresh_server_tools(name),
             name=f"mcp-tools-refresh-{name}",
         )
         self._tool_refresh_tasks[name] = task
 
-    async def _refresh_server_tools(self, name: str, client: MCPClient) -> None:
+    async def _refresh_server_tools(self, name: str) -> None:
         current_task = asyncio.current_task()
+        lock = self._connection_locks.get(name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._connection_locks[name] = lock
         try:
-            tools = await client.list_tools()
-            state = self._servers.get(name)
-            if (
-                state is None
-                or state.client is not client
-                or state.status != ServerStatus.CONNECTED
-                or not client.connected
-            ):
-                return
-            state.tools = _filter_mcp_tools(state.config, tools)
-            await self._notify_status(name, ServerStatus.CONNECTED)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            state = self._servers.get(name)
-            if state is not None and state.client is client:
-                state.status = ServerStatus.ERROR
-                state.tools = []
-                state.last_exception = exc
-                state.last_error = f"MCP tool catalog refresh failed: {type(exc).__name__}: {exc}"
-                _record_operation_failure(state, "tool_catalog", exc, retryable=True)
-                await self._notify_status(name, ServerStatus.ERROR)
+            async with lock:
+                while name in self._pending_tool_refreshes:
+                    client = self._pending_tool_refreshes.pop(name)
+                    state = self._servers.get(name)
+                    if (
+                        state is None
+                        or state.client is not client
+                        or not client.connected
+                        or not (
+                            state.status == ServerStatus.CONNECTED
+                            or _has_tool_catalog_error(state)
+                        )
+                    ):
+                        continue
+                    try:
+                        tools = await client.list_tools()
+                    except Exception as exc:
+                        if state.client is client and client.connected:
+                            state.status = ServerStatus.ERROR
+                            state.tools = []
+                            state.last_exception = exc
+                            state.last_error = f"MCP tool catalog refresh failed: {type(exc).__name__}: {exc}"
+                            _record_operation_failure(state, "tool_catalog", exc, retryable=True)
+                            await self._notify_status(name, ServerStatus.ERROR)
+                        continue
+                    if state.client is not client or not client.connected:
+                        continue
+                    state.status = ServerStatus.CONNECTED
+                    state.tools = _filter_mcp_tools(state.config, tools)
+                    state.last_error = ""
+                    state.last_exception = None
+                    state.operation_failures.pop("tool_catalog", None)
+                    await self._notify_status(name, ServerStatus.CONNECTED)
         finally:
             if self._tool_refresh_tasks.get(name) is current_task:
                 self._tool_refresh_tasks.pop(name, None)
+                self._pending_tool_refreshes.pop(name, None)
 
     async def _cancel_tool_refresh_task(self, name: str) -> None:
+        self._pending_tool_refreshes.pop(name, None)
         task = self._tool_refresh_tasks.pop(name, None)
         if task is None or task is asyncio.current_task():
             return
@@ -1752,7 +1783,9 @@ class MCPServerManager:
         disconnected_client: MCPClient | None = None,
     ) -> None:
         state = self._servers.get(name)
-        if state is None or state.status != ServerStatus.CONNECTED:
+        if state is None or not (
+            state.status == ServerStatus.CONNECTED or _has_tool_catalog_error(state)
+        ):
             return
         if disconnected_client is not None and state.client is not disconnected_client:
             # A previous SDK lifecycle may finish after an explicit restart.

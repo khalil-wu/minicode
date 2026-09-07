@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -32,11 +33,11 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
         relative = Path(relative_text)
         if not relative_text or relative.is_absolute() or ".." in relative.parts:
             return None
-        if any(part.startswith(".") for part in relative.parts):
-            return None
         try:
             candidate = (self._preview_root / relative).resolve()
-            candidate.relative_to(self._preview_root)
+            resolved_relative = candidate.relative_to(self._preview_root)
+            if any(part.startswith(".") for part in (*relative.parts, *resolved_relative.parts)):
+                return None
             return candidate if candidate.is_file() else None
         except (OSError, RuntimeError, ValueError):
             return None
@@ -53,7 +54,7 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
             self.send_error(404, "Preview resource not found")
             return None
         try:
-            stat = target.stat()
+            stat = os.fstat(handle.fileno())
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(stat.st_size))

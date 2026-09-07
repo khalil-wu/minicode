@@ -50,7 +50,9 @@ async def _resolve_terminal_scope(
     command: str,
 ) -> CommandScope | None:
     try:
-        return resolve_command_scope(session, data)
+        return resolve_command_scope(
+            session, data, require_workspace=command in {"terminal.create", "terminal.exec"},
+        )
     except ValueError as exc:
         await emit_command_error(session, command, exc)
         return None

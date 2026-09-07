@@ -28,6 +28,7 @@ def resolve_command_scope(
     data: Mapping[str, Any],
     *,
     require_conversation: bool = True,
+    require_workspace: bool = False,
     workspace_keys: tuple[str, ...] = ("workspace_root", "workspace"),
 ) -> CommandScope:
     """Resolve a MiniCode-style explicit command owner and reject stale owners."""
@@ -97,6 +98,8 @@ def resolve_command_scope(
             # A client-supplied absolute path is not an ownership boundary.  A
             # session, conversation, or legacy host must first bind the root.
             raise ValueError("No workspace is bound to this command owner")
+    if require_workspace and workspace is None:
+        raise ValueError("Open a workspace before running this command")
     workspace_root = str(workspace) if workspace is not None else ""
 
     if bound_workspace:

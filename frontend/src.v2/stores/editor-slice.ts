@@ -147,14 +147,14 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
         persistEditorTabs(loadedTabs, s.workingDirectory);
         return { editorTabs: loadedTabs };
       }),
-    markTabSaved: (path, savedContent, contentHash) =>
+    markTabSaved: (path, savedContent, contentHash, sizeBytes) =>
       set((s) => {
         const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
         return {
-          editorTabs: s.editorTabs.map((t) =>
-            editorPathsEqual(t.path, normalizedPath, s.workingDirectory)
-              ? { ...t, original: savedContent, contentHash, externalChanged: false, error: null }
-              : t,
+          editorTabs: s.editorTabs.map((tab) =>
+            editorPathsEqual(tab.path, normalizedPath, s.workingDirectory)
+              ? { ...tab, original: savedContent, contentHash, sizeBytes, externalChanged: false, error: null }
+              : tab,
           ),
         };
       }),
@@ -167,17 +167,6 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
               ? { ...t, externalChanged: true }
               : t;
           }),
-        };
-      }),
-    reloadTab: (path, content, contentHash) =>
-      set((s) => {
-        const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
-        return {
-          editorTabs: s.editorTabs.map((t) =>
-            editorPathsEqual(t.path, normalizedPath, s.workingDirectory)
-              ? { ...t, content, original: content, contentHash, externalChanged: false, loading: false, error: null }
-              : t,
-          ),
         };
       }),
     insertIntoActiveEditor: (text) => {

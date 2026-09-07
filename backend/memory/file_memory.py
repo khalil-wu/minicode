@@ -41,7 +41,7 @@ class FileMemory:
     """
 
     def __init__(self, memory_dir: Path | None = None) -> None:
-        self._dir = memory_dir or MEMORY_DIR
+        self._dir = resolve_memory_path(memory_dir or MEMORY_DIR)
         self._index_file = self._dir / "MEMORY.md"
         self._reset_lock = FileLock(self._lock_path_for(self._dir))
         with self._reset_lock.acquire(timeout=5.0):
@@ -128,6 +128,7 @@ class FileMemory:
     def reset_lock(self) -> FileLock:
         """Shared lock object used by memory workers and destructive reset."""
 
+        resolve_memory_path(self._dir)
         return self._reset_lock
 
     def _ensure_initialized(self) -> None:
@@ -203,9 +204,7 @@ class FileMemory:
         the new initialized tree instead of exposing a partially deleted one.
         """
 
-        root = self._dir.absolute()
-        if is_link(self._dir):
-            raise ValueError("Refusing to reset a symlinked or junction memory directory")
+        root = resolve_memory_path(self._dir).absolute()
         if root == Path(root.anchor) or root == DATA_ROOT.absolute():
             raise ValueError(f"Refusing to reset unsafe memory directory: {root}")
 

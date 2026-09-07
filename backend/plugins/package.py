@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -76,6 +77,18 @@ def validate_plugin_directory(source_path: str | Path) -> dict[str, Any]:
         raise PluginSettingsError("Plugin lifecycle API is disabled", status_code=404)
 
     source = _resolve_plugin_source_directory(source_path)
+    linked_paths = _plugin_symlink_paths(source)
+    if linked_paths:
+        return {
+            "ok": False,
+            "manifests": [],
+            "warnings": [],
+            "errors": [
+                "Plugin directories cannot contain symbolic links or junctions: "
+                + ", ".join(linked_paths[:3])
+            ],
+            "excluded": [],
+        }
     manifest_paths = _plugin_manifest_paths(source)
     warnings: list[str] = []
     errors: list[str] = []
@@ -100,13 +113,6 @@ def validate_plugin_directory(source_path: str | Path) -> dict[str, Any]:
     if skill_count <= 0 and not any(component_counts.values()):
         warnings.append(
             "Plugin manifest does not expose skills, MCP servers, apps, hooks, or extensions."
-        )
-
-    linked_paths = _plugin_symlink_paths(source)
-    if linked_paths:
-        errors.append(
-            "Plugin directories cannot contain symbolic links: "
-            + ", ".join(linked_paths[:3])
         )
 
     files, excluded = _collect_packable_plugin_files(source)
@@ -212,9 +218,15 @@ def _plugin_symlink_paths(plugin_dir: Path, *, limit: int = 20) -> list[str]:
         root_path = Path(root)
         for name in [*dirnames, *filenames]:
             candidate = root_path / name
-            if not candidate.is_symlink():
+            metadata = candidate.lstat()
+            if not (
+                stat.S_ISLNK(metadata.st_mode)
+                or os.name == "nt" and metadata.st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+            ):
                 continue
-            found.append(_relative_plugin_path(candidate, plugin_dir))
+            found.append(candidate.relative_to(plugin_dir).as_posix())
+            if name in dirnames:
+                dirnames.remove(name)
             if len(found) >= limit:
                 return found
     return found

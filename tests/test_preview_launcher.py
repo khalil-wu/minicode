@@ -2,6 +2,8 @@ import asyncio
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
@@ -285,7 +287,7 @@ def test_preview_launcher_monitor_broadcasts_ready_and_crashed():
         def __init__(self, lines):
             self.lines = [line.encode("utf-8") for line in lines]
 
-        async def readline(self):
+        async def read(self, _size):
             await asyncio.sleep(0)
             if self.lines:
                 return self.lines.pop(0)
@@ -293,19 +295,23 @@ def test_preview_launcher_monitor_broadcasts_ready_and_crashed():
 
     class FakeProcess:
         pid = 8765
-        returncode = 1
+        returncode = None
 
         def __init__(self):
             self.stdout = FakeStream(["Local: http://127.0.0.1:5179\n"])
             self.stderr = FakeStream(["build failed\n"])
 
         async def wait(self):
+            self.returncode = 1
             return self.returncode
 
     events = []
 
     async def broadcast(event):
         events.append(event)
+        if event["type"] == "preview.server.ready":
+            launched.process.returncode = 1
+            launched._exit_event.set()
 
     config = launcher.PreviewLaunchConfig(
         name="web",
@@ -321,6 +327,7 @@ def test_preview_launcher_monitor_broadcasts_ready_and_crashed():
         session_id="session-monitor",
         conversation_id="conv-monitor",
         workspace_root=str(Path.cwd()),
+        _sandbox_runner=SimpleNamespace(terminate=AsyncMock(return_value=True)),
     )
 
     asyncio.run(launcher._monitor_process(launched, broadcast))
@@ -430,19 +437,20 @@ def test_static_monitor_does_not_replace_file_url_with_server_root():
         def __init__(self, lines):
             self.lines = [line.encode("utf-8") for line in lines]
 
-        async def readline(self):
+        async def read(self, _size):
             await asyncio.sleep(0)
             return self.lines.pop(0) if self.lines else b""
 
     class FakeProcess:
         pid = 1234
-        returncode = 0
+        returncode = None
 
         def __init__(self):
             self.stdout = FakeStream(["Serving HTTP on 127.0.0.1 port 43123 (http://127.0.0.1:43123/)\n"])
             self.stderr = FakeStream([])
 
         async def wait(self):
+            self.returncode = 0
             return self.returncode
 
     events = []
@@ -461,10 +469,14 @@ def test_static_monitor_does_not_replace_file_url_with_server_root():
         session_id="session-static-monitor",
         conversation_id="conv-static-monitor",
         workspace_root=str(Path.cwd()),
+        _sandbox_runner=SimpleNamespace(terminate=AsyncMock(return_value=True)),
     )
 
     async def broadcast(event):
         events.append(event)
+        if event["type"] == "preview.server.ready":
+            launched.process.returncode = 0
+            launched._exit_event.set()
 
     asyncio.run(launcher._monitor_process(launched, broadcast))
 

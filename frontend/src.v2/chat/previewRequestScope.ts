@@ -14,6 +14,7 @@ export interface PreviewRequestLease {
 }
 
 const previewSlots = new Map<string, PreviewSlotState>();
+let nextPreviewGeneration = 0;
 
 const slotFor = (conversationId?: string): string =>
   String(conversationId || "").trim() || GLOBAL_PREVIEW_SLOT;
@@ -36,7 +37,7 @@ export const beginPreviewRequest = (
   previous?.controller?.abort();
   revokeObjectUrl(previous?.objectUrl);
   const controller = options.abortable ? new AbortController() : undefined;
-  const generation = (previous?.generation ?? 0) + 1;
+  const generation = ++nextPreviewGeneration;
   previewSlots.set(slot, { generation, controller });
   return { slot, generation, controller };
 };

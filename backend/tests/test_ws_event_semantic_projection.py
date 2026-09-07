@@ -301,10 +301,15 @@ def test_preview_refresh_validates_url_and_preserves_command_scope(
         resolve_requested_workspace=lambda requested=None: Path(requested or tmp_path).resolve(),
     )
     session.session_lifecycle = SessionLifecycle(session)
-    monkeypatch.setattr(
-        "backend.preview.launcher.preview_url_is_owned",
-        lambda *_args, **_kwargs: True,
+    from backend.preview import launcher
+
+    process = launcher.PreviewLaunchProcess(
+        id="refresh-preview",
+        config=launcher.PreviewLaunchConfig("web", "fixture", str(tmp_path), 5173, "http://localhost:5173"),
+        process=SimpleNamespace(pid=1234, returncode=None),
+        session_id="session-1", conversation_id="conversation-1", workspace_root=str(tmp_path),
     )
+    monkeypatch.setattr(launcher, "_RUNNING", {process.id: process})
 
     assert asyncio.run(handle_preview_refresh(session, {
         "conversation_id": "conversation-1",

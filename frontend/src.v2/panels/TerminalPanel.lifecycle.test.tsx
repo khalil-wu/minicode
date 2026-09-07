@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { TerminalPanel } from "./TerminalPanel";
@@ -17,6 +18,7 @@ const mocks = vi.hoisted(() => {
     list: vi.fn(), snapshot: vi.fn(), spawn: vi.fn(), restart: vi.fn(), clearPty: vi.fn(),
     write: vi.fn(), resize: vi.fn(), kill: vi.fn(), ackExit: vi.fn(),
     send: vi.fn(), awaitResult: vi.fn(), clearScreen: vi.fn(), renderOutput: vi.fn(),
+    resetScreen: vi.fn(), terminalOptions: {} as { convertEol?: boolean; fontFamily?: string },
   };
 });
 
@@ -40,8 +42,10 @@ vi.mock("../protocol/ws-outbox", async (importOriginal) => ({
 vi.mock("@xterm/xterm", () => ({ Terminal: class {
   cols = 80;
   rows = 24;
-  options = {};
+  options = mocks.terminalOptions;
+  constructor(options: { convertEol?: boolean }) { Object.assign(this.options, options); }
   clear = mocks.clearScreen;
+  reset = mocks.resetScreen;
   write = mocks.renderOutput;
   writeln = mocks.renderOutput;
   onData(callback: (data: string) => void) { mocks.input = callback; }
@@ -78,6 +82,7 @@ describe("terminal lifecycle", () => {
     mocks.native = true;
     mocks.input = null;
     mocks.output = null;
+    mocks.terminalOptions = {};
     mocks.list.mockResolvedValue([]);
     mocks.snapshot.mockImplementation(async (id: string, owner: string) => pty(owner, id));
     mocks.spawn.mockImplementation(async (_cwd: string, owner: string) => pty(owner, `${owner}-new`));
@@ -96,7 +101,130 @@ describe("terminal lifecycle", () => {
     });
   });
 
-  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    document.documentElement.style.removeProperty("--font-mono");
+  });
+
+  it("uses the bundled CJK face after the monospace fonts in the shared code token", async () => {
+    const tokensCss = readFileSync("src.v2/styles/tokens.css", "utf8");
+    const stack = tokensCss.match(/--font-mono:\s*([^;]+);/)?.[1];
+    expect(stack).toContain('"Noto Sans SC"');
+    expect(stack!.indexOf('"Noto Sans SC"')).toBeGreaterThan(stack!.indexOf('"JetBrains Mono"'));
+    document.documentElement.style.setProperty("--font-mono", stack!);
+
+    render(<TerminalPanel />);
+
+    await waitFor(() => expect(mocks.terminalOptions.fontFamily).toBe(stack));
+  });
+
+  it.each([true, false])("does not start a terminal or promise a command runner without a workspace (desktop=%s)", async (native) => {
+    mocks.native = native;
+    useAppStore.setState({ workingDirectory: null });
+    render(<TerminalPanel />);
+    await waitFor(() => expect(mocks.input).toBeTypeOf("function"));
+
+    fireEvent.click(screen.getByRole("button", { name: "新建终端" }));
+    await screen.findByText("请先打开工作区，再启动终端或运行命令。");
+    act(() => mocks.input!("echo unexpected\r"));
+
+    expect(mocks.spawn).not.toHaveBeenCalled();
+    expect(mocks.awaitResult).not.toHaveBeenCalledWith(expect.objectContaining({ type: "terminal.create" }), expect.anything());
+    expect(mocks.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "terminal.exec" }));
+    expect(mocks.renderOutput.mock.calls.some(([output]) => String(output).includes("已就绪"))).toBe(false);
+    expect(mocks.renderOutput).not.toHaveBeenCalledWith("$ ");
+  });
+
+  it("starts after a workspace is mounted into the same conversation", async () => {
+    useAppStore.setState({ workingDirectory: null });
+    render(<TerminalPanel />);
+    await screen.findByText("请先打开工作区，再启动终端或运行命令。");
+
+    await act(async () => useAppStore.setState({ workingDirectory: "C:/mounted" }));
+
+    await waitFor(() => expect(mocks.spawn).toHaveBeenCalledWith("C:/mounted", "conv-a"));
+  });
+
+  it("rejects command-runner input immediately when its workspace is cleared and discards the old draft", async () => {
+    mocks.native = false;
+    render(<TerminalPanel />);
+    await screen.findByText("Interactive shell unavailable");
+    act(() => mocks.input!("echo old-draft"));
+
+    act(() => {
+      useAppStore.setState({ workingDirectory: null });
+      mocks.input!("\r");
+    });
+    expect(mocks.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "terminal.exec" }));
+    await act(async () => useAppStore.setState({ workingDirectory: "C:/mounted" }));
+    await screen.findByText("Interactive shell unavailable");
+    act(() => mocks.input!("echo current\r"));
+
+    expect(mocks.send).toHaveBeenLastCalledWith({
+      type: "terminal.exec", command: "echo current", cwd: "C:/mounted",
+      conversation_id: "conv-a", workspace_root: "C:/mounted",
+    });
+  });
+
+  it("does not enable a late command runner after the workspace was cleared", async () => {
+    const oldSpawn = pending<ReturnType<typeof pty> | null>();
+    mocks.spawn.mockReturnValueOnce(oldSpawn.promise);
+    render(<TerminalPanel />);
+    await waitFor(() => expect(mocks.spawn).toHaveBeenCalled());
+    await act(async () => useAppStore.setState({ workingDirectory: null }));
+
+    await act(async () => oldSpawn.resolve(null));
+    act(() => mocks.input!("echo unexpected\r"));
+
+    expect(screen.queryByText(/命令运行器已就绪/)).toBeNull();
+    expect(mocks.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "terminal.exec" }));
+  });
+
+  it("resets the screen and selects newline handling for the active transport", async () => {
+    mocks.native = false;
+    const pipe = {
+      id: "term-pipe", conversationId: "conv-a", cwd: "C:/conv-a", shell: "bash",
+      terminalMode: "pipe" as const,
+    };
+    const native = { ...pipe, id: "term-pty", shell: "pwsh", terminalMode: "pty" as const };
+    const pipeOutput = "first\nsecond\n";
+    const nativeOutput = "native\r\noutput\r\n";
+    const rendered: { output: string; convertEol?: boolean }[] = [];
+    mocks.renderOutput.mockImplementation((output: string) => {
+      rendered.push({ output, convertEol: mocks.terminalOptions.convertEol });
+    });
+    useAppStore.setState({
+      terminalSessions: [pipe, native],
+      activeTerminalSessionId: pipe.id,
+      terminalSnapshots: {
+        [pipe.id]: { ...pipe, output: pipeOutput, capturedAt: 1 },
+        [native.id]: { ...native, output: nativeOutput, capturedAt: 1 },
+      },
+    });
+
+    render(<TerminalPanel />);
+    await waitFor(() => expect(rendered).toContainEqual({ output: pipeOutput, convertEol: true }));
+    const resetCount = mocks.resetScreen.mock.calls.length;
+    await act(async () => useAppStore.getState().setActiveTerminalSession(native.id));
+
+    await waitFor(() => expect(rendered).toContainEqual({ output: nativeOutput, convertEol: false }));
+    expect(mocks.resetScreen.mock.calls.length).toBeGreaterThan(resetCount);
+    expect(mocks.clearScreen).not.toHaveBeenCalled();
+  });
+
+  it("updates newline handling when a cached session receives its transport metadata", async () => {
+    mocks.native = false;
+    const session = { id: "term-a", conversationId: "conv-a", cwd: "C:/conv-a", shell: "bash" };
+    useAppStore.setState({ terminalSessions: [session], activeTerminalSessionId: session.id });
+    render(<TerminalPanel />);
+    await waitFor(() => expect(mocks.resetScreen).toHaveBeenCalled());
+    expect(mocks.terminalOptions.convertEol).toBe(false);
+
+    await act(async () => useAppStore.getState().upsertTerminalSession({ ...session, terminalMode: "pipe" }));
+
+    await waitFor(() => expect(mocks.terminalOptions.convertEol).toBe(true));
+  });
 
   it("keeps cached terminals after inventory failure and allows a manual retry", async () => {
     useAppStore.setState({

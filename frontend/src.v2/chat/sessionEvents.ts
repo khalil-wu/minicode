@@ -1058,7 +1058,11 @@ const clearActiveConversationView = () => {
 
 const applyRuntimeSessionSnapshot = (session: RuntimeSessionSnapshot | undefined | null) => {
   if (!session) return;
-  useAppStore.getState().setRuntimeSession(session);
+  const state = useAppStore.getState();
+  state.setRuntimeSession(session);
+  if (session.active_conversation_id === state.conversationId && session.workspace_root !== undefined) {
+    state.setWorkingDirectory(session.workspace_root ?? "");
+  }
   applyQueuedUserMessageSnapshot(session.queued_user_messages);
   applyPendingTurnInputSnapshot(session.pending_turn_inputs);
   applyActiveStreamSnapshot(session);

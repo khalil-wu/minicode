@@ -3,7 +3,7 @@ import asyncio
 from mcp import types
 from mcp.shared.exceptions import McpError
 
-from backend.mcp.client import MCPClient, MCPTransport
+from backend.mcp.client import MCPClient, MCPServerCapabilities, MCPTransport
 
 
 def test_sse_uses_official_sse_transport_without_rewriting_url(monkeypatch) -> None:
@@ -121,11 +121,54 @@ def test_official_session_pagination_is_fully_consumed() -> None:
 
     client = MCPClient("remote", transport=MCPTransport.HTTP, url="https://mcp.example/mcp")
     client._connected = True
+    client._server_capabilities = MCPServerCapabilities(tools=True)
     client._session = _Session()
 
     tools = asyncio.run(client.list_tools())
 
     assert [tool.name for tool in tools] == ["first", "second"]
+
+
+def test_tool_catalog_respects_absent_negotiated_capability() -> None:
+    class _Session:
+        async def list_tools(self, cursor=None):
+            raise AssertionError("tools/list is not supported by this server")
+
+    client = MCPClient("inventory-only")
+    client._connected = True
+    client._session = _Session()
+
+    assert asyncio.run(client.list_tools()) == []
+    assert client.connected
+
+
+def test_oversized_tool_response_does_not_disconnect_a_live_session(monkeypatch) -> None:
+    class _Session:
+        calls = 0
+
+        async def call_tool(self, *_args, **_kwargs):
+            self.calls += 1
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="x" * 512 if self.calls == 1 else "ok")]
+            )
+
+    async def scenario() -> None:
+        client = MCPClient("bounded-response")
+        client._connected = True
+        client._session = _Session()
+
+        oversized = await client.call_tool("inspect")
+        assert oversized.is_error
+        assert "exceeding the 256-byte response limit" in oversized.text
+        assert client.connected
+        assert not client._disconnect_notified
+
+        accepted = await client.call_tool("inspect")
+        assert not accepted.is_error
+        assert accepted.text == "ok"
+
+    monkeypatch.setattr("backend.mcp.client._MAX_MCP_RESPONSE_BYTES", 256)
+    asyncio.run(scenario())
 
 
 def test_headers_helper_receives_minicode_server_env(monkeypatch) -> None:

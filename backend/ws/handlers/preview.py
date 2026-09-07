@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, TYPE_CHECKING, cast
 
 from backend.agent.message import AgentEvent
@@ -22,7 +23,9 @@ async def _resolve_scope(
     command: str,
 ) -> CommandScope | None:
     try:
-        return resolve_command_scope(session, data)
+        return resolve_command_scope(
+            session, data, require_workspace=command in {"preview.launch.config", "preview.launch.start"},
+        )
     except ValueError as exc:
         await emit_command_error(session, command, exc)
         return None
@@ -126,8 +129,12 @@ async def handle_preview_launch_start(session: "WebSocketSession", data: dict[st
     await session.send_event(_scope_event(preview_launch_started_event(process), scope))
     await session.send_event(_scope_event(preview_launch_detected_event(process), scope))
     verification = await wait_until_ready(process.effective_url, timeout=20.0, interval=1.0)
-    if verification.ok:
-        await mark_preview_ready(process)
+    if verification.ok and not await mark_preview_ready(process):
+        verification = replace(
+            verification,
+            ok=False,
+            error="Preview process stopped before readiness could be confirmed.",
+        )
     await session.send_event(_scope_event(preview_verified_event(verification), scope))
     return True
 
@@ -146,6 +153,7 @@ async def handle_preview_launch_stop(session: "WebSocketSession", data: dict[str
             name,
             session_id=session.session_id,
             conversation_id=scope.conversation_id,
+            workspace_root=scope.workspace_root,
         )
     except RuntimeError as exc:
         # A preview whose exit could not be proven keeps running; say so instead
@@ -161,12 +169,13 @@ async def handle_preview_launch_stop(session: "WebSocketSession", data: dict[str
 
 async def handle_preview_navigate(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.preview import verify_preview_url
+    from backend.preview.verifier import PreviewProcessChangedError
     from backend.services.preview_service import preview_navigated_event, preview_verified_event, validate_preview_url
 
     scope = await _resolve_scope(session, data, "preview.navigate")
     if scope is None:
         return True
-    url, error_event = validate_preview_url(
+    url, process, error_event = validate_preview_url(
         data,
         command="preview.navigate",
         session_id=session.session_id,
@@ -177,7 +186,11 @@ async def handle_preview_navigate(session: "WebSocketSession", data: dict[str, A
         await emit_command_error(session, "preview.navigate", error_event)
         return True
     await session.send_event(_scope_event(preview_navigated_event(url), scope))
-    result = await verify_preview_url(url)
+    try:
+        result = await verify_preview_url(url, process=process)
+    except PreviewProcessChangedError as exc:
+        await session.send_event(_scope_event(AgentEvent.command_result("preview.navigate", str(exc), level="error"), scope))
+        return True
     await session.send_event(_scope_event(preview_verified_event(result), scope))
     return True
 
@@ -190,7 +203,7 @@ async def handle_preview_refresh(session: "WebSocketSession", data: dict[str, An
         return True
     url = str(data.get("url", "")).strip()
     if url:
-        url, error_event = validate_preview_url(
+        url, _process, error_event = validate_preview_url(
             {"url": url},
             command="preview.refresh",
             session_id=session.session_id,
@@ -206,12 +219,13 @@ async def handle_preview_refresh(session: "WebSocketSession", data: dict[str, An
 
 async def handle_preview_verify(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.preview import verify_preview_url
+    from backend.preview.verifier import PreviewProcessChangedError
     from backend.services.preview_service import preview_verified_event, validate_preview_url
 
     scope = await _resolve_scope(session, data, "preview.verify")
     if scope is None:
         return True
-    url, error_event = validate_preview_url(
+    url, process, error_event = validate_preview_url(
         data,
         command="preview.verify",
         session_id=session.session_id,
@@ -221,7 +235,11 @@ async def handle_preview_verify(session: "WebSocketSession", data: dict[str, Any
     if error_event is not None:
         await emit_command_error(session, "preview.verify", error_event)
         return True
-    result = await verify_preview_url(url)
+    try:
+        result = await verify_preview_url(url, process=process)
+    except PreviewProcessChangedError as exc:
+        await session.send_event(_scope_event(AgentEvent.command_result("preview.verify", str(exc), level="error"), scope))
+        return True
     await session.send_event(_scope_event(preview_verified_event(result), scope))
     return True
 

@@ -17,6 +17,7 @@ type XtermLike = {
   cols: number;
   rows: number;
   clear: () => void;
+  reset: () => void;
   clearSelection?: () => void;
   dispose: () => void;
   focus?: () => void;
@@ -38,6 +39,7 @@ type XtermWithOptions = XtermLike & {
   options: {
     theme?: Record<string, string>;
     fontSize?: number;
+    convertEol?: boolean;
   };
 };
 
@@ -124,7 +126,7 @@ const terminalStatusLabel = (status: TerminalSessionInfo["status"]): string =>
  * terminal follows --font-mono and the Appearance-tab code zoom setting. */
 const terminalFontFamily = (): string => {
   const stack = getComputedStyle(document.documentElement).getPropertyValue("--font-mono").trim();
-  return stack || '"JetBrains Mono", Consolas, monospace';
+  return stack || '"JetBrains Mono", Consolas, "Noto Sans SC", monospace';
 };
 
 const TERMINAL_BASE_FONT_SIZE = 13;
@@ -201,6 +203,7 @@ export const TerminalPanel = () => {
   const terminalSessions = useAppStore((s) => s.terminalSessions);
   const activeTerminalSessionId = useAppStore((s) => s.activeTerminalSessionId);
   const conversationId = useAppStore((s) => s.conversationId);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
   const resolvedTheme = useAppStore((s) => s.resolvedTheme);
   const terminalSnapshots = useAppStore((s) => s.terminalSnapshots);
   const [booting, setBooting] = useState(true);
@@ -292,6 +295,7 @@ export const TerminalPanel = () => {
           lineHeight: 1.12,
           letterSpacing: 0,
           cursorBlink: true,
+          convertEol: !isDesktop(),
           allowTransparency: true,
           scrollback: 8000,
           theme: terminalTheme(isLight),
@@ -447,7 +451,7 @@ export const TerminalPanel = () => {
     // cached sessions and preferred terminal. Keep them visible until the
     // authoritative list for this owner arrives and reconciles the cache.
     void refreshSessionsRef.current();
-  }, [conversationId]);
+  }, [conversationId, workingDirectory]);
 
   useEffect(() => {
     if (!activeTerminalSessionId && terminalSessions.length > 0) {
@@ -461,7 +465,7 @@ export const TerminalPanel = () => {
       safeFit();
       termRef.current?.focus?.();
     });
-  }, [activeTerminalSessionId]);
+  }, [activeTerminalSessionId, activeSession?.terminalMode, workingDirectory]);
 
   useEffect(() => {
     if (activeSession && statusMessage === "正在启动后端 Shell...") {
@@ -571,15 +575,21 @@ export const TerminalPanel = () => {
       setStatusMessage("请先选择会话，再打开终端。");
       return;
     }
+    const cwd = useAppStore.getState().workingDirectory;
+    if (!cwd) {
+      setStatusMessage("请先打开工作区，再启动终端或运行命令。");
+      return;
+    }
+    const isCurrent = () => isCurrentConversation(ownerConversationId)
+      && useAppStore.getState().workingDirectory === cwd;
     creatingRef.current = true;
     setAutoCreating(true);
     setStatusMessage("");
-    const cwd = useAppStore.getState().workingDirectory || undefined;
     try {
       if (isDesktop()) {
         const session = await ptySpawn(cwd, ownerConversationId);
         if (!session) {
-          if (!isCurrentConversation(ownerConversationId)) return;
+          if (!isCurrent()) return;
           setStatusMessage("命令运行器已就绪。输入命令后按 Enter。");
           if (!outputBufferRef.current["web-fallback"]) {
             outputBufferRef.current["web-fallback"] = "命令运行器。命令在当前工作区运行，不支持交互式操作。\r\n$ ";
@@ -600,7 +610,7 @@ export const TerminalPanel = () => {
           terminalMode: "pty",
         };
         mirrorTerminalCreated(terminalSession);
-        if (useAppStore.getState().conversationId !== ownerConversationId) return;
+        if (!isCurrent()) return;
         useAppStore.getState().upsertTerminalSession(terminalSession);
         useAppStore.getState().setActiveTerminalSession(session.sessionId);
         requestAnimationFrame(() => {
@@ -621,7 +631,7 @@ export const TerminalPanel = () => {
           },
           "terminal.create",
         );
-        if (!isCurrentConversation(ownerConversationId)) return;
+        if (!isCurrent()) return;
         if (commandResultSucceeded(result)) {
           setStatusMessage("正在启动后端 Shell...");
         } else {
@@ -638,7 +648,7 @@ export const TerminalPanel = () => {
         });
       }
     } catch (error) {
-      if (!isCurrentConversation(ownerConversationId)) return;
+      if (!isCurrent()) return;
       setStatusMessage(`启动终端失败：${String(error)}`);
       useAppStore.getState().setActiveTerminalSession(null);
       redrawActiveSession();
@@ -832,6 +842,10 @@ export const TerminalPanel = () => {
       setStatusMessage("请先选择会话，再运行命令。");
       return;
     }
+    if (!state.workingDirectory) {
+      setStatusMessage("请先打开工作区，再启动终端或运行命令。");
+      return;
+    }
     const trimmed = command.trim();
     if (!trimmed) {
       appendOutput("web-fallback", "\r\n$ ");
@@ -872,24 +886,30 @@ export const TerminalPanel = () => {
   };
 
   const redrawActiveSession = () => {
-    const term = termRef.current;
+    const term = termRef.current as XtermWithOptions | null;
     if (!term) return;
-    term.clear();
-    safeFit();
     const sessionId = activeRef.current;
+    const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
+    term.options.convertEol = !sessionId || session?.terminalMode === "pipe";
+    term.reset();
+    safeFit();
     if (!sessionId) {
+      const state = useAppStore.getState();
+      if (!state.conversationId || !state.workingDirectory) {
+        term.writeln(state.conversationId
+          ? "请先打开工作区，再启动终端或运行命令。"
+          : "请先选择会话，再打开终端。");
+        return;
+      }
       const fallbackOutput = outputBufferRef.current["web-fallback"];
       if (fallbackOutput) {
         term.write(fallbackOutput);
         return;
       }
       const message = statusMessage || (
-        isDesktop()
-          ? (booting || autoCreating ? "正在启动终端..." : "暂无终端会话，点击 + 新建。")
-          : "命令运行器已就绪。输入命令后按 Enter。"
+        booting || autoCreating ? "正在启动终端..." : "暂无终端会话，点击 + 新建。"
       );
       term.writeln(message);
-      if (!isDesktop()) term.write("$ ");
       return;
     }
     const buffered = outputBufferRef.current[sessionId] ?? "";

@@ -1382,6 +1382,25 @@ describe("SidebarRight diagnostics", () => {
     });
   });
 
+  it.each(["tasks", "browser"] as const)("keeps %s selected when only a live URL is cached", async (tab) => {
+    useAppStore.setState({
+      conversationId: "conv-live-preview",
+      previewOwnerConversationId: null,
+      rightStackTab: tab,
+      rightStackTabLocked: false,
+      livePreviewUrl: null,
+    });
+    render(<SidebarRight />);
+
+    act(() => useAppStore.getState().setLivePreviewUrl("http://localhost:5173", "conv-live-preview"));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().rightStackTab).toBe(tab);
+      expect(screen.queryByRole("tab", { name: /预览/ })).toBeNull();
+    });
+    expect(screen.queryByText("Preview panel")).toBeNull();
+  });
+
   it("does not let automatic preview state steal focus from diagnostics", async () => {
     useAppStore.setState({
       rightStackTab: "diagnostics",

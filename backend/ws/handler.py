@@ -532,7 +532,7 @@ class WebSocketSession(
         ):
             active = None
             self.active_conversation_id = None
-        workspace_root = self.session_lifecycle.workspace_root_for_conversation()
+        workspace_root = self.session_lifecycle.current_workspace_root() if active is not None else None
         workspace_scope = workspace_scope_for(
             workspace_root=getattr(active, "workspace_root", "") if active is not None else "",
             worktree_path=getattr(active, "worktree_path", "") if active is not None else "",

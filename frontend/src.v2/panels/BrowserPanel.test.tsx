@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
+import { handlePreviewEvent } from "../chat/previewEvents";
 import { BrowserPanel, normalizeBrowserInput } from "./BrowserPanel";
 import { __resetOpenWebInBrowserForTests, openWebInBrowser } from "../chat/openWebInBrowser";
 
@@ -148,6 +149,31 @@ describe("BrowserPanel", () => {
     expect(useAppStore.getState().rightStackTab).toBe("browser");
     expect(screen.getAllByRole("tab")).toHaveLength(1);
     expect(runtimeMocks.create).not.toHaveBeenCalled();
+  });
+
+  it("delivers a ready preview received before mount to the owning native browser", async () => {
+    useAppStore.setState({
+      workingDirectory: "C:/browser", conversationWorkbenchStates: {},
+      previewLaunchProcesses: [], previewServers: [], livePreviewUrl: null, previewVerification: null,
+    });
+    handlePreviewEvent({
+      type: "preview.launch.started", conversation_id: "conv-browser", workspace_root: "C:/browser",
+      id: "web", name: "web", command: "npm run dev", cwd: "C:/browser", port: 4173, url: "", status: "starting",
+    });
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    handlePreviewEvent({
+      type: "preview.server.ready", conversation_id: "conv-browser", workspace_root: "C:/browser",
+      id: "web", port: 4173, url: "http://localhost:4173",
+    });
+
+    render(<BrowserPanel />);
+
+    await waitFor(() => {
+      expect(runtimeMocks.navigate).toHaveBeenCalledExactlyOnceWith(
+        "conv-browser", expect.stringMatching(/^browser_/), "http://localhost:4173/",
+      );
+    });
+    expect(useAppStore.getState().rightStackTab).toBe("browser");
   });
 
   it("restores browser tabs created by an agent before the panel opened", async () => {

@@ -852,6 +852,7 @@ describe("handleSessionEvent", () => {
       session: {
         session_id: "session-restore",
         active_conversation_id: "conv-restored",
+        workspace_root: "C:/repo-restored",
       },
       messages: [{
         id: "assistant-restored",
@@ -1211,6 +1212,57 @@ describe("handleSessionEvent", () => {
       worktreePath: "C:/repo/.minicode/worktrees/conv-protected",
       gitIsolated: true,
     });
+  });
+
+  it.each(["session.restored", "session.synced", "conversation.switched"] as const)(
+    "%s keeps conversation history without advertising an unmounted workspace",
+    (eventType) => {
+      const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+      useAppStore.setState({ workingDirectory: "C:/previous-workspace" });
+      const conversation = {
+        id: "conv-unmounted",
+        title: "Unmounted project",
+        updated_at: "2026-01-02T00:00:00.000Z",
+        workspace_root: "C:/untrusted-workspace",
+        transcript: [{ id: "saved-message", role: "user", content: "Saved history" }],
+      };
+
+      expect(handleSessionEvent({
+        type: eventType,
+        conversation_id: conversation.id,
+        active_conversation_id: conversation.id,
+        conversation,
+        active_conversation: conversation,
+        workspace: null,
+        working_directory: "",
+        session: { active_conversation_id: conversation.id, workspace_root: null },
+      } as unknown as ServerEvent, buffers)).toBe(true);
+
+      const state = useAppStore.getState();
+      expect(state.conversationId).toBe(conversation.id);
+      expect(state.workingDirectory).toBe("");
+      expect(state.messages.map((message) => message.content)).toContain("Saved history");
+      expect(state.conversations.find((item) => item.id === conversation.id)?.workspaceRoot)
+        .toBe("C:/untrusted-workspace");
+    },
+  );
+
+  it("uses the mounted workspace from the matching runtime owner", () => {
+    const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+
+    handleSessionEvent({
+      type: "conversation.switched",
+      conversation_id: "conv-mounted",
+      conversation: {
+        id: "conv-mounted",
+        title: "Mounted project",
+        updated_at: "2026-01-02T00:00:00.000Z",
+        workspace_root: "C:/base-project",
+      },
+      session: { active_conversation_id: "conv-mounted", workspace_root: "C:/actual-worktree" },
+    } as unknown as ServerEvent, buffers);
+
+    expect(useAppStore.getState().workingDirectory).toBe("C:/actual-worktree");
   });
 
   it("session sync restores active conversation snapshot without a separate list event", () => {

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import hashlib
 import json
 import logging
@@ -13,7 +14,6 @@ import socket
 import subprocess
 import sys
 from collections import deque
-from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Coroutine
@@ -34,6 +34,8 @@ from backend.subprocesses import terminate_process_tree
 logger = logging.getLogger(__name__)
 
 OUTPUT_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+MAX_PREVIEW_LOG_LINE_CHARS = 64 * 1024
+PREVIEW_OUTPUT_DRAIN_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,8 @@ class PreviewLaunchProcess:
     _monitor_task: asyncio.Task[None] | None = field(default=None, repr=False)
     _sandbox_runner: SandboxRunner | None = field(default=None, repr=False)
     ready_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    _exit_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    _stop_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     @property
     def effective_url(self) -> str:
@@ -78,6 +82,15 @@ class PreviewLaunchProcess:
     @property
     def effective_port(self) -> int:
         return self.detected_port or self.config.port
+
+    @property
+    def is_active(self) -> bool:
+        return (
+            _RUNNING.get(self.id) is self
+            and self.process.returncode is None
+            and self.status in {"starting", "ready"}
+            and not self.cleanup_pending
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -89,6 +102,8 @@ class PreviewLaunchProcess:
             "url": self.effective_url,
             "pid": self.process.pid,
             "status": self.status,
+            "cleanup_pending": self.cleanup_pending,
+            "cleanup_reason": self.cleanup_reason,
             "stderr_tail": list(self.stderr_tail),
             "output_tail": list(self.output_tail),
             "session_id": self.session_id,
@@ -110,10 +125,6 @@ _RUNNING: dict[str, PreviewLaunchProcess] = {}
 
 
 def _active_preview_processes() -> list[PreviewLaunchProcess]:
-    stopped = [key for key, proc in _RUNNING.items() if proc.process.returncode is not None]
-    for key in stopped:
-        proc = _RUNNING.pop(key)
-        proc.status = "exited"
     return list(_RUNNING.values())
 
 
@@ -152,7 +163,7 @@ def _coerce_config(raw: dict[str, Any], workspace_root: Path, source: str) -> Pr
     try:
         cwd.relative_to(workspace_root)
     except ValueError:
-        cwd = workspace_root
+        raise PreviewLaunchConfigError(source, f"cwd must stay inside the workspace: {cwd_value}") from None
     port = raw.get("port")
     if not isinstance(port, int) or not (1 <= port <= 65535):
         port = 0
@@ -290,25 +301,17 @@ def preview_url_is_owned(
     knowing its number.
     """
 
+    if find_preview_process(
+        url, session_id=session_id, conversation_id=conversation_id, workspace_root=workspace_root,
+    ) is not None:
+        return True
     try:
-        parsed = urlparse(str(url or "").strip())
-        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-            return False
-        requested = _preview_origin(parsed)
-    except (TypeError, ValueError):
+        requested = _preview_origin(urlparse(str(url or "").strip()))
+    except ValueError:
         return False
-
-    candidates = [str(value).strip() for value in extra_urls if str(value).strip()]
-    candidates.extend(
-        process.effective_url
-        for process in running_preview_processes(
-            session_id=session_id,
-            conversation_id=conversation_id,
-            workspace_root=workspace_root,
-        )
-        if process.effective_url
-    )
-    for candidate in candidates:
+    if requested is None:
+        return False
+    for candidate in extra_urls:
         try:
             candidate_parsed = urlparse(candidate)
             if _preview_origin(candidate_parsed) == requested:
@@ -316,6 +319,32 @@ def preview_url_is_owned(
         except (TypeError, ValueError):
             continue
     return False
+
+
+def find_preview_process(
+    url: str,
+    *,
+    session_id: str,
+    conversation_id: str,
+    workspace_root: str | Path | None = None,
+) -> PreviewLaunchProcess | None:
+    try:
+        requested = _preview_origin(urlparse(str(url or "").strip()))
+    except ValueError:
+        return None
+    if requested is None:
+        return None
+    for process in running_preview_processes(
+        session_id=session_id, conversation_id=conversation_id, workspace_root=workspace_root,
+    ):
+        if not process.is_active:
+            continue
+        try:
+            if _preview_origin(urlparse(process.effective_url)) == requested:
+                return process
+        except ValueError:
+            continue
+    return None
 
 
 def _preview_origin(parsed: Any) -> tuple[str, str, int] | None:
@@ -337,85 +366,134 @@ async def _monitor_process(
     """Read stdout/stderr, detect ready URL, and report crashes."""
     ready_fired = False
 
-    async def _read_stream(stream: asyncio.StreamReader | None, is_stderr: bool) -> None:
+    async def _record_line(line: str, is_stderr: bool) -> None:
         nonlocal ready_fired
+        if is_stderr:
+            launched.stderr_tail.append(line)
+        stream_name = "stderr" if is_stderr else "stdout"
+        launched.output_tail.append({"stream": stream_name, "line": line})
+        if broadcast:
+            await broadcast({
+                "type": "preview.server.output",
+                "id": launched.id,
+                "stream": stream_name,
+                "line": line,
+                **launched.owner_dict(),
+            })
+
+        if ready_fired:
+            return
+
+        match = OUTPUT_URL_RE.search(line)
+        if match:
+            url = match.group(0).rstrip(".,;)]}").replace("0.0.0.0", "localhost")
+            try:
+                parsed = urlparse(url)
+                detected_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            except ValueError:
+                return
+            # ``python -m http.server`` uses an explicit static-file URL;
+            # keep that path while learning only the bound port.
+            if launched.config.source != "static-html":
+                launched.detected_url = url
+            launched.detected_port = detected_port
+            ready_fired = True
+            await mark_preview_ready(launched, broadcast)
+
+    async def _read_stream(stream: asyncio.StreamReader | None, is_stderr: bool) -> None:
         if stream is None:
             return
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        pending = ""
+        omitted_characters = 0
         while True:
-            raw = await stream.readline()
+            raw = await stream.read(4096)
+            segments = decoder.decode(raw, final=not raw).split("\n")
+            for segment_index, segment in enumerate(segments):
+                pending += segment
+                overflow = max(0, len(pending) - MAX_PREVIEW_LOG_LINE_CHARS)
+                if overflow:
+                    pending = pending[overflow:]
+                    omitted_characters += overflow
+                if segment_index == len(segments) - 1 and raw:
+                    continue
+                if not raw and not pending and not omitted_characters:
+                    continue
+                line = pending.rstrip()
+                if omitted_characters:
+                    line = f"[... {omitted_characters} characters omitted] {line}"
+                pending = ""
+                omitted_characters = 0
+                await _record_line(line, is_stderr)
             if not raw:
                 break
-            try:
-                line = raw.decode("utf-8", errors="replace").rstrip()
-            except Exception:
-                continue
 
-            if is_stderr:
-                launched.stderr_tail.append(line)
-            stream_name = "stderr" if is_stderr else "stdout"
-            launched.output_tail.append({"stream": stream_name, "line": line})
-            if broadcast:
-                await broadcast({
-                    "type": "preview.server.output",
-                    "id": launched.id,
-                    "stream": stream_name,
-                    "line": line,
-                    **launched.owner_dict(),
-                })
-
-            if ready_fired:
-                continue
-
-            match = OUTPUT_URL_RE.search(line)
-            if match:
-                url = match.group(0).rstrip(".,;)]}").replace("0.0.0.0", "localhost")
-                try:
-                    parsed = urlparse(url)
-                    detected_port = parsed.port or (443 if parsed.scheme == "https" else 80)
-                except ValueError:
-                    continue
-                # ``python -m http.server`` uses an explicit static-file URL;
-                # keep that path while learning only the bound port.
-                if launched.config.source != "static-html":
-                    launched.detected_url = url
-                launched.detected_port = detected_port
-                ready_fired = True
-                await mark_preview_ready(launched, broadcast)
-
+    readers = [
+        asyncio.create_task(_read_stream(launched.process.stdout, False)),
+        asyncio.create_task(_read_stream(launched.process.stderr, True)),
+    ]
+    output = asyncio.gather(*readers)
+    exited = asyncio.create_task(launched._exit_event.wait())
+    stopped = asyncio.create_task(launched._stop_event.wait())
+    monitor_error = ""
     try:
-        await asyncio.gather(
-            _read_stream(launched.process.stdout, False),
-            _read_stream(launched.process.stderr, True),
-        )
-    except Exception as exc:
-        logger.debug("Preview monitor error: %s", exc)
-
-    await launched.process.wait()
-    if launched._sandbox_runner is not None:
-        # Long-lived container sandboxes keep a cidfile/name owned by the
-        # runner. Natural exit must release that state just like explicit stop.
-        if not await launched._sandbox_runner.terminate(launched.process):
-            logger.warning(
-                "Preview %s exited but its sandbox resources could not be proven released",
-                launched.id,
-            )
-    was_stopping = launched.status == "stopping"
-    launched.status = "exited" if was_stopping or launched.process.returncode == 0 else "crashed"
+        try:
+            completed, _ = await asyncio.wait((output, exited, stopped), return_when=asyncio.FIRST_COMPLETED)
+            if output in completed:
+                await output
+                await asyncio.wait((exited, stopped), return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            launched._stop_event.set()
+        except Exception as exc:
+            monitor_error = f"Preview output failed: {exc}"
+            logger.warning("Preview monitor error: %s", exc, exc_info=True)
+        launched.status = "stopping"
+        await _cleanup_preview_process(launched)
+        if not output.done():
+            completed, _ = await asyncio.wait((output,), timeout=PREVIEW_OUTPUT_DRAIN_SECONDS)
+            if not completed:
+                monitor_error = monitor_error or "Preview output did not finish after exit; remaining delivery was cancelled"
+        if output.done() and not output.cancelled() and output.exception() is not None:
+            monitor_error = monitor_error or f"Preview output failed: {output.exception()}"
+    finally:
+        for task in (*readers, exited, stopped):
+            task.cancel()
+        await asyncio.gather(*readers, output, exited, stopped, return_exceptions=True)
+    was_stopping = launched._stop_event.is_set()
+    if monitor_error:
+        launched.stderr_tail.append(monitor_error)
+    if not launched.cleanup_pending:
+        launched.status = "exited" if was_stopping or (launched.process.returncode == 0 and not monitor_error) else "crashed"
     # _RUNNING is keyed by a deterministic preview id, so a restart reuses this
     # exact key. Both awaits above are yield points during which the user may
     # have restarted the preview and overwritten the slot; popping by id alone
     # would evict the live replacement and orphan it beyond every stop path.
-    if _RUNNING.get(launched.id) is launched:
+    registered = _RUNNING.get(launched.id)
+    if registered is launched and not launched.cleanup_pending:
         _RUNNING.pop(launched.id, None)
+    elif registered is not None and registered is not launched:
+        return
 
-    if broadcast and not was_stopping and launched.process.returncode != 0:
-        await broadcast({
-            "type": "preview.server.crashed",
-            "id": launched.id,
-            "exit_code": launched.process.returncode,
-            "stderr_tail": list(launched.stderr_tail),
-            **launched.owner_dict(),
-        })
+    if broadcast and not was_stopping:
+        if launched.cleanup_pending:
+            await broadcast({
+                "type": "preview.server.unhealthy",
+                "id": launched.id,
+                "last_error": "Preview resources could not be confirmed stopped; retry stop",
+                "cleanup_pending": True,
+                "cleanup_reason": launched.cleanup_reason,
+                **launched.owner_dict(),
+            })
+        elif launched.status == "exited":
+            await broadcast({"type": "preview.launch.stopped", **launched.to_dict()})
+        else:
+            await broadcast({
+                "type": "preview.server.crashed",
+                "id": launched.id,
+                "exit_code": launched.process.returncode,
+                "stderr_tail": list(launched.stderr_tail),
+                **launched.owner_dict(),
+            })
 
 
 async def start_preview_launch(
@@ -460,8 +538,10 @@ async def start_preview_launch(
 async def mark_preview_ready(
     launched: PreviewLaunchProcess,
     broadcast: BroadcastFn | None = None,
-) -> None:
+) -> bool:
     """Commit readiness after either process output or HTTP verification."""
+    if launched.process.returncode is not None or launched.status not in {"starting", "ready"}:
+        return False
     transitioned = launched.status != "ready"
     launched.status = "ready"
     launched.ready_event.set()
@@ -473,6 +553,7 @@ async def mark_preview_ready(
             "port": launched.effective_port,
             **launched.owner_dict(),
         })
+    return True
 
 
 async def _start_preview_config(
@@ -492,8 +573,10 @@ async def _start_preview_config(
         f"{session}\0{conversation}\0{Path(config.cwd).resolve()}\0{config.name}".encode("utf-8")
     ).hexdigest()
     existing = _RUNNING.get(preview_id)
-    if existing and existing.process.returncode is None:
-        return existing
+    if existing is not None:
+        if existing.process.returncode is None and existing.status in {"starting", "ready"}:
+            return existing
+        await _stop_preview_processes([existing])
     if config.auto_port and not config.port:
         port = _allocate_loopback_port()
         config = replace(
@@ -552,12 +635,14 @@ async def _start_preview_config(
             timeout=None,
         )
     sandbox_runner = SandboxRunner(policy)
+    exit_event = asyncio.Event()
     process = await sandbox_runner.spawn_shell_interactive(
         config.command,
         cwd=config.cwd,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        on_exit=exit_event.set,
     )
     launched = PreviewLaunchProcess(
         id=preview_id,
@@ -567,6 +652,7 @@ async def _start_preview_config(
         conversation_id=conversation,
         workspace_root=str(sandbox_root),
         _sandbox_runner=sandbox_runner,
+        _exit_event=exit_event,
     )
     _RUNNING[preview_id] = launched
     launched._monitor_task = asyncio.create_task(_monitor_process(launched, broadcast))
@@ -710,25 +796,16 @@ async def _stop_preview_processes(
     """
     unproven: list[str] = []
     for proc in targets:
-        if proc.process.returncode is None:
-            proc.status = "stopping"
-            if proc._sandbox_runner is not None:
-                reaped = await proc._sandbox_runner.terminate(proc.process)
-            else:
-                reaped = await terminate_process_tree(proc.process)
-            if not reaped:
-                proc.cleanup_pending = True
-                proc.cleanup_reason = "preview_tree_survived_kill"
-                unproven.append(proc.id)
-                logger.warning(
-                    "Preview %s could not be proven stopped; keeping its handle",
-                    proc.id,
-                )
-                continue
-        proc.cleanup_pending = False
-        proc.cleanup_reason = ""
+        proc.status = "stopping"
         if proc._monitor_task and not proc._monitor_task.done():
-            proc._monitor_task.cancel()
+            proc._stop_event.set()
+            await proc._monitor_task
+        else:
+            await _cleanup_preview_process(proc)
+        if proc.cleanup_pending:
+            unproven.append(proc.id)
+            continue
+        proc.status = "exited"
         # A restart during the await above may already own this deterministic
         # key; only the entry we actually stopped may leave the registry.
         if _RUNNING.get(proc.id) is proc:
@@ -738,3 +815,17 @@ async def _stop_preview_processes(
             "Preview processes could not be proven stopped: " + ", ".join(sorted(unproven))
         )
     return targets
+
+
+async def _cleanup_preview_process(launched: PreviewLaunchProcess) -> None:
+    launched.cleanup_pending = True
+    launched.cleanup_reason = "preview_cleanup_pending"
+    if launched._sandbox_runner is not None:
+        reaped = await launched._sandbox_runner.terminate(launched.process)
+    else:
+        reaped = await terminate_process_tree(launched.process)
+    launched.cleanup_pending = not reaped
+    launched.cleanup_reason = "" if reaped else "preview_cleanup_unproven"
+    if not reaped:
+        launched.status = "unhealthy"
+        logger.warning("Preview %s could not be proven stopped; keeping its handle", launched.id)

@@ -32,13 +32,13 @@ from backend.tools.base import (
     ToolSchema,
 )
 from backend.tools.contracts import ToolSpec
+from backend.tools.path_resolution import PathTraversalError, _resolve_path
 
 logger = logging.getLogger(__name__)
 
 _MAX_LOCATIONS = 30
 _MAX_HOVER_CHARS = 4_000
 _MAX_SYMBOLS = 100
-_PROJECT_MARKERS = (".git", "package.json", "pyproject.toml", "Cargo.toml", "go.mod", ".vscode")
 
 
 class LSPGoToDefinitionTool(BaseTool):
@@ -77,7 +77,7 @@ class LSPGoToDefinitionTool(BaseTool):
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Absolute path to the source file.",
+                        "description": "Source file path, absolute or relative to the current workspace.",
                     },
                     "line": {
                         "type": "integer",
@@ -96,7 +96,7 @@ class LSPGoToDefinitionTool(BaseTool):
                     },
                     "workspace_root": {
                         "type": "string",
-                        "description": "Workspace root for the language server. Defaults to the file's directory.",
+                        "description": "Workspace root for the language server. Defaults to the current conversation's workspace.",
                     },
                 },
                 "required": ["file_path", "line", "character"],
@@ -116,10 +116,14 @@ class LSPGoToDefinitionTool(BaseTool):
         if error:
             return self._error_result(error)
         line, character = position
-        workspace_root = _workspace_root_for(file_path, args.get("workspace_root"))
+        try:
+            file_path = str(_resolve_path(file_path, context))
+            workspace_root = str(_resolve_path(str(args.get("workspace_root") or "."), context))
+        except PathTraversalError as exc:
+            return self._error_result(str(exc))
 
         manager = get_lsp_manager()
-        if not manager.is_available(file_path):
+        if not manager.is_available(file_path, workspace_root):
             return ToolResult(
                 content=f"No language server available for {Path(file_path).suffix} files. "
                         f"Install pyright (pip install pyright), typescript-language-server (npm i -g typescript-language-server), "
@@ -188,7 +192,7 @@ class LSPFindReferencesTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "Absolute path to the source file."},
+                    "file_path": {"type": "string", "description": "Source file path, absolute or relative to the current workspace."},
                     "line": {"type": "integer", "minimum": 0, "description": "Line number. Interpreted as 0-based unless line_base is 1."},
                     "character": {"type": "integer", "minimum": 0, "description": "0-based character offset."},
                     "line_base": {
@@ -196,7 +200,7 @@ class LSPFindReferencesTool(BaseTool):
                         "enum": [0, 1],
                         "description": "Set to 1 when passing a human/editor 1-based line number. Defaults to 0.",
                     },
-                    "workspace_root": {"type": "string", "description": "Workspace root. Defaults to auto-detected project root."},
+                    "workspace_root": {"type": "string", "description": "Workspace root. Defaults to the current conversation's workspace."},
                 },
                 "required": ["file_path", "line", "character"],
             },
@@ -215,10 +219,14 @@ class LSPFindReferencesTool(BaseTool):
         if error:
             return self._error_result(error)
         line, character = position
-        workspace_root = _workspace_root_for(file_path, args.get("workspace_root"))
+        try:
+            file_path = str(_resolve_path(file_path, context))
+            workspace_root = str(_resolve_path(str(args.get("workspace_root") or "."), context))
+        except PathTraversalError as exc:
+            return self._error_result(str(exc))
 
         manager = get_lsp_manager()
-        if not manager.is_available(file_path):
+        if not manager.is_available(file_path, workspace_root):
             return ToolResult(
                 content=f"No language server available for {Path(file_path).suffix} files.",
                 is_error=True,
@@ -284,7 +292,7 @@ class LSPHoverTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "Absolute path to the source file."},
+                    "file_path": {"type": "string", "description": "Source file path, absolute or relative to the current workspace."},
                     "line": {"type": "integer", "minimum": 0, "description": "Line number. Interpreted as 0-based unless line_base is 1."},
                     "character": {"type": "integer", "minimum": 0, "description": "0-based character offset."},
                     "line_base": {
@@ -292,7 +300,7 @@ class LSPHoverTool(BaseTool):
                         "enum": [0, 1],
                         "description": "Set to 1 when passing a human/editor 1-based line number. Defaults to 0.",
                     },
-                    "workspace_root": {"type": "string", "description": "Workspace root."},
+                    "workspace_root": {"type": "string", "description": "Workspace root. Defaults to the current conversation's workspace."},
                 },
                 "required": ["file_path", "line", "character"],
             },
@@ -311,10 +319,14 @@ class LSPHoverTool(BaseTool):
         if error:
             return self._error_result(error)
         line, character = position
-        workspace_root = _workspace_root_for(file_path, args.get("workspace_root"))
+        try:
+            file_path = str(_resolve_path(file_path, context))
+            workspace_root = str(_resolve_path(str(args.get("workspace_root") or "."), context))
+        except PathTraversalError as exc:
+            return self._error_result(str(exc))
 
         manager = get_lsp_manager()
-        if not manager.is_available(file_path):
+        if not manager.is_available(file_path, workspace_root):
             return ToolResult(
                 content=f"No language server available for {Path(file_path).suffix} files.",
                 is_error=True,
@@ -387,8 +399,8 @@ class LSPDocumentSymbolsTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "Absolute path to the source file."},
-                    "workspace_root": {"type": "string", "description": "Workspace root."},
+                    "file_path": {"type": "string", "description": "Source file path, absolute or relative to the current workspace."},
+                    "workspace_root": {"type": "string", "description": "Workspace root. Defaults to the current conversation's workspace."},
                 },
                 "required": ["file_path"],
             },
@@ -403,10 +415,14 @@ class LSPDocumentSymbolsTool(BaseTool):
         if not file_path:
             return self._error_result("Missing file_path")
 
-        workspace_root = _workspace_root_for(file_path, args.get("workspace_root"))
+        try:
+            file_path = str(_resolve_path(file_path, context))
+            workspace_root = str(_resolve_path(str(args.get("workspace_root") or "."), context))
+        except PathTraversalError as exc:
+            return self._error_result(str(exc))
 
         manager = get_lsp_manager()
-        if not manager.is_available(file_path):
+        if not manager.is_available(file_path, workspace_root):
             return ToolResult(
                 content=f"No language server available for {Path(file_path).suffix} files.",
                 is_error=True,
@@ -489,18 +505,6 @@ def _parse_position(args: dict[str, Any]) -> tuple[tuple[int, int], str]:
             return (0, 0), "line must be at least 1 when line_base is 1"
         line -= 1
     return (line, character), ""
-
-
-def _workspace_root_for(file_path: str, explicit_root: Any) -> str:
-    workspace_root = str(explicit_root or "").strip()
-    if workspace_root:
-        return workspace_root
-    path = Path(file_path)
-    workspace_root = str(path.parent)
-    for parent in path.resolve().parents:
-        if any((parent / marker).exists() for marker in _PROJECT_MARKERS):
-            return str(parent)
-    return workspace_root
 
 
 def _format_locations(title: str, locations: list[LSPLocation], total: int) -> str:

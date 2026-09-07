@@ -8,6 +8,17 @@ import type {
 } from "../protocol/streaming-types";
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
 import type { ShortcutActionId, ShortcutBindings } from "../lib/keyboard-shortcuts";
+import type {
+  PreviewLaunchConfigInfo,
+  PreviewLaunchProcessInfo,
+  PreviewServerInfo,
+} from "../protocol/preview-types";
+export type {
+  PreviewLaunchConfigInfo,
+  PreviewLaunchProcessInfo,
+  PreviewServerInfo,
+  PreviewServerOutputLine,
+} from "../protocol/preview-types";
 
 // ── UI Slice ──────────────────────────────────────────────────────
 
@@ -187,37 +198,6 @@ export interface McpServerStatus {
     retryable: boolean;
   }>;
   progress?: McpServerProgress;
-}
-
-export interface PreviewServerInfo {
-  port: number;
-  url: string;
-  name: string;
-  framework?: string;
-}
-
-export interface PreviewLaunchConfigInfo {
-  name: string;
-  command: string;
-  cwd: string;
-  port: number;
-  url: string;
-  auto_port?: boolean;
-  source?: string;
-}
-
-export interface PreviewServerOutputLine {
-  stream: "stdout" | "stderr";
-  line: string;
-  timestamp?: number;
-}
-
-export interface PreviewLaunchProcessInfo extends PreviewLaunchConfigInfo {
-  id: string;
-  pid?: number;
-  status: "starting" | "running" | "ready" | "exited" | "crashed" | "unhealthy";
-  stderr_tail?: string[];
-  output_tail?: PreviewServerOutputLine[];
 }
 
 export interface PreviewVerificationInfo {
@@ -1877,9 +1857,8 @@ export interface EditorSlice {
     contentHash?: string,
     meta?: Pick<EditorTab, "largeFile" | "loadWarning" | "sizeBytes" | "readOnly">,
   ) => void;
-  markTabSaved: (path: string, savedContent: string, contentHash?: string) => void;
+  markTabSaved: (path: string, savedContent: string, contentHash?: string, sizeBytes?: number) => void;
   markTabExternalChanged: (path: string) => void;
-  reloadTab: (path: string, content: string, contentHash?: string) => void;
   insertIntoActiveEditor: (text: string) => boolean;
 }
 

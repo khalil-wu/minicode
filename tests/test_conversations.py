@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import json
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
@@ -1324,6 +1325,9 @@ def test_websocket_session_restore_emits_active_conversation_snapshot(monkeypatc
     monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", tmp_path, raising=False)
     workspace_root = tmp_path / "project"
     workspace_root.mkdir()
+    trust_ledger = tmp_path / "trusted_workspaces.json"
+    trust_ledger.write_text(json.dumps({"roots": [str(workspace_root)]}), encoding="utf-8")
+    monkeypatch.setattr("backend.workspace.trust.TRUSTED_WORKSPACES_FILE", trust_ledger)
     repo = ConversationRepository(base_dir=tmp_path)
     conversation = repo.create_conversation(
         conversation_id="conv_restore_active",
@@ -1352,7 +1356,73 @@ def test_websocket_session_restore_emits_active_conversation_snapshot(monkeypatc
     assert restored["active_conversation"]["transcript"][0]["content"] == "hello from restored project"
     assert restored["session"]["active_conversation_id"] == conversation.id
     assert restored["session"]["workspace_root"] == str(workspace_root.resolve())
+    assert restored["workspace"]["root_path"] == str(workspace_root.resolve())
+    assert restored["error"] is None
     assert restored["messages"][0]["content"] == "hello from restored project"
+
+
+@pytest.mark.parametrize("workspace_state", ["untrusted", "missing"])
+@pytest.mark.parametrize("warm_start", [False, True], ids=["cold", "previous-workspace"])
+def test_websocket_restore_preserves_history_without_an_unavailable_workspace(
+    monkeypatch, tmp_path, workspace_state: str, warm_start: bool,
+) -> None:
+    from backend.conversations.repository import ConversationRepository
+
+    _install_noop_llm(monkeypatch)
+    monkeypatch.setattr("backend.main.CONVERSATION_DATA_DIR", tmp_path, raising=False)
+    monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", tmp_path, raising=False)
+    previous_root = tmp_path / "previous-project"
+    previous_root.mkdir()
+    target_root = tmp_path / "unavailable-project"
+    if workspace_state == "untrusted":
+        target_root.mkdir()
+    trust_ledger = tmp_path / "trusted_workspaces.json"
+    trust_ledger.write_text(json.dumps({"roots": [str(previous_root)]}), encoding="utf-8")
+    monkeypatch.setattr("backend.workspace.trust.TRUSTED_WORKSPACES_FILE", trust_ledger)
+    repo = ConversationRepository(base_dir=tmp_path)
+    previous = repo.create_conversation(
+        conversation_id="conv_restore_previous", workspace_root=str(previous_root), memory_mode="disabled",
+    )
+    target = repo.create_conversation(
+        conversation_id="conv_restore_unavailable", workspace_root=str(target_root), memory_mode="disabled",
+        transcript=[{"id": "saved-message", "role": "user", "content": "Saved history"}],
+    )
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws?session_id=session_test_restore_unavailable") as ws:
+            _receive_until_event(ws, "llm.model.updated")
+            if warm_start:
+                ws.send_json({"type": "conversation.switch", "conversation_id": previous.id})
+                previous_switched = _receive_conversation_switched(ws, previous.id)
+                assert previous_switched["session"]["workspace_root"] == str(previous_root.resolve())
+            ws.send_json({"type": "session.restore", "last_conversation_id": target.id})
+            restored = _receive_until_event(ws, "session.restored")
+            switched = _receive_conversation_switched(ws, target.id)
+            ws.send_json({"type": "session.sync"})
+            synced = _receive_until_event(ws, "session.synced")
+            ws.send_json({"type": "terminal.list", "conversation_id": target.id})
+            terminal_result = None
+            for _attempt in range(60):
+                payload = ws.receive_json()
+                if payload.get("type") == "command.result" and payload.get("command") == "terminal.list":
+                    terminal_result = payload
+                    break
+
+    assert restored["restored"] is True
+    assert restored["active_conversation_id"] == target.id
+    assert restored["active_conversation"]["workspace_root"] == str(target_root)
+    assert restored["messages"][0]["content"] == "Saved history"
+    assert restored["workspace"] is None
+    assert restored["working_directory"] == ""
+    assert restored["session"]["workspace_root"] is None
+    assert restored["error"]
+    assert switched["conversation"]["workspace_root"] == str(target_root)
+    assert switched["session"]["workspace_root"] is None
+    assert synced["working_directory"] == ""
+    assert synced["session"]["workspace_root"] is None
+    assert terminal_result is not None
+    assert terminal_result["level"] == "error"
+    assert "Open a workspace" in terminal_result["message"]
 
 
 def test_websocket_completed_conversation_restores_after_same_session_reconnect(

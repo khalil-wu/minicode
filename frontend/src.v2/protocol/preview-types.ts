@@ -70,7 +70,9 @@ export interface PreviewServerOutputLine {
 export interface PreviewLaunchProcessInfo extends PreviewLaunchConfigInfo {
   id: string;
   pid?: number;
-  status: "starting" | "running" | "ready" | "exited" | "crashed" | "unhealthy";
+  status: "starting" | "running" | "ready" | "stopping" | "exited" | "crashed" | "unhealthy";
+  cleanup_pending?: boolean;
+  cleanup_reason?: string;
   stderr_tail?: string[];
   output_tail?: PreviewServerOutputLine[];
 }
@@ -149,6 +151,8 @@ export interface PreviewServerUnhealthyEvent extends PreviewOwnedEvent {
   url?: string;
   consecutive_failures?: number;
   last_error?: string;
+  cleanup_pending?: boolean;
+  cleanup_reason?: string;
 }
 
 export interface PreviewVerifiedEvent extends PreviewOwnedEvent {

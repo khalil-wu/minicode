@@ -39,7 +39,7 @@ class _UnicodeMetadataClient(MCPClient):
     def __init__(self) -> None:
         super().__init__(server_name="unicode-test")
         self._connected = True
-        self._server_capabilities = MCPServerCapabilities(resources=True, prompts=True)
+        self._server_capabilities = MCPServerCapabilities(tools=True, resources=True, prompts=True)
 
     async def _request(self, method, params=None):
         if method == "tools/list":

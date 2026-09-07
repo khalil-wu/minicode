@@ -7,7 +7,7 @@ import os
 import signal
 import subprocess
 from contextlib import suppress
-from typing import Any
+from typing import Any, Callable
 
 import psutil
 
@@ -84,13 +84,43 @@ def process_group_kwargs() -> dict[str, Any]:
     return {"start_new_session": True}
 
 
-async def spawn_exec(*args: str, **kwargs: Any) -> asyncio.subprocess.Process:
+class _ExitCallbackProtocol(asyncio.subprocess.SubprocessStreamProtocol):
+    def __init__(self, on_exit: Callable[[], None], *, limit: int, loop: asyncio.AbstractEventLoop):
+        super().__init__(limit, loop)
+        self._on_exit = on_exit
+
+    def process_exited(self) -> None:
+        super().process_exited()
+        self._on_exit()
+
+
+async def _spawn_with_exit_callback(
+    *args: str, shell: bool, on_exit: Callable[[], None], **kwargs: Any,
+) -> asyncio.subprocess.Process:
+    loop = asyncio.get_running_loop()
+    protocol = _ExitCallbackProtocol(on_exit, limit=kwargs.pop("limit", 64 * 1024), loop=loop)
+    for stream in ("stdin", "stdout", "stderr"):
+        kwargs.setdefault(stream, None)
+    spawn = loop.subprocess_shell if shell else loop.subprocess_exec
+    transport, _ = await spawn(lambda: protocol, *args, **kwargs)
+    return asyncio.subprocess.Process(transport, protocol, loop)
+
+
+async def spawn_exec(
+    *args: str, on_exit: Callable[[], None] | None = None, **kwargs: Any,
+) -> asyncio.subprocess.Process:
     kwargs.update(process_group_kwargs())
+    if on_exit is not None:
+        return await _spawn_with_exit_callback(*args, shell=False, on_exit=on_exit, **kwargs)
     return await asyncio.create_subprocess_exec(*args, **kwargs)
 
 
-async def spawn_shell(command: str, **kwargs: Any) -> asyncio.subprocess.Process:
+async def spawn_shell(
+    command: str, *, on_exit: Callable[[], None] | None = None, **kwargs: Any,
+) -> asyncio.subprocess.Process:
     kwargs.update(process_group_kwargs())
+    if on_exit is not None:
+        return await _spawn_with_exit_callback(command, shell=True, on_exit=on_exit, **kwargs)
     return await asyncio.create_subprocess_shell(command, **kwargs)
 
 

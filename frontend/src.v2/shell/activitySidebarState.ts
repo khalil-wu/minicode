@@ -2,6 +2,7 @@ import { citationUrl, extractInlineCitationIndexes } from "../chat/citationProje
 import { getContentBlocks, getToolCallsFromMessage } from "../lib/content-blocks";
 import { planStepProgressStatus, shouldSurfacePlanProgress } from "../lib/planVisibility";
 import { isProviderRequestProgress, providerProgressLabel } from "../lib/provider-progress";
+import { previewUrlsShareOrigin } from "../lib/preview-projection";
 import {
   artifactFallbackLabel as projectionArtifactFallbackLabel,
   artifactMediaTypeForProjection,
@@ -445,20 +446,24 @@ export function buildOutput(messages: ChatMessage[], previewArtifact: ArtifactCo
 function buildBrowser(input: ActivitySidebarStateInput): ActivityBrowserItem[] {
   if (!input.livePreviewUrl) return [];
   const url = input.livePreviewUrl;
-  const server = input.previewServers.find((item) => item.url === url || sameHost(item.url, url));
-  const process = input.previewLaunchProcesses.find((item) => item.url === url || sameHost(item.url, url));
+  const server = input.previewServers.find((item) => previewUrlsShareOrigin(item.url, url));
+  const process = input.previewLaunchProcesses.find((item) => previewUrlsShareOrigin(item.url, url));
   const verification = input.previewVerification?.url === url ? input.previewVerification : null;
   const status: ActivityBrowserItem["status"] = verification
     ? verification.ok ? "verified" : "failed"
-    : process && ["starting", "running"].includes(process.status)
-      ? "running"
-      : "idle";
+    : process && ["crashed", "unhealthy"].includes(process.status)
+      ? "failed"
+      : process && ["starting", "running", "ready", "stopping"].includes(process.status)
+        ? "running"
+        : "idle";
   const detail = verification
     ? verification.ok
       ? `${verification.status_code ?? "OK"} in ${verification.elapsed_ms}ms`
       : verification.error || `Failed${verification.status_code ? ` (${verification.status_code})` : ""}`
     : process
-      ? process.status
+      ? process.status === "stopping"
+        ? "正在停止"
+        : process.cleanup_pending ? "清理未完成，请重试停止" : process.status
       : server?.framework;
 
   return [{
@@ -619,13 +624,15 @@ function buildRuns(input: ActivitySidebarStateInput): ActivityRunItem[] {
   }
 
   for (const process of input.previewLaunchProcesses ?? []) {
-    const running = ["starting", "running", "ready"].includes(process.status);
+    const running = ["starting", "running", "ready", "stopping"].includes(process.status);
     items.push({
       id: `preview:${process.id}`,
       previewId: process.id,
       kind: "preview",
       label: process.name || "Preview",
-      detail: process.url || process.command,
+      detail: process.status === "stopping"
+        ? "正在停止"
+        : process.cleanup_pending ? "清理未完成，请重试停止" : process.url || process.command,
       status: running ? "running" : process.status === "exited" ? "completed" : "failed",
       attention: process.status === "crashed" || process.status === "unhealthy",
     });
@@ -872,10 +879,6 @@ function hostLabel(url: string): string {
   } catch {
     return url;
   }
-}
-
-function sameHost(left: string, right: string): boolean {
-  return hostLabel(left) === hostLabel(right);
 }
 
 function sizeLabel(bytes?: number): string | undefined {

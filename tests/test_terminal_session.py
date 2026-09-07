@@ -1,9 +1,14 @@
 import asyncio
+import shutil
 import struct
+import subprocess
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from backend.terminal.session import TerminalSession, TerminalSessionManager, _windows_powershell_init_command
+from backend.terminal.shell_commands import windows_powershell_native_tool_alias_prelude
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.services import terminal_service
 from backend.tools.terminal_tools import ReadTerminalTool
@@ -64,6 +69,34 @@ def test_windows_powershell_init_command_prefers_native_curl() -> None:
 
     assert "Get-Command curl.exe" in init_cmd
     assert "Set-Alias -Name curl -Value curl.exe" in init_cmd
+    assert "-Scope Local -Option AllScope -Force" in init_cmd
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell startup contract")
+def test_windows_powershell_startup_preserves_all_scope_and_runs_native_curl() -> None:
+    powershell = shutil.which("powershell.exe")
+    if powershell is None or shutil.which("curl.exe") is None:
+        pytest.skip("Windows PowerShell and native curl are required")
+    command = (
+        "$ErrorActionPreference = 'Stop'; "
+        "Set-Alias -Name curl -Value Invoke-WebRequest -Scope Global -Option AllScope -Force; "
+        f"{windows_powershell_native_tool_alias_prelude()}"
+        "$alias = Get-Alias curl; "
+        "if ($alias.Definition -ne 'curl.exe' -or -not ($alias.Options -band "
+        "[System.Management.Automation.ScopedItemOptions]::AllScope)) { throw 'wrong curl alias' }; "
+        "curl --version; exit $LASTEXITCODE"
+    )
+
+    result = subprocess.run(
+        [powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("curl ")
+    assert not result.stderr.strip()
 
 
 def test_terminal_snapshot_returns_bounded_recent_output() -> None:

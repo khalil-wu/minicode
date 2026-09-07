@@ -30,17 +30,15 @@ def resolve_memory_path(root: Path, relative_path: Path | str = "") -> Path:
         raise MemoryBackendError(
             f"path '{relative_path}' must stay within the memories root"
         )
-    current = root
-    for index in range(len(relative.parts) + 1):
-        if is_link(current):
+    target = root / relative
+    absolute_target = target.absolute()
+    for component in (*reversed(absolute_target.parents), absolute_target):
+        if is_link(component):
             raise MemoryBackendError(
-                f"memory path '{current}' must not be a symlink or junction"
+                f"memory path '{component}' must not be a symlink or junction"
             )
-        if index == len(relative.parts):
-            return current
-        if current.exists() and not current.is_dir():
+        if component != absolute_target and component.exists() and not component.is_dir():
             raise MemoryBackendError(
                 f"path '{relative_path}' traverses through a non-directory path component"
             )
-        current = current / relative.parts[index]
-    return current
+    return target

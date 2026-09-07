@@ -7,7 +7,7 @@ import {
   openAttachmentPreview,
   openLocalFilePreview,
 } from "./openAttachmentPreview";
-import { resetPreviewRequestScopesForTests } from "./previewRequestScope";
+import { releasePreviewScope, resetPreviewRequestScopesForTests } from "./previewRequestScope";
 
 const mocks = vi.hoisted(() => ({
   fetchAttachmentPreview: vi.fn(),
@@ -138,5 +138,24 @@ describe("attachment preview request generation", () => {
     openLocalFilePreview({ id: "a-2", name: "a2.png", file: imageFile, conversationId: "conv-a" });
     expect(revokeObjectURL).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:conv-a-first");
+  });
+
+  it("does not revive a file request after the conversation preview is released and reopened", async () => {
+    const oldText = deferred<string>();
+    const oldFile = { type: "text/plain", size: 3, text: () => oldText.promise } as File;
+    const newFile = { type: "text/plain", size: 7, text: async () => "current" } as File;
+    openLocalFilePreview({ id: "old", name: "old.txt", file: oldFile, conversationId: "conv-preview" });
+    releasePreviewScope("conv-preview");
+    openLocalFilePreview({ id: "new", name: "new.txt", file: newFile, conversationId: "conv-preview" });
+    await vi.waitFor(() => expect(useAppStore.getState().previewArtifact).toMatchObject({
+      artifactId: "local:new", content: "current", loading: false,
+    }));
+
+    oldText.resolve("old");
+    await Promise.resolve();
+
+    expect(useAppStore.getState().previewArtifact).toMatchObject({
+      artifactId: "local:new", content: "current", loading: false,
+    });
   });
 });

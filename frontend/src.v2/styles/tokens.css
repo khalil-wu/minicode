@@ -91,7 +91,7 @@
 
   /* Desktop-native typography: fast offline startup and stable CJK metrics. */
   --font-ui:    "Manrope", "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
-  --font-mono:  "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --font-mono:  "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", "Noto Sans SC", monospace;
   --font-cjk:   "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", "Source Han Sans SC", sans-serif;
   --font-prose: var(--font-ui);
   --app-text-scale: 1;

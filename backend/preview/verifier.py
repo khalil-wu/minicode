@@ -5,7 +5,7 @@ import asyncio
 import time
 from dataclasses import asdict, dataclass
 import ipaddress
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from urllib.parse import urljoin, urlparse
 
 from backend.permissions.network import (
@@ -14,6 +14,13 @@ from backend.permissions.network import (
     connected_peer_ip,
     snapshot_response_extensions,
 )
+
+if TYPE_CHECKING:
+    from backend.preview.launcher import PreviewLaunchProcess
+
+
+class PreviewProcessChangedError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -77,7 +84,21 @@ async def wait_until_ready(
     return last
 
 
-async def verify_preview_url(url: str, timeout: float | None = None) -> PreviewVerification:
+async def verify_preview_url(
+    url: str,
+    timeout: float | None = None,
+    *,
+    process: PreviewLaunchProcess | None = None,
+) -> PreviewVerification:
+    if process is not None and not process.is_active:
+        raise PreviewProcessChangedError("Preview process stopped or restarted before verification completed.")
+    result = await _verify_preview_url_http(url, timeout)
+    if process is not None and not process.is_active:
+        raise PreviewProcessChangedError("Preview process stopped or restarted before verification completed.")
+    return result
+
+
+async def _verify_preview_url_http(url: str, timeout: float | None) -> PreviewVerification:
     started = time.perf_counter()
     allowed, reason = await asyncio.to_thread(_preview_target_allowed, url)
     if not allowed:

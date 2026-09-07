@@ -27,6 +27,14 @@ const emptyPreviewFields = (): PreviewFields => ({
 const normalizedConversationId = (value: unknown): string =>
   typeof value === "string" ? value.trim() : "";
 
+export const previewUrlsShareOrigin = (left: string, right: string): boolean => {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
+};
+
 const previewFieldsFromWorkbench = (state: ConversationWorkbenchState): PreviewFields => ({
   // A stored null is meaningful. It prevents a conversation from inheriting a
   // previous conversation's open file while the right panel is still mounted.

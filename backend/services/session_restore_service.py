@@ -39,7 +39,6 @@ def build_restored_runtime_snapshot(
     *,
     restored_conversation_id: str | None,
     active_payload: dict[str, Any] | None,
-    restored_workspace: dict[str, Any] | None,
 ) -> dict[str, Any]:
     snapshot = dict(runtime_snapshot)
     if restored_conversation_id:
@@ -50,8 +49,6 @@ def build_restored_runtime_snapshot(
         restored_permission_mode = str((active_payload or {}).get("permission_mode") or "").strip()
         if restored_permission_mode:
             snapshot["permission_mode"] = restored_permission_mode
-    if restored_workspace:
-        snapshot["workspace_root"] = restored_workspace.get("root_path")
     return snapshot
 
 
@@ -190,4 +187,3 @@ def build_session_synced_payload(
         ),
         "snapshot_at": _snapshot_now(),
     }
-

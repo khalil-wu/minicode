@@ -236,3 +236,70 @@ def test_write_mcp_config_rejects_ambiguous_or_incompatible_shapes(
             json.dumps({"servers": {"broken": server}}),
             tmp_path / ".mcp.json",
         )
+
+
+@pytest.mark.parametrize("names", [("docs", " docs "), (" docs ", "docs")], ids=["plain-first", "padded-first"])
+def test_mcp_config_api_rejects_normalized_name_collisions_without_overwriting(monkeypatch, tmp_path, names) -> None:
+    config_path = tmp_path / ".mcp.json"
+    original = '{"servers": {}}\n'
+    config_path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr("backend.api.routes_llm.MCP_CONFIG_FILE", config_path)
+    content = json.dumps({"servers": {
+        name: {"transport": "stdio", "command": f"fixture-{index}", "auto_start": False}
+        for index, name in enumerate(names)
+    }})
+
+    with TestClient(app) as client:
+        response = client.put("/api/mcp/config", json={
+            "content": content, "reload": False, "confirm_sensitive_change": True,
+        })
+
+    assert response.status_code == 400
+    assert "duplicated after trimming whitespace" in response.json()["detail"]
+    assert config_path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.glob("*.bak")) == []
+
+
+@pytest.mark.parametrize("field", ["default", "tool"])
+@pytest.mark.parametrize("mode", [[], {}], ids=["list", "object"])
+def test_mcp_config_api_reports_invalid_approval_types_as_configuration_errors(monkeypatch, tmp_path, field, mode) -> None:
+    config_path = tmp_path / ".mcp.json"
+    original = '{"servers": {}}\n'
+    config_path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr("backend.api.routes_llm.MCP_CONFIG_FILE", config_path)
+    policy = {"default_tools_approval_mode": mode} if field == "default" else {"tools": {"read": {"approval_mode": mode}}}
+    content = json.dumps({"servers": {"docs": {"transport": "stdio", "command": "fixture", **policy}}})
+
+    with TestClient(app) as client:
+        response = client.put("/api/mcp/config", json={
+            "content": content, "reload": False, "confirm_sensitive_change": True,
+        })
+        assert response.status_code == 400
+        assert "approval_mode" in response.json()["detail"]
+        assert config_path.read_text(encoding="utf-8") == original
+        assert list(tmp_path.glob("*.bak")) == []
+        config_path.write_text(content, encoding="utf-8")
+        response = client.get("/api/mcp/config")
+
+    assert response.status_code == 400
+    assert "approval_mode" in response.json()["detail"]
+    assert config_path.read_text(encoding="utf-8") == content
+
+
+@pytest.mark.parametrize("mode", ["auto", "prompt", "writes", "approve", None])
+def test_mcp_approval_modes_round_trip_through_the_runtime_config_loader(tmp_path, mode) -> None:
+    from backend.mcp.manager import MCPServerManager
+
+    config_path = tmp_path / ".mcp.json"
+    write_mcp_config(json.dumps({"servers": {" docs ": {
+        "transport": "stdio", "command": "fixture", "auto_start": False,
+        "default_tools_approval_mode": mode,
+        "tools": {"read": {"approval_mode": mode}},
+    }}}), config_path)
+
+    configs = MCPServerManager(config_path, workspace_root=None)._load_local_configs()
+
+    assert len(configs) == 1
+    assert configs[0].name == "docs"
+    assert configs[0].default_tools_approval_mode == mode
+    assert configs[0].tool_approval_modes == ({} if mode is None else {"read": mode})

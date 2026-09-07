@@ -93,6 +93,8 @@ def _parse_and_validate_config(content: str) -> dict[str, Any]:
             raise ValueError("MCP server names cannot be empty.")
         if "\x00" in server_name:
             raise ValueError(f"Invalid MCP server name '{server_name}': names cannot contain NUL.")
+        if server_name in normalized_servers:
+            raise ValueError(f"MCP server name '{server_name}' is duplicated after trimming whitespace.")
         if not isinstance(server, dict):
             raise ValueError(f"MCP server '{server_name}' must be an object.")
         normalized_servers[server_name] = _validate_server(server_name, server)
@@ -287,7 +289,9 @@ def _validate_server(name: str, server: dict[str, Any]) -> dict[str, Any]:
         normalized[field] = list(dict.fromkeys(value.strip() for value in values))
     approval_modes = {"auto", "prompt", "writes", "approve"}
     default_approval = normalized.get("default_tools_approval_mode")
-    if default_approval is not None and default_approval not in approval_modes:
+    if default_approval is not None and (
+        not isinstance(default_approval, str) or default_approval not in approval_modes
+    ):
         raise ValueError(
             f"MCP server '{name}' default_tools_approval_mode must be one of: "
             "approve, auto, prompt, writes."
@@ -308,7 +312,7 @@ def _validate_server(name: str, server: dict[str, Any]) -> dict[str, Any]:
                     + ", ".join(unknown_tool_fields)
                 )
             mode = tool_config.get("approval_mode")
-            if mode is not None and mode not in approval_modes:
+            if mode is not None and (not isinstance(mode, str) or mode not in approval_modes):
                 raise ValueError(
                     f"MCP server '{name}' tools.{tool_name}.approval_mode is invalid."
                 )

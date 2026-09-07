@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
-import os
 import shutil
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
@@ -892,9 +891,7 @@ async def import_plugin_package(
     tmp_root = install_root / ".package-imports"
     tmp_root.mkdir(parents=True, exist_ok=True)
     token = _safe_plugin_folder_name(package.stem) or "plugin-package"
-    tmp_extract = tmp_root / f"{token}.{os.getpid()}.tmp"
-    if tmp_extract.exists():
-        _remove_within_root(tmp_extract, install_root)
+    tmp_extract = tmp_root / f"{token}.{uuid4().hex}.tmp"
     tmp_extract.mkdir(parents=True)
     try:
         _extract_plugin_package(package, tmp_extract)
@@ -929,15 +926,15 @@ async def _install_plugin_directory(
     trusted_marketplace: bool = False,
     marketplace_source_descriptor: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if not _is_plugin_directory(source):
-        raise PluginSettingsError(
-            "Plugin directory must contain .minicode-plugin/plugin.json",
-            status_code=400,
-        )
     linked_paths = _plugin_symlink_paths(source)
     if linked_paths:
         raise PluginSettingsError(
-            "Plugin directories cannot contain symbolic links: " + ", ".join(linked_paths[:3]),
+            "Plugin directories cannot contain symbolic links or junctions: " + ", ".join(linked_paths[:3]),
+            status_code=400,
+        )
+    if not _is_plugin_directory(source):
+        raise PluginSettingsError(
+            "Plugin directory must contain .minicode-plugin/plugin.json",
             status_code=400,
         )
 
@@ -1485,5 +1482,3 @@ def resolve_plugin_asset(plugin_path: str | Path, variant: str) -> Path | None:
         return None
     field = {"composer": "composerIcon", "logo": "logo", "logo-dark": "logoDark"}.get(variant)
     return _resolve_manifest_asset(manifest, interface.get(field)) if field else None
-
-

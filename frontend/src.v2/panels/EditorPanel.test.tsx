@@ -7,6 +7,7 @@ import { fsReadFileInfo, fsSearchFiles, isDesktop } from "../desktop/runtime";
 import { compareWriteWorkspaceFile, readWorkspaceFile, searchWorkspaceFiles } from "../protocol/workspace";
 import { pushToast } from "../overlays/ToastContainer";
 import { useAppStore } from "../stores";
+import { clearEditorWorkspaceBufferCacheForTests, persistEditorTabs } from "../stores/shared-helpers";
 import { EditorPanel } from "./EditorPanel";
 
 vi.hoisted(() => {
@@ -54,6 +55,7 @@ vi.mock("monaco-editor/languages/definitions/markdown/register.js", () => ({}));
 vi.mock("monaco-editor/languages/definitions/python/register.js", () => ({}));
 
 vi.mock("../desktop/runtime", () => ({
+  desktop: vi.fn(() => null),
   fsCompareWriteFile: vi.fn(),
   fsReadFileInfo: vi.fn(),
   fsSearchFiles: vi.fn(),
@@ -70,6 +72,9 @@ vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 describe("EditorPanel", () => {
   beforeEach(() => {
+    vi.resetAllMocks();
+    clearEditorWorkspaceBufferCacheForTests();
+    localStorage.clear();
     vi.mocked(isDesktop).mockReturnValue(false);
     vi.mocked(fsSearchFiles).mockResolvedValue([]);
     vi.mocked(searchWorkspaceFiles).mockResolvedValue([]);
@@ -475,7 +480,7 @@ describe("EditorPanel", () => {
   it("keeps the tab dirty when the user types while a save request is in flight", async () => {
     let resolveSave: ((value: {
       ok: true;
-      file: { content: string; content_hash: string };
+      file: { content: string; content_hash: string; size_bytes: number };
     }) => void) | undefined;
     vi.mocked(compareWriteWorkspaceFile).mockImplementation(() => new Promise((resolve) => {
       resolveSave = resolve;
@@ -486,6 +491,7 @@ describe("EditorPanel", () => {
         content: "first edit",
         original: "disk baseline",
         contentHash: "hash-before",
+        sizeBytes: 13,
         loading: false,
         error: null,
         largeFile: false,
@@ -512,7 +518,7 @@ describe("EditorPanel", () => {
     await act(async () => {
       resolveSave?.({
         ok: true,
-        file: { content: "first edit", content_hash: "hash-first-edit" },
+        file: { content: "first edit", content_hash: "hash-first-edit", size_bytes: 10 },
       });
       await Promise.resolve();
     });
@@ -521,6 +527,138 @@ describe("EditorPanel", () => {
     expect(tab?.content).toBe("second edit while saving");
     expect(tab?.original).toBe("first edit");
     expect(tab?.contentHash).toBe("hash-first-edit");
+    expect(tab?.sizeBytes).toBe(10);
+    expect(screen.getByText("10 B")).toBeTruthy();
     expect(tab?.content).not.toBe(tab?.original);
+  });
+
+  it("loads persisted tabs when workspace restoration finishes after the panel mounts", async () => {
+    const workspace = "/tmp/restored-editor";
+    persistEditorTabs([{ path: "saved.txt", content: "", original: "", loading: true }], workspace);
+    useAppStore.setState({ workingDirectory: "" });
+    vi.mocked(readWorkspaceFile).mockResolvedValueOnce({
+      path: "saved.txt", content: "中文恢复", content_hash: "restored-hash", size_bytes: 12,
+    });
+    render(<EditorPanel />);
+
+    act(() => useAppStore.getState().setWorkingDirectory(workspace));
+
+    const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    expect(editor.value).toBe("中文恢复");
+    expect(readWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(readWorkspaceFile).toHaveBeenCalledWith("saved.txt", workspace);
+    expect(screen.queryByText("正在加载文件...")).toBeNull();
+  });
+
+  it("does not apply an old workspace read to a restored tab with the same path", async () => {
+    let resolveOld: ((value: { path: string; content: string; size_bytes: number }) => void) | undefined;
+    vi.mocked(readWorkspaceFile)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce({ path: "same.txt", content: "new workspace", size_bytes: 13 });
+    useAppStore.setState({
+      editorTabs: [{ path: "same.txt", content: "", original: "", loading: true }],
+      activeTabPath: "same.txt",
+    });
+    persistEditorTabs([{ path: "same.txt", content: "", original: "", loading: true }], "/tmp/other-editor");
+    render(<EditorPanel />);
+    await waitFor(() => expect(readWorkspaceFile).toHaveBeenCalledTimes(1));
+
+    act(() => useAppStore.getState().setWorkingDirectory("/tmp/other-editor"));
+    const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    expect(editor.value).toBe("new workspace");
+    await act(async () => resolveOld?.({ path: "same.txt", content: "old workspace", size_bytes: 99 }));
+
+    expect(editor.value).toBe("new workspace");
+    expect(useAppStore.getState().editorTabs[0]?.sizeBytes).toBe(13);
+  });
+
+  it.each(["bytes", "characters", "lines"] as const)("applies the %s limit on reload and clears it when the file shrinks", async (limit) => {
+    vi.mocked(isDesktop).mockReturnValue(true);
+    const content = limit === "lines" ? "line\n".repeat(20_000)
+      : limit === "characters" ? "text".repeat(250_001) : "large desktop snapshot";
+    const sizeBytes = limit === "bytes" ? 3 * 1024 * 1024 : content.length;
+    vi.mocked(fsReadFileInfo)
+      .mockResolvedValueOnce({ content, contentHash: "large-hash", sizeBytes })
+      .mockResolvedValueOnce({ content: "small", contentHash: "small-hash", sizeBytes: 5 });
+    useAppStore.setState({
+      editorTabs: [{ path: "growing.txt", content: "old", original: "old", loading: false, externalChanged: true, sizeBytes: 3 }],
+      activeTabPath: "growing.txt",
+    });
+    render(<EditorPanel />);
+
+    fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
+    await screen.findByText("文件未加载到编辑器");
+    expect(screen.queryByTestId("monaco-editor")).toBeNull();
+    expect(useAppStore.getState().editorTabs[0]).toMatchObject({
+      content: "", original: "", largeFile: true, sizeBytes, contentHash: "large-hash",
+    });
+
+    act(() => useAppStore.getState().markTabExternalChanged("growing.txt"));
+    fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
+    const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    expect(editor.value).toBe("small");
+    expect(useAppStore.getState().editorTabs[0]).toMatchObject({
+      largeFile: false, loadWarning: null, sizeBytes: 5, contentHash: "small-hash", externalChanged: false,
+    });
+  });
+
+  it("updates read-only metadata on reload instead of retaining the previous snapshot flags", async () => {
+    vi.mocked(isDesktop).mockReturnValue(true);
+    vi.mocked(fsReadFileInfo)
+      .mockResolvedValueOnce({ content: "generated", contentHash: "generated-hash", sizeBytes: 9, readOnly: true })
+      .mockResolvedValueOnce({ content: "editable", contentHash: "editable-hash", sizeBytes: 8, readOnly: false });
+    useAppStore.setState({
+      editorTabs: [{ path: "result.txt", content: "old", original: "old", loading: false, externalChanged: true }],
+      activeTabPath: "result.txt",
+    });
+    render(<EditorPanel />);
+
+    fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
+    await screen.findByText("只读");
+    const editor = screen.getByTestId("monaco-editor") as HTMLTextAreaElement;
+    expect(editor.readOnly).toBe(true);
+    fireEvent.change(editor, { target: { value: "not allowed" } });
+    expect(useAppStore.getState().editorTabs[0]?.content).toBe("generated");
+
+    act(() => useAppStore.getState().markTabExternalChanged("result.txt"));
+    fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
+    await waitFor(() => expect(editor.value).toBe("editable"));
+    expect(editor.readOnly).toBe(false);
+    expect(screen.queryByText("只读")).toBeNull();
+    expect(screen.getByText("8 B")).toBeTruthy();
+  });
+
+  it("shows a lightweight limit notice when an automatic reload receives HTTP 413", async () => {
+    vi.mocked(readWorkspaceFile).mockRejectedValueOnce(new Error("File is too large. Max supported size is 2097152 bytes."));
+    useAppStore.setState({
+      editorTabs: [{ path: "growing.txt", content: "old", original: "old", loading: false, sizeBytes: 3 }],
+      activeTabPath: "growing.txt",
+    });
+    render(<EditorPanel />);
+
+    act(() => useAppStore.setState({ fileChanges: [{ path: "growing.txt", event: "modify", sequence: 1, timestamp: 1 }] }));
+
+    await screen.findByText("文件未加载到编辑器");
+    expect(screen.queryByTestId("monaco-editor")).toBeNull();
+    expect(useAppStore.getState().editorTabs[0]).toMatchObject({ content: "", original: "", largeFile: true });
+    expect(useAppStore.getState().editorTabs[0]?.sizeBytes).toBeUndefined();
+  });
+
+  it("keeps edits typed while a reload is pending, including their previous metadata", async () => {
+    let resolveRead: ((value: { path: string; content: string; size_bytes: number }) => void) | undefined;
+    vi.mocked(readWorkspaceFile).mockImplementationOnce(() => new Promise((resolve) => { resolveRead = resolve; }));
+    useAppStore.setState({
+      editorTabs: [{ path: "editing.txt", content: "draft", original: "old", loading: false, externalChanged: true, sizeBytes: 3 }],
+      activeTabPath: "editing.txt",
+    });
+    render(<EditorPanel />);
+    const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+
+    fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
+    fireEvent.change(editor, { target: { value: "new unsaved edit" } });
+    await act(async () => resolveRead?.({ path: "editing.txt", content: "external", size_bytes: 8 }));
+
+    expect(editor.value).toBe("new unsaved edit");
+    expect(useAppStore.getState().editorTabs[0]).toMatchObject({ original: "old", sizeBytes: 3, externalChanged: true });
   });
 });

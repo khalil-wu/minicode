@@ -1,8 +1,15 @@
 import { useAppStore } from "../stores";
-import type { PreviewRefreshedEvent, ServerEvent } from "../protocol/events";
+import type {
+  PreviewLaunchConfigEvent,
+  PreviewLaunchStartedEvent,
+  PreviewRefreshedEvent,
+  PreviewServerUnhealthyEvent,
+  ServerEvent,
+} from "../protocol/events";
 import { isReplayedEvent as isReplayed } from "../protocol/events";
 import { pushToast } from "../overlays/ToastContainer";
 import { normalizeWorkspaceRoot } from "../lib/workspace-path";
+import { previewUrlsShareOrigin, selectPreviewForConversation } from "../lib/preview-projection";
 
 export const handlePreviewEvent = (e: ServerEvent): boolean => {
   if (!e.type.startsWith("preview.")) return false;
@@ -40,7 +47,7 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
     return true;
   }
   const updateLivePreview = (url: string): void => {
-    if (isActiveEvent) {
+    if (isActiveEvent && !isReplayed(e)) {
       s.openLivePreview(url, eventConversationId);
       return;
     }
@@ -49,17 +56,23 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
     // current iframe.
     s.setLivePreviewUrl(url, eventConversationId);
   };
-  const launchProcessesForEvent = () => {
-    const latest = useAppStore.getState();
-    return isActiveEvent
-      ? latest.previewLaunchProcesses
-      : latest.conversationWorkbenchStates?.[eventConversationId]?.previewLaunchProcesses ?? [];
+  const previewForEvent = () => selectPreviewForConversation(useAppStore.getState(), eventConversationId);
+  const invalidateVerification = (url: string): void => {
+    const verification = previewForEvent().previewVerification;
+    if (verification && previewUrlsShareOrigin(verification.url, url)) {
+      s.setPreviewVerification(null, eventConversationId);
+    }
   };
   switch (e.type) {
     case "preview.servers.updated": {
       const ev = e as unknown as {
         servers?: { port?: number; url?: string; name?: string; framework?: string }[];
       };
+      for (const current of previewForEvent().previewServers) {
+        if (!ev.servers?.some((server) => server.port === current.port && server.url === current.url)) {
+          invalidateVerification(current.url);
+        }
+      }
       s.setPreviewServers((ev.servers ?? [])
         .filter((server): server is { port: number; url: string; name?: string; framework?: string } =>
           typeof server.port === "number" && typeof server.url === "string",
@@ -86,7 +99,11 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
     }
     case "preview.server.stopped": {
       const ev = e as unknown as { port?: number };
-      if (ev.port) s.removePreviewServer(ev.port, eventConversationId);
+      if (ev.port) {
+        const current = previewForEvent().previewServers.find((server) => server.port === ev.port);
+        if (current) invalidateVerification(current.url);
+        s.removePreviewServer(ev.port, eventConversationId);
+      }
       return true;
     }
     case "preview.navigated": {
@@ -111,49 +128,21 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
       return true;
     }
     case "preview.launch.config": {
-      const ev = e as unknown as {
-        configs?: {
-          name: string;
-          command: string;
-          cwd: string;
-          port: number;
-          url: string;
-          auto_port?: boolean;
-          source?: string;
-        }[];
-        running?: {
-          id: string;
-          name: string;
-          command: string;
-          cwd: string;
-          port: number;
-          url: string;
-          pid?: number;
-          status: "starting" | "running" | "ready" | "exited" | "crashed";
-          auto_port?: boolean;
-          source?: string;
-          stderr_tail?: string[];
-          output_tail?: { stream: "stdout" | "stderr"; line: string; timestamp?: number }[];
-        }[];
-      };
+      const ev = e as PreviewLaunchConfigEvent;
+      for (const current of previewForEvent().previewLaunchProcesses) {
+        const next = ev.running?.find((process) => process.id === current.id);
+        if (!next || next.pid !== current.pid || next.url !== current.url || !["running", "ready"].includes(next.status)) {
+          invalidateVerification(current.url);
+        }
+      }
       s.setPreviewLaunchConfigs(ev.configs ?? [], eventConversationId);
       s.setPreviewLaunchProcesses(ev.running ?? [], eventConversationId);
       return true;
     }
     case "preview.launch.started": {
-      const ev = e as unknown as {
-        id?: string;
-        name?: string;
-        command?: string;
-        cwd?: string;
-        port?: number;
-        url?: string;
-        pid?: number;
-        status?: "starting" | "running" | "ready" | "exited" | "crashed";
-        stderr_tail?: string[];
-        output_tail?: { stream: "stdout" | "stderr"; line: string; timestamp?: number }[];
-      };
-      if (ev.id && ev.name && ev.command && ev.cwd && typeof ev.port === "number" && ev.url) {
+      const ev = e as PreviewLaunchStartedEvent;
+      if (ev.id && ev.name && ev.command && ev.cwd && typeof ev.port === "number" && typeof ev.url === "string") {
+        invalidateVerification(ev.url);
         s.upsertPreviewLaunchProcess({
           id: ev.id,
           name: ev.name,
@@ -163,17 +152,22 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
           url: ev.url,
           pid: ev.pid,
           status: ev.status ?? "running",
+          cleanup_pending: ev.cleanup_pending,
+          cleanup_reason: ev.cleanup_reason,
           stderr_tail: ev.stderr_tail,
           output_tail: ev.output_tail,
         }, eventConversationId);
-        updateLivePreview(ev.url);
+        if (ev.url) {
+          if (ev.status === "ready" || ev.status === "running") updateLivePreview(ev.url);
+          else s.setLivePreviewUrl(ev.url, eventConversationId);
+        }
       }
       return true;
     }
     case "preview.server.ready": {
       const ev = e as unknown as { id?: string; url?: string; port?: number };
       if (!ev.id || !ev.url || typeof ev.port !== "number") return true;
-      const current = launchProcessesForEvent().find((process) => process.id === ev.id);
+      const current = previewForEvent().previewLaunchProcesses.find((process) => process.id === ev.id);
       if (current) {
         s.upsertPreviewLaunchProcess({
           ...current,
@@ -198,7 +192,7 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
         line?: string;
       };
       if (!ev.id || !ev.stream || typeof ev.line !== "string") return true;
-      const current = launchProcessesForEvent().find((process) => process.id === ev.id);
+      const current = previewForEvent().previewLaunchProcesses.find((process) => process.id === ev.id);
       if (!current) return true;
       s.upsertPreviewLaunchProcess({
         ...current,
@@ -215,13 +209,15 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
     case "preview.server.crashed": {
       const ev = e as unknown as { id?: string; exit_code?: number | null; stderr_tail?: string[] };
       if (!ev.id) return true;
-      const current = launchProcessesForEvent().find((process) => process.id === ev.id);
+      const current = previewForEvent().previewLaunchProcesses.find((process) => process.id === ev.id);
       if (current) {
+        invalidateVerification(current.url);
         s.upsertPreviewLaunchProcess({
           ...current,
           status: "crashed",
           stderr_tail: ev.stderr_tail,
         }, eventConversationId);
+        s.removePreviewServer(current.port, eventConversationId);
       }
       if (isActiveEvent) {
         pushToast(`预览服务 ${ev.id} 已退出（${ev.exit_code ?? "未知"}）`, "error");
@@ -229,13 +225,16 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
       return true;
     }
     case "preview.server.unhealthy": {
-      const ev = e as unknown as { id?: string; last_error?: string };
+      const ev = e as PreviewServerUnhealthyEvent;
       if (!ev.id) return true;
-      const current = launchProcessesForEvent().find((process) => process.id === ev.id);
+      const current = previewForEvent().previewLaunchProcesses.find((process) => process.id === ev.id);
       if (current) {
+        invalidateVerification(current.url);
         s.upsertPreviewLaunchProcess({
           ...current,
           status: "unhealthy",
+          cleanup_pending: ev.cleanup_pending ?? current.cleanup_pending,
+          cleanup_reason: ev.cleanup_reason ?? current.cleanup_reason,
         }, eventConversationId);
       }
       if (isActiveEvent) {
@@ -245,6 +244,10 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
     }
     case "preview.launch.stopped": {
       const ev = e as unknown as { id?: string; port?: number };
+      const preview = previewForEvent();
+      const current = preview.previewLaunchProcesses.find((process) => process.id === ev.id)
+        ?? preview.previewServers.find((server) => server.port === ev.port);
+      if (current) invalidateVerification(current.url);
       if (ev.id) s.removePreviewLaunchProcess(ev.id, eventConversationId);
       if (typeof ev.port === "number") s.removePreviewServer(ev.port, eventConversationId);
       return true;

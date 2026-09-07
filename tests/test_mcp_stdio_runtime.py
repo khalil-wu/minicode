@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from backend.mcp.client import MCPClient
+from backend.mcp.manager import MCPServerConfig, MCPServerManager, ServerStatus
+from backend.services.mcp_service import list_mcp_inventory
 
 
 def test_stdio_mcp_delegates_transport_and_session_lifecycle_to_official_sdk(monkeypatch) -> None:
@@ -133,5 +135,195 @@ for line in sys.stdin:
         await asyncio.wait_for(disconnected.wait(), timeout=2.0)
         assert client.connected is False
         assert await client.close() is True
+
+    asyncio.run(run())
+
+
+def test_stdio_catalog_notifications_survive_startup_refresh_and_catalog_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run() -> None:
+        notices = [asyncio.Event(), asyncio.Event()]
+        notifications: list[str] = []
+        statuses: list[ServerStatus] = []
+        fresh = asyncio.Event()
+
+        async def on_status(name, status):
+            statuses.append(status)
+            if [tool.name for tool in manager._servers[name].tools] == ["fresh_tool"]:
+                fresh.set()
+
+        manager = MCPServerManager(
+            tmp_path / ".mcp.json", workspace_root=None, on_status_change=on_status
+        )
+        create_client = manager._create_client
+
+        def instrument_client(config, **kwargs):
+            client = create_client(config, **kwargs)
+            on_changed = client._on_tools_changed
+
+            async def record_notification(name):
+                await on_changed(name)
+                notifications.append(name)
+                if len(notifications) <= len(notices):
+                    notices[len(notifications) - 1].set()
+
+            client._on_tools_changed = record_notification
+            return client
+
+        monkeypatch.setattr(manager, "_create_client", instrument_client)
+        config = MCPServerConfig(
+            name="catalog-fixture",
+            command=sys.executable,
+            args=[str(Path(__file__).parent / "fixtures" / "mcp_catalog_server.py")],
+            startup_timeout_sec=3,
+        )
+        startup = asyncio.create_task(manager.start_server(config))
+        client = None
+        try:
+            async with asyncio.timeout(10):
+                await notices[0].wait()
+                state = manager._servers[config.name]
+                client = state.client
+                assert state.status == ServerStatus.STARTING
+                state.operation_failures["reconnect"] = {"message": "previous attempt failed"}
+                await client._session.send_ping()
+                await startup
+                await notices[1].wait()
+                assert state.status == ServerStatus.CONNECTED
+                refresh = manager._tool_refresh_tasks[config.name]
+                await client._session.send_ping()
+                await fresh.wait()
+                await refresh
+
+            assert notifications == [config.name] * 3
+            assert ServerStatus.ERROR in statuses
+            assert state.status == ServerStatus.CONNECTED
+            assert state.last_error == ""
+            assert state.operation_failures == {}
+            assert state.client is client
+            assert client.connected
+            assert [(tool.name, tool.description) for tool in state.tools] == [
+                ("fresh_tool", "catalog request 4")
+            ]
+            assert manager._tool_refresh_tasks == {}
+            assert manager._pending_tool_refreshes == {}
+        finally:
+            if not startup.done():
+                startup.cancel()
+            await asyncio.gather(startup, return_exceptions=True)
+            assert await manager.stop_server(config.name)
+        assert client is not None and client._lifecycle_task is None
+        assert manager._servers[config.name].status == ServerStatus.OFFLINE
+
+    asyncio.run(run())
+
+
+def _contract_config(mode: str) -> MCPServerConfig:
+    return MCPServerConfig(
+        name="contract-fixture",
+        command=sys.executable,
+        args=[str(Path(__file__).parent / "fixtures" / "mcp_contract_server.py"), mode],
+        startup_timeout_sec=3,
+    )
+
+
+def test_stdio_resources_and_prompts_work_without_tools_capability(tmp_path: Path) -> None:
+    async def run() -> None:
+        manager = MCPServerManager(tmp_path / ".mcp.json", workspace_root=None)
+        config = _contract_config("inventory-only")
+        try:
+            await manager.start_server(config)
+            state = manager._servers[config.name]
+            assert state.status == ServerStatus.CONNECTED
+            assert state.tools == []
+            client = manager.get_client(config.name)
+            assert client is not None
+            assert not client.server_capabilities.tools
+            assert client.server_capabilities.resources
+            assert client.server_capabilities.prompts
+
+            inventory = await list_mcp_inventory(manager, config.name)
+            assert [resource["uri"] for resource in inventory["resources"]] == ["fixture://guide"]
+            assert [prompt["name"] for prompt in inventory["prompts"]] == ["review"]
+            assert await client.read_resource("fixture://guide") == "RESOURCE_MARKER"
+            assert await client.get_prompt("review") == "user: PROMPT_MARKER"
+        finally:
+            assert await manager.stop_server(config.name)
+
+    asyncio.run(run())
+
+
+def test_stdio_invalid_tool_result_preserves_live_client_and_stop_ownership(tmp_path: Path) -> None:
+    async def run() -> None:
+        manager = MCPServerManager(tmp_path / ".mcp.json", workspace_root=None)
+        config = _contract_config("tools")
+        client = None
+        try:
+            await manager.start_server(config)
+            client = manager.get_client(config.name)
+            assert client is not None
+            lifecycle = client._lifecycle_task
+
+            invalid = await client.call_tool("inspect", {"behavior": "invalid"})
+            assert invalid.is_error
+            assert "Invalid structured content" in invalid.text
+            await client._session.send_ping()
+            assert manager._servers[config.name].status == ServerStatus.CONNECTED
+            assert manager.get_client(config.name) is client
+            assert client.connected
+            assert client._lifecycle_task is lifecycle and not lifecycle.done()
+
+            valid = await client.call_tool("inspect", {"behavior": "valid"})
+            assert not valid.is_error
+            assert valid.text == "TOOL_MARKER"
+        finally:
+            try:
+                assert await manager.stop_server(config.name)
+                if client is not None:
+                    assert client._lifecycle_task is None
+            finally:
+                if client is not None:
+                    await client.close()
+        assert lifecycle.done()
+        assert client._lifecycle_task is None
+        assert manager._servers[config.name].status == ServerStatus.OFFLINE
+
+    asyncio.run(run())
+
+
+def test_stdio_actual_transport_exit_still_notifies_manager_after_tool_call(tmp_path: Path) -> None:
+    async def run() -> None:
+        disconnected = asyncio.Event()
+
+        async def on_status(name, status):
+            if status == ServerStatus.ERROR:
+                disconnected.set()
+
+        manager = MCPServerManager(
+            tmp_path / ".mcp.json", workspace_root=None, on_status_change=on_status
+        )
+        config = _contract_config("tools")
+        client = None
+        try:
+            await manager.start_server(config)
+            client = manager.get_client(config.name)
+            assert client is not None
+            lifecycle = client._lifecycle_task
+            async with asyncio.timeout(5):
+                result = await client.call_tool("inspect", {"behavior": "exit"})
+                assert result.is_error
+                await disconnected.wait()
+                await lifecycle
+            state = manager._servers[config.name]
+            assert state.status == ServerStatus.ERROR
+            assert state.last_error == "MCP stdio transport closed"
+            assert state.client is None
+            assert not client.connected
+            assert manager._reconnect_tasks == {}
+        finally:
+            assert await manager.stop_server(config.name)
+            if client is not None:
+                await client.close()
 
     asyncio.run(run())

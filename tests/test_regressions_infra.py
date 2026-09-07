@@ -1270,6 +1270,7 @@ def test_preview_launch_start_rejects_workspace_outside_session(monkeypatch, tmp
 
     async def fake_mark_preview_ready(process, broadcast=None):
         process.status = "ready"
+        return True
 
     monkeypatch.setattr("backend.preview.start_preview_launch", fake_start_preview_launch)
     monkeypatch.setattr("backend.preview.mark_preview_ready", fake_mark_preview_ready)

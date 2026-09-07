@@ -137,6 +137,8 @@ class WorkspaceFileWatcher:
                 self.watcher = watcher
 
             def on_any_event(self, event: FileSystemEvent):
+                if event.event_type not in ("modified", "created", "deleted", "moved"):
+                    return
                 if self.watcher._closed:
                     return
                 loop = self.watcher._loop

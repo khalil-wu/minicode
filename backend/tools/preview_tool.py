@@ -192,6 +192,13 @@ class PreviewServerTool(BaseTool):
             verification = await wait_until_ready(proc.effective_url, timeout=timeout)
             if verification.ok:
                 await mark_preview_ready(proc)
+        if proc.process.returncode is not None:
+            return self._error_result(
+                f"Preview process exited with code {proc.process.returncode} before startup completed."
+                + ("\n" + "\n".join(proc.stderr_tail) if proc.stderr_tail else "")
+            )
+        if proc.status == "stopping":
+            return self._error_result("Preview process was stopped before startup completed.")
         status = "ready" if proc.status == "ready" else "starting"
         payload = {
             "status": status,
@@ -232,8 +239,8 @@ class PreviewServerTool(BaseTool):
 
     async def _verify(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         from backend.permissions.network import assess_network_url
-        from backend.preview.launcher import preview_url_is_owned
-        from backend.preview.verifier import verify_preview_url
+        from backend.preview.launcher import find_preview_process
+        from backend.preview.verifier import PreviewProcessChangedError, verify_preview_url
 
         url = args.get("url", "").strip()
         session_id, conversation_id = self._owner(context)
@@ -250,12 +257,13 @@ class PreviewServerTool(BaseTool):
                 return self._error_result("No URL provided and no running preview server.")
 
         assessment = await asyncio.to_thread(assess_network_url, url)
-        if not assessment.allowed and not preview_url_is_owned(
+        process = find_preview_process(
             url,
             session_id=session_id,
             conversation_id=conversation_id,
             workspace_root=self._workspace(context),
-        ):
+        )
+        if not assessment.allowed and process is None:
             return self._error_result(
                 "Preview verification of a local, private, credential-bearing, or "
                 "unresolved target is allowed only for a preview owned by this "
@@ -264,7 +272,10 @@ class PreviewServerTool(BaseTool):
 
         raw_timeout = args.get("timeout")
         timeout = float(raw_timeout) if raw_timeout is not None else None
-        result = await verify_preview_url(url, timeout=timeout)
+        try:
+            result = await verify_preview_url(url, timeout=timeout, process=process)
+        except PreviewProcessChangedError as exc:
+            return self._error_result(str(exc))
         return self._success_result(json.dumps(result.to_dict(), ensure_ascii=False))
 
     async def _detect(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:

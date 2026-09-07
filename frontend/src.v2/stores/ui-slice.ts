@@ -45,6 +45,7 @@ import { clamp } from "../lib/clamp";
 import { DEFAULT_SHORTCUT_BINDINGS } from "../lib/keyboard-shortcuts";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { diffFileDecisionForPath, diffFilePathsEqual } from "../chat/diffReviewState";
+import { openWebInBrowser } from "../chat/openWebInBrowser";
 
 const initialRemoteImagePolicy = (): UISlice["remoteImagePolicy"] => {
   const stored = readLS(LS.remoteImagePolicy);
@@ -833,24 +834,12 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         ...ownerPatch,
       };
     }),
-  openLivePreview: (url, conversationId) =>
-    set((s) => {
-      const normalizedUrl = /^https?:\/\//i.test(url.trim()) ? url.trim() : `http://${url.trim()}`;
-      const targetId = String(conversationId || s.conversationId || "").trim();
-      const rightSidebarWidth = preferredRightSidebarWidth("preview", s.rightSidebarWidth);
-      if (rightSidebarWidth !== s.rightSidebarWidth) {
-        writeLS(LS.layout.rightWidth, String(rightSidebarWidth));
-      }
-      writeLS(LS.layout.rightOpen, "1");
-      return {
-        ...updatePreviewWorkbench(s, targetId || undefined, { livePreviewUrl: normalizedUrl }),
-        ...(targetId === s.conversationId || !targetId ? { livePreviewUrl: normalizedUrl } : {}),
-        previewOwnerConversationId: targetId || null,
-        rightStackTab: "preview",
-        rightPanelOpen: true,
-        rightSidebarWidth,
-      };
-    }),
+  openLivePreview: (url, conversationId) => {
+    const normalizedUrl = /^https?:\/\//i.test(url.trim()) ? url.trim() : `http://${url.trim()}`;
+    const targetId = String(conversationId || get().conversationId || "").trim();
+    get().setLivePreviewUrl(normalizedUrl, targetId);
+    if (targetId && targetId === get().conversationId) openWebInBrowser(normalizedUrl);
+  },
   setPreviewServers: (servers, conversationId) =>
     set((s) => {
       const value = servers.map((server) => ({ ...server }));

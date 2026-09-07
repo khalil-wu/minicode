@@ -47,6 +47,7 @@ def test_lsp_parse_locations_supports_location_link() -> None:
 
 
 def test_lsp_tool_uses_zero_based_lines_by_default(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
     source = tmp_path / "sample.py"
     source.write_text("def f():\n    return 1\n", encoding="utf-8")
 
@@ -62,7 +63,7 @@ def test_lsp_tool_uses_zero_based_lines_by_default(monkeypatch, tmp_path) -> Non
         def __init__(self) -> None:
             self.client = _Client()
 
-        def is_available(self, file_path: str) -> bool:
+        def is_available(self, file_path: str, workspace_root: str) -> bool:
             return True
 
         async def get_client(self, file_path: str, workspace_root: str) -> _Client:
@@ -82,6 +83,7 @@ def test_lsp_tool_uses_zero_based_lines_by_default(monkeypatch, tmp_path) -> Non
 
 
 def test_lsp_tool_converts_one_based_lines_when_requested(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
     source = tmp_path / "sample.py"
     source.write_text("def f():\n    return 1\n", encoding="utf-8")
 
@@ -97,7 +99,7 @@ def test_lsp_tool_converts_one_based_lines_when_requested(monkeypatch, tmp_path)
         def __init__(self) -> None:
             self.client = _Client()
 
-        def is_available(self, file_path: str) -> bool:
+        def is_available(self, file_path: str, workspace_root: str) -> bool:
             return True
 
         async def get_client(self, file_path: str, workspace_root: str) -> _Client:

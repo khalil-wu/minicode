@@ -604,6 +604,7 @@ class SandboxRunner:
         stdin: Any = asyncio.subprocess.PIPE,
         stdout: Any = asyncio.subprocess.PIPE,
         stderr: Any = asyncio.subprocess.PIPE,
+        on_exit: Callable[[], None] | None = None,
     ) -> asyncio.subprocess.Process:
         """Start a long-lived shell command behind the declared sandbox."""
         if not str(command or "").strip():
@@ -615,6 +616,7 @@ class SandboxRunner:
             "stderr": stderr,
             "cwd": str(cwd) if cwd else None,
             "env": self._build_env(),
+            "on_exit": on_exit,
         }
         if isinstance(wrapped, list):
             process = await spawn_exec(*wrapped, **spawn_kwargs)
@@ -1179,9 +1181,7 @@ class SandboxRunner:
     async def _kill_tree(self, proc: asyncio.subprocess.Process) -> bool:
         # The sandbox owns container cleanup, while the host child still uses
         # the shared process-group lifecycle used by every other execution path.
-        reaped = True
-        if proc.returncode is None:
-            reaped = await terminate_process_tree(proc)
+        reaped = await terminate_process_tree(proc)
         await self._cleanup_container(force=True)
         self._cleanup_sandbox_setup_state()
         return reaped

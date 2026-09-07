@@ -41,11 +41,6 @@ const normalizeInitialTab = (tab: SidebarRightProps["initialTab"]): StackTab => 
 const defaultOpenTabs: StackTab[] = ["tasks"];
 const sidebarIconProps = { size: 16, strokeWidth: 1.85 } as const;
 
-const shouldAllowAutomaticTabSwitch = (activeTab: StackTab, rightPanelOpen: boolean): boolean => {
-  if (!rightPanelOpen) return true;
-  return activeTab === "preview" || activeTab === "tasks";
-};
-
 const LazyPreviewPanel = lazy(() =>
   import("../panels/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
 );
@@ -89,9 +84,7 @@ const preferredManualSidebarWidth = (tab: StackTab): number => {
 
 export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: SidebarRightProps) => {
   const messages = useAppStore((s) => s.messages);
-  const conversationId = useAppStore((s) => s.conversationId);
   const rightStackTab = useAppStore((s) => s.rightStackTab);
-  const rightStackTabLocked = useAppStore((s) => s.rightStackTabLocked);
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
   const rightSidebarWidth = useAppStore((s) => s.rightSidebarWidth);
   const setRightSidebarWidth = useAppStore((s) => s.setRightSidebarWidth);
@@ -115,35 +108,12 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
     });
   }, []);
 
-  // 用户手动切换tab时锁定自动切换
-  const lockAndSetTab = useCallback((tab: StackTab) => {
-    setUserTabLocked(true);
-    setActiveTab(tab);
-  }, [setActiveTab]);
   const subagents = useAppStore((s) => s.subagents);
-  const activeLivePreviewUrl = useAppStore((s) => selectActiveConversationPreview(s).livePreviewUrl);
   const activePreviewArtifact = useAppStore((s) => selectActiveConversationPreview(s).previewArtifact);
-  const previewSurfaceLiveUrl = useAppStore((s) => selectPreviewSurface(s).livePreviewUrl);
   const previewSurfaceArtifact = useAppStore((s) => selectPreviewSurface(s).previewArtifact);
   const diffReview = useAppStore((s) => s.diffReview);
   const gitChanges = useAppStore((s) => s.gitChanges);
   const mcpServers = useAppStore((s) => s.mcpServers);
-  const [userTabLocked, setUserTabLocked] = useState(false);
-  const allowAutoSwitch = !embedded && !rightStackTabLocked && !userTabLocked && shouldAllowAutomaticTabSwitch(activeTab, rightPanelOpen);
-
-  // Switching conversations must not rebuild or reorder the user's open panel
-  // tabs. Only release the automatic-switch lock for the new conversation.
-  useEffect(() => {
-    setUserTabLocked(false);
-  }, [conversationId]);
-
-  useEffect(() => {
-    if (!allowAutoSwitch) return;
-    if (activeLivePreviewUrl) {
-      setRightStackTab("preview", { automatic: true });
-    }
-  }, [activeLivePreviewUrl, allowAutoSwitch, setRightStackTab]);
-
   const runningSubagents = subagents.filter((subagent) => subagent.status === "running").length;
   const mcpErrors = mcpServers.filter((s) => s.status === "error").length;
   const gitChangeCount = gitChanges.workingTree.length + gitChanges.staged.length + gitChanges.untracked.length;
@@ -151,7 +121,7 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
   const tabs: { id: StackTab; label: string; badge?: string; icon: React.ReactNode }[] = [
     { id: "tasks", label: "上下文", icon: <PanelRightOpen {...sidebarIconProps} /> },
     { id: "diff", label: "审阅", badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <FileDiff {...sidebarIconProps} /> },
-    { id: "preview", label: "预览", badge: previewSurfaceLiveUrl || previewSurfaceArtifact ? "开" : undefined, icon: <MonitorPlay {...sidebarIconProps} /> },
+    { id: "preview", label: "预览", badge: previewSurfaceArtifact ? "开" : undefined, icon: <MonitorPlay {...sidebarIconProps} /> },
     { id: "browser", label: "浏览器", icon: <Globe2 {...sidebarIconProps} /> },
     { id: "artifacts", label: "产物", badge: activePreviewArtifact ? "1" : undefined, icon: <Layers {...sidebarIconProps} /> },
     { id: "subagents", label: "子智能体", badge: runningSubagents ? String(runningSubagents) : undefined, icon: <Bot {...sidebarIconProps} /> },
@@ -177,9 +147,9 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
     setOpenTabIds(nextTabs);
     if (activeTab !== tab) return;
     const fallbackTab = nextTabs[Math.min(tabIndex, nextTabs.length - 1)] ?? "tasks";
-    lockAndSetTab(fallbackTab);
+    setActiveTab(fallbackTab);
     setRightSidebarWidth(preferredManualSidebarWidth(fallbackTab));
-  }, [activeTab, lockAndSetTab, openTabIds, setRightSidebarWidth]);
+  }, [activeTab, setActiveTab, openTabIds, setRightSidebarWidth]);
   useEffect(() => {
     addOpenTab(activeTab);
   }, [activeTab, addOpenTab]);
@@ -208,8 +178,8 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
   }, [addOpenTab, diffReview, gitChangeCount]);
 
   useEffect(() => {
-    if (previewSurfaceLiveUrl || previewSurfaceArtifact) addOpenTab("preview");
-  }, [addOpenTab, previewSurfaceArtifact, previewSurfaceLiveUrl]);
+    if (previewSurfaceArtifact) addOpenTab("preview");
+  }, [addOpenTab, previewSurfaceArtifact]);
 
   const activePrimaryTab = openedTabs.some((tab) => tab.id === activeTab);
   const compactPanel = ["tasks", "inspector", "subagents", "artifacts", "diagnostics"].includes(activeTab);
@@ -223,7 +193,7 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
   const sidebarMaxWidth = embedded ? "none" : rightPanelOpen ? "min(1040px, calc(100vw - 720px))" : "0px";
   const activateTab = (tab: StackTab) => {
     addOpenTab(tab);
-    lockAndSetTab(tab);
+    setActiveTab(tab);
     setLauncherOpen(false);
   };
 
