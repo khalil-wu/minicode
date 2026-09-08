@@ -8,7 +8,7 @@ import { __resetOpenWebInPreviewDedupeForTests } from "../openWebInPreview";
 import { registerWebSocketSender } from "../../protocol/ws-outbox";
 import {
   __resetOpenWebInBrowserForTests,
-  subscribeBrowserOpenRequests,
+  subscribeBrowserRequests,
 } from "../openWebInBrowser";
 import mermaid from "mermaid";
 
@@ -627,7 +627,7 @@ describe("MarkdownRenderer", () => {
   it("opens ordinary web links inside the Browser panel", () => {
     useAppStore.setState({ conversationId: "conv-markdown-link" });
     const requests: string[] = [];
-    const unsubscribe = subscribeBrowserOpenRequests((request) => requests.push(request.url));
+    const unsubscribe = subscribeBrowserRequests((request) => requests.push(request.url));
     render(<MarkdownRenderer content={"Open [docs](https://docs.example/guide)."} />);
 
     const link = screen.getByRole("link", { name: "docs" });
@@ -656,7 +656,7 @@ describe("MarkdownRenderer", () => {
   it("deduplicates rapid repeated Browser navigation for the same url", () => {
     useAppStore.setState({ conversationId: "conv-markdown-dedupe" });
     const requests: string[] = [];
-    const unsubscribe = subscribeBrowserOpenRequests((request) => requests.push(request.url));
+    const unsubscribe = subscribeBrowserRequests((request) => requests.push(request.url));
     render(<MarkdownRenderer content={"Open [docs](https://docs.example/guide)."} />);
 
     const link = screen.getByRole("link", { name: "docs" });
@@ -672,7 +672,7 @@ describe("MarkdownRenderer", () => {
     const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
     useAppStore.setState({ conversationId: "conv-markdown-image" });
     const requests: string[] = [];
-    const unsubscribe = subscribeBrowserOpenRequests((request) => requests.push(request.url));
+    const unsubscribe = subscribeBrowserRequests((request) => requests.push(request.url));
 
     try {
       render(<MarkdownRenderer content={"![chart](https://assets.example/chart.png)"} />);

@@ -940,7 +940,12 @@ def test_send_message_resumes_completed_agent_with_canonical_checkpoint(
     asyncio.run(_test_send_message_resumes_completed_agent_with_full_sidechain(tmp_path))
 
 
-async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_path):
+def test_send_message_resumes_agent_after_parent_turn_handoff(tmp_path, monkeypatch):
+    monkeypatch.setenv("MINICODE_STATE_ROOT", str(tmp_path / "state"))
+    asyncio.run(_test_send_message_resumes_completed_agent_with_full_sidechain(tmp_path, handoff=True))
+
+
+async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_path, *, handoff=False):
     events: list[tuple[str, dict[str, Any]]] = []
 
     async def emit(event_type: str, data: dict[str, Any]) -> None:
@@ -1019,12 +1024,18 @@ async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_pat
         "availability_filters": [],
     }
     first_epoch = first_record.mailbox_epoch
+    original_run_path = runtime.get_run(subagent_id).agent_path
 
     initial_transcript = runtime.load_agent_transcript(subagent_id)
     initial_assistant_messages = [
         item for item in initial_transcript["history"] if item.get("role") == "assistant"
     ]
     assert [item["content"] for item in initial_assistant_messages] == ["initial child result"]
+
+    if handoff:
+        runtime.commit_terminal("parent-run")
+        runtime.start_run(run_id="later-parent", conversation_id="conversation-1")
+        parent_context.metadata["run_id"] = "later-parent"
 
     resumed = await SendMessageTool().execute(
         {
@@ -1047,6 +1058,9 @@ async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_pat
         runtime.get_subagent_snapshot(subagent_id, include_result=True)
     )
     assert len(llm.calls) == 2
+    resumed_run = runtime.get_run(subagent_id)
+    assert resumed_run.agent_path == original_run_path
+    assert resumed_run.parent_run_id == parent_context.metadata["run_id"]
     resumed_messages = llm.calls[1]
     assert any("Inspect the parser and report once." in text for text in resumed_messages)
     assert resumed_messages.count("initial child result") == 1
@@ -1066,6 +1080,8 @@ async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_pat
     # durable runtime record and canonical context checkpoint own recovery.
     resumed_epoch = resumed_record.mailbox_epoch
     runtime._subagents.pop(subagent_id, None)
+    runtime._runs.pop(subagent_id)
+    runtime._registry.discard(subagent_id, kind="run")
     assert runtime.get_subagent(subagent_id) is None
 
     resumed_from_transcript = await SendMessageTool().execute(
@@ -1083,6 +1099,10 @@ async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_pat
         await asyncio.sleep(0.01)
     assert resumed_record is not None and resumed_record.status == "completed"
     assert resumed_record.mailbox_epoch == resumed_epoch + 1
+    restored_run = runtime.get_run(subagent_id)
+    assert restored_run.agent_path == original_run_path
+    assert restored_run.parent_run_id == parent_context.metadata["run_id"]
+    assert runtime._swarm_store.get_agent_run(subagent_id) == restored_run.to_dict()
     assert len(llm.calls) == 3
     assert "initial child result" in llm.calls[2]
     assert "resumed child result" in llm.calls[2]

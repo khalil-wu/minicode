@@ -23,6 +23,7 @@ vi.hoisted(() => {
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 import { useAppStore } from "../stores";
+import { pushToast } from "../overlays/ToastContainer";
 import type { ClientCommand } from "../protocol/events";
 import {
   getWebSocket,
@@ -209,6 +210,64 @@ describe("useWebSocketConnection socket ownership", () => {
     act(() => vi.advanceTimersByTime(1_500));
 
     expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+  it.each([
+    ["connection.llm_initialization_failed", 1008, null],
+    ["connection.session_initialization_failed", 1011, null],
+    ["connection.session_initialization_failed", 1011, "restore-conversation"],
+  ])("keeps the initialization error for %s instead of retrying", async (errorCode, closeCode, conversationId) => {
+    useAppStore.setState({ conversationId });
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.emit("open"));
+    await flushQueuedCommands();
+    vi.mocked(pushToast).mockClear();
+    const message = "会话日志无法读取，请修复后重试。";
+
+    act(() => socket.emitMessage({
+      type: "error",
+      message,
+      recoverable: false,
+      error_type: "api",
+      error_code: errorCode,
+    }));
+    expect(useAppStore.getState().connectionPhase).toBe("failed");
+    expect(useAppStore.getState().connectionError).toBe(message);
+    expect(useAppStore.getState().isConnected).toBe(false);
+    expect(socket.close).toHaveBeenCalledOnce();
+    expect(pushToast).toHaveBeenCalledExactlyOnceWith(message, "error", 0);
+    const sendCount = socket.send.mock.calls.length;
+
+    act(() => socket.emit("close", closeCode));
+    act(() => vi.advanceTimersByTime(600_001));
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(useAppStore.getState().connectionError).toBe(message);
+    expect(socket.send).toHaveBeenCalledTimes(sendCount);
+    expect(pushToast).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { recoverable: true },
+    { conversation_id: "conversation" },
+    { replayed: true },
+    { error_code: "command.failed" },
+  ])("does not turn unrelated errors into terminal connection failures: %j", (overrides) => {
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.emit("open"));
+    act(() => socket.emitMessage({
+      type: "error",
+      message: "请求失败",
+      recoverable: false,
+      error_type: "api",
+      error_code: "connection.session_initialization_failed",
+      ...overrides,
+    }));
+    expect(useAppStore.getState().connectionPhase).toBe("connected");
+    expect(socket.close).not.toHaveBeenCalled();
   });
 
   it("keeps the reconnect attempt visible until session restore completes", () => {

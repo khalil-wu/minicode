@@ -1,32 +1,38 @@
 import { useAppStore } from "../stores";
 
-interface BrowserOpenRequest {
+interface BrowserRequestBase {
   id: number;
   url: string;
   conversationId: string;
 }
 
-type BrowserOpenListener = (request: BrowserOpenRequest) => void;
+type BrowserRequest = BrowserRequestBase & (
+  | { kind: "open" }
+  | { kind: "refresh"; workspaceRoot: string }
+);
+
+type BrowserRequestListener = (request: BrowserRequest) => void;
 
 const BROWSER_NAVIGATE_DEDUPE_MS = 750;
-const listeners = new Set<BrowserOpenListener>();
+const listeners = new Set<BrowserRequestListener>();
 let requestSequence = 0;
-let pendingRequest: BrowserOpenRequest | null = null;
+const pendingRequests = new Map<string, BrowserRequest>();
 let lastNavigate: { url: string; conversationId: string; at: number } | null = null;
 
-function normalizeBrowserUrl(value: string): string | null {
+function parseBrowserUrl(value: string): URL | null {
   try {
     const parsed = new URL(value.trim());
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-    return parsed.toString();
+    return parsed;
   } catch {
     return null;
   }
 }
 
 export function openWebInBrowser(url: string): boolean {
-  const normalizedUrl = normalizeBrowserUrl(url);
-  if (!normalizedUrl) return false;
+  const parsedUrl = parseBrowserUrl(url);
+  if (!parsedUrl) return false;
+  const normalizedUrl = parsedUrl.toString();
   const conversationId = String(useAppStore.getState().conversationId || "").trim();
   if (!conversationId) return false;
 
@@ -41,25 +47,41 @@ export function openWebInBrowser(url: string): boolean {
     return true;
   }
 
-  const request = { id: ++requestSequence, url: normalizedUrl, conversationId };
-  pendingRequest = request;
+  const request: BrowserRequest = { kind: "open", id: ++requestSequence, url: normalizedUrl, conversationId };
+  pendingRequests.set("open", request);
   lastNavigate = { url: normalizedUrl, conversationId, at: now };
   listeners.forEach((listener) => listener(request));
   return true;
 }
 
-export function subscribeBrowserOpenRequests(listener: BrowserOpenListener): () => void {
+export function refreshWebInBrowser(url: string, conversationId: string, workspaceRoot: string): boolean {
+  const parsedUrl = parseBrowserUrl(url);
+  if (!parsedUrl) return false;
+  const request: BrowserRequest = {
+    kind: "refresh", id: ++requestSequence, url: parsedUrl.toString(), conversationId, workspaceRoot,
+  };
+  pendingRequests.set(JSON.stringify([conversationId, workspaceRoot, parsedUrl.origin]), request);
+  listeners.forEach((listener) => listener(request));
+  return true;
+}
+
+export function subscribeBrowserRequests(listener: BrowserRequestListener): () => void {
   listeners.add(listener);
-  if (pendingRequest) listener(pendingRequest);
+  pendingRequests.forEach((request) => listener(request));
   return () => listeners.delete(listener);
 }
 
-export function acknowledgeBrowserOpenRequest(id: number): void {
-  if (pendingRequest?.id === id) pendingRequest = null;
+export function acknowledgeBrowserRequest(id: number): void {
+  for (const [key, request] of pendingRequests) {
+    if (request.id === id) {
+      pendingRequests.delete(key);
+      return;
+    }
+  }
 }
 
 export function __resetOpenWebInBrowserForTests(): void {
-  pendingRequest = null;
+  pendingRequests.clear();
   lastNavigate = null;
   requestSequence = 0;
   listeners.clear();

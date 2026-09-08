@@ -212,6 +212,11 @@ const AgentDetail = ({
       </header>
 
       <div className="subagents-detail-body">
+        {view.resultError && (
+          <div className="subagents-transcript-error" role="alert">
+            <span>{view.resultError}</span>
+          </div>
+        )}
         {transcriptError && (
           <div className="subagents-transcript-error" role="status">
             <span>{transcriptError}</span>

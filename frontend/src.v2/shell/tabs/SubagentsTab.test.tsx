@@ -284,6 +284,46 @@ describe("SubagentsTab", () => {
     expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
   });
 
+  it.each([false, true])("keeps the durable startup error visible with prior transcript=%s", async (hasHistory) => {
+    const messages = hasHistory ? [{
+      id: "previous-answer",
+      role: "assistant",
+      content: "上一轮已经完成",
+      timestamp: 1,
+    }] : [];
+    sendClientCommandAwaitResultMock.mockResolvedValue({
+      type: "command.result",
+      command: "subagent.transcript",
+      level: hasHistory ? "success" : "warning",
+      message: hasHistory ? "" : "Terminal subagent startup-failed has no durable transcript.",
+      data: { seq: hasHistory ? 1 : 0, messages },
+    });
+    useAppStore.setState({
+      focusedSubagentId: "startup-failed",
+      subagents: [{
+        id: "startup-failed",
+        role: "reviewer",
+        status: "error",
+        objective: "启动审计任务",
+        resultError: "RuntimeError: SubagentStart hook denied this task.",
+      }],
+    });
+
+    render(<SubagentsTab />);
+
+    expect(within(screen.getByRole("alert")).getByText(
+      "RuntimeError: SubagentStart hook denied this task.",
+    )).toBeTruthy();
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
+    if (hasHistory) {
+      expect(await screen.findByText("上一轮已经完成")).toBeTruthy();
+    } else {
+      expect(await screen.findByText("Terminal subagent startup-failed has no durable transcript.")).toBeTruthy();
+    }
+    expect(screen.getByRole("alert").textContent).toContain("SubagentStart hook denied this task");
+    expect(screen.queryByRole("button", { name: "停止子智能体" })).toBeNull();
+  });
+
   it("renders the child through the ordinary ChatTurn transcript without a details gate", async () => {
     sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
       sendClientCommandMock(command);

@@ -7,7 +7,7 @@ import { selectPreviewForConversation } from "../lib/preview-projection";
 import { buildActivitySidebarState } from "../shell/activitySidebarState";
 import { handlePreviewEvent } from "./previewEvents";
 import { handleCommandResultEvent } from "./commandResultEvents";
-import { __resetOpenWebInBrowserForTests, subscribeBrowserOpenRequests } from "./openWebInBrowser";
+import { __resetOpenWebInBrowserForTests, subscribeBrowserRequests } from "./openWebInBrowser";
 
 vi.mock("../overlays/ToastContainer", () => ({
   pushToast: vi.fn(),
@@ -29,7 +29,7 @@ describe("live preview browser routing", () => {
 
   beforeEach(() => {
     browserRequests.mockClear();
-    subscribeBrowserOpenRequests(browserRequests);
+    subscribeBrowserRequests(browserRequests);
     useAppStore.setState({
       conversationId: "conv-active", workingDirectory: "C:/active",
       conversations: [], sideChats: {}, conversationMessages: {}, conversationWorkbenchStates: {},
@@ -52,7 +52,7 @@ describe("live preview browser routing", () => {
     send({ type: "preview.server.ready", id: launch.id, port: launch.port, url });
 
     expect(browserRequests).toHaveBeenCalledExactlyOnceWith({
-      id: 1, url: `${url}/`, conversationId: "conv-active",
+      kind: "open", id: 1, url: `${url}/`, conversationId: "conv-active",
     });
     expect(useAppStore.getState().previewLaunchProcesses[0]).toMatchObject({ status: "ready", url });
     expect(useAppStore.getState().rightStackTab).toBe("browser");
@@ -106,7 +106,7 @@ describe("live preview browser routing", () => {
 
     useAppStore.getState().openLivePreview("localhost:4173", "conv-active");
     expect(browserRequests).toHaveBeenCalledExactlyOnceWith({
-      id: 1, url: `${url}/`, conversationId: "conv-active",
+      kind: "open", id: 1, url: `${url}/`, conversationId: "conv-active",
     });
     expect(useAppStore.getState().previewArtifact).toEqual(artifact);
     expect(selectPreviewForConversation(useAppStore.getState(), "conv-active").previewArtifact).toEqual(artifact);
@@ -235,9 +235,10 @@ describe("handlePreviewEvent owner projection", () => {
     expect(useAppStore.getState().previewServers).toEqual([]);
   });
 
-  it("projects exact live refresh evidence once and suppresses replay side effects", () => {
+  it("queues a scoped refresh without opening the panel or replaying side effects", () => {
     const listener = vi.fn();
-    window.addEventListener("preview:auto-refresh", listener);
+    const unsubscribe = subscribeBrowserRequests(listener);
+    useAppStore.setState({ rightPanelOpen: false, rightStackTab: "tasks" });
     try {
       expect(handlePreviewEvent({
         type: "preview.refreshed",
@@ -257,15 +258,17 @@ describe("handlePreviewEvent owner projection", () => {
       } as unknown as ServerEvent)).toBe(true);
 
       expect(listener).toHaveBeenCalledTimes(1);
-      expect((listener.mock.calls[0][0] as CustomEvent).detail).toEqual({
-        conversation_id: "conv-active",
-        workspace_root: "C:/active",
-        request_id: "refresh-1",
-        path: "src/app.ts",
+      expect(listener.mock.calls[0][0]).toEqual({
+        kind: "refresh",
+        id: 1,
+        conversationId: "conv-active",
+        workspaceRoot: "c:/active",
         url: "http://localhost:5173/app",
       });
+      expect(useAppStore.getState().rightPanelOpen).toBe(false);
+      expect(useAppStore.getState().rightStackTab).toBe("tasks");
     } finally {
-      window.removeEventListener("preview:auto-refresh", listener);
+      unsubscribe();
     }
   });
 });

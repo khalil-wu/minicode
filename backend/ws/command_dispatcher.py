@@ -257,10 +257,12 @@ class SessionCommandDispatcher:
         """Receive and admit commands for one attached websocket generation."""
 
         while True:
-            if connection_generation != self._session.connection_generation:
+            if not self._session.is_connected or connection_generation != self._session.connection_generation:
                 return
 
             raw = await self._session.ws.receive_text()
+            if not self._session.is_connected or connection_generation != self._session.connection_generation:
+                return
             try:
                 message = json.loads(raw.replace("\x00", ""))
             except json.JSONDecodeError:

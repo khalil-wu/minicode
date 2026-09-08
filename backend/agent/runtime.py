@@ -553,6 +553,10 @@ class AgentRuntime:
             raise RuntimeError("Agent runtime lease was lost; refusing to start a new run.")
         resolved_run_id = run_id or new_run_id()
         existing = self._runs.get(resolved_run_id)
+        if existing is None and run_id:
+            persisted_existing = self._swarm_store.get_agent_run(resolved_run_id)
+            if persisted_existing is not None:
+                existing = _agent_run_from_dict(persisted_existing)
         if existing is not None and existing.status == "running":
             if (
                 existing.runtime_owner_token == self._runtime_owner_token
@@ -565,10 +569,22 @@ class AgentRuntime:
                 # Admission may create the durable record before provider and
                 # extension setup. QueryEngine reuses that exact owner instead
                 # of creating a competing run for the same scheduled turn.
+                if resolved_run_id not in self._runs:
+                    self._registry.register(existing, kind="run")
+                    self._runs[resolved_run_id] = existing
                 return existing
             raise RuntimeError(f"Agent run {resolved_run_id} is already running.")
         parent = self._runs.get(str(parent_run_id or "").strip())
         parent_path = AgentPath.parse(parent.agent_path) if parent and parent.agent_path else None
+        subagent = self._subagents.get(task_id) if role != "main" else None
+        if existing is not None:
+            agent_path = existing.agent_path or existing.run_id
+        elif subagent is not None:
+            agent_path = subagent.agent_path
+        elif parent_path and role != "main":
+            agent_path = parent_path.child(task_id or resolved_run_id).value
+        else:
+            agent_path = AgentPath.main(resolved_run_id).value
         record = AgentRunRecord(
             run_id=resolved_run_id,
             conversation_id=conversation_id,
@@ -581,11 +597,7 @@ class AgentRuntime:
             runtime_process_id=self._runtime_process_id,
             runtime_process_start_identity=self._runtime_process_start_identity,
             runtime_owner_token=self._runtime_owner_token,
-            agent_path=(
-                parent_path.child(task_id or resolved_run_id).value
-                if parent_path and role != "main"
-                else AgentPath.main(resolved_run_id).value
-            ),
+            agent_path=agent_path,
             mailbox_epoch=max(0, int(mailbox_epoch or 0)),
         )
         persisted = self._swarm_store.upsert_agent_run(
@@ -1648,7 +1660,7 @@ class AgentRuntime:
         from backend.terminal.task_persistence import reconcile_owned_tasks
 
         for original in list(self._subagents.values()):
-            if not original.cleanup_pending:
+            if not original.cleanup_pending or not self._owns_record(original):
                 continue
             worktrees_completed = self._reconcile_subagent_worktrees(original)
             record = self._subagents.get(original.subagent_id) or original
@@ -1685,7 +1697,7 @@ class AgentRuntime:
                 )
 
         for record in list(self._runs.values()):
-            if not record.cleanup_pending:
+            if not record.cleanup_pending or not self._owns_record(record):
                 continue
             children_completed = all(
                 not child.cleanup_pending
@@ -2731,7 +2743,7 @@ class AgentRuntime:
         recipient_mailbox_epoch: int | None = None,
     ) -> SwarmMessageRecord:
         sender_record = self.get_subagent(sender_id)
-        sender_run = self.get_run(sender_id)
+        sender_run = self.get_run(sender_id) if sender_record is None else None
         # The mailbox protocol has a stable virtual leader participant. Keep that
         # literal on disk: rewriting it to a transient parent run id
         # makes the leader poller and the UI lose child->leader messages.

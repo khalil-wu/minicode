@@ -5,6 +5,7 @@ import logging
 import re
 import threading
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -20,6 +21,7 @@ from backend.config import AppConfig
 from backend.llm.base import LLMAdapter
 from backend.permissions.checker import PermissionChecker
 from backend.tools.registry import ToolRegistry
+from backend.ws.event_outbox import EventOutbox
 
 if TYPE_CHECKING:
     from backend.agent.message import AgentEvent
@@ -39,7 +41,7 @@ def _invalidate_runtime_status_cache() -> None:
 
 async def _dispose_unadopted_connection_resources(
     llm: LLMAdapter,
-    artifact_store: ArtifactStore,
+    artifact_store: ArtifactStore | None,
     *,
     adopted_session: WebSocketSession | None = None,
 ) -> None:
@@ -75,6 +77,7 @@ async def _dispose_unadopted_connection_resources(
 class WebSocketManager:
     def __init__(self) -> None:
         self._sessions: dict[str, WebSocketSession] = {}
+        self._connecting_websockets: dict[str, WebSocket] = {}
         self._disconnect_tasks: dict[str, asyncio.Task] = {}
         # Destructive conversation teardown belongs to the process-wide
         # manager, not to the websocket that happened to request it. A
@@ -272,67 +275,88 @@ class WebSocketManager:
         memory_manager: Any | None = None,
         mcp_manager: Any = _SESSION_MCP_MANAGER_UNSET,
     ) -> tuple[WebSocketSession, int]:
-        from backend.ws.handler import WebSocketSession
+        from backend.ws.handler import (
+            CONVERSATION_DATA_DIR,
+            WS_EVENT_REPLAY_MAX,
+            WebSocketSession,
+        )
 
+        session = None
+        session_id = ""
         try:
-            await websocket.accept(subprotocol=_websocket_accept_subprotocol(websocket))
-        except BaseException:
-            await _dispose_unadopted_connection_resources(llm, artifact_store)
-            raise
-
-        requested_session_id = (websocket.query_params.get("session_id") or "").strip()
-        if requested_session_id and not SESSION_ID_PATTERN.fullmatch(requested_session_id):
             try:
-                await websocket.close(code=1008, reason="invalid session_id")
-            finally:
-                await _dispose_unadopted_connection_resources(llm, artifact_store)
-            raise WebSocketDisconnect(code=1008)
-        session_id = requested_session_id or f"session_{uuid.uuid4().hex}"
+                await websocket.accept(subprotocol=_websocket_accept_subprotocol(websocket))
+                requested_session_id = (websocket.query_params.get("session_id") or "").strip()
+                if requested_session_id and not SESSION_ID_PATTERN.fullmatch(requested_session_id):
+                    await websocket.close(code=1008, reason="invalid session_id")
+                    raise WebSocketDisconnect(code=1008)
+                session_id = requested_session_id or f"session_{uuid.uuid4().hex}"
+                self._connecting_websockets[session_id] = websocket
+                replay_state = None
+                if session_id not in self._sessions:
+                    retiring_task = self._disconnect_tasks.get(session_id)
+                    if retiring_task is not None:
+                        await asyncio.shield(retiring_task)
+                    replay_state = await asyncio.to_thread(
+                        EventOutbox.load_replay_state,
+                        session_id=session_id,
+                        replay_root=Path(CONVERSATION_DATA_DIR).parent / "ws-event-log",
+                        replay_limit=WS_EVENT_REPLAY_MAX,
+                    )
+                if self._connecting_websockets.get(session_id) is not websocket:
+                    await websocket.close(code=1012, reason="replaced by newer connection")
+                    raise WebSocketDisconnect(code=1012)
 
-        if session_id in self._disconnect_tasks:
-            self._disconnect_tasks[session_id].cancel()
-            del self._disconnect_tasks[session_id]
-            logger.info(f"Cancelled disconnect cleanup task for session {session_id} due to reconnection")
+                if session_id in self._disconnect_tasks:
+                    self._disconnect_tasks[session_id].cancel()
+                    del self._disconnect_tasks[session_id]
+                    logger.info(f"Cancelled disconnect cleanup task for session {session_id} due to reconnection")
 
-        existing_session = self._sessions.get(session_id)
-        if existing_session:
-            try:
-                previous_ws, generation = existing_session.attach_websocket(websocket)
-                if previous_ws is not websocket:
-                    try:
-                        await previous_ws.close(code=1012, reason="replaced by newer connection")
-                    except Exception:
-                        logger.debug(
-                            "session %s previous websocket close failed",
-                            session_id,
-                            exc_info=True,
-                        )
+                session = self._sessions.get(session_id)
+                if session is not None:
+                    previous_ws, generation = session.attach_websocket(websocket)
+                    if previous_ws is not websocket:
+                        try:
+                            await previous_ws.close(code=1012, reason="replaced by newer connection")
+                        except Exception:
+                            logger.debug(
+                                "session %s previous websocket close failed",
+                                session_id,
+                                exc_info=True,
+                            )
+                    _invalidate_runtime_status_cache()
+                    return session, generation
+
+                session = WebSocketSession(
+                    session_id=session_id,
+                    websocket=websocket,
+                    llm=llm,
+                    artifact_store=artifact_store,
+                    tool_registry=tool_registry,
+                    permission_checker=permission_checker,
+                    config=config,
+                    skill_manager=skill_manager,
+                    skill_executor=skill_executor,
+                    memory_manager=memory_manager,
+                    mcp_manager=mcp_manager,
+                    ws_manager=self,
+                    replay_state=replay_state,
+                )
+                self._sessions[session_id] = session
                 _invalidate_runtime_status_cache()
-                return existing_session, generation
+                return session, session.connection_generation
             finally:
+                if self._connecting_websockets.get(session_id) is websocket:
+                    self._connecting_websockets.pop(session_id)
                 await _dispose_unadopted_connection_resources(
                     llm,
                     artifact_store,
-                    adopted_session=existing_session,
+                    adopted_session=session,
                 )
-
-        session = WebSocketSession(
-            session_id=session_id,
-            websocket=websocket,
-            llm=llm,
-            artifact_store=artifact_store,
-            tool_registry=tool_registry,
-            permission_checker=permission_checker,
-            config=config,
-            skill_manager=skill_manager,
-            skill_executor=skill_executor,
-            memory_manager=memory_manager,
-            mcp_manager=mcp_manager,
-            ws_manager=self,
-        )
-        self._sessions[session_id] = session
-        _invalidate_runtime_status_cache()
-        return session, session.connection_generation
+        except BaseException:
+            if session is not None and session.ws is websocket:
+                self.disconnect(session_id, connection_generation=session.connection_generation)
+            raise
 
     def get_session(self, session_id: str) -> WebSocketSession | None:
         return self._sessions.get(session_id)
@@ -357,10 +381,11 @@ class WebSocketManager:
                     # that reconnects after the grace deadline gets a fresh
                     # session instead of attaching to one being destroyed.
                     self._sessions.pop(session_id, None)
-                    if self._disconnect_tasks.get(session_id) is asyncio.current_task():
-                        self._disconnect_tasks.pop(session_id, None)
                     _invalidate_runtime_status_cache()
                     await session.session_lifecycle.shutdown(reason="disconnect_timeout")
+                    persistence_task = session.event_outbox.persistence_tail
+                    if persistence_task is not None:
+                        await asyncio.shield(persistence_task)
                     logger.info("Session %s cleaned up after disconnect timeout", session_id)
             except asyncio.CancelledError:
                 logger.info(
@@ -388,29 +413,43 @@ class WebSocketManager:
         if not clean_id:
             return False
         session = self._sessions.pop(clean_id, None)
-        disconnect_task = self._disconnect_tasks.pop(clean_id, None)
+        disconnect_task = self._disconnect_tasks.get(clean_id)
+        if session is None:
+            if disconnect_task is not None and not disconnect_task.done():
+                await asyncio.shield(asyncio.gather(disconnect_task, return_exceptions=True))
+            return False
         if disconnect_task is not None and not disconnect_task.done():
             disconnect_task.cancel()
-            await asyncio.gather(disconnect_task, return_exceptions=True)
-        if session is None:
-            return False
         session.mark_disconnected()
         _invalidate_runtime_status_cache()
-        try:
-            await session.session_lifecycle.shutdown(reason=reason)
-        except Exception:
-            logger.exception("Failed to shut down websocket session %s", clean_id)
-        websocket = getattr(session, "ws", None)
-        close = getattr(websocket, "close", None)
-        if callable(close):
+
+        async def shutdown_and_close() -> None:
             try:
-                await close(code=1000, reason="extension shutdown")
-            except Exception:
-                logger.debug(
-                    "Websocket close failed after session shutdown for %s",
-                    clean_id,
-                    exc_info=True,
-                )
+                try:
+                    await session.session_lifecycle.shutdown(reason=reason)
+                except Exception:
+                    logger.exception("Failed to shut down websocket session %s", clean_id)
+                persistence_task = session.event_outbox.persistence_tail
+                if persistence_task is not None:
+                    await asyncio.shield(persistence_task)
+                websocket = session.ws
+                try:
+                    await websocket.close(code=1000, reason=reason)
+                except Exception:
+                    logger.debug(
+                        "Websocket close failed after session shutdown for %s",
+                        clean_id,
+                        exc_info=True,
+                    )
+            finally:
+                if self._disconnect_tasks.get(clean_id) is asyncio.current_task():
+                    self._disconnect_tasks.pop(clean_id, None)
+
+        shutdown_task = asyncio.create_task(
+            shutdown_and_close(), name=f"session-shutdown:{clean_id}",
+        )
+        self._disconnect_tasks[clean_id] = shutdown_task
+        await asyncio.shield(shutdown_task)
         return True
 
     async def _drain_conversation_delete_tasks(self) -> None:
@@ -440,26 +479,24 @@ class WebSocketManager:
 
     async def shutdown(self, *, reason: str = "application_shutdown") -> None:
         """Drain disconnect timers and all live sessions before loop teardown."""
-        cleanup_tasks = list(self._disconnect_tasks.values())
-        self._disconnect_tasks.clear()
-        for task in cleanup_tasks:
-            if not task.done():
+        cleanup_tasks = dict(self._disconnect_tasks)
+        for session_id, task in cleanup_tasks.items():
+            if session_id in self._sessions and not task.done():
                 task.cancel()
         if cleanup_tasks:
-            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+            await asyncio.shield(asyncio.gather(*cleanup_tasks.values(), return_exceptions=True))
 
         # Session shutdown cancels session-owned command tasks. Destructive
         # conversation deletion is manager-owned and must be settled before
         # those session resources disappear.
         await self._drain_conversation_delete_tasks()
 
-        sessions = list(self._sessions.values())
-        self._sessions.clear()
-        if sessions:
+        session_ids = list(self._sessions)
+        if session_ids:
             await asyncio.gather(
                 *(
-                    session.session_lifecycle.shutdown(reason=reason)
-                    for session in sessions
+                    self.shutdown_session(session_id, reason=reason)
+                    for session_id in session_ids
                 ),
                 return_exceptions=True,
             )
@@ -505,6 +542,7 @@ class WebSocketManager:
 
     def reset_for_tests(self) -> None:
         """Drop retained sessions so test cases cannot leak runtime state."""
+        self._connecting_websockets.clear()
         for task in list(self._disconnect_tasks.values()):
             if not task.done():
                 task.cancel()

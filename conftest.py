@@ -7,6 +7,10 @@ import pytest
 def isolate_all_runtime_data_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """One isolation owner for both test trees and every mutable runtime path."""
     conversations = tmp_path / "conversations"
+    data_root = tmp_path / "state" / "data"
+    monkeypatch.setattr("backend.memory.file_memory.DATA_ROOT", data_root)
+    monkeypatch.setattr("backend.memory.file_memory.MEMORY_DIR", data_root / "memory")
+    monkeypatch.setattr("backend.workspace.recent_projects.DEFAULT_STORE_PATH", data_root / "recent_projects.json")
     monkeypatch.setattr("backend.config.SETTINGS_FILE", tmp_path / "settings.json", raising=False)
     monkeypatch.setattr("backend.vault.store.VAULT_FILE", tmp_path / "vault.json", raising=False)
     monkeypatch.setattr("backend.conversations.repository.CONVERSATION_DATA_DIR", conversations, raising=False)

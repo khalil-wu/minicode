@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -33,6 +34,8 @@ from backend.ws.payload_contracts import (
 
 logger = logging.getLogger(__name__)
 
+ReplayState = tuple[WebSocketReplayEventStore, list[dict[str, Any]]]
+
 
 class EventOutbox:
     """Own ordered WebSocket delivery and the durable reconnect window."""
@@ -48,6 +51,7 @@ class EventOutbox:
         has_active_run: Callable[[], bool],
         requires_conversation_owner: Callable[[str, dict[str, Any]], bool],
         workspace_scoped_event_types: Collection[str],
+        replay_state: ReplayState | None = None,
     ) -> None:
         self.session_id = session_id
         self.websocket = websocket
@@ -60,15 +64,22 @@ class EventOutbox:
         self._has_active_run = has_active_run
         self._requires_conversation_owner = requires_conversation_owner
         self._workspace_scoped_event_types = workspace_scoped_event_types
-        self._store = WebSocketReplayEventStore(
-            session_id=session_id,
-            root_dir=replay_root,
+        self._store, self._events = (
+            replay_state
+            if replay_state is not None
+            else self.load_replay_state(
+                session_id=session_id,
+                replay_root=replay_root,
+                replay_limit=replay_limit,
+            )
         )
-        self._events: list[dict[str, Any]] = self._store.load(limit=replay_limit)
         self._event_seq = self._max_replay_event_seq(self._events)
         self._replay_cursor = self._event_seq
         self._send_lock = asyncio.Lock()
         self._persist_tail: asyncio.Task[None] | None = None
+        self._pending_persistence: deque[
+            tuple[dict[str, Any], list[dict[str, Any]] | None, list[dict[str, Any]]]
+        ] = deque()
         self._persistence_errors: list[dict[str, Any]] = []
         self._persistence_failed_seqs: set[int] = set()
         self._event_generation: ContextVar[int | None] = ContextVar(
@@ -83,6 +94,16 @@ class EventOutbox:
             f"ws_client_command_type_{session_id}",
             default="",
         )
+
+    @staticmethod
+    def load_replay_state(
+        *,
+        session_id: str,
+        replay_root: Path,
+        replay_limit: int,
+    ) -> ReplayState:
+        store = WebSocketReplayEventStore(session_id=session_id, root_dir=replay_root)
+        return store, store.load(limit=replay_limit)
 
     @property
     def current_replay_seq(self) -> int:
@@ -251,16 +272,16 @@ class EventOutbox:
             enveloped = self._envelope(payload) if envelope else dict(payload)
             if self._is_replayable(enveloped):
                 replay_payload, rewrite_events = self._stage(enveloped)
-                persist_snapshot = [dict(event) for event in self._events]
-                persist_task = asyncio.create_task(
-                    self._persist_after(
-                        self._persist_tail,
-                        replay_payload,
-                        rewrite_events,
-                        persist_snapshot,
-                    )
+                persist_snapshot = (
+                    rewrite_events
+                    if rewrite_events is not None
+                    else [dict(event) for event in self._events]
                 )
-                self._persist_tail = persist_task
+                if rewrite_events is not None:
+                    self._pending_persistence.clear()
+                self._pending_persistence.append((replay_payload, rewrite_events, persist_snapshot))
+                if self._persist_tail is None or self._persist_tail.done():
+                    self._persist_tail = asyncio.create_task(self._persist_pending())
             if not self._can_send(generation):
                 if self._has_active_run():
                     self.events_dropped_during_disconnect = True
@@ -324,27 +345,23 @@ class EventOutbox:
             rewrite_events = [dict(event) for event in self._events]
         return replay_payload, rewrite_events
 
-    async def _persist_after(
+    async def _persist_pending(self) -> None:
+        while self._pending_persistence:
+            replay_payload, rewrite_events, persist_snapshot = self._pending_persistence.popleft()
+            await self._persist_event(replay_payload, rewrite_events, persist_snapshot)
+
+    async def _persist_event(
         self,
-        previous: asyncio.Task[None] | None,
         replay_payload: dict[str, Any],
         rewrite_events: list[dict[str, Any]] | None,
         persist_snapshot: list[dict[str, Any]],
     ) -> None:
-        predecessor_failed = False
-        if previous is not None:
-            try:
-                await asyncio.shield(previous)
-            except asyncio.CancelledError:
-                predecessor_failed = True
-            except Exception:
-                predecessor_failed = True
-                logger.debug(
-                    "Repairing websocket replay persistence after a failed predecessor",
-                    exc_info=True,
-                )
+        repair_prefix = bool(self._persistence_failed_seqs) and any(
+            event["seq"] in self._persistence_failed_seqs
+            for event in persist_snapshot
+        )
         try:
-            if rewrite_events is not None or predecessor_failed:
+            if rewrite_events is not None or repair_prefix:
                 repaired_events = (
                     rewrite_events if rewrite_events is not None else persist_snapshot
                 )
@@ -406,7 +423,8 @@ class EventOutbox:
         if not owner:
             return 0
         async with self._send_lock:
-            await self.drain_persistence()
+            if self._persist_tail is not None:
+                await asyncio.shield(self._persist_tail)
             for event in self._events:
                 if str(event.get("conversation_id") or "").strip() != owner:
                     continue

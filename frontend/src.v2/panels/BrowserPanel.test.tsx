@@ -4,6 +4,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { handlePreviewEvent } from "../chat/previewEvents";
+import type { ServerEvent } from "../protocol/events";
+import type { EmbeddedBrowserState } from "../desktop/runtime";
 import { BrowserPanel, normalizeBrowserInput } from "./BrowserPanel";
 import { __resetOpenWebInBrowserForTests, openWebInBrowser } from "../chat/openWebInBrowser";
 
@@ -48,7 +50,7 @@ const runtimeMocks = vi.hoisted(() => ({
   })),
   clearSiteData: vi.fn(async () => true),
   close: vi.fn(async () => true),
-  onEvent: vi.fn(() => () => {}),
+  onEvent: vi.fn((_callback: (event: EmbeddedBrowserState) => void) => () => {}),
   openExternal: vi.fn(async () => true),
 }));
 
@@ -100,6 +102,15 @@ describe("BrowserPanel", () => {
     useAppStore.setState({
       conversationId: "conv-browser",
       permissionMode: "bypass",
+      workingDirectory: "C:/browser",
+      conversationWorkbenchStates: {},
+      conversations: [],
+      sideChats: {},
+      conversationMessages: {},
+      previewLaunchProcesses: [],
+      previewServers: [],
+      livePreviewUrl: null,
+      previewVerification: null,
       browserAnnotations: [],
       selectedMentions: [],
     });
@@ -119,7 +130,7 @@ describe("BrowserPanel", () => {
   it("renders a native-browser shell and opens typed addresses in the embedded view", async () => {
     render(<BrowserPanel />);
 
-    expect(screen.getByText("开始浏览")).toBeTruthy();
+    expect(await screen.findByText("开始浏览")).toBeTruthy();
     expect(screen.getByRole("tab", { name: /新标签页/ })).toBeTruthy();
     const address = screen.getByRole("textbox", { name: "地址栏" });
     fireEvent.change(address, { target: { value: "example.com" } });
@@ -197,6 +208,371 @@ describe("BrowserPanel", () => {
     });
     expect(document.querySelector('[data-brand="website"] img')?.getAttribute("src")).toBe("https://docs.example/icon.png");
     expect(runtimeMocks.create).not.toHaveBeenCalled();
+  });
+
+  it.each(["updated", "error", "blank"])("keeps a live %s event instead of overwriting it with the initial list", async (eventKind) => {
+    const listing = pending<ReturnType<typeof page>[]>();
+    runtimeMocks.list.mockReturnValueOnce(listing.promise);
+    render(<BrowserPanel />);
+    const url = eventKind === "blank" ? "about:blank" : "https://live.example/document";
+    const liveEvent: EmbeddedBrowserState = {
+      ...page("native", "Live page", url),
+      type: eventKind === "error" ? "error" : "updated",
+      error: eventKind === "error" ? "Live navigation failed" : undefined,
+      faviconUrl: "",
+    };
+    act(() => runtimeMocks.onEvent.mock.calls.at(-1)![0](liveEvent));
+    await act(async () => listing.resolve([
+      { ...page("native", "Old page", "https://old.example/", true), faviconUrl: "https://old.example/icon.png" },
+    ]));
+
+    expect((screen.getByRole("textbox", { name: "地址栏" }) as HTMLInputElement).value).toBe(eventKind === "blank" ? "" : url);
+    expect(screen.getByRole("tab", { name: "Live page" })).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "Old page" })).toBeNull();
+    expect(document.querySelector('img[src="https://old.example/icon.png"]')).toBeNull();
+    if (eventKind === "error") expect(screen.getByRole("alert").textContent).toContain("Live navigation failed");
+    if (eventKind === "blank") expect(screen.getByText("开始浏览")).toBeTruthy();
+  });
+
+  it("preserves a native page received before the restoration request fails", async () => {
+    const listing = pending<ReturnType<typeof page>[]>();
+    runtimeMocks.list.mockReturnValueOnce(listing.promise);
+    render(<BrowserPanel />);
+    act(() => runtimeMocks.onEvent.mock.calls.at(-1)![0](page("native", "Live page", "https://live.example/")));
+
+    await act(async () => listing.reject(new Error("Native listing failed")));
+
+    expect(screen.getByRole("tab", { name: "Live page" }).getAttribute("aria-selected")).toBe("true");
+    expect((screen.getByRole("textbox", { name: "地址栏" }) as HTMLInputElement).value).toBe("https://live.example/");
+    expect(screen.getByRole("alert").textContent).toContain("Native listing failed");
+  });
+
+  it("allocates distinct tabs for batched requests instead of overwriting the first blank tab", async () => {
+    render(<BrowserPanel />);
+    await screen.findByText("开始浏览");
+
+    act(() => {
+      openWebInBrowser("https://first.example/");
+      openWebInBrowser("https://second.example/");
+    });
+
+    await screen.findByRole("tab", { name: "https://first.example/" });
+    expect(screen.getByRole("tab", { name: "https://second.example/" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getAllByRole("tab")).toHaveLength(2);
+    expect(new Set(runtimeMocks.navigate.mock.calls.map((call) => call[1])).size).toBe(2);
+    expect(runtimeMocks.navigate.mock.calls.map((call) => call[2])).toEqual(["https://first.example/", "https://second.example/"]);
+  });
+
+  it.each(["native-first", "open-first"])("keeps both pages when %s occurs in the same React batch", async (order) => {
+    render(<BrowserPanel />);
+    await screen.findByText("开始浏览");
+    const emit = () => runtimeMocks.onEvent.mock.calls.at(-1)![0](page("native", "Native page", "https://native.example/"));
+
+    act(() => {
+      if (order === "native-first") emit();
+      openWebInBrowser("https://requested.example/");
+      if (order === "open-first") emit();
+    });
+
+    await screen.findByRole("tab", { name: "https://requested.example/" });
+    expect(screen.getByRole("tab", { name: "Native page" })).toBeTruthy();
+    expect(screen.getAllByRole("tab")).toHaveLength(2);
+  });
+
+  it("clears an explicitly empty native favicon when the page changes", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([
+      { ...page("native", "Old page", "https://old.example/", true), faviconUrl: "https://old.example/icon.png" },
+    ]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Old page" });
+    expect(document.querySelector('img[src="https://old.example/icon.png"]')).toBeTruthy();
+
+    act(() => runtimeMocks.onEvent.mock.calls.at(-1)![0]({
+      ...page("native", "New page", "https://new.example/"), faviconUrl: "",
+    }));
+
+    expect(screen.getByRole("tab", { name: "New page" })).toBeTruthy();
+    expect(document.querySelector('img[src="https://old.example/icon.png"]')).toBeNull();
+  });
+
+  it("keeps a native blank page hidden and reuses it for the next web request", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("native", "Old page", "https://old.example/", true)]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Old page" });
+    act(() => runtimeMocks.onEvent.mock.calls.at(-1)![0](page("native", "Blank page", "about:blank")));
+    expect(screen.getByText("开始浏览")).toBeTruthy();
+
+    act(() => openWebInBrowser("https://new.example/"));
+
+    await waitFor(() => expect(runtimeMocks.navigate).toHaveBeenCalledExactlyOnceWith("conv-browser", "native", "https://new.example/"));
+    expect(screen.getAllByRole("tab")).toHaveLength(1);
+  });
+
+  it("selects the next live tab when closing the middle tab", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([
+      page("first", "First page", "https://first.example/"),
+      page("middle", "Middle page", "https://middle.example/", true),
+      page("last", "Last page", "https://last.example/"),
+    ]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Middle page" });
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭 Middle page" }));
+
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "Middle page" })).toBeNull());
+    expect(screen.getByRole("tab", { name: "Last page" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it.each(["page", "empty", "blank", "failed"])("opens a pending link after delayed %s restoration", async (restoration) => {
+    const listing = pending<ReturnType<typeof page>[]>();
+    runtimeMocks.list.mockReturnValueOnce(listing.promise);
+    openWebInBrowser("https://requested.example/guide");
+    render(<BrowserPanel />);
+
+    expect(screen.getByRole("status").textContent).toContain("正在恢复浏览器标签页");
+    expect(screen.queryByRole("textbox", { name: "地址栏" })).toBeNull();
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+
+    await act(async () => {
+      if (restoration === "failed") listing.reject(new Error("Native listing failed"));
+      else listing.resolve(restoration === "empty" ? [] : [
+        page("existing", "Existing page", restoration === "blank" ? "about:blank" : "https://existing.example/", true),
+      ]);
+    });
+
+    await waitFor(() => expect(runtimeMocks.navigate).toHaveBeenCalledExactlyOnceWith(
+      "conv-browser", expect.any(String), "https://requested.example/guide",
+    ));
+    expect((screen.getByRole("textbox", { name: "地址栏" }) as HTMLInputElement).value).toBe("https://requested.example/guide");
+    expect(screen.getByRole("tab", { name: "https://requested.example/guide" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getAllByRole("tab")).toHaveLength(restoration === "page" ? 2 : 1);
+    if (restoration === "page") expect(screen.getByRole("tab", { name: "Existing page" })).toBeTruthy();
+    if (restoration === "blank") expect(runtimeMocks.navigate).toHaveBeenCalledWith("conv-browser", "existing", expect.any(String));
+  });
+
+  it.each([false, true])("waits for the new owner's restoration after switching from hydrated=%s", async (alreadyHydrated) => {
+    const firstList = pending<ReturnType<typeof page>[]>();
+    const secondList = pending<ReturnType<typeof page>[]>();
+    runtimeMocks.list.mockReturnValueOnce(firstList.promise).mockReturnValueOnce(secondList.promise);
+    render(<BrowserPanel />);
+    if (alreadyHydrated) {
+      await act(async () => firstList.resolve([page("first-tab", "First owner", "https://first.example/", true)]));
+      await screen.findByRole("tab", { name: "First owner" });
+    }
+
+    act(() => {
+      useAppStore.setState({ conversationId: "conv-other" });
+      openWebInBrowser("https://second.example/guide");
+    });
+    expect(screen.getByRole("status")).toBeTruthy();
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    await act(async () => secondList.resolve([
+      { ...page("second-tab", "Second owner", "https://second.example/", true), conversationId: "conv-other" },
+    ]));
+    await waitFor(() => expect(runtimeMocks.navigate).toHaveBeenCalledExactlyOnceWith(
+      "conv-other", expect.any(String), "https://second.example/guide",
+    ));
+    if (!alreadyHydrated) {
+      await act(async () => firstList.resolve([page("first-tab", "First owner", "https://first.example/", true)]));
+    }
+
+    expect(screen.queryByRole("tab", { name: "First owner" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Second owner" })).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: "地址栏" }) as HTMLInputElement).value).toBe("https://second.example/guide");
+    expect(runtimeMocks.navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it("reloads all tabs on the refreshed preview origin without navigating or stealing focus", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([
+      page("preview-a", "Preview A", "http://localhost:4173/first"),
+      page("preview-b", "Preview B", "http://localhost:4173/second"),
+      page("other-preview", "Other preview", "http://localhost:5173/"),
+      page("website", "Website", "https://example.com/", true),
+    ]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Website" });
+    runtimeMocks.activate.mockClear();
+
+    act(() => handlePreviewEvent({
+      type: "preview.refreshed", conversation_id: "conv-browser", workspace_root: "C:/browser",
+      url: "http://localhost:4173/source", path: "src/app.ts",
+    }));
+
+    await waitFor(() => expect(runtimeMocks.runAction.mock.calls).toEqual([
+      ["conv-browser", "preview-a", "reload"],
+      ["conv-browser", "preview-b", "reload"],
+    ]));
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    expect(runtimeMocks.activate).not.toHaveBeenCalled();
+    expect(screen.getAllByRole("tab")).toHaveLength(4);
+    expect(screen.getByRole("tab", { name: "Website" }).getAttribute("aria-selected")).toBe("true");
+    expect((screen.getByRole("textbox", { name: "地址栏" }) as HTMLInputElement).value).toBe("https://example.com/");
+  });
+
+  it.each([
+    { replayed: true },
+    { conversation_id: "conv-background" },
+    { workspace_root: "C:/other" },
+    { url: "http://localhost:5173/" },
+    { url: undefined },
+  ])("does not reload unrelated or historical refresh evidence: %j", async (override) => {
+    useAppStore.setState({ conversationMessages: { "conv-background": [] } });
+    runtimeMocks.list.mockResolvedValueOnce([page("preview", "Preview", "http://localhost:4173/", true)]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Preview" });
+
+    act(() => handlePreviewEvent({
+      type: "preview.refreshed", conversation_id: "conv-browser", workspace_root: "C:/browser",
+      url: "http://localhost:4173/", ...override,
+    } as ServerEvent));
+
+    expect(runtimeMocks.runAction).not.toHaveBeenCalled();
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("uses the owning live preview when an explicit refresh has no URL", async () => {
+    useAppStore.setState({ livePreviewUrl: "http://localhost:4173/app" });
+    runtimeMocks.list.mockResolvedValueOnce([
+      page("preview", "Preview", "http://localhost:4173/route"),
+      page("website", "Website", "https://example.com/", true),
+    ]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Website" });
+
+    act(() => handlePreviewEvent({
+      type: "preview.refreshed", conversation_id: "conv-browser", workspace_root: "C:/browser",
+    }));
+
+    await waitFor(() => expect(runtimeMocks.runAction).toHaveBeenCalledExactlyOnceWith("conv-browser", "preview", "reload"));
+    expect(screen.getByRole("tab", { name: "Website" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("retains and coalesces refreshes until browser hydration completes", async () => {
+    const listing = pending<ReturnType<typeof page>[]>();
+    runtimeMocks.list.mockReturnValueOnce(listing.promise);
+    render(<BrowserPanel />);
+    act(() => {
+      for (const url of ["http://localhost:4173/first", "http://localhost:4173/latest", "http://localhost:5173/docs"]) {
+        handlePreviewEvent({
+          type: "preview.refreshed", conversation_id: "conv-browser", workspace_root: "C:/browser", url,
+        });
+      }
+    });
+    expect(runtimeMocks.runAction).not.toHaveBeenCalled();
+
+    await act(async () => listing.resolve([
+      page("web", "Web preview", "http://localhost:4173/app"),
+      page("docs", "Docs preview", "http://localhost:5173/guide"),
+      page("website", "Website", "https://example.com/", true),
+    ]));
+
+    await waitFor(() => expect(runtimeMocks.runAction.mock.calls).toEqual([
+      ["conv-browser", "web", "reload"],
+      ["conv-browser", "docs", "reload"],
+    ]));
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    expect(screen.getByRole("tab", { name: "Website" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("retains refreshes while unmounted and consumes them just once after remount", async () => {
+    const pages = [
+      page("preview", "Preview", "http://localhost:4173/app"),
+      page("website", "Website", "https://example.com/", true),
+    ];
+    runtimeMocks.list.mockResolvedValueOnce(pages).mockResolvedValueOnce(pages).mockResolvedValueOnce(pages);
+    const initial = render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Website" });
+    initial.unmount();
+    act(() => handlePreviewEvent({
+      type: "preview.refreshed", conversation_id: "conv-browser", workspace_root: "C:/browser",
+      url: "http://localhost:4173/",
+    }));
+    expect(runtimeMocks.runAction).not.toHaveBeenCalled();
+
+    const restored = render(<BrowserPanel />);
+    await waitFor(() => expect(runtimeMocks.runAction).toHaveBeenCalledExactlyOnceWith("conv-browser", "preview", "reload"));
+    expect(screen.getByRole("tab", { name: "Website" }).getAttribute("aria-selected")).toBe("true");
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    restored.unmount();
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Website" });
+    expect(runtimeMocks.runAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("discards a pending refresh when its workspace changes before restoration", async () => {
+    const listing = pending<ReturnType<typeof page>[]>();
+    runtimeMocks.list.mockReturnValueOnce(listing.promise);
+    render(<BrowserPanel />);
+    act(() => {
+      handlePreviewEvent({
+        type: "preview.refreshed", conversation_id: "conv-browser", workspace_root: "C:/browser",
+        url: "http://localhost:4173/",
+      });
+      useAppStore.setState({ workingDirectory: "C:/other" });
+    });
+
+    await act(async () => listing.resolve([page("preview", "Preview", "http://localhost:4173/", true)]));
+
+    await screen.findByRole("tab", { name: "Preview" });
+    expect(runtimeMocks.runAction).not.toHaveBeenCalled();
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("keeps a pending refresh with its original conversation until that browser is restored", async () => {
+    handlePreviewEvent({
+      type: "preview.refreshed", conversation_id: "conv-browser", workspace_root: "C:/browser",
+      url: "http://localhost:4173/",
+    });
+    useAppStore.setState({ conversationId: "conv-other" });
+    runtimeMocks.list.mockResolvedValueOnce([
+      { ...page("other", "Other owner", "http://localhost:4173/", true), conversationId: "conv-other" },
+    ]).mockResolvedValueOnce([page("original", "Original owner", "http://localhost:4173/", true)]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Other owner" });
+    expect(runtimeMocks.runAction).not.toHaveBeenCalled();
+
+    act(() => useAppStore.setState({ conversationId: "conv-browser" }));
+
+    await screen.findByRole("tab", { name: "Original owner" });
+    expect(runtimeMocks.runAction).toHaveBeenCalledExactlyOnceWith("conv-browser", "original", "reload");
+  });
+
+  it.each([false, true])("shows an automatic refresh failure with IPC rejection=%s", async (reject) => {
+    const preview = page("preview", "Preview", "http://localhost:4173/", true);
+    runtimeMocks.list.mockResolvedValueOnce([preview]).mockResolvedValueOnce([preview]);
+    if (reject) runtimeMocks.runAction.mockRejectedValueOnce(new Error("Native reload failed"));
+    else runtimeMocks.runAction.mockResolvedValueOnce(false);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Preview" });
+
+    act(() => handlePreviewEvent({
+      type: "preview.refreshed", conversation_id: "conv-browser", workspace_root: "C:/browser",
+      url: "http://localhost:4173/",
+    }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(reject ? "Native reload failed" : "浏览器未接受刷新操作");
+  });
+
+  it("does not let an old automatic refresh failure overwrite a newer navigation", async () => {
+    const reload = pending<boolean>();
+    runtimeMocks.list.mockResolvedValueOnce([page("preview", "Preview", "http://localhost:4173/", true)]);
+    runtimeMocks.runAction.mockReturnValueOnce(reload.promise);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Preview" });
+    act(() => handlePreviewEvent({
+      type: "preview.refreshed", conversation_id: "conv-browser", workspace_root: "C:/browser",
+      url: "http://localhost:4173/",
+    }));
+    const address = screen.getByRole("textbox", { name: "地址栏" }) as HTMLInputElement;
+    fireEvent.change(address, { target: { value: "https://new.example/" } });
+    fireEvent.submit(address.closest("form")!);
+    await screen.findByRole("tab", { name: "https://new.example/" });
+
+    await act(async () => reload.reject(new Error("Old automatic refresh failed")));
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(address.value).toBe("https://new.example/");
+    expect(runtimeMocks.list).toHaveBeenCalledTimes(1);
   });
 
   it("shows per-tab console and network diagnostics without exposing browser internals", async () => {

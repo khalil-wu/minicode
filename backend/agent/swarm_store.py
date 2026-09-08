@@ -551,6 +551,14 @@ class FileSwarmStore:
             )
         return record if cursor.rowcount == 1 else None
 
+    def get_agent_run(self, run_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM agent_runs WHERE run_id = ?",
+                (run_id.strip(),),
+            ).fetchone()
+        return json.loads(row["payload_json"]) if row is not None else None
+
     def list_agent_runs(
         self,
         *,
@@ -779,6 +787,7 @@ class FileSwarmStore:
                     """
                     SELECT run_id, owner_token, payload_json FROM agent_runs
                     WHERE status = 'running'
+                       OR json_extract(payload_json, '$.cleanup_pending') = 1
                     ORDER BY updated_at DESC, run_id
                     """
                 ).fetchall(),
@@ -786,6 +795,7 @@ class FileSwarmStore:
                     """
                     SELECT run_id, owner_token, payload_json FROM agent_runs
                     WHERE status != 'running'
+                      AND json_extract(payload_json, '$.cleanup_pending') IS NOT 1
                     ORDER BY updated_at DESC, run_id
                     LIMIT ?
                     """,
@@ -843,6 +853,7 @@ class FileSwarmStore:
                     SELECT subagent_id, owner_token, agent_path, mailbox_epoch, payload_json
                     FROM subagent_runs
                     WHERE status = 'running'
+                       OR json_extract(payload_json, '$.cleanup_pending') = 1
                     ORDER BY updated_at DESC, subagent_id
                     """
                 ).fetchall(),
@@ -851,6 +862,7 @@ class FileSwarmStore:
                     SELECT subagent_id, owner_token, agent_path, mailbox_epoch, payload_json
                     FROM subagent_runs
                     WHERE status != 'running'
+                      AND json_extract(payload_json, '$.cleanup_pending') IS NOT 1
                     ORDER BY updated_at DESC, subagent_id
                     LIMIT ?
                     """,

@@ -10,12 +10,12 @@ from backend.agent.checkpoint import (
     load_latest_checkpoint,
     save_checkpoint,
 )
-from backend.agent.execution_journal import ExecutionJournal
+from backend.agent.execution_journal import ExecutionJournal, delete_agent_journal
 
 
-def _save(base_dir: Path, *, conversation_id: str) -> Path:
+def _save(base_dir: Path, *, conversation_id: str, session_id: str = "session-1") -> Path:
     return save_checkpoint(
-        session_id="session-1",
+        session_id=session_id,
         user_message=f"message for {conversation_id}",
         iterations=1,
         reply="partial",
@@ -69,7 +69,10 @@ def test_checkpoint_load_and_clear_are_conversation_scoped(tmp_path: Path) -> No
     ) is not None
 
 
-@pytest.mark.parametrize("unsafe_id", ["../escape", "..\\escape", "/absolute", "C:\\absolute", ".."])
+@pytest.mark.parametrize("unsafe_id", [
+    "../escape", "..\\escape", "/absolute", "C:\\absolute", "..",
+    "alice@../escape", "alice@..\\escape", "CON", "nul.txt",
+])
 def test_checkpoint_and_journal_reject_path_like_ids(tmp_path: Path, unsafe_id: str) -> None:
     with pytest.raises(ValueError):
         load_latest_checkpoint(unsafe_id, base_dir=tmp_path)
@@ -77,6 +80,27 @@ def test_checkpoint_and_journal_reject_path_like_ids(tmp_path: Path, unsafe_id: 
         ExecutionJournal(unsafe_id, base_dir=tmp_path / "journals")
 
     assert not (tmp_path.parent / "escape").exists()
+
+
+def test_named_teammate_checkpoint_and_journal_round_trip(tmp_path: Path) -> None:
+    agent_id = "alice@audit"
+    checkpoint_path = _save(tmp_path, conversation_id="conversation", session_id=agent_id)
+    journal = ExecutionJournal(agent_id, base_dir=tmp_path / "journals")
+    journal.append("user_prompt", {"content": "Audit the named teammate."})
+
+    checkpoint = load_latest_checkpoint(agent_id, base_dir=tmp_path, conversation_id="conversation")
+    assert checkpoint is not None
+    assert checkpoint.session_id == agent_id
+    assert checkpoint.reply == "partial"
+    assert checkpoint_path.parent.name == agent_id
+    restored = ExecutionJournal(agent_id, base_dir=tmp_path / "journals")
+    assert restored.read_events()[0].agent_id == agent_id
+    assert restored.path.parent.name == agent_id
+
+    clear_checkpoints(agent_id, base_dir=tmp_path, conversation_id="conversation")
+    assert not checkpoint_path.exists()
+    assert delete_agent_journal(agent_id, base_dir=tmp_path / "journals")
+    assert not journal.path.parent.exists()
 
 
 def test_default_checkpoint_directory_honors_runtime_state_root(

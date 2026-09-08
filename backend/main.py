@@ -24,10 +24,11 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import FastAPI, Query, Request, WebSocket
+from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.websockets import WebSocketState
 
 from backend.agent.message import AgentEvent
 from backend.artifact.store import ArtifactStore
@@ -38,6 +39,7 @@ from backend.version import __version__
 from backend.llm.model_registry import create_session_llm as _create_session_llm
 from backend.ui.preferences import UIPreferencesStore
 from backend.workspace import create_workspace_router
+from backend.ws.manager import _dispose_unadopted_connection_resources
 
 # ── Decomposed sub-modules ──
 from backend.api.auth import (
@@ -493,30 +495,53 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         await websocket.close(code=1008)
         return
 
-    # Create session-level resources
-    artifact_store = ArtifactStore()
-    tool_registry = _state.bootstrap.create_tool_registry(
-        artifact_store,
-        workspace_root=workspace_root,
-        config=config,
-    )
-    permission_checker = _state.bootstrap.create_permission_checker(
-        workspace_root=workspace_root,
-        config=config,
-    )
+    artifact_store = None
+    try:
+        try:
+            artifact_store = ArtifactStore()
+            tool_registry = _state.bootstrap.create_tool_registry(
+                artifact_store,
+                workspace_root=workspace_root,
+                config=config,
+            )
+            permission_checker = _state.bootstrap.create_permission_checker(
+                workspace_root=workspace_root,
+                config=config,
+            )
+        except BaseException:
+            await _dispose_unadopted_connection_resources(llm, artifact_store)
+            raise
 
-    session, connection_generation = await _state.ws_manager.connect(
-        websocket=websocket,
-        llm=llm,
-        artifact_store=artifact_store,
-        tool_registry=tool_registry,
-        permission_checker=permission_checker,
-        config=config,
-        skill_manager=_state.bootstrap.skill_manager,
-        skill_executor=_state.bootstrap.skill_executor,
-        memory_manager=_state.bootstrap.memory_manager,
-        mcp_manager=_state.bootstrap.mcp_manager,
-    )
+        session, connection_generation = await _state.ws_manager.connect(
+            websocket=websocket,
+            llm=llm,
+            artifact_store=artifact_store,
+            tool_registry=tool_registry,
+            permission_checker=permission_checker,
+            config=config,
+            skill_manager=_state.bootstrap.skill_manager,
+            skill_executor=_state.bootstrap.skill_executor,
+            memory_manager=_state.bootstrap.memory_manager,
+            mcp_manager=_state.bootstrap.mcp_manager,
+        )
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        logger.exception("WebSocket session initialization failed")
+        try:
+            if websocket.application_state is WebSocketState.CONNECTING:
+                await websocket.accept(subprotocol=_websocket_accept_subprotocol(websocket))
+            await websocket.send_json(
+                AgentEvent.error(
+                    f"Session initialization failed: {exc}",
+                    recoverable=False,
+                    error_code="connection.session_initialization_failed",
+                ).to_ws_message()
+            )
+            await websocket.close(code=1011)
+        except WebSocketDisconnect:
+            return
+        return
 
     try:
         await session.session_lifecycle.handle(connection_generation=connection_generation)
@@ -525,6 +550,4 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             session.session_id,
             connection_generation=connection_generation,
         )
-
-
 

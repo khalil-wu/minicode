@@ -832,6 +832,7 @@ def test_handle_rejects_non_object_json_and_continues_to_ping(
     session.event_outbox = SimpleNamespace(
         websocket=_WebSocket(),
         connection_generation=1,
+        connected=True,
     )
     session.artifact_store = _ArtifactStore()
     session.session_lifecycle = SessionLifecycle(session)
@@ -1321,7 +1322,7 @@ def test_done_transport_defers_canonical_snake_case_provider_raw(
     assert stored.payload["provider_timeline"][0]["raw"] == "x" * 10_000
 
 
-def test_replay_persistence_repairs_a_failed_predecessor_from_the_staged_prefix() -> None:
+def test_replay_persistence_repairs_a_failed_sequence_from_the_staged_prefix() -> None:
     class Store:
         def __init__(self) -> None:
             self.rewrites: list[list[dict[str, Any]]] = []
@@ -1333,19 +1334,15 @@ def test_replay_persistence_repairs_a_failed_predecessor_from_the_staged_prefix(
         def append(self, event: dict[str, Any]) -> None:
             self.appends.append(dict(event))
 
-    async def failed_predecessor() -> None:
-        raise OSError("replay disk full")
-
     async def scenario() -> Store:
         store = Store()
         owner = object.__new__(EventOutbox)
         owner._store = store
         owner.session_id = "session-replay-repair"
-        owner._persistence_failed_seqs = set()
+        owner._persistence_failed_seqs = {1}
         owner._persistence_errors = []
-        await EventOutbox._persist_after(
+        await EventOutbox._persist_event(
             owner,
-            asyncio.create_task(failed_predecessor()),
             {"type": "done", "seq": 2},
             None,
             [

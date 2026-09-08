@@ -1028,12 +1028,14 @@ class SessionLifecycle:
                 conversation_id=owner_conversation_id,
                 workspace_root=owner_workspace_root,
             )
-            if active_previews:
+            for preview in active_previews:
+                if not preview.is_active or not preview.effective_url:
+                    continue
                 await self._session.send_payload(
                     {
                         "type": "preview.refreshed",
                         "path": relative_path,
-                        "url": active_previews[0].effective_url,
+                        "url": preview.effective_url,
                         "conversation_id": owner_conversation_id,
                         "workspace_root": str(owner_workspace_root),
                     },

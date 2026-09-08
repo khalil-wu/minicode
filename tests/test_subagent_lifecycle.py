@@ -4,6 +4,9 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from backend.agent.checkpoint import load_latest_run_checkpoint
 from backend.agent.runtime import AgentRuntime
 from backend.agent.run_context import RunContext
 from backend.agent.state import AgentState
@@ -19,7 +22,7 @@ from backend.permissions.context import ToolExecutionContext
 from backend.tools.agent_tools import TaskTool
 from backend.tools.registry import ToolRegistry
 from backend.tools.subagent_support import _SubagentLifecycleOwner
-from backend.tools.swarm_tools import TaskUpdateTool
+from backend.tools.swarm_tools import SendMessageTool, TaskUpdateTool
 
 
 def _runtime(tmp_path: Path) -> AgentRuntime:
@@ -262,6 +265,146 @@ def test_teammate_exit_gates_only_owned_in_progress_tasks_before_idle(
         ("task_completed", owned.task_id),
         ("teammate_idle", "alice"),
     ]
+
+
+class _PersistentTeammateHooks(_OrdinaryChildHooks):
+    def __init__(self, runtime: AgentRuntime, trigger: str) -> None:
+        super().__init__(runtime)
+        self.trigger = trigger
+        self.idle = asyncio.Event()
+        self.gate_calls = 0
+
+    async def run_subagent_stop(self, *, subagent_id: str, summary: str, **_: Any) -> HookResult:
+        record = self.runtime.get_subagent(subagent_id)
+        self.stop_calls.append((summary, record.status))
+        return HookResult()
+
+    def _gate(self) -> HookResult:
+        self.gate_calls += 1
+        if self.gate_calls == 1:
+            return HookResult(
+                blocked=self.trigger != "mailbox",
+                message="Finish the second audit step.",
+            )
+        return HookResult(prevent_continuation=True, stop_reason="audit finished")
+
+    async def run_task_completed(self, **_: Any) -> HookResult:
+        assert self.trigger == "task_gate"
+        return self._gate()
+
+    async def run_teammate_idle(self, **_: Any) -> HookResult:
+        self.idle.set()
+        return self._gate()
+
+
+@pytest.mark.parametrize("trigger", ["task_gate", "idle_gate", "mailbox"])
+@pytest.mark.parametrize("legacy_run", [False, True], ids=["fresh", "legacy-run"])
+def test_named_teammate_keeps_mailbox_identity_across_query_turns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trigger: str, legacy_run: bool
+) -> None:
+    monkeypatch.setenv("MINICODE_STATE_ROOT", str(tmp_path / "state"))
+    runtime = _runtime(tmp_path)
+    runtime.start_run(run_id="parent", conversation_id="conversation")
+    runtime.create_swarm_team(team_name="audit", conversation_id="conversation", created_by="parent")
+    agent_id = "alice@audit"
+    if legacy_run:
+        runtime.start_run(run_id=agent_id, conversation_id="conversation")
+        runtime.commit_terminal(agent_id, summary="old turn")
+    if trigger == "task_gate":
+        runtime.create_swarm_task(
+            title="Owned task", assignee="alice", status="in_progress",
+            team_name="audit", conversation_id="conversation",
+        )
+    llm = _TwoAnswerLLM()
+    hooks = _PersistentTeammateHooks(runtime, trigger)
+    monkeypatch.setattr("backend.hooks.manager.load_hook_manager_for_workspace", lambda *_args, **_kwargs: hooks)
+    monkeypatch.setattr("backend.hooks.manager.register_hook_manager_for_session", lambda *_args, **_kwargs: None)
+    registry = ToolRegistry()
+    checker = PermissionChecker(PermissionSettings(), workspace_root=tmp_path)
+    tool = TaskTool(
+        llm_provider=llm,
+        tool_registry_provider=registry,
+        artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
+        permission_checker_provider=checker,
+        agent_settings_provider=AgentSettings(max_iterations=2),
+        token_budget_provider=TokenBudget(),
+    )
+    registry.register(tool)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    async def emit(event_type: str, payload: dict[str, Any]) -> None:
+        events.append((event_type, payload))
+
+    context = ToolExecutionContext(
+        permission=checker.build_context(mode="bypass"),
+        workspace_root=tmp_path,
+        session_id="session",
+        task_id="parent-task",
+        conversation_id="conversation",
+        emit_event=emit,
+        metadata={"run_id": "parent", "_tool_registry": registry},
+        run_context=RunContext(agent_runtime=runtime, hook_manager=hooks),
+    )
+
+    async def run() -> None:
+        try:
+            launched = await tool.execute({
+                "description": "Audit named teammate",
+                "prompt": "Answer the first audit step.",
+                "agent_type": "general-purpose",
+                "name": "alice", "team_name": "audit",
+            }, context=context)
+            assert launched.status == "teammate_spawned"
+            if trigger == "mailbox":
+                await asyncio.wait_for(hooks.idle.wait(), timeout=5)
+                sent = await SendMessageTool().execute({
+                    "recipient": agent_id, "message": "Answer the next audit step."
+                }, context=context)
+                assert not sent.is_error
+            assert await runtime.wait_for_subagent(agent_id, timeout=5)
+            await asyncio.sleep(0)
+        finally:
+            tasks = list(runtime._subagent_tasks.values())
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    try:
+        asyncio.run(run())
+        record = runtime.get_subagent(agent_id)
+        assert record.status == "completed"
+        assert record.mailbox_epoch == 1
+        assert hooks.stop_calls == [("draft answer", "running"), ("revised answer", "running")]
+        assert hooks.gate_calls == 2
+        assert len(llm.prompts) == 2
+        expected_prompt = "Answer the next audit step." if trigger == "mailbox" else "Finish the second audit step."
+        assert expected_prompt in llm.prompts[-1]
+        runs = [
+            row for row in runtime._swarm_store.list_agent_runs(conversation_id="conversation")
+            if row["parent_run_id"] == agent_id
+        ]
+        run_ids = {row["run_id"] for row in runs}
+        assert len(run_ids) == 2
+        assert agent_id not in run_ids
+        assert all(row["status"] == "completed" for row in runs)
+        assert all(row["agent_path"] == record.agent_path for row in runs)
+        assert all(row["mailbox_epoch"] == record.mailbox_epoch for row in runs)
+        checkpoint = load_latest_run_checkpoint(agent_id, conversation_id="conversation")
+        assert checkpoint is not None
+        assert checkpoint.run_id in run_ids
+        assert checkpoint.reply == "revised answer"
+        assert len([item for item in events if item[0] == "subagent.start"]) == 1
+        done = [payload for event_type, payload in events if event_type == "subagent.done"]
+        assert len(done) == 1
+        assert done[0]["subagent_id"] == agent_id
+        assert done[0]["mailbox_epoch"] == 1
+        assert done[0]["agent_path"] == record.agent_path
+        assert done[0]["result"]["content"] == "revised answer"
+        if legacy_run:
+            assert runtime.get_run(agent_id).summary == "old turn"
+            assert runtime.get_run(agent_id).status == "completed"
+    finally:
+        runtime.close(release_lease=True)
 
 
 class _TaskUpdateHooks:

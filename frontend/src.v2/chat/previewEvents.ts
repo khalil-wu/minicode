@@ -10,6 +10,7 @@ import { isReplayedEvent as isReplayed } from "../protocol/events";
 import { pushToast } from "../overlays/ToastContainer";
 import { normalizeWorkspaceRoot } from "../lib/workspace-path";
 import { previewUrlsShareOrigin, selectPreviewForConversation } from "../lib/preview-projection";
+import { refreshWebInBrowser } from "./openWebInBrowser";
 
 export const handlePreviewEvent = (e: ServerEvent): boolean => {
   if (!e.type.startsWith("preview.")) return false;
@@ -116,15 +117,8 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
       // A replayed file-watcher notification is historical evidence, not a
       // request to reload the live iframe and issue a fresh verification call.
       if (isReplayed(e) || !isActiveEvent) return true;
-      window.dispatchEvent(new CustomEvent("preview:auto-refresh", {
-        detail: {
-          conversation_id: ev.conversation_id,
-          workspace_root: ev.workspace_root,
-          request_id: ev.request_id,
-          path: ev.path,
-          url: ev.url,
-        },
-      }));
+      const url = ev.url || previewForEvent().livePreviewUrl;
+      if (url) refreshWebInBrowser(url, eventConversationId, eventWorkspaceRoot);
       return true;
     }
     case "preview.launch.config": {

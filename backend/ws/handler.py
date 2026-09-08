@@ -58,7 +58,7 @@ from backend.ws.command_dispatcher import SessionCommandDispatcher
 from backend.ws.session_lifecycle import SessionLifecycle
 from backend.ws.command_handlers import SessionCommandHandlersMixin
 from backend.ws.conversation_runtime import ConversationRuntime
-from backend.ws.event_outbox import EventOutbox
+from backend.ws.event_outbox import EventOutbox, ReplayState
 from backend.ws.event_log import is_hidden_provider_reasoning_event
 from backend.ws.fork_registry import ForkRegistry
 from backend.ws.manager import _SESSION_MCP_MANAGER_UNSET
@@ -253,6 +253,7 @@ class WebSocketSession(
         memory_manager: Any | None = None,
         mcp_manager: Any = _SESSION_MCP_MANAGER_UNSET,
         ws_manager: Any | None = None,
+        replay_state: ReplayState | None = None,
     ) -> None:
         self.session_id = session_id
         self.ws_manager = ws_manager
@@ -266,6 +267,7 @@ class WebSocketSession(
             has_active_run=self._has_active_run,
             requires_conversation_owner=_requires_conversation_owner,
             workspace_scoped_event_types=WORKSPACE_SCOPED_EVENT_TYPES,
+            replay_state=replay_state,
         )
         self.session_lifecycle = SessionLifecycle(self)
         self.command_dispatcher = SessionCommandDispatcher(

@@ -7,7 +7,7 @@ import { ToolCallCard } from "./ToolCallCard";
 import { __resetOpenWebInPreviewDedupeForTests } from "../openWebInPreview";
 import {
   __resetOpenWebInBrowserForTests,
-  subscribeBrowserOpenRequests,
+  subscribeBrowserRequests,
 } from "../openWebInBrowser";
 
 const { sendMock, openLivePreviewMock, mockStoreState } = vi.hoisted(() => {
@@ -117,7 +117,7 @@ describe("ToolCallCard", () => {
 
   it("dedupes repeated browser opens from a single web result", () => {
     const requests: string[] = [];
-    const unsubscribe = subscribeBrowserOpenRequests((request) => requests.push(request.url));
+    const unsubscribe = subscribeBrowserRequests((request) => requests.push(request.url));
     render(React.createElement(ToolCallCard, {
       viewMode: "verbose",
       record: {

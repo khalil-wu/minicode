@@ -59,7 +59,7 @@ MAX_CHECKPOINT_TEXT_CHARS = 32 * 1024
 MAX_CHECKPOINT_COLLECTION_ITEMS = 256
 MAX_CHECKPOINT_NESTING = 8
 MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024
-_STORAGE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_STORAGE_ID_RE = re.compile(r"^[A-Za-z0-9_.@-]+$")
 _WINDOWS_RESERVED_NAMES = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{index}" for index in range(1, 10)),

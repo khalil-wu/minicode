@@ -37,12 +37,14 @@ import {
   type EmbeddedBrowserSettings,
 } from "../desktop/runtime";
 import { assessNetworkTargetUrl } from "../lib/network-target";
+import { previewUrlsShareOrigin } from "../lib/preview-projection";
+import { normalizeWorkspaceRoot } from "../lib/workspace-path";
 import { BrandIcon } from "../components/BrandIcon";
 import { SelectMenu } from "../components/SelectMenu";
 import { useAppStore } from "../stores";
 import {
-  acknowledgeBrowserOpenRequest,
-  subscribeBrowserOpenRequests,
+  acknowledgeBrowserRequest,
+  subscribeBrowserRequests,
 } from "../chat/openWebInBrowser";
 import "./BrowserPanel.css";
 
@@ -133,7 +135,7 @@ const updateTabFromEvent = (tab: BrowserTab, event: EmbeddedBrowserState): Brows
   loading: event.loading,
   canGoBack: event.canGoBack,
   canGoForward: event.canGoForward,
-  faviconUrl: event.faviconUrl || tab.faviconUrl,
+  faviconUrl: event.faviconUrl ?? tab.faviconUrl,
   error: event.type === "error" ? event.error || "页面加载失败。" : undefined,
 });
 
@@ -141,9 +143,10 @@ export const BrowserPanel = () => {
   const conversationId = useAppStore((state) => state.conversationId) || "";
   const addBrowserAnnotation = useAppStore((state) => state.addBrowserAnnotation);
   const addSelectedMention = useAppStore((state) => state.addSelectedMention);
-  const [tabs, setTabs] = useState<BrowserTab[]>(() => [blankTab()]);
+  const [tabs, setRenderedTabs] = useState<BrowserTab[]>(() => [blankTab()]);
   const [activeId, setActiveId] = useState(() => tabs[0].id);
-  const [browserHydrated, setBrowserHydrated] = useState(false);
+  const [hydratedConversationId, setHydratedConversationId] = useState<string | null>(null);
+  const browserHydrated = hydratedConversationId === conversationId;
   const [annotationPage, setAnnotationPage] = useState<string | null>(null);
   const [annotationNote, setAnnotationNote] = useState("");
   const [annotationSelector, setAnnotationSelector] = useState("");
@@ -160,7 +163,11 @@ export const BrowserPanel = () => {
   const addressRef = useRef<HTMLInputElement>(null);
   const activeIdRef = useRef(activeId);
   const tabsRef = useRef(tabs);
-  tabsRef.current = tabs;
+  const setTabs = useCallback((update: BrowserTab[] | ((current: BrowserTab[]) => BrowserTab[])) => {
+    const nextTabs = typeof update === "function" ? update(tabsRef.current) : update;
+    tabsRef.current = nextTabs;
+    setRenderedTabs(nextTabs);
+  }, []);
   const createdIdsRef = useRef(new Set<string>());
   const visibleIdsRef = useRef(new Set<string>());
   const ownerRef = useRef(conversationId);
@@ -220,7 +227,7 @@ export const BrowserPanel = () => {
     activeIdRef.current = initialTab.id;
     setTabs([initialTab]);
     setActiveId(initialTab.id);
-    setBrowserHydrated(false);
+    setHydratedConversationId(null);
     setAnnotationPage(null);
     setInspectorPage(null);
     setSettingsPage(null);
@@ -228,11 +235,11 @@ export const BrowserPanel = () => {
     setInspectorLoading(false);
     setDiagnostics([]);
     if (!isDesktop()) {
-      setBrowserHydrated(true);
+      setHydratedConversationId(conversationId);
       return;
     }
     if (!conversationId) {
-      setBrowserHydrated(true);
+      setHydratedConversationId(conversationId);
       return;
     }
     let cancelled = false;
@@ -245,15 +252,20 @@ export const BrowserPanel = () => {
         || targets.length === 0
       ) return;
       const restoredTabs = targets.map((target) => {
+        if (!createdIdsRef.current.has(target.id) && target.url && target.url !== "about:blank") {
+          visibleIdsRef.current.add(target.id);
+        }
         createdIdsRef.current.add(target.id);
-        if (target.url && target.url !== "about:blank") visibleIdsRef.current.add(target.id);
         return updateTabFromEvent(blankTab(target.id), target);
       });
       const restoredIds = new Set(restoredTabs.map((tab) => tab.id));
-      setTabs((current) => [
-        ...restoredTabs,
-        ...current.filter((tab) => !restoredIds.has(tab.id) && createdIdsRef.current.has(tab.id)),
-      ]);
+      setTabs((current) => {
+        const liveTabs = new Map(current.map((tab) => [tab.id, tab]));
+        return [
+          ...restoredTabs.map((tab) => liveTabs.get(tab.id) ?? tab),
+          ...current.filter((tab) => !restoredIds.has(tab.id) && createdIdsRef.current.has(tab.id)),
+        ];
+      });
       const activeTarget = targets.find((target) => target.active) ?? targets[0];
       if (!createdIdsRef.current.has(activeIdRef.current) || activeIdRef.current === initialTab.id) {
         activeIdRef.current = activeTarget.id;
@@ -261,9 +273,11 @@ export const BrowserPanel = () => {
       }
     }).catch((error) => {
       if (cancelled || ownerGenerationRef.current !== generation || ownerRef.current !== conversationId) return;
-      setTabs([{ ...initialTab, error: error instanceof Error ? error.message : "无法恢复浏览器标签页。" }]);
+      setTabs((current) => current.map((tab) => tab.id === activeIdRef.current
+        ? { ...tab, error: error instanceof Error ? error.message : "无法恢复浏览器标签页。" }
+        : tab));
     }).finally(() => {
-      if (!cancelled && ownerGenerationRef.current === generation) setBrowserHydrated(true);
+      if (!cancelled && ownerGenerationRef.current === generation) setHydratedConversationId(conversationId);
     });
     return () => { cancelled = true; };
   }, [conversationId]);
@@ -389,38 +403,24 @@ export const BrowserPanel = () => {
   }, [activeId, browserHydrated, reconcileNativeTab, syncBounds]);
 
   const openTab = useCallback((requestedUrl = "") => {
-    const reusableBlank = tabs.find((tab) => !tab.url && !visibleIdsRef.current.has(tab.id));
-    if (requestedUrl && reusableBlank) {
-      setTabs((current) => current.map((tab) => (
-        tab.id === reusableBlank.id
-          ? { ...tab, url: requestedUrl, draftUrl: requestedUrl, loading: true, error: undefined }
-          : tab
-      )));
-      setActiveId(reusableBlank.id);
-      activeIdRef.current = reusableBlank.id;
-      void performNativeNavigation(reusableBlank.id, requestedUrl);
-      return;
-    }
+    const reusableBlank = requestedUrl
+      ? tabsRef.current.find((tab) => !tab.url && !visibleIdsRef.current.has(tab.id))
+      : undefined;
     const tab = requestedUrl
-      ? { ...blankTab(), url: requestedUrl, draftUrl: requestedUrl, loading: true }
+      ? { ...(reusableBlank ?? blankTab()), url: requestedUrl, draftUrl: requestedUrl, loading: true, error: undefined }
       : blankTab();
-    setTabs((current) => [...current, tab]);
+    const nextTabs = reusableBlank
+      ? tabsRef.current.map((current) => current.id === tab.id ? tab : current)
+      : [...tabsRef.current, tab];
+    setTabs(nextTabs);
+    activeIdRef.current = tab.id;
     setActiveId(tab.id);
     if (requestedUrl) {
-      window.queueMicrotask(() => {
-        activeIdRef.current = tab.id;
-        void performNativeNavigation(tab.id, requestedUrl);
-      });
+      void performNativeNavigation(tab.id, requestedUrl);
     } else {
       window.setTimeout(() => addressRef.current?.focus(), 0);
     }
-  }, [performNativeNavigation, tabs]);
-
-  useEffect(() => subscribeBrowserOpenRequests((request) => {
-    if (request.conversationId !== ownerRef.current) return;
-    acknowledgeBrowserOpenRequest(request.id);
-    openTab(request.url);
-  }), [openTab]);
+  }, [performNativeNavigation]);
 
   useEffect(() => {
     if (!isDesktop()) return;
@@ -433,6 +433,7 @@ export const BrowserPanel = () => {
       const knownTab = createdIdsRef.current.has(event.id);
       createdIdsRef.current.add(event.id);
       if (event.url && event.url !== "about:blank") visibleIdsRef.current.add(event.id);
+      else if (event.url === "about:blank") visibleIdsRef.current.delete(event.id);
       setTabs((current) => {
         const existing = current.find((tab) => tab.id === event.id);
         if (existing) {
@@ -482,7 +483,7 @@ export const BrowserPanel = () => {
     await performNativeNavigation(tabId, target.normalizedUrl);
   };
 
-  const runNavigationAction = async (
+  const runNavigationAction = useCallback(async (
     tabId: string,
     action: "back" | "forward" | "reload" | "stop" | "focus",
   ) => {
@@ -511,7 +512,25 @@ export const BrowserPanel = () => {
         ? { ...tab, loading: false, error: error instanceof Error ? error.message : "浏览器操作失败。" }
         : tab));
     }
-  };
+  }, [reconcileNativeTab]);
+
+  useEffect(() => {
+    if (!isDesktop() || !browserHydrated) return;
+    return subscribeBrowserRequests((request) => {
+      if (request.conversationId !== ownerRef.current) return;
+      acknowledgeBrowserRequest(request.id);
+      if (request.kind === "open") {
+        openTab(request.url);
+        return;
+      }
+      if (request.workspaceRoot !== normalizeWorkspaceRoot(useAppStore.getState().workingDirectory)) return;
+      for (const tab of tabsRef.current) {
+        if (createdIdsRef.current.has(tab.id) && previewUrlsShareOrigin(tab.url, request.url)) {
+          void runNavigationAction(tab.id, "reload");
+        }
+      }
+    });
+  }, [browserHydrated, conversationId, openTab, runNavigationAction]);
 
   const closeTab = async (tabId: string) => {
     const index = tabs.findIndex((tab) => tab.id === tabId);
@@ -553,9 +572,9 @@ export const BrowserPanel = () => {
       setActiveId(replacement.id);
       return;
     }
+    const liveIndex = tabsRef.current.findIndex((tab) => tab.id === tabId);
     setTabs(liveTabs);
     if (activeIdRef.current === tabId) {
-      const liveIndex = tabsRef.current.findIndex((tab) => tab.id === tabId);
       const next = liveTabs[Math.min(Math.max(liveIndex, 0), liveTabs.length - 1)];
       setActiveId(next.id);
     }
@@ -737,6 +756,19 @@ export const BrowserPanel = () => {
         <Globe2 size={24} strokeWidth={1.8} />
         <strong>内置浏览器仅在桌面版可用</strong>
         <span>请在 MiniCode 桌面应用中打开网页。</span>
+      </div>
+    );
+  }
+
+  if (!browserHydrated) {
+    return (
+      <div className="mc-browser-panel">
+        <div className="mc-browser-surface">
+          <div className="mc-browser-empty" role="status">
+            <LoaderCircle className="mc-browser-spin" size={24} />
+            <strong>正在恢复浏览器标签页…</strong>
+          </div>
+        </div>
       </div>
     );
   }

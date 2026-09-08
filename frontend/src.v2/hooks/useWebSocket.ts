@@ -18,6 +18,7 @@ import {
 export { commandWithClientCommandId } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
 import { handleChatStreamEvent } from "../chat/chatStreamEvents";
+import { normalizeAgentErrorMessage } from "../chat/errorMessages";
 import { handleRuntimeEvent } from "../chat/runtimeEvents";
 import { handleControlEvent } from "../chat/controlEvents";
 import { handleSessionEvent } from "../chat/sessionEvents";
@@ -1028,6 +1029,21 @@ export const useWebSocketConnection = () => {
         }
         if (!parsed) return;
         if (isSupersededCommandProjection(parsed)) return;
+        if (
+          parsed.type === "error"
+          && !parsed.conversation_id
+          && !isReplayedEvent(parsed)
+          && parsed.recoverable === false
+          && parsed.error_code?.startsWith("connection.")
+        ) {
+          const message = normalizeAgentErrorMessage(parsed.message);
+          clearHeartbeatTimers();
+          heartbeatCleanup = () => {};
+          stopReconnecting(message, message);
+          ref.current = null;
+          ws.close();
+          return;
+        }
         if (parsed.type === "pong") {
           awaitingPong = false;
           if (pongTimeout !== null) {
