@@ -62,6 +62,8 @@ interface BrowserTab {
 
 type InspectorKind = "console" | "network";
 
+const RENDERER_OVERLAYS = '[role="menu"], [role="listbox"], [role="dialog"], [role="tooltip"]';
+
 interface BrowserDiagnosticItem {
   timestamp?: number;
   level?: number | string;
@@ -160,6 +162,7 @@ export const BrowserPanel = () => {
   const [settingsPage, setSettingsPage] = useState<string | null>(null);
   const [browserSettings, setBrowserSettings] = useState<EmbeddedBrowserSettings>(DEFAULT_BROWSER_SETTINGS);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const overlaysRef = useRef(new Set<HTMLElement>());
   const addressRef = useRef<HTMLInputElement>(null);
   const activeIdRef = useRef(activeId);
   const tabsRef = useRef(tabs);
@@ -289,13 +292,22 @@ export const BrowserPanel = () => {
     const owner = ownerRef.current;
     if (!owner || !element || !id || !createdIdsRef.current.has(id) || !visibleIdsRef.current.has(id)) return;
     const rect = element.getBoundingClientRect();
+    // WebContentsView sits above the renderer, regardless of CSS z-index.
+    // Yield its surface to overlapping menus and modal backdrops; retain the
+    // same tab and navigation state when the renderer overlay closes.
+    const obscured = Array.from(overlaysRef.current).some((overlay) => {
+      const bounds = overlay.getBoundingClientRect();
+      return bounds.width > 0 && bounds.height > 0 && getComputedStyle(overlay).visibility !== "hidden"
+        && (overlay.getAttribute("aria-modal") === "true"
+          || (bounds.left < rect.right && bounds.right > rect.left && bounds.top < rect.bottom && bounds.bottom > rect.top));
+    });
     void embeddedBrowserSetBounds({
       id,
       conversationId: owner,
       x: rect.left,
       y: rect.top,
-      width: rect.width,
-      height: rect.height,
+      width: obscured ? 0 : rect.width,
+      height: obscured ? 0 : rect.height,
     });
   }, []);
 
@@ -372,11 +384,40 @@ export const BrowserPanel = () => {
     if (!element) return;
     const observer = new ResizeObserver(syncBounds);
     observer.observe(element);
+    const trackOverlays = (node: Node, added: boolean) => {
+      if (!(node instanceof HTMLElement)) return false;
+      const overlays = [...node.querySelectorAll<HTMLElement>(RENDERER_OVERLAYS)];
+      if (node.matches(RENDERER_OVERLAYS)) overlays.push(node);
+      for (const overlay of overlays) {
+        if (added) {
+          overlaysRef.current.add(overlay);
+          observer.observe(overlay);
+        } else {
+          overlaysRef.current.delete(overlay);
+          observer.unobserve(overlay);
+        }
+      }
+      return overlays.length > 0;
+    };
+    trackOverlays(document.body, true);
+    const overlayObserver = new MutationObserver((mutations) => {
+      let changed = false;
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) changed = trackOverlays(node, true) || changed;
+        for (const node of mutation.removedNodes) changed = trackOverlays(node, false) || changed;
+      }
+      if (changed) syncBounds();
+    });
+    // Only overlay mount/unmount triggers IPC. Streaming text updates do not
+    // scan the document or resize the native browser.
+    overlayObserver.observe(document.body, { childList: true, subtree: true });
     window.addEventListener("resize", syncBounds);
     document.addEventListener("scroll", syncBounds, true);
     const animationFrame = window.requestAnimationFrame(syncBounds);
     return () => {
       observer.disconnect();
+      overlayObserver.disconnect();
+      overlaysRef.current.clear();
       window.removeEventListener("resize", syncBounds);
       document.removeEventListener("scroll", syncBounds, true);
       window.cancelAnimationFrame(animationFrame);

@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/openai/codex",
+  "revision": "588b781ab4924ce7352488394028e63d74cf807f",
+  "license": "Apache-2.0",
+  "files": {
+    "plugin-creator/assets/plugin-creator-small.svg": "codex-rs/skills/src/assets/samples/plugin-creator/assets/plugin-creator-small.svg",
+    "plugin-creator/assets/plugin-creator.png": "codex-rs/skills/src/assets/samples/plugin-creator/assets/plugin-creator.png",
+    "skill-creator/assets/skill-creator-small.svg": "codex-rs/skills/src/assets/samples/skill-creator/assets/skill-creator-small.svg",
+    "skill-creator/assets/skill-creator.png": "codex-rs/skills/src/assets/samples/skill-creator/assets/skill-creator.png"
+  }
+}

@@ -105,7 +105,7 @@ class TaskStopTool(BaseTool):
             )
         if target is None:
             return ToolResult(content="Subagent is not owned by the current task.", is_error=True, status="forbidden", result_kind="subagent")
-        outcome = control.interrupt(target)
+        outcome = control.interrupt(target, reason=str(args.get("reason") or "interrupted").strip() or "interrupted")
         status = outcome.interrupt_status
         emit_event = context.emit_event if context else None
 

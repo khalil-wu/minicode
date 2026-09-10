@@ -1,0 +1,6 @@
+interface:
+  display_name: "Plugin Creator"
+  short_description: "创建、校验并导入 MiniCode 插件"
+  icon_small: "./assets/plugin-creator.svg"
+  icon_large: "./assets/plugin-creator.svg"
+  brand_color: "#d97706"

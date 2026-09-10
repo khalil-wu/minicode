@@ -29,6 +29,7 @@ export const SidebarLeft = ({
   const createConversation = useAppStore((s) => s.createConversation);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
   const toggleSkillsMarketplace = useAppStore((s) => s.toggleSkillsMarketplace);
+  const skillsMarketplaceOpen = useAppStore((s) => s.skillsMarketplaceOpen);
   const toggleSettings = useAppStore((s) => s.toggleSettings);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
   const globalSearchEnabled = capabilityFeatureEnabled(runtimeCapabilities, "global_search", true);
@@ -36,15 +37,24 @@ export const SidebarLeft = ({
   const isOpen = embedded || leftSidebarWidth > 0;
 
   const switchAppMode = (nextMode: "cowork" | "code") => {
+    leaveMarketplace();
     setAppMode(nextMode);
     onNavigate?.();
   };
   const startSession = () => {
+    leaveMarketplace();
     createConversation({ appMode, bindWorkspace: appMode === "code" && Boolean(workingDirectory) });
     onNavigate?.();
   };
   const navigate = (action: () => void) => {
     action();
+    onNavigate?.();
+  };
+  const leaveMarketplace = () => {
+    useAppStore.setState({ skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app" });
+  };
+  const navigateToContent = () => {
+    leaveMarketplace();
     onNavigate?.();
   };
 
@@ -82,6 +92,7 @@ export const SidebarLeft = ({
           if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
           event.preventDefault();
           const mode = event.key === "Home" ? "cowork" : event.key === "End" ? "code" : appMode === "code" ? "cowork" : "code";
+          leaveMarketplace();
           setAppMode(mode);
           event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[mode === "code" ? 1 : 0].focus();
         }}>
@@ -117,7 +128,10 @@ export const SidebarLeft = ({
           {globalSearchEnabled && <button type="button" className="btn-ghost mc-icon-button" aria-label="搜索" title="搜索任务与命令" onClick={() => navigate(() => toggleCommandPalette())}><Search size={16} /></button>}
         </div>
         <SidebarAction icon={<Clock3 />} label="已安排" onClick={openAutomationsPanel} />
-        <SidebarAction icon={<Puzzle />} label="技能" onClick={() => navigate(() => toggleSkillsMarketplace())} />
+        <SidebarAction icon={<Puzzle />} label="插件" active={skillsMarketplaceOpen} onClick={() => navigate(() => {
+          if (skillsMarketplaceOpen) useAppStore.setState({ skillsMarketplaceTab: "plugins" });
+          else toggleSkillsMarketplace("app", "plugins");
+        })} />
       </nav>
 
       <button type="button" className="mc-sidebar-project-open" onClick={() => navigate(() => void openWorkspaceFolder())} title={workingDirectory || "打开项目"}>
@@ -128,11 +142,11 @@ export const SidebarLeft = ({
         {appMode === "cowork" ? (
           <ConversationsTab
             conversationId={conversationId ?? ""}
-            onNavigate={onNavigate}
+            onNavigate={navigateToContent}
             onSetConfirmDialog={(dialog) => setConfirmDialog(dialog)}
           />
         ) : (
-          <FileTree onNavigate={onNavigate} />
+          <FileTree onNavigate={navigateToContent} />
         )}
       </div>
 

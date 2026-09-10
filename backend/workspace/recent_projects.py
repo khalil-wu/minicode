@@ -66,10 +66,6 @@ class RecentProjectStore:
 
     def _load(self) -> None:
         """从文件加载。"""
-        if not self._store_path.exists():
-            self._projects = []
-            return
-
         try:
             raw = self._store_path.read_text(encoding="utf-8")
             data = json.loads(raw)
@@ -77,9 +73,12 @@ class RecentProjectStore:
                 self._projects = [RecentProject.from_dict(item) for item in data if isinstance(item, dict)]
             else:
                 self._projects = []
-        except Exception as exc:
-            logger.warning("Failed to load recent projects: %s", exc)
+        except FileNotFoundError:
             self._projects = []
+        except (OSError, ValueError, TypeError) as exc:
+            raise RecentProjectPersistenceError(
+                "Recent workspace metadata could not be read"
+            ) from exc
 
     def _save(self, *, strict: bool = False) -> bool:
         """保存到文件；显式删除操作可要求失败向上传播。"""

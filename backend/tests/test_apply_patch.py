@@ -164,8 +164,8 @@ def test_apply_update_hunks_failure_includes_current_excerpt():
     assert "import re" in str(exc_info.value)
 
 
-def test_apply_update_hunks_rejects_contextless_non_eof_insert():
-    # #8: bare insert without context is ambiguous and must not land at file top.
+def test_apply_update_hunks_appends_contextless_non_eof_insert():
+    # Codex's contextless chunk appends at EOF, never at the file top.
     original = "line 0\nline 1\n"
     changes = parse_patch(
         "*** Begin Patch\n"
@@ -174,8 +174,7 @@ def test_apply_update_hunks_rejects_contextless_non_eof_insert():
         "+inserted\n"
         "*** End Patch"
     )
-    with pytest.raises(ApplyPatchError, match="no context lines"):
-        apply_update_hunks(original, changes[0].hunks, "f.py")
+    assert apply_update_hunks(original, changes[0].hunks, "f.py") == "line 0\nline 1\ninserted\n"
 
 
 def test_apply_update_hunks_eof_append_without_context():
@@ -190,12 +189,10 @@ def test_apply_update_hunks_eof_append_without_context():
         "*** End Patch"
     )
     result = apply_update_hunks(original, changes[0].hunks, "f.py")
-    # original ends with a trailing newline, so split/join preserves the empty
-    # final segment and the append lands after it (MiniCode-compatible).
-    assert result == "line 0\nline 1\n\nappended"
+    assert result == "line 0\nline 1\nappended\n"
 
 
-def test_apply_update_hunks_rejects_eof_mixed_with_context():
+def test_apply_update_hunks_matches_eof_context():
     original = "line 0\nline 1\n"
     changes = parse_patch(
         "*** Begin Patch\n"
@@ -206,8 +203,7 @@ def test_apply_update_hunks_rejects_eof_mixed_with_context():
         "*** End of File\n"
         "*** End Patch"
     )
-    with pytest.raises(ApplyPatchError, match="mixes context/removal lines"):
-        apply_update_hunks(original, changes[0].hunks, "f.py")
+    assert apply_update_hunks(original, changes[0].hunks, "f.py") == "line 0\nline 1\nappended\n"
 
 
 # --- tool execute ---------------------------------------------------------

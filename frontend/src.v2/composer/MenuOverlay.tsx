@@ -375,7 +375,9 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      if (!open) return;
+      if (!open || e.isComposing || e.keyCode === 229) return;
+      const owner = listRef.current?.closest(".composer-container");
+      if (owner && !owner.contains(e.target as Node)) return;
       if (e.key !== "Escape" && listRef.current?.contains(e.target as Node)) return;
       if (["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key)) {
         e.stopPropagation();
@@ -624,7 +626,7 @@ const activeBadgeStyle: React.CSSProperties = {
 function renderMenuIcon(item: MenuItem) {
   if (item.type === "folder") return <Folder size={14} />;
   if (item.type === "file") return fileIcon(item.name || item.path || "file", { size: 14, className: "composer-context-icon-svg" });
-  if (item.type === "skill") return <BrandIcon value={item.displayName || item.name} iconUrl={item.icon} fallback="skill" size={14} />;
+  if (item.type === "skill") return <BrandIcon value={item.displayName || item.name} iconUrl={item.icon} inferBrand={false} fallback="skill" size={14} />;
   if (item.type === "plugin") return <Blocks size={14} />;
   if (item.type === "argument") return <AtSign size={14} />;
   return <Command size={14} />;

@@ -93,4 +93,6 @@ def test_stash_workspace_changes_treats_clean_checkout_as_noop(monkeypatch, tmp_
     )
 
     assert stash_workspace_changes(tmp_path, label="handoff") == (True, "")
-    assert calls == [("stash", "push", "--include-untracked", "--message", "handoff")]
+    assert len(calls) == 1
+    assert calls[0][:4] == ("stash", "push", "--include-untracked", "--message")
+    assert calls[0][4].startswith("handoff-")

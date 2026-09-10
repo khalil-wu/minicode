@@ -14,7 +14,6 @@ from backend.agent.turn_budget import (
     TurnDeadlineController,
 )
 from backend.agent.rollout_budget import RolloutBudget, billable_tokens_from_usage
-from backend.llm.cost_tracker import estimate_usage_cost_usd
 from backend.llm.base import UsageInfo
 
 
@@ -80,10 +79,6 @@ class TurnBudgetRuntime:
 
     def _usage_contributor_id(self) -> str:
         metadata = getattr(self.tool_context, "metadata", {}) or {}
-        agent_path = str(metadata.get("agent_path") or "").strip()
-        mailbox_epoch = max(0, int(metadata.get("mailbox_epoch") or 0))
-        if agent_path and mailbox_epoch > 0:
-            return f"{agent_path}@{mailbox_epoch}"
         return str(
             metadata.get("run_id")
             or metadata.get("task_id")
@@ -103,27 +98,8 @@ class TurnBudgetRuntime:
         )
 
     def turn_cost_usd(self) -> float | None:
-        """Cost of this turn so far, or None when it cannot be priced.
-
-        Budget checks happen before the WS terminal handler commits totals to
-        CostTracker, so the turn-owned provider usage is authoritative here.
-
-        ``UsageInfo.cost_usd`` is only ever populated from a provider-reported
-        cost, and no provider MiniCode supports reports one, so reading it alone
-        made ``max_turn_cost_usd`` unarmed for every provider while presenting a
-        confident ``$0``. Fall back to the local price table, and return None —
-        not 0.0 — when the active model is unpriced, so the caller can say the
-        ceiling cannot be enforced instead of silently never reaching it.
-        """
-        usage = self.usage()
-        reported = getattr(usage, "cost_usd", None)
-        if reported is not None:
-            return max(0.0, float(reported))
-        model_id = str(getattr(self.state, "model", "") or "").strip()
-        if not model_id:
-            return None
-        estimated = estimate_usage_cost_usd(model_id, usage)
-        return None if estimated is None else max(0.0, estimated)
+        """Return request-priced turn cost without repricing mixed-model totals."""
+        return self.usage().cost_usd
 
     def active_phase_deadline(self) -> float | None:
         return self.deadlines.active_deadline()

@@ -342,12 +342,10 @@ test.describe("Workbench workspace and chat continuity", () => {
   });
 
   test("Open folder binds the active conversation before the next agent turn", async ({ page }) => {
-    await page.getByRole("button", { name: "打开左侧栏" }).click();
     await page.getByRole("button", { name: "打开项目" }).click();
 
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().workingDirectory)).toBe(workspacePath);
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().appMode)).toBe("code");
-    await page.getByRole("button", { name: "打开左侧栏" }).click();
     await expect(page.getByRole("tree", { name: "文件资源管理器" })).toBeVisible();
 
     const composer = page.locator('textarea, input[placeholder*="message" i], [contenteditable="true"]').first();

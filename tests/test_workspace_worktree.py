@@ -2,12 +2,57 @@ from pathlib import Path
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import ANY, patch
+import pytest
 
 from backend.agent.run_context import RunContext
 from backend.hooks.manager import HookEvent, HookResult
 from backend.tools import worktree_tools
 from backend.tools.worktree_tools import CreateWorktreeTool, RemoveWorktreeTool
 from backend.workspace.worktree import WorktreeInfo, WorktreeManager, summarize_worktree_status
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_subdirectory_uses_its_owning_checkout_for_status(tmp_path: Path, linked: bool) -> None:
+    main = tmp_path / "repo"
+    main.mkdir()
+    (main / ".git").mkdir()
+    child = main / ".minicode" / "worktrees" / "feature"
+    child.mkdir(parents=True)
+    (child / ".git").write_text("gitdir: ../../../.git/worktrees/feature", encoding="utf-8")
+    worktrees = [
+        WorktreeInfo(main, "main", "abc", False, False),
+        WorktreeInfo(child, "feature", "def", False, False),
+    ]
+    checkout = child if linked else main
+    nested = checkout / "src" / "nested"
+    nested.mkdir(parents=True)
+
+    status = summarize_worktree_status(nested, worktrees)
+
+    assert status.is_worktree is linked
+    assert status.current_path == checkout.resolve()
+    assert status.current_branch == ("feature" if linked else "main")
+
+
+def test_nested_workspace_cannot_offer_removal_of_its_active_worktree(tmp_path: Path, monkeypatch) -> None:
+    from backend.services.workspace_api_service import workspace_git_worktree_payload
+
+    main = tmp_path / "repo"
+    main.mkdir()
+    (main / ".git").mkdir()
+    child = main / ".minicode" / "worktrees" / "feature"
+    nested = child / "src"
+    nested.mkdir(parents=True)
+    entries = [WorktreeInfo(main, "main", "abc", False, False), WorktreeInfo(child, "feature", "def", False, False)]
+    monkeypatch.setattr(WorktreeManager, "_is_git_repo", lambda self: True)
+    monkeypatch.setattr(WorktreeManager, "list_worktrees", lambda self: entries)
+    monkeypatch.setattr("backend.services.workspace_api_service.resolve_git_common_dir", lambda root: main / ".git")
+
+    payload = workspace_git_worktree_payload(nested)
+
+    current = next(entry for entry in payload["worktrees"] if entry["is_current"])
+    assert current["path"] == str(child.resolve())
+    assert current["can_remove"] is False
 
 
 def test_summarize_worktree_status_detects_linked_worktree(tmp_path: Path) -> None:

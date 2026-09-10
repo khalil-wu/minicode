@@ -14,7 +14,7 @@ from threading import Lock
 from typing import Any
 
 from backend.artifact.store import ArtifactStore
-from backend.atomic_io import atomic_write_bytes, file_mutation_locks
+from backend.atomic_io import atomic_write_bytes, file_mutation_locks, run_blocking_io
 from backend.permissions.context import ToolExecutionContext
 from backend.security.sensitive_files import is_protected_write_path
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
@@ -33,6 +33,7 @@ from backend.tools.file_tools_common import (
     _validate_text_arg,
     _workspace_display_path,
     content_hash,
+    record_file_hash,
     invalidate_workspace_file_caches,
 )
 
@@ -218,9 +219,6 @@ class WriteFileTool(BaseTool):
             )
 
         try:
-            ok, message = _validate_expected_hash(path, args.get("expected_hash"))
-            if not ok:
-                return self._error_result(message)
             file_existed_before_write = path.exists()
             # Symlink + parent boundary check before write
             if path.exists() and path.is_symlink():
@@ -250,26 +248,26 @@ class WriteFileTool(BaseTool):
             # Repeat the guard inside the process-wide same-file queue. This
             # prevents two sessions that reviewed the same hash from both
             # committing, and also makes two simultaneous creates deterministic.
-            with file_mutation_locks([path]):
-                ok, message = _validate_expected_hash(path, args.get("expected_hash"))
-                if not ok:
-                    return self._error_result(message)
-                file_existed_before_write = path.exists()
-                old_content = path.read_bytes().decode("utf-8") if file_existed_before_write else None
-                # Whole-file Write honors the exact line endings supplied by
-                # the model. CC and Pi both distinguish this from Edit, which
-                # preserves the existing file's line-ending style.
-                atomic_write_bytes(path, content.encode("utf-8"))
+            def commit_write():
+                with file_mutation_locks([path]):
+                    ok, message = _validate_expected_hash(path, args.get("expected_hash"))
+                    if not ok:
+                        raise ValueError(message)
+                    existed = path.exists()
+                    previous = path.read_bytes().decode("utf-8") if existed else None
+                    atomic_write_bytes(path, content.encode("utf-8"))
+                    record_file_hash(context, path, content_hash(content))
+                    get_global_file_cache().invalidate(path)
+                    invalidate_workspace_file_caches(
+                        file_tree_changed=not existed or path.name == ".gitignore"
+                    )
+                    return previous, existed
 
-                # Invalidate before releasing the queue so the next mutation
-                # cannot consume stale model/editor state.
-                cache = get_global_file_cache()
-                cache.invalidate(path)
-                invalidate_workspace_file_caches(
-                    file_tree_changed=not file_existed_before_write or path.name == ".gitignore"
-                )
+            old_content, file_existed_before_write = await run_blocking_io(commit_write)
         except UnicodeDecodeError:
             return self._error_result(f"Cannot read binary or non-UTF-8 file: {file_path}")
+        except ValueError as exc:
+            return self._error_result(str(exc))
         except PermissionError:
             return self._error_result(f"No permission to write file: {file_path}")
         except OSError as exc:

@@ -16,7 +16,7 @@ describe("InlineDiff", () => {
     expect(container.querySelectorAll(".inline-diff-line-context")).toHaveLength(1);
   });
 
-  it("keeps one visible line-number column ordered across concatenated patches", () => {
+  it("keeps one visible line-number column using each concatenated hunk's coordinates", () => {
     const { container } = render(
       <InlineDiff
         patch={[
@@ -34,7 +34,7 @@ describe("InlineDiff", () => {
     const numbers = [...container.querySelectorAll<HTMLElement>(".inline-diff-number")]
       .map((node) => Number(node.textContent))
       .filter((value) => Number.isFinite(value));
-    expect(numbers).toEqual([10, 10, 11, 11]);
+    expect(numbers).toEqual([10, 10, 10, 10]);
     expect(container.querySelectorAll(".inline-diff-line:first-child .inline-diff-number")).toHaveLength(1);
   });
 });

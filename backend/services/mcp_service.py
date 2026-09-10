@@ -620,6 +620,8 @@ def _server_entry_from_payload(
             entry.pop("oauth", None)
     if config.transport == "stdio" and not config.env:
         entry.pop("env", None)
+    if config.transport == "stdio" and "cwd" in data and not config.cwd:
+        entry.pop("cwd", None)
     if config.transport != "stdio" and not config.headers:
         entry.pop("headers", None)
     if config.transport != "stdio" and not config.headers_helper:

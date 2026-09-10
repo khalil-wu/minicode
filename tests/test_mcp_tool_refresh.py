@@ -129,7 +129,7 @@ def test_catalog_error_recovers_on_later_notification_without_losing_other_diagn
         assert state.last_exception is None
         assert state.operation_failures == {"resource_restore": restore_failure}
         assert [tool.name for tool in manager.get_all_tools()["fixture"]] == ["fresh_tool"]
-        assert manager._registry_version == 2
+        assert manager._registry_version == 4
 
     asyncio.run(scenario())
 

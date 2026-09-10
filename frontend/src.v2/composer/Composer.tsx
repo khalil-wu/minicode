@@ -130,11 +130,14 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const removeSelectedSkill = useAppStore((s) => s.removeSelectedSkill);
   const setMentionResults = useAppStore((s) => s.setMentionResults);
   const selectedSkills = useAppStore((s) => s.selectedSkills);
+  const skillCatalog = useAppStore((s) => s.availableSkills);
   const activeGoal = useAppStore((s) => s.activeGoal);
   const currentModel = useAppStore((s) => s.currentModel);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const submittingRef = useRef(false);
+  const [submitting, setSubmitting] = useState(false);
   const [menuFilter, setMenuFilter] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [selectedSlashCommand, setSelectedSlashCommand] = useState<string | null>(null);
@@ -148,7 +151,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const historySavedDraftRef = useRef("");
   const hasReadyAttachment = useAppStore((s) => s.attachments.some((a) => a.status === "ready"));
 
-  const sendState = deriveSendState({
+  const sendState = submitting ? "sending" : deriveSendState({
     hasContent: draft.trim().length > 0 || hasReadyAttachment,
     isStreaming,
     isConnected,
@@ -296,7 +299,23 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     });
   };
 
-  const submit = async () => {
+  const runSubmission = async (action: () => Promise<void>) => {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      await action();
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : "消息发送失败，请重试。", "error", 4500);
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
+  };
+
+  const submit = () => runSubmission(submitCurrentDraft);
+
+  const submitCurrentDraft = async () => {
     if (sendState === "stop" && !draft.trim()) return;
     if (sendState !== "idle" && sendState !== "queue" && sendState !== "offline-queue") return;
     const queueWhileStreaming = sendState === "queue";
@@ -413,6 +432,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   };
 
   const executeSlashCommand = async (commandLine: string) => {
+    const composerStateAtSend = composerFingerprint();
     const result = await executeRuntimeSlashCommand(commandLine, {
       getState: useAppStore.getState,
       setState: useAppStore.setState,
@@ -429,6 +449,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         });
       },
     });
+    if (composerFingerprint() !== composerStateAtSend) return;
     if (result.reset === "composer") {
       resetComposer();
       return;
@@ -543,7 +564,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         setDraft("");
       } else if (selection.kind === "execute") {
         setSelectedSlashCommand(null);
-        void executeSlashCommand(selection.commandLine);
+        void runSubmission(() => executeSlashCommand(selection.commandLine));
       }
       closeSlashPanel();
       setMenuFilter("");
@@ -670,10 +691,10 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         onRecallHistory={recallHistory}
         onEscape={escapeInterrupt}
         onClearCommand={() => setSelectedSlashCommand(null)}
-        skillTokens={selectedSkills.map((skill) => ({
-          name: skill.name,
-          description: skill.description,
-        }))}
+        skillTokens={selectedSkills.map((skill) => {
+          const metadata = skillCatalog.find((item) => skill.path ? item.path === skill.path : item.name === skill.name);
+          return { name: skill.name, displayName: metadata?.display_name, description: skill.description, icon: metadata?.icon };
+        })}
         onRemoveSkill={removeSelectedSkill}
         onRemoveLastSkill={() => {
           const last = useAppStore.getState().selectedSkills.at(-1);

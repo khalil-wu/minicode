@@ -6,7 +6,8 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 import { useAppStore } from "../stores";
-import { editorPathComparisonKey, editorPathsEqual } from "../stores/shared-helpers";
+import type { EditorOpenRequest, EditorTab } from "../stores/types";
+import { editorPathComparisonKey, editorPathsEqual, editorStateForWorkspace } from "../stores/shared-helpers";
 import { workspaceRawResourceUrlWithToken } from "../protocol/api";
 import {
   compareWriteWorkspaceFile,
@@ -61,6 +62,8 @@ const LazyMonacoEditor = lazy(async () => {
   return { default: reactMonaco.default };
 });
 
+const LazyPdfPreview = lazy(() => import("./PdfAttachmentPreview").then((module) => ({ default: module.PdfAttachmentPreview })));
+
 type MonacoEditorInstance = {
   getSelection: () => unknown;
   getModel?: () => { getValueInRange: (range: unknown) => string } | null;
@@ -77,6 +80,7 @@ type MonacoEditorInstance = {
   revealPositionInCenter?: (position: { lineNumber: number; column: number }) => void;
   setPosition?: (position: { lineNumber: number; column: number }) => void;
   onDidChangeCursorPosition: (handler: (event: { position: { lineNumber: number; column: number } }) => void) => unknown;
+  onDidDispose: (handler: () => void) => unknown;
 };
 
 type EditorInsertEvent = CustomEvent<{ text: string; handled?: boolean }>;
@@ -104,7 +108,10 @@ const guessLanguage = (path: string): string => {
 };
 
 const basename = (path: string) => path.split(/[/\\]/).filter(Boolean).pop() ?? path;
-const dirname = (path: string) => path.replace(/\\/g, "/").split("/").filter(Boolean).slice(0, -1).join("/");
+const dirname = (path: string) => {
+  const normalized = normalizeWorkspacePath(path);
+  return normalized.slice(0, normalized.lastIndexOf("/") + 1);
+};
 
 const workspaceRelativePath = (path: string, workingDirectory: string): string => {
   const normalized = normalizeWorkspacePath(path);
@@ -115,9 +122,9 @@ const workspaceRelativePath = (path: string, workingDirectory: string): string =
   return normalized.replace(/^\.\/+/, "");
 };
 
-const resolveUnqualifiedEditorPath = async (path: string, workingDirectory: string): Promise<string> => {
+const resolveUnqualifiedEditorPath = async (path: string, workingDirectory: string, exactPath = false): Promise<string> => {
   const relative = workspaceRelativePath(path, workingDirectory);
-  if (!relative || relative.includes("/") || !workingDirectory.trim()) return relative || path;
+  if (exactPath || !relative || relative.includes("/") || !workingDirectory.trim()) return relative || path;
 
   const query = basename(relative);
   const results = isDesktop()
@@ -187,8 +194,7 @@ const isEditablePath = (path: string): boolean => {
 };
 
 const toWorkspaceDisplayPath = (path: string, workingDirectory = ""): string => {
-  const decodedSeparators = path.trim().replace(/%5[cC]/g, "/").replace(/%2[fF]/g, "/");
-  const normalized = normalizeWorkspacePath(decodedSeparators);
+  const normalized = normalizeWorkspacePath(path);
   const root = normalizeWorkspacePath(workingDirectory);
   if (!normalized || !root) return normalized;
   if (workspacePathsEqual(normalized, root)) return ".";
@@ -198,50 +204,61 @@ const toWorkspaceDisplayPath = (path: string, workingDirectory = ""): string => 
   return normalized;
 };
 
-const rawFileUrl = (path: string, workingDirectory = ""): string => {
+const rawFileUrl = (path: string, workingDirectory: string, version: number): string => {
+  if (!path || /^(https?:|data:|blob:|mailto:|tel:|#)/i.test(path)) return path;
   const normalized = toWorkspaceDisplayPath(path, workingDirectory);
-  if (/^(https?:|data:|blob:|file:|mailto:|tel:|#)/i.test(normalized)) return normalized;
-  return workspaceRawResourceUrlWithToken(normalized, workingDirectory);
+  const url = new URL(workspaceRawResourceUrlWithToken(normalized, workingDirectory));
+  url.searchParams.set("version", String(version));
+  return url.toString();
+};
+
+const useRawFileUrl = (path: string, workingDirectory: string): string => {
+  const version = useAppStore((state) => {
+    for (let i = state.fileChanges.length - 1; i >= 0; i--) {
+      const change = state.fileChanges[i];
+      if (editorPathsEqual(change.path, path, workingDirectory)) return change.sequence;
+    }
+    return 0;
+  });
+  return useMemo(() => rawFileUrl(path, workingDirectory, version), [path, workingDirectory, version]);
 };
 
 const isAbsoluteLocalPath = (path: string): boolean =>
   /^[a-zA-Z]:(?:[\\/]|%5[cC]|%2[fF])/.test(path) || path.startsWith("/") || path.startsWith("\\");
 
-const markdownUrlTransform = (url: string): string => (
-  isAbsoluteLocalPath(url) ? url : defaultUrlTransform(url)
-);
-
-const normalizeJoinedPath = (path: string): string => {
-  const normalized = path.replace(/\\/g, "/").replace(/\/+/g, "/");
-  const driveMatch = normalized.match(/^([a-zA-Z]:)(?:\/|$)/);
-  const prefix = driveMatch ? `${driveMatch[1]}/` : normalized.startsWith("/") ? "/" : "";
-  const body = driveMatch ? normalized.slice(driveMatch[0].length) : normalized.replace(/^\/+/, "");
-  const parts: string[] = [];
-  for (const part of body.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (parts.length > 0 && parts[parts.length - 1] !== "..") parts.pop();
-      else if (!prefix) parts.push(part);
-      continue;
-    }
-    parts.push(part);
-  }
-  return `${prefix}${parts.join("/")}`.replace(/\/+$/, "") || ".";
+const markdownUrlTransform = (url: string): string => {
+  if (/^file:/i.test(url)) return URL.canParse(url) ? url : "";
+  return isAbsoluteLocalPath(url) ? url : defaultUrlTransform(url);
 };
 
-const resolveWorkspaceAssetPath = (src: string, ownerPath: string, workingDirectory: string): string => {
+const resolveWorkspaceAsset = (src: string, ownerPath: string, workingDirectory: string): { path: string; fragment: string } => {
   const trimmed = src.trim();
-  if (!trimmed || /^(https?:|data:|blob:|file:|mailto:|tel:|#)/i.test(trimmed)) return trimmed;
-  if (isAbsoluteLocalPath(trimmed)) return toWorkspaceDisplayPath(normalizeJoinedPath(trimmed), workingDirectory);
+  if (!trimmed || /^(https?:|data:|blob:|mailto:|tel:|#)/i.test(trimmed)) return { path: trimmed, fragment: "" };
+  const fragmentIndex = trimmed.indexOf("#");
+  const fragment = fragmentIndex < 0 ? "" : trimmed.slice(fragmentIndex);
+  let path = trimmed.split(/[?#]/, 1)[0];
+  if (/^file:/i.test(path)) {
+    const url = new URL(path);
+    path = url.hostname && url.hostname !== "localhost" ? `//${url.hostname}${url.pathname}` : url.pathname.replace(/^\/([a-zA-Z]:\/)/, "$1");
+  }
+  // Decode the Markdown URL once. Tree/editor paths are already literal file
+  // names, and a filename containing "%20" must not be decoded a second time.
+  try {
+    path = decodeURIComponent(path);
+  } catch (error) {
+    if (!(error instanceof URIError)) throw error;
+    // A malformed escape is literal filename text, as in Codex local links.
+  }
+  if (isAbsoluteLocalPath(path)) return { path: toWorkspaceDisplayPath(path, workingDirectory), fragment };
   const ownerDir = dirname(ownerPath);
   const base = ownerDir || workingDirectory || "";
-  return toWorkspaceDisplayPath(normalizeJoinedPath(base ? `${base}/${trimmed}` : trimmed), workingDirectory);
+  return { path: toWorkspaceDisplayPath(base ? `${base}/${path}` : path, workingDirectory), fragment };
 };
 
 const resolveDesktopFsPath = (path: string, workingDirectory: string): string => {
   const trimmed = path.trim();
   if (!trimmed || isAbsoluteLocalPath(trimmed) || !workingDirectory.trim()) return trimmed;
-  return normalizeJoinedPath(`${workingDirectory}/${trimmed}`);
+  return normalizeWorkspacePath(`${workingDirectory}/${trimmed}`);
 };
 
 const pathsMatch = (a: string, b: string): boolean => {
@@ -266,7 +283,6 @@ const MAX_EDITOR_BYTES = 2 * 1024 * 1024;
 const MAX_EDITOR_CHARS = 1_000_000;
 const MAX_EDITOR_LINES = 20_000;
 const MAX_MARKDOWN_PREVIEW_IMAGES = 80;
-const EDITOR_FRAME_REFERRER_POLICY = "no-referrer";
 
 const countLines = (content: string): number =>
   content ? content.split(/\r\n|\r|\n/).length : 0;
@@ -314,6 +330,8 @@ const createMarkdownPreviewComponents = (
   return {
   a: (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
     const href = typeof props.href === "string" ? props.href : "";
+    const asset = resolveWorkspaceAsset(href, ownerPath, workingDirectory);
+    const resourceUrl = useRawFileUrl(asset.path, workingDirectory);
     if (href.startsWith("#")) {
       const target = `${scopeId}-${markdownHeadingSlug(decodeMarkdownFragment(href.slice(1)))}`;
       return (
@@ -333,7 +351,7 @@ const createMarkdownPreviewComponents = (
     return (
       <a
         {...props}
-        href={href ? rawFileUrl(resolveWorkspaceAssetPath(href, ownerPath, workingDirectory)) : props.href}
+        href={href ? `${resourceUrl}${asset.fragment}` : props.href}
         target="_blank"
         rel="noreferrer"
         style={{ color: "var(--accent-primary)" }}
@@ -341,13 +359,12 @@ const createMarkdownPreviewComponents = (
     );
   },
   img: (props: React.ImgHTMLAttributes<HTMLImageElement>) => {
-    const src = typeof props.src === "string"
-      ? rawFileUrl(resolveWorkspaceAssetPath(props.src, ownerPath, workingDirectory))
-      : props.src;
+    const asset = resolveWorkspaceAsset(props.src ?? "", ownerPath, workingDirectory);
+    const src = useRawFileUrl(asset.path, workingDirectory);
     return (
       <img
         {...props}
-        src={src}
+        src={`${src}${asset.fragment}`}
         loading="lazy"
         decoding="async"
         style={{
@@ -451,7 +468,6 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const reducedMotion = useAppStore((s) => s.reducedMotion);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const editorOpenRequests = useAppStore((s) => s.editorOpenRequests);
-  const activeEditorPath = useAppStore((s) => s.activeEditorPath);
   const fileChanges = useAppStore((s) => s.fileChanges);
   const gitChanges = useAppStore((s) => s.gitChanges);
   const setDiffReviewState = useAppStore((s) => s.setDiffReviewState);
@@ -473,7 +489,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const markTabExternalChanged = useAppStore((s) => s.markTabExternalChanged);
 
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
-  const [saving, setSaving] = useState(false);
+  const savingPathsRef = useRef(new Set<string>());
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "error">("idle");
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const [mdPreview, setMdPreview] = useState(false);
@@ -482,9 +498,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const monacoMountedRef = useRef(false);
   const pendingRevealRef = useRef<EditorTarget | null>(null);
   const loadEpochRef = useRef(new Map<string, number>());
-
-  const loadEpochKey = (path: string, directory: string): string =>
-    `${normalizeWorkspaceRoot(directory)}\0${editorPathComparisonKey(path, directory)}`;
+  const loadingTabsRef = useRef(new WeakSet<EditorTab>());
+  const openingRequestsRef = useRef(new WeakSet<EditorOpenRequest>());
 
   const activeTab = tabs.find((tab) => editorPathsEqual(tab.path, activeTabPath, workingDirectory)) ?? null;
   const markdownScopeId = useMemo(
@@ -524,7 +539,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
 
   useEffect(() => {
     setMdPreview(false);
-  }, [activeTabPath]);
+    setSaveStatus("idle");
+  }, [activeTabPath, workingDirectory]);
 
   useEffect(() => {
     if (saveStatus !== "saved") return;
@@ -561,39 +577,34 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   // Consume open requests from other panels
   useEffect(() => {
     for (const request of editorOpenRequests) {
-      consumeEditorOpenRequest(request.id);
-      void resolveUnqualifiedEditorPath(request.path, workingDirectory).then((resolvedPath) => {
-        if (!workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)) return;
-        openEditorTab(resolvedPath);
-        loadFileIfNeeded(resolvedPath);
-        handleSetActive(resolvedPath, {
-          path: resolvedPath,
-          line: request.line,
-          column: request.column,
-        });
+      if (openingRequestsRef.current.has(request)) continue;
+      openingRequestsRef.current.add(request);
+      void resolveUnqualifiedEditorPath(request.path, workingDirectory, request.exact).then((resolvedPath) => {
+        const state = useAppStore.getState();
+        if (!state.editorOpenRequests.includes(request)) return;
+        const activate = state.activeEditorOpenRequestId === request.id;
+        openEditorTab(resolvedPath, { activate: false });
+        if (activate) {
+          handleSetActive(resolvedPath, { path: resolvedPath, line: request.line, column: request.column });
+        }
+        consumeEditorOpenRequest(request.id);
       }).catch((error: unknown) => {
-        if (!workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)) return;
+        if (!useAppStore.getState().editorOpenRequests.includes(request)) return;
+        consumeEditorOpenRequest(request.id);
         pushToast(`无法定位文件：${errorMessage(error)}`, "error", 5000);
       });
     }
   }, [editorOpenRequests, consumeEditorOpenRequest, openEditorTab, workingDirectory]);
 
-  // Sync activeEditorPath from workspace slice
-  useEffect(() => {
-    if (activeEditorPath && !editorPathsEqual(activeEditorPath, activeTabPath, workingDirectory)) {
-      const exists = tabs.some((tab) => editorPathsEqual(tab.path, activeEditorPath, workingDirectory));
-      if (exists) setActiveTab(activeEditorPath);
-    }
-  }, [activeEditorPath, activeTabPath, tabs, setActiveTab, workingDirectory]);
-
   useEffect(() => {
     for (const tab of tabs) {
-      if (tab.loading) {
-        void loadFileContent(tab.path);
+      if (tab.loading && !loadingTabsRef.current.has(tab)) {
+        loadingTabsRef.current.add(tab);
+        void loadFileContent(tab);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workingDirectory]);
+  }, [tabs, workingDirectory]);
 
   const applyFileSnapshot = (path: string, snapshot: FileSnapshot) => {
     const warning = largeFileReason(snapshot);
@@ -606,16 +617,17 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     return warning;
   };
 
-  const loadFileContent = async (path: string) => {
+  const loadFileContent = async (tab: EditorTab) => {
+    const path = tab.path;
     const directory = workingDirectory;
-    const epochKey = loadEpochKey(path, directory);
+    const epochKey = tab.id;
     const epoch = (loadEpochRef.current.get(epochKey) ?? 0) + 1;
     loadEpochRef.current.set(epochKey, epoch);
     const commit = (callback: () => void) => {
       if (loadEpochRef.current.get(epochKey) !== epoch) return;
       if (!workspaceRootsEqual(directory, useAppStore.getState().workingDirectory)) return;
       const currentState = useAppStore.getState();
-      if (!currentState.editorTabs.some((tab) => editorPathsEqual(tab.path, path, currentState.workingDirectory))) return;
+      if (!currentState.editorTabs.includes(tab)) return;
       callback();
     };
     if (isImagePath(path) || isPdfPath(path)) {
@@ -644,14 +656,6 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       } else {
         commit(() => markTabLoaded(path, "", message || `Could not read ${path}`));
       }
-    }
-  };
-
-  const loadFileIfNeeded = (path: string) => {
-    const currentState = useAppStore.getState();
-    const tab = currentState.editorTabs.find((t) => editorPathsEqual(t.path, path, currentState.workingDirectory));
-    if (tab?.loading) {
-      void loadFileContent(path);
     }
   };
 
@@ -685,15 +689,6 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     } else {
       setCursor({ line: 1, column: 1 });
     }
-    useAppStore.setState({ activeEditorPath: path });
-  };
-
-  const openFile = (targetPath: string) => {
-    const normalized = targetPath.trim();
-    if (!normalized) return;
-    openEditorTab(normalized);
-    loadFileIfNeeded(normalized);
-    handleSetActive(normalized);
   };
 
   useEffect(() => {
@@ -731,66 +726,79 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       pushToast(`${basename(activeTab.path)} 已保存。`, "info", 1400);
       return;
     }
-    if (saving) return;
-    setSaving(true);
-    setSaveStatus("idle");
-
     const savePath = activeTab.path;
     const saveContent = activeTab.content;
     const saveOriginal = activeTab.original;
     const expectedHash = activeTab.contentHash ?? "";
     const saveWorkspace = workingDirectory;
-    const saveEpochKey = loadEpochKey(savePath, saveWorkspace);
+    const saveEpochKey = activeTab.id;
+    if (savingPathsRef.current.has(saveEpochKey)) return;
+    savingPathsRef.current.add(saveEpochKey);
+    setSaveStatus("idle");
     const saveEpoch = (loadEpochRef.current.get(saveEpochKey) ?? 0) + 1;
     loadEpochRef.current.set(saveEpochKey, saveEpoch);
-    const canCommitSave = () => {
-      if (loadEpochRef.current.get(saveEpochKey) !== saveEpoch) return false;
-      const state = useAppStore.getState();
-      if (!workspaceRootsEqual(state.workingDirectory, saveWorkspace)) return false;
-      const currentTab = state.editorTabs.find((tab) => editorPathsEqual(tab.path, savePath, state.workingDirectory));
-      return Boolean(
-        currentTab
-        && currentTab.original === saveOriginal
-        && (currentTab.contentHash ?? "") === expectedHash,
-      );
-    };
     try {
       // Route saves through the backend even in desktop mode. The agent and
       // editor then share one guarded mutation queue; native IPC remains for
       // reads/tree operations but cannot race a Python-side model edit here.
       const result = await compareWriteWorkspaceFile(savePath, expectedHash, saveContent, saveWorkspace);
+      const state = useAppStore.getState();
+      const workspace = workspaceRootsEqual(state.workingDirectory, saveWorkspace)
+        ? state : editorStateForWorkspace(saveWorkspace);
+      const currentTab = workspace.editorTabs.find((tab) => tab.id === saveEpochKey);
+      if (!currentTab || currentTab.original !== saveOriginal || (currentTab.contentHash ?? "") !== expectedHash
+        || loadEpochRef.current.get(saveEpochKey) !== saveEpoch) return;
+      const currentPath = currentTab.path;
+      const saveIsVisible = workspaceRootsEqual(state.workingDirectory, saveWorkspace)
+        && editorPathsEqual(state.activeTabPath, currentPath, saveWorkspace);
       if (result.ok) {
-        if (!canCommitSave()) return;
         // Mark exactly the payload acknowledged by disk as the baseline. If
         // the user typed again while this request was in flight, current
         // content remains newer than original and the tab correctly stays dirty.
-        markTabSaved(savePath, saveContent, result.file.content_hash, result.file.size_bytes ?? result.file.size);
-        setSaveStatus("saved");
-        pushToast(`已保存 ${basename(savePath)}`, "success", 1600);
+        markTabSaved(currentPath, saveContent, result.file.content_hash, result.file.size_bytes ?? result.file.size, saveWorkspace);
+        if (currentTab.externalChanged && workspaceRootsEqual(state.workingDirectory, saveWorkspace)) {
+          void reloadFileFromDisk(currentPath, { silent: true, preserveEdits: true });
+        }
+        if (saveIsVisible) {
+          setSaveStatus("saved");
+          pushToast(`已保存 ${basename(currentPath)}`, "success", 1600);
+        }
       } else {
-        if (!canCommitSave()) return;
-        setSaveStatus("error");
+        if (saveIsVisible) setSaveStatus("error");
         if (result.conflict) {
-          markTabExternalChanged(savePath);
-          pushToast(`${basename(savePath)} 已在磁盘上更改。为避免覆盖，已跳过保存。`, "warning", 4200);
-        } else {
-          pushToast(result.message || `保存失败：${basename(savePath)}`, "error", 3500);
+          markTabExternalChanged(currentPath, { workspaceRoot: saveWorkspace });
+          if (saveIsVisible) pushToast(`${basename(currentPath)} 已在磁盘上更改。为避免覆盖，已跳过保存。`, "warning", 4200);
+        } else if (saveIsVisible) {
+          pushToast(result.message || `保存失败：${basename(currentPath)}`, "error", 3500);
         }
       }
     } finally {
-      setSaving(false);
+      savingPathsRef.current.delete(saveEpochKey);
     }
   };
 
+  const previousWorkspaceRef = useRef(workingDirectory);
+  useEffect(() => {
+    if (workspaceRootsEqual(previousWorkspaceRef.current, workingDirectory)) return;
+    previousWorkspaceRef.current = workingDirectory;
+    for (const tab of tabs) {
+      if (tab.loading || isPreviewableMediaPath(tab.path)
+        || savingPathsRef.current.has(tab.id)) continue;
+      void reloadFileFromDisk(tab.path, { silent: true, preserveEdits: true });
+    }
+    // Reload cached buffers once when their workspace becomes visible again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workingDirectory]);
+
   const reloadFileFromDisk = async (
     path: string,
-    { silent = false }: { silent?: boolean } = {},
+    { silent = false, preserveEdits = false }: { silent?: boolean; preserveEdits?: boolean } = {},
   ) => {
     const stateAtRequest = useAppStore.getState();
     const tabAtRequest = stateAtRequest.editorTabs.find((tab) => editorPathsEqual(tab.path, path, stateAtRequest.workingDirectory));
     if (!tabAtRequest) return;
     const directory = stateAtRequest.workingDirectory;
-    const epochKey = loadEpochKey(path, directory);
+    const epochKey = tabAtRequest.id;
     const epoch = (loadEpochRef.current.get(epochKey) ?? 0) + 1;
     loadEpochRef.current.set(epochKey, epoch);
     const canCommit = () => {
@@ -800,8 +808,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       const currentTab = currentState.editorTabs.find((tab) => editorPathsEqual(tab.path, path, currentState.workingDirectory));
       return Boolean(
         currentTab
-        && currentTab === tabAtRequest
-        && currentTab.content === tabAtRequest.content
+        && currentTab.id === tabAtRequest.id
+        && (preserveEdits || currentTab === tabAtRequest)
         && currentTab.original === tabAtRequest.original
         && currentTab.contentHash === tabAtRequest.contentHash,
       );
@@ -810,12 +818,18 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       const snapshot = await readFileSnapshot(path, directory);
       if (snapshot == null) throw new Error(`无法读取 ${path}`);
       if (!canCommit()) return;
+      const currentTab = useAppStore.getState().editorTabs.find((tab) => editorPathsEqual(tab.path, path, directory))!;
+      if (preserveEdits && currentTab.content !== currentTab.original) {
+        markTabExternalChanged(path, { changed: snapshot.content !== currentTab.original });
+        return;
+      }
       const warning = applyFileSnapshot(path, snapshot);
       if (!silent) pushToast(warning || `已从磁盘重新加载 ${basename(path)}。`, warning ? "warning" : "success", warning ? 3500 : 1800);
     } catch (error) {
       if (!canCommit()) return;
       const message = errorMessage(error);
-      if (isLargeFileError(message)) {
+      const currentTab = useAppStore.getState().editorTabs.find((tab) => editorPathsEqual(tab.path, path, directory))!;
+      if (isLargeFileError(message) && (!preserveEdits || currentTab.content === currentTab.original)) {
         markTabLoaded(path, "", null, undefined, { largeFile: true, loadWarning: message });
       } else {
         markTabExternalChanged(path);
@@ -827,7 +841,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   // External changes follow the same contract as established editors: clean
   // buffers track disk automatically; dirty buffers keep user edits and expose
   // an explicit reload decision.
-  const lastFileChangeSequence = useRef(fileChanges.at(-1)?.sequence ?? 0);
+  const lastFileChangeSequence = useRef(0);
   useEffect(() => {
     const latestSequence = fileChanges.at(-1)?.sequence ?? 0;
     if (latestSequence < lastFileChangeSequence.current) {
@@ -837,17 +851,22 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     if (latestSequence === lastFileChangeSequence.current) return;
     const newChanges = fileChanges.filter((change) => change.sequence > lastFileChangeSequence.current);
     lastFileChangeSequence.current = latestSequence;
-    for (const change of newChanges) {
+    const changedPaths = new Map(newChanges.map((change) => [editorPathComparisonKey(change.path, workingDirectory), change]));
+    for (const change of changedPaths.values()) {
       const currentState = useAppStore.getState();
       const tab = currentState.editorTabs.find((candidate) =>
         editorPathsEqual(candidate.path, change.path, currentState.workingDirectory));
       if (!tab) continue;
+      // Media viewers subscribe to the changed path through useRawFileUrl.
       if (isImagePath(tab.path) || isPdfPath(tab.path)) continue;
-      if (tab.content === tab.original && change.event !== "delete") {
+      if (tab.loading || savingPathsRef.current.has(tab.id)) {
         markTabExternalChanged(tab.path);
-        void reloadFileFromDisk(tab.path, { silent: true });
+        continue;
+      }
+      if (change.event === "delete") {
+        markTabExternalChanged(tab.path);
       } else {
-        markTabExternalChanged(tab.path);
+        void reloadFileFromDisk(tab.path, { silent: true, preserveEdits: true });
       }
     }
     // reloadFileFromDisk intentionally reads the latest workingDirectory and
@@ -882,7 +901,9 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   };
 
   const handleCloseTab = async (path: string) => {
-    const tab = tabs.find((t) => editorPathsEqual(t.path, path, workingDirectory));
+    const state = useAppStore.getState();
+    if (!workspaceRootsEqual(state.workingDirectory, workingDirectory)) return false;
+    const tab = state.editorTabs.find((t) => editorPathsEqual(t.path, path, workingDirectory));
     if (tab && tab.content !== tab.original) {
       const { showConfirm } = await import("../overlays/DialogService");
       const ok = await showConfirm({
@@ -891,14 +912,18 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         confirmLabel: "放弃",
         danger: true,
       });
-      if (!ok) return;
+      if (!ok) return false;
+      const current = useAppStore.getState();
+      if (!workspaceRootsEqual(current.workingDirectory, workingDirectory)
+        || !current.editorTabs.includes(tab)) return false;
     }
     closeEditorTab(path);
+    return true;
   };
 
   const handleCloseTabs = async (paths: string[]) => {
     for (const path of paths) {
-      await handleCloseTab(path);
+      if (!await handleCloseTab(path)) break;
     }
   };
 
@@ -1080,7 +1105,6 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                   ? { ...tab, loading: true, error: null }
                   : tab),
               }));
-              void loadFileContent(activeTab.path);
             }} />
           ) : isImagePath(activeTab.path) ? (
             <ImageViewer path={activeTab.path} workingDirectory={workingDirectory} />
@@ -1109,16 +1133,20 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
           ) : (
             <Suspense fallback={<EditorLoading />}>
               <LazyMonacoEditor
+                key={normalizeWorkspaceRoot(workingDirectory)}
                 height="100%"
                 language={language}
                 theme={monacoTheme}
-                path={activeTab.path}
+                path={`minicode-editor://buffer/${activeTab.id}`}
                 loading={<EditorLoading />}
                 value={activeTab.content}
                 onChange={(value) => updateTabContent(activeTab.path, value ?? "")}
                 onMount={(editor) => {
                   monacoMountedRef.current = true;
                   editorRef.current = editor as MonacoEditorInstance;
+                  editor.onDidDispose(() => {
+                    if (editorRef.current === editor) editorRef.current = null;
+                  });
                   (editor as MonacoEditorInstance).addAction?.({
                     id: "minicode.ask-about-selection",
                     label: "在侧边对话中询问所选内容",
@@ -1133,7 +1161,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                         pushToast("请先选择一些代码。", "warning");
                         return;
                       }
-                      useAppStore.getState().openSideChatWithSelection(text, activeTab.path);
+                      const state = useAppStore.getState();
+                      state.openSideChatWithSelection(text, state.activeTabPath ?? undefined);
                     },
                   });
                   editor.onDidChangeCursorPosition((event) => {
@@ -1364,7 +1393,7 @@ const MarkdownPreviewLimitNotice = ({ imageCount, onEdit }: { imageCount: number
 );
 
 const ImageViewer = ({ path, workingDirectory }: { path: string; workingDirectory: string }) => {
-  const imgSrc = rawFileUrl(path, workingDirectory);
+  const imgSrc = useRawFileUrl(path, workingDirectory);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => setFailed(false), [imgSrc]);
@@ -1391,27 +1420,11 @@ const ImageViewer = ({ path, workingDirectory }: { path: string; workingDirector
 };
 
 const PdfViewer = ({ path, workingDirectory }: { path: string; workingDirectory: string }) => {
-  const src = rawFileUrl(path, workingDirectory);
+  const src = useRawFileUrl(path, workingDirectory);
   return (
-    <div className="flex-1 min-h-0 flex flex-col" style={{ background: "var(--surface-base)" }}>
-      <div className="flex items-center gap-2 min-h-[34px] px-3 border-b" style={{ borderColor: "var(--border-subtle)", color: "var(--text-muted)", fontSize: "var(--text-xs)", fontFamily: "var(--font-mono)" }}>
-        <span className="editor-media-file-icon" style={{ color: fileGlyphColor(path) }} aria-hidden="true">{fileIcon(path, { size: 14, className: "editor-media-file-icon-svg" })}</span>
-        <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{basename(path)}</span>
-      </div>
-      <iframe
-        title={basename(path)}
-        src={src}
-        sandbox="allow-scripts allow-same-origin"
-        referrerPolicy={EDITOR_FRAME_REFERRER_POLICY}
-        style={{
-          flex: 1,
-          minHeight: 0,
-          width: "100%",
-          border: 0,
-          background: "var(--surface-base)",
-        }}
-      />
-    </div>
+    <Suspense fallback={<EditorLoading />}>
+      <LazyPdfPreview url={src} name={basename(path)} />
+    </Suspense>
   );
 };
 

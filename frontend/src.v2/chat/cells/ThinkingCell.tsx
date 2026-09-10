@@ -11,9 +11,13 @@ import "./cells.css";
 export const ThinkingCell = memo(function ThinkingCell({
   cell,
   isStreaming = false,
+  conversationId,
+  workspaceRoot,
 }: {
   cell: ThinkingCellState;
   isStreaming?: boolean;
+  conversationId?: string;
+  workspaceRoot?: string;
 }) {
   const streaming = Boolean(isStreaming || cell.isStreaming);
   const content = readableToolLabel(cell.content).trim();
@@ -29,7 +33,7 @@ export const ThinkingCell = memo(function ThinkingCell({
       data-reasoning-type={cell.providerReasoningType}
       data-streaming={streaming ? "true" : "false"}
     >
-      <MarkdownRenderer content={content} isStreaming={streaming} />
+      <MarkdownRenderer content={content} isStreaming={streaming} conversationId={conversationId} workspaceRoot={workspaceRoot} />
     </div>
   );
 });

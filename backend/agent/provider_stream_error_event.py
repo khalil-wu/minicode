@@ -14,8 +14,8 @@ from backend.agent.loop_runtime_helpers import (
     terminal_reason_from_error_type,
 )
 from backend.agent.message import AgentEvent
+from backend.agent.loop_preflight import PhaseDeadlineExceeded
 from backend.agent.provider_attempt import provider_progress_id
-from backend.agent.provider_protocol import add_usage
 from backend.agent.recovery_controller import RecoveryProfile
 from backend.agent.stream_sanitizer import scrub_thinking_tags
 from backend.agent.terminal_projection import TurnTerminalProjection
@@ -105,6 +105,7 @@ async def handle_provider_error_event(
     if (
         not stream_text.full_text
         and not pending_tool_calls
+        and not stream_state.has_non_text_result
         and not classification.fatal
         and classification.error_type not in {"prompt_too_long", "media_size"}
     ):
@@ -205,7 +206,10 @@ async def handle_provider_error_event(
             # random jitter layer: it makes the advertised Retry-After value
             # false and stacks a MiniCode-specific policy on top of provider
             # SDK behavior.
-            await sleep_or_cancel(retry_delay, cancel_event)
+            wait_seconds, deadline_capped = budget_runtime.bounded_provider_timeout(retry_delay)
+            await sleep_or_cancel(wait_seconds, cancel_event)
+            if deadline_capped:
+                raise PhaseDeadlineExceeded
             yield ProviderErrorEventResult(
                 action="retry",
                 stream_attempt=new_attempt,
@@ -284,7 +288,7 @@ async def handle_provider_error_event(
     async for recovery_event in degrade_and_finish(
         state=state,
         ctx=context_builder,
-        usage=add_usage(turn_usage, usage),
+        usage=turn_usage,
         stream_text=stream_text,
         full_text=stream_text.pending_recovery_text(scrub_thinking_tags),
         pending_tool_calls=pending_tool_calls,

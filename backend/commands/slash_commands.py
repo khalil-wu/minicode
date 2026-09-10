@@ -145,12 +145,7 @@ async def _apply_permission_mode(
     if not handled:
         await _emit_command_unavailable(ws, command)
         return False
-    await ws.emit_command_result(
-        command,
-        f"Permission mode set to '{mode}'.",
-        data={"mode": mode},
-    )
-    return True
+    return ws.permission_context.mode == mode
 
 
 async def _handle_new(
@@ -173,10 +168,6 @@ async def _handle_new(
         await _emit_command_unavailable(ws, "new")
         return True, ""
 
-    await ws.emit_command_result(
-        "new",
-        "Started a new conversation.",
-    )
     return True, ""
 
 
@@ -383,11 +374,6 @@ async def _handle_memory(
         await _emit_command_unavailable(ws, "memory")
         return True, ""
 
-    await ws.emit_command_result(
-        "memory",
-        f"Conversation memory mode set to '{memory_mode}'.",
-        data={"memory_mode": memory_mode},
-    )
     return True, ""
 
 
@@ -411,11 +397,6 @@ async def _handle_archive(
     if not handled:
         await _emit_command_unavailable(ws, "archive")
         return True, ""
-    await ws.emit_command_result(
-        "archive",
-        "Archived the current conversation.",
-        data={"conversation_id": conversation_id},
-    )
     return True, ""
 
 
@@ -439,11 +420,6 @@ async def _handle_unarchive(
     if not handled:
         await _emit_command_unavailable(ws, "unarchive")
         return True, ""
-    await ws.emit_command_result(
-        "unarchive",
-        "Unarchived the current conversation.",
-        data={"conversation_id": conversation_id},
-    )
     return True, ""
 
 
@@ -516,11 +492,6 @@ async def _handle_effort(
     if not handled:
         await _emit_command_unavailable(ws, "effort")
         return True, ""
-    await ws.emit_command_result(
-        "effort",
-        f"Reasoning effort set to '{effort}'.",
-        data={"reasoning_effort": effort},
-    )
     return True, ""
 
 

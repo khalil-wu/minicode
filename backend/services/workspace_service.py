@@ -488,36 +488,36 @@ def write_pr_automation(workspace_root: Any, data: dict[str, Any]) -> dict[str, 
 
 
 async def set_git_pr_automation_payload(workspace_root: Any, data: dict[str, Any]) -> dict[str, Any]:
-    current = write_pr_automation(workspace_root, data)
+    current = read_pr_automation(workspace_root)
     auto_merge_error = ""
-    if current["auto_merge"] and "auto_merge" in data:
+    if "auto_merge" in data:
         gh_path = shutil.which("gh")
         if not gh_path:
-            auto_merge_error = "gh CLI not found; Auto-merge was saved but cannot be enabled remotely."
+            auto_merge_error = "gh CLI not found; Auto-merge was not changed."
         else:
-            # MiniCode requires an explicit pr_number and confirmation before
-            # touching gh pr merge; never arm --auto blindly — verify an open,
-            # non-default-branch PR is actually attached to this checkout.
             view_code, view_out = await _run_gh_pr_view(gh_path, cwd=str(workspace_root))
-            armed = False
+            pr_info = None
             if view_code == 0 and view_out:
                 pr_info, _checks = parse_gh_pr_status(view_out)
                 state = str((pr_info or {}).get("state") or "").upper()
                 branch = str((pr_info or {}).get("branch") or "")
-                armed = (
-                    bool(pr_info)
-                    and state not in {"MERGED", "CLOSED", ""}
-                    and branch not in {"main", "master"}
-                )
-            if not armed:
+                if state != "OPEN" or branch in {"main", "master"}:
+                    pr_info = None
+            if not pr_info:
                 auto_merge_error = (
-                    "Auto-merge was saved but not armed: no open PR is attached "
-                    "to this branch (merged/closed/default-branch PRs are ignored)."
+                    "Auto-merge was not changed: no open PR is attached to this branch."
                 )
             else:
-                code, output = await _run_gh_pr_merge_auto(gh_path, cwd=str(workspace_root))
+                code, output = await _run_gh_pr_merge_auto(
+                    gh_path,
+                    cwd=str(workspace_root),
+                    pr_number=int(pr_info["number"]),
+                    enabled=bool(data["auto_merge"]),
+                )
                 if code != 0:
-                    auto_merge_error = output or "gh pr merge --auto failed"
+                    auto_merge_error = output or "The remote auto-merge update failed."
+    if not auto_merge_error:
+        current = write_pr_automation(workspace_root, data)
     payload = await fetch_git_pr_status_payload(workspace_root)
     payload["automation"] = current
     if auto_merge_error:
@@ -540,13 +540,13 @@ async def _run_gh_pr_view(gh_path: str, *, cwd: str) -> tuple[int, str]:
     return proc.returncode or 0, (stdout or stderr or b"").decode(errors="replace").strip()
 
 
-async def _run_gh_pr_merge_auto(gh_path: str, *, cwd: str) -> tuple[int, str]:
+async def _run_gh_pr_merge_auto(gh_path: str, *, cwd: str, pr_number: int, enabled: bool) -> tuple[int, str]:
     proc = await spawn_exec(
         gh_path,
         "pr",
         "merge",
-        "--auto",
-        "--merge",
+        str(pr_number),
+        *( ["--auto", "--merge"] if enabled else ["--disable-auto"] ),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,

@@ -35,8 +35,8 @@ def _raise_if_cancelled(context: Any) -> None:
 
 
 def _workspace_root(context: Any, fallback: Path | None) -> Path | None:
-    if context and getattr(context, "workspace_root", None):
-        return Path(context.workspace_root).resolve()
+    if context is not None and hasattr(context, "workspace_root"):
+        return Path(context.workspace_root).resolve() if context.workspace_root is not None else None
     return fallback.resolve() if fallback is not None else None
 
 

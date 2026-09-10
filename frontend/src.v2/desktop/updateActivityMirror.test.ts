@@ -61,8 +61,8 @@ describe("update activity snapshot", () => {
         } as never,
       },
       editorTabs: [
-        { path: "clean.ts", content: "same", original: "same", loading: false },
-        { path: "dirty.ts", content: "changed", original: "old", loading: false },
+        { id: "editor-fixture-1", path: "clean.ts", content: "same", original: "same", loading: false },
+        { id: "editor-fixture-2", path: "dirty.ts", content: "changed", original: "old", loading: false },
       ],
       backgroundTasks: [
         { id: "task-running", command: "build", status: "running", timestamp: 1, conversationId: "conv-active" },
@@ -89,7 +89,7 @@ describe("update activity snapshot", () => {
       isConnected: false,
       runtimeSession: null,
       editorTabs: [
-        { path: "readonly.ts", content: "changed", original: "old", loading: false, readOnly: true },
+        { id: "editor-fixture-3", path: "readonly.ts", content: "changed", original: "old", loading: false, readOnly: true },
       ],
     });
 

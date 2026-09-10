@@ -162,7 +162,7 @@ describe("conversation deletion store behavior", () => {
       conversationMessages: { "conv-only": [] },
       conversationStreaming: { "conv-only": false },
       workingDirectory: "C:\\Desktop\\MiniCode",
-      editorTabs: [{ path: "README.md", content: "", original: "", loading: false, error: null }],
+      editorTabs: [{ id: "editor-fixture-1", path: "README.md", content: "", original: "", loading: false, error: null }],
       activeTabPath: "README.md",
       activeEditorPath: "README.md",
       appMode: "cowork",
@@ -180,7 +180,7 @@ describe("conversation deletion store behavior", () => {
     expect(state.conversations).toEqual([]);
     expect(state.messages).toEqual([]);
     expect(state.workingDirectory).toBe("C:\\Desktop\\MiniCode");
-    expect(state.editorTabs).toEqual([{ path: "README.md", content: "", original: "", loading: false, error: null }]);
+    expect(state.editorTabs).toEqual([{ id: "editor-fixture-1", path: "README.md", content: "", original: "", loading: false, error: null }]);
     expect(state.activeTabPath).toBe("README.md");
     expect(state.activeEditorPath).toBe("README.md");
     expect(state.appMode).toBe("code");

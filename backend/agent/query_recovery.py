@@ -57,6 +57,8 @@ def prepare_query_recovery(
     """
 
     metadata["_query_engine_recovery_prepared"] = True
+    metadata["_query_engine_recovery_restored"] = False
+    metadata["checkpoint_origin"] = {}
     if not metadata.get("resume_from_checkpoint") or not session_id or not conversation_id:
         return QueryRecoveryResult()
 

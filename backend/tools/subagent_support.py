@@ -229,7 +229,35 @@ def _prompt_scope_summary(prompt: str) -> str:
     return text if len(text) <= 120 else f"{text[:80]} … {text[-39:]}"
 
 
-def _exclusive_parallel_task_scopes(tasks: list[dict[str, Any]]) -> list[str]:
+def _canonical_write_scope(scope: str, workspace_root: str | Path | None = None) -> Path:
+    return (Path(workspace_root or Path.cwd()) / str(scope).replace("\\", "/")).resolve()
+
+
+def _admit_subagent_workspace(raw: dict[str, Any], workspace_root: str | Path | None) -> dict[str, Any]:
+    result = dict(raw)
+    isolation = str(raw.get("isolation") or "").strip().lower()
+    cwd = str(raw.get("cwd") or "").strip()
+    if isolation and isolation != "worktree":
+        raise ValueError(f"Unsupported isolation mode: {isolation!r}. Only 'worktree' is supported.")
+    if cwd and isolation:
+        raise ValueError('cwd is mutually exclusive with isolation: "worktree"')
+    if cwd:
+        candidate = Path(cwd).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError("cwd must be an absolute path")
+        candidate = candidate.resolve()
+        if workspace_root is None:
+            raise ValueError("cwd requires an active workspace")
+        if not candidate.is_relative_to(Path(workspace_root).resolve()):
+            raise ValueError("cwd must be inside the active workspace")
+        if not candidate.is_dir():
+            raise ValueError("cwd must reference an existing directory")
+        result["cwd"] = str(candidate)
+    result["isolation"] = isolation
+    return result
+
+
+def _exclusive_parallel_task_scopes(tasks: list[dict[str, Any]], workspace_root: str | Path | None = None) -> list[str]:
     """Return explicit scope labels after checking structured write ownership.
 
     Natural-language similarity is deliberately irrelevant here: two workers
@@ -240,24 +268,20 @@ def _exclusive_parallel_task_scopes(tasks: list[dict[str, Any]]) -> list[str]:
     # workers whose write_scope shares a path would race on that file
     # (last-writer-wins) with no mutual exclusion, so reject the batch — the
     # caller surfaces this as "non-overlapping assignment" guidance.
-    seen_write_paths: list[str] = []
+    seen_write_paths: list[Path] = []
     for task in tasks:
         # Read-only/exploration workers do not mutate the workspace and should
         # not create artificial overlap conflicts with write-capable workers.
-        if bool(task.get("read_only")) or str(task.get("agent_type") or "").lower() in {"explore", "plan"}:
+        if bool(task.get("read_only")) or str(task.get("agent_type") or "").lower() in {"explore", "plan"} or task.get("isolation") == "worktree":
             continue
         raw_scope = task.get("write_scope")
         paths = raw_scope if isinstance(raw_scope, list) else []
         for path in paths:
-            norm = os.path.normcase(
-                os.path.normpath(str(path or "").strip())
-            ).strip("/\\")
-            if not norm:
+            if not str(path or "").strip():
                 continue
+            norm = _canonical_write_scope(path, task.get("cwd") or workspace_root)
             if any(
-                norm == existing
-                or norm.startswith(f"{existing}{os.sep}")
-                or existing.startswith(f"{norm}{os.sep}")
+                norm.is_relative_to(existing) or existing.is_relative_to(norm)
                 for existing in seen_write_paths
             ):
                 return []
@@ -386,6 +410,7 @@ async def _resolve_subagent_llm(
     run_context: RunContext | None = None,
     agent_type: str,
     model_override: str = "",
+    provider_override: str = "",
     effort_override: str = "",
     workspace_root: str | Path | None = None,
     build_adapter: bool = True,
@@ -451,7 +476,8 @@ async def _resolve_subagent_llm(
     model_was_selected = not model_inherits
     available_snapshot = tuple(snapshot.get("available_models") or ())
 
-    target_provider = parent_provider
+    requested_provider = str(provider_override or "").strip()
+    target_provider = parent_provider if requested_provider.lower() in {"", "inherit"} else requested_provider
     target_model = parent_model
     if not model_inherits:
         target_model = requested_model
@@ -460,13 +486,13 @@ async def _resolve_subagent_llm(
             # Keep the parent's exact model when a bare family alias already
             # matches; otherwise resolve it within the current provider before
             # applying provider-qualified model selection.
-            if alias in parent_model.lower():
+            if target_provider == parent_provider and alias in parent_model.lower():
                 target_model = parent_model
             elif model_runtime is not None:
                 alias_match = next(
                     (
                         candidate
-                        for candidate in model_runtime.get_models(parent_provider)
+                        for candidate in model_runtime.get_models(target_provider)
                         if alias in candidate.id.lower()
                         or alias in str(getattr(candidate, "name", "") or "").lower()
                     ),
@@ -486,8 +512,8 @@ async def _resolve_subagent_llm(
                 if alias_match:
                     target_model = alias_match
         parent_exact_model = (
-            model_runtime.get_model(parent_provider, target_model)
-            if model_runtime is not None and parent_provider
+            model_runtime.get_model(target_provider, target_model)
+            if model_runtime is not None and target_provider
             else None
         )
         if "/" in target_model and model_runtime is not None and parent_exact_model is None:
@@ -502,6 +528,8 @@ async def _resolve_subagent_llm(
                 resolved_prefix = provider_prefix.lower()
                 provider_definition = model_runtime.get_provider(resolved_prefix)
             if provider_definition is not None and qualified_model:
+                if requested_provider and requested_provider != "inherit" and resolved_prefix != target_provider:
+                    raise ValueError("Task provider conflicts with the provider-qualified model")
                 target_provider = resolved_prefix
                 target_model = qualified_model
 
@@ -589,7 +617,7 @@ async def _resolve_subagent_llm(
                     reasoning_effort=effective_effort,
                 ),
             )
-    requires_fresh_adapter = model_changed or not effort_inherits
+    requires_fresh_adapter = model_changed or effective_effort != parent_effort
     if not requires_fresh_adapter or not build_adapter:
         return _SubagentLLMResolution(
             llm=inherited_llm,
@@ -793,19 +821,19 @@ def _nonempty_subagent_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
     return result
 
 
-def _scope_is_within_any(scope: str, ceiling: list[str]) -> bool:
+def _scope_is_within_any(scope: str, ceiling: list[str], workspace_root: str | Path | None = None) -> bool:
     """True when one workspace-relative scope sits inside any ceiling scope."""
-    candidate = PurePosixPath(str(scope).replace("\\", "/")).as_posix().strip("/")
-    for allowed in ceiling:
-        root = PurePosixPath(str(allowed).replace("\\", "/")).as_posix().strip("/")
-        if not root or candidate == root or candidate.startswith(f"{root}/"):
-            return True
-    return False
+    candidate = _canonical_write_scope(scope, workspace_root)
+    return any(candidate.is_relative_to(_canonical_write_scope(allowed, workspace_root)) for allowed in ceiling)
 
 
 def _narrowed_subagent_scope_metadata(
     inherited: dict[str, Any],
     requested: dict[str, Any],
+    *,
+    workspace_root: str | Path | None = None,
+    child_workspace_root: str | Path | None = None,
+    isolated: bool = False,
 ) -> dict[str, Any]:
     """Merge a child's requested fence into the inherited one by narrowing.
 
@@ -825,11 +853,25 @@ def _narrowed_subagent_scope_metadata(
     child_scope = [
         str(scope) for scope in (requested.get("write_scope") or []) if str(scope).strip()
     ]
-    if parent_scope:
-        kept = [scope for scope in child_scope if _scope_is_within_any(scope, parent_scope)]
-        narrowed["write_scope"] = kept or parent_scope
-    elif child_scope:
-        narrowed["write_scope"] = child_scope
+    base = _canonical_write_scope(".", workspace_root)
+    child_base = base if isolated else _canonical_write_scope(".", child_workspace_root or base)
+    parents = [_canonical_write_scope(scope, base) for scope in parent_scope]
+    children = [_canonical_write_scope(scope, child_base) for scope in child_scope]
+    if parents:
+        candidates = children or [
+            child_base if child_base.is_relative_to(parent) else parent
+            for parent in parents
+        ]
+        kept = {
+            candidate if candidate.is_relative_to(parent) else parent
+            for candidate in candidates for parent in parents
+            if candidate.is_relative_to(parent) or parent.is_relative_to(candidate)
+        }
+        if not kept:
+            raise ValueError("Requested child write_scope does not intersect the parent's write_scope")
+        narrowed["write_scope"] = [os.path.relpath(scope, child_base).replace("\\", "/") for scope in sorted(kept)]
+    elif children:
+        narrowed["write_scope"] = [os.path.relpath(scope, child_base).replace("\\", "/") for scope in children]
     else:
         narrowed.pop("write_scope", None)
     return narrowed

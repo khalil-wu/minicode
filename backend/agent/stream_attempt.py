@@ -337,6 +337,7 @@ class StreamAttemptState:
     finish_reason: str = ""
     provider_done: bool = False
     saw_partial_tool_call: bool = False
+    has_non_text_result: bool = False
     final_tool_batch_received: bool = False
     partial_tool_names: dict[str, str] = field(default_factory=dict)
     partial_tool_args: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -372,6 +373,11 @@ class StreamAttemptState:
     def accept_provider_event(self, event: StreamEvent) -> ProviderEventOutcome:
         """Accept protocol state without making presentation decisions."""
 
+        if event.usage is not None:
+            self.usage = event.usage
+        if event.type == StreamEventType.IMAGE_CHUNK:
+            self.has_non_text_result = bool(event.image_data) or self.has_non_text_result
+            return ProviderEventOutcome()
         if event.type in {
             StreamEventType.TOOL_CALL_START,
             StreamEventType.TOOL_CALL_DELTA,
@@ -392,7 +398,6 @@ class StreamAttemptState:
             )
         if event.type == StreamEventType.DONE:
             self.provider_done = True
-            self.usage = event.usage
             raw = dict(getattr(event, "raw", {}) or {})
             self.accept_done_payload(
                 finish_reason=event.finish_reason,
@@ -465,6 +470,7 @@ class StreamAttemptState:
         self.response_phase = ""
         self.finish_reason = ""
         self.provider_done = False
+        self.has_non_text_result = False
         self.saw_partial_tool_call = False
         self.final_tool_batch_received = False
         self.partial_tool_names.clear()

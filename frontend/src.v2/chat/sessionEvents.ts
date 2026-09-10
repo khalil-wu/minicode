@@ -796,15 +796,21 @@ const applyActiveStreamSnapshot = (session: RuntimeSessionSnapshot) => {
     }
     const targets = steerTargets.get(conversationId);
     let fallbackIndex = -1;
+    let liveIndex = -1;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messages[index]?.role === "assistant") {
-        fallbackIndex = index;
+      const message = messages[index];
+      if (message.role !== "assistant" || message.queueState === "queued") continue;
+      if (message.isStreaming || message.isThinkingStreaming) {
+        liveIndex = index;
         break;
       }
+      if (fallbackIndex < 0 && !message.terminalStatus && message.completedAt == null) fallbackIndex = index;
     }
+    const activeIndex = liveIndex >= 0 ? liveIndex : fallbackIndex;
     return messages.map((message, index) => {
       const ownsActiveStream = message.role === "assistant"
-        && ((targets?.has(message.id) ?? false) || (!targets?.size && index === fallbackIndex));
+        && message.queueState !== "queued"
+        && ((targets?.has(message.id) ?? false) || (!targets?.size && index === activeIndex));
       if (ownsActiveStream) return { ...message, isStreaming: true };
       return message.isStreaming || message.isThinkingStreaming
         ? { ...message, isStreaming: false, isThinkingStreaming: false }

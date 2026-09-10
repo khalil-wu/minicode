@@ -192,7 +192,8 @@ class TurnKernel:
             metadata.setdefault("session_id", session_id)
             metadata.setdefault("minicode_session_id", session_id)
         if run_record.conversation_id:
-            metadata.setdefault("conversation_id", run_record.conversation_id)
+            metadata["conversation_id"] = run_record.conversation_id
+            state.conversation_id = run_record.conversation_id
         try:
             return cls(
                 runtime=runtime,

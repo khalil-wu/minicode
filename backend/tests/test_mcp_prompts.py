@@ -49,6 +49,8 @@ class _PromptClient(MCPClient):
 
 
 class _PromptManager:
+    registry_version = 0
+
     def __init__(self) -> None:
         self.client = _PromptClient()
 

@@ -282,7 +282,7 @@ export const openWorkspaceFilePreview = (target: WorkspaceFilePreviewTarget): bo
   const path = String(target.path || "").trim();
   if (!path) return false;
   const state = useAppStore.getState();
-  const workspaceRoot = String(target.workspaceRoot || state.workingDirectory || "").trim();
+  const workspaceRoot = String(target.workspaceRoot ?? state.workingDirectory ?? "").trim();
   const conversationId = activePreviewConversationId(target.conversationId);
   const name = String(target.name || basename(path) || "文件");
   const artifactId = `workspace:${path}`;

@@ -21,7 +21,6 @@ from backend.agent.state import AgentState
 from backend.agent.value_utils import finite_number, nonnegative_int
 from backend.llm.base import (
     UsageInfo,
-    _normalize_usage_cost,
     _normalize_usage_int,
 )
 
@@ -84,6 +83,7 @@ def provider_raw_for_projection(
         ("message_phase", 80),
         ("terminal_fallback", 128),
         ("recovered_from", 128),
+        ("price_source", 64),
     ):
         value = public_text(raw.get(key), max_chars=maximum, single_line=True)
         if value:
@@ -666,7 +666,7 @@ def _safe_side_calls(value: Any) -> list[dict[str, Any]]:
         if not isinstance(raw_item, Mapping):
             continue
         item: dict[str, Any] = {}
-        for key in ("id", "operation", "provider", "model", "status", "error_type"):
+        for key in ("id", "operation", "provider", "model", "status", "error_type", "price_source"):
             rendered = public_text(raw_item.get(key), max_chars=256, single_line=True)
             if rendered:
                 item[key] = rendered
@@ -677,6 +677,12 @@ def _safe_side_calls(value: Any) -> list[dict[str, Any]]:
         usage = project_public_usage(raw_item.get("usage"))
         if usage:
             item["usage"] = usage
+        raw_usage = project_public_usage(raw_item.get("raw_usage"))
+        if raw_usage:
+            item["raw_usage"] = raw_usage
+        requests = _safe_side_calls(raw_item.get("requests"))
+        if requests:
+            item["requests"] = requests
         if item:
             result.append(item)
     return result
@@ -729,11 +735,11 @@ def add_usage(left: UsageInfo, right: UsageInfo | None) -> UsageInfo:
     left.reasoning_output_tokens += _normalize_usage_int(
         getattr(right, "reasoning_output_tokens", 0)
     )
-    left.cost_usd += _normalize_usage_cost(getattr(right, "cost_usd", 0.0))
-    if not bool(getattr(right, "input_includes_cache_read", True)):
-        left.input_includes_cache_read = False
-    if not bool(getattr(right, "input_includes_cache_write", True)):
-        left.input_includes_cache_write = False
+    left.cost_usd = (
+        left.cost_usd + right.cost_usd
+        if left.cost_usd is not None and right.cost_usd is not None
+        else None
+    )
     return left
 
 
@@ -966,6 +972,7 @@ def provider_trace_payload(
         "model": raw.get("model") or request_summary.get("model") or "",
         "finish_reason": finish_reason or raw.get("finish_reason") or "",
         "event_type": raw.get("event_type") or "",
+        "price_source": raw.get("price_source") or "unknown",
         "usage": {
             "input_tokens": usage.input_tokens,
             "output_tokens": usage.output_tokens,
@@ -977,7 +984,7 @@ def provider_trace_payload(
             "input_includes_cache_write": usage.input_includes_cache_write,
             "ordinary_input_tokens": usage.normalized_ordinary_input_tokens,
             "prompt_cache_total_tokens": usage.normalized_prompt_cache_total_tokens,
-            "cost_usd": usage.cost_usd,
+            **({"cost_usd": usage.cost_usd} if usage.cost_usd is not None else {}),
         },
         "raw_usage": (
             raw.get("raw_usage")

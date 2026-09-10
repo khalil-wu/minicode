@@ -460,6 +460,7 @@ export interface ConversationDeleteCommand {
   conversation_id: string;
   cleanup_worktree?: boolean;
   force?: boolean;
+  client_resource_cleanup?: boolean;
 }
 
 export interface ConversationWorktreeCleanupCommand {

@@ -1,6 +1,7 @@
 """Session utility mixin for WebSocketSession."""
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +57,7 @@ class SessionCommandHandlersMixin:
 
         model_runtime = self._model_runtime_for_conversation(self.active_conversation_id)
         if model_runtime is not None:
-            model_runtime.refresh()
+            model_runtime.refresh(settings_snapshot=scoped_settings)
         current_provider = str(self.provider or "").strip()
         extension_provider_active = bool(
             model_runtime is not None
@@ -113,8 +114,16 @@ class SessionCommandHandlersMixin:
 
     async def _run_cwd_changed_hook(self, *, old_cwd: str, new_cwd: str) -> None:
         from backend.hooks.runtime import run_cwd_changed_hook
+        from backend.hooks.manager import load_hook_manager_for_workspace, register_hook_manager_for_session
 
-        await run_cwd_changed_hook(old_cwd=old_cwd, new_cwd=new_cwd)
+        scope_id = self.active_conversation_id or self.session_id
+        manager = await asyncio.to_thread(
+            load_hook_manager_for_workspace,
+            Path(new_cwd) if new_cwd else None,
+            session_id=scope_id,
+        )
+        register_hook_manager_for_session(scope_id, manager, owner_session_id=self.session_id)
+        await run_cwd_changed_hook(old_cwd=old_cwd, new_cwd=new_cwd, hook_manager=manager)
 
     # ── LLM model selection ──────────────────────────────
 

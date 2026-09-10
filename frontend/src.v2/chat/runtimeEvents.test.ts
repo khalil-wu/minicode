@@ -1246,6 +1246,20 @@ describe("runtime capability events", () => {
 });
 
 describe("runtime subagent events", () => {
+  it("projects the backend completion summary and top-level error into available results", () => {
+    useAppStore.setState({ conversationId: "conv-contract", messages: [], conversationMessages: {},
+      subagents: [], conversationAgentStates: {}, inspectorEntries: [] });
+    handleRuntimeEvent({ type: "subagent.done", subagent_id: "summary-child", status: "completed",
+      summary: "Verified the parser", result: { summary: "Verified the parser" },
+    } as unknown as ServerEvent, "conv-contract");
+    handleRuntimeEvent({ type: "subagent.done", subagent_id: "error-child", status: "failed",
+      error: "Repository could not be opened", result: {},
+    } as unknown as ServerEvent, "conv-contract");
+    expect(useAppStore.getState().subagents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "summary-child", status: "done", resultContent: "Verified the parser", resultAvailable: true }),
+      expect.objectContaining({ id: "error-child", status: "error", resultError: "Repository could not be opened", resultAvailable: true }),
+    ]));
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     useAppStore.setState({

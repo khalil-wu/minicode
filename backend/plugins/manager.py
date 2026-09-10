@@ -235,6 +235,7 @@ class PluginManager:
             config_change_hook=config_change_hook or run_config_change_hook,
             _policy=policy,
             _trusted_marketplace=True,
+            _expected_plugin_id=str(plugin["id"]),
             _marketplace_source_descriptor=(
                 marketplace_record.get("source")
                 if isinstance(marketplace_record.get("source"), Mapping)
@@ -855,6 +856,12 @@ class MarketplaceRegistry:
 
     def reconcile(self, *, policy: Any | None = None) -> dict[str, Any]:
         """Validate declared marketplace state without executing plugin code."""
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._mutation_lock:
+            return self._reconcile_locked(policy=policy)
+
+    def _reconcile_locked(self, *, policy: Any | None = None) -> dict[str, Any]:
 
         effective_policy = _effective_marketplace_policy(policy)
         effective_policy.assert_policy_valid()

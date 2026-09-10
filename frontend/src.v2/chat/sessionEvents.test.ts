@@ -1334,6 +1334,7 @@ describe("handleSessionEvent", () => {
     useAppStore.setState({
       workingDirectory: "C:/stale-workspace",
       editorTabs: [{
+        id: "editor-fixture-1",
         path: "src/stale.ts",
         content: "",
         original: "",
@@ -1645,7 +1646,7 @@ describe("handleSessionEvent", () => {
       conversationStreaming: { "conv-stale": true },
       isStreaming: true,
       workingDirectory: "C:/repo",
-      editorTabs: [{ path: "README.md", content: "", original: "", loading: false, error: null }],
+      editorTabs: [{ id: "editor-fixture-2", path: "README.md", content: "", original: "", loading: false, error: null }],
       activeTabPath: "README.md",
       activeEditorPath: "README.md",
       contextUsage: { used: 80, limit: 100 },

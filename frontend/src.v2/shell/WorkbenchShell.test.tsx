@@ -27,7 +27,7 @@ vi.mock("./SidebarLeft", () => ({
 }));
 
 vi.mock("./SidebarRight", () => ({
-  SidebarRight: ({ initialTab }: { initialTab?: string }) => <button type="button" data-testid="right-sidebar" data-initial-tab={initialTab}>Right sidebar</button>,
+  SidebarRight: ({ visible }: { visible?: boolean }) => <button type="button" data-testid="right-sidebar" data-visible={String(visible)} data-initial-tab={useAppStore.getState().rightStackTab}>Right sidebar</button>,
 }));
 
 vi.mock("./MainSlots", () => ({
@@ -36,6 +36,7 @@ vi.mock("./MainSlots", () => ({
   ),
 }));
 vi.mock("../panels/SideChatPanel", () => ({ SideChatPanel: () => null }));
+vi.mock("../overlays/SkillsMarketplace", () => ({ SkillsMarketplace: () => <main>Extensions page</main> }));
 vi.mock("../chat/ChatPane", () => ({ ChatPane: () => <main>Chat</main> }));
 
 import { useAppStore } from "../stores";
@@ -48,6 +49,7 @@ describe("WorkbenchShell narrow navigation", () => {
     runtimeState = { runtimeToken: "test-token" };
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
     useAppStore.setState({
+      skillsMarketplaceOpen: false,
       appMode: "code",
       isConnected: true,
       connectionPhase: "connecting",
@@ -57,6 +59,7 @@ describe("WorkbenchShell narrow navigation", () => {
       themeMode: "dark",
       leftSidebarWidth: 320,
       rightPanelOpen: true,
+      rightStackTab: "tasks",
       previewArtifact: null,
       dockCollapsed: true,
       sideChatOpen: false,
@@ -73,6 +76,22 @@ describe("WorkbenchShell narrow navigation", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("preserves the workbench and sidebars while visiting plugins and skills", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
+    render(<WorkbenchShell />);
+    const workspace = screen.getByText("Code workspace");
+    const sidebar = screen.getByTestId("right-sidebar");
+    act(() => useAppStore.setState({ skillsMarketplaceOpen: true }));
+    await screen.findByText("Extensions page");
+    expect(screen.getByTestId("left-sidebar")).toBeTruthy();
+    expect(workspace.isConnected).toBe(true);
+    expect(screen.getByTestId("right-sidebar")).toBe(sidebar);
+    expect(sidebar.dataset.visible).toBe("false");
+    act(() => useAppStore.setState({ skillsMarketplaceOpen: false }));
+    expect(screen.getByText("Code workspace")).toBe(workspace);
+    expect(sidebar.dataset.visible).toBe("true");
   });
 
   it("opens the existing sidebars as drawers and closes them with Escape", () => {
@@ -157,7 +176,7 @@ describe("WorkbenchShell narrow navigation", () => {
   });
 
   it("keeps sidebars in drawers while the window cannot fit the full context card", () => {
-    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1599 });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1199 });
     render(<WorkbenchShell />);
 
     expect(screen.queryByTestId("left-sidebar")).toBeNull();
@@ -201,7 +220,7 @@ describe("WorkbenchShell narrow navigation", () => {
     render(<WorkbenchShell />);
 
     expect(screen.queryByTestId("left-sidebar")).toBeNull();
-    expect(screen.queryByTestId("right-sidebar")).toBeNull();
+    expect(screen.getByTestId("right-sidebar").getAttribute("data-visible")).toBe("false");
     expect(screen.getByRole("button", { name: "打开左侧栏" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "打开右侧栏" })).toBeTruthy();
   });
@@ -212,7 +231,7 @@ describe("WorkbenchShell narrow navigation", () => {
     expect(screen.getByTestId("left-sidebar")).toBeTruthy();
 
     act(() => {
-      window.innerWidth = 1599;
+      window.innerWidth = 1199;
       window.dispatchEvent(new Event("resize"));
     });
 
@@ -285,16 +304,16 @@ describe("WorkbenchShell narrow navigation", () => {
     expect(screen.queryByRole("dialog", { name: "左侧栏" })).toBeNull();
   });
 
-  it("traps Side Chat focus and restores the page after close", () => {
-    useAppStore.setState({ sideChatOpen: true });
+  it("hides the narrow side-chat panel without closing its thread", () => {
     render(<WorkbenchShell />);
-
-    expect(screen.getByRole("dialog", { name: "侧边对话" }).getAttribute("tabindex")).toBe("-1");
+    act(() => useAppStore.getState().toggleSideChat());
+    expect(screen.getByRole("dialog", { name: "右侧面板" }).getAttribute("tabindex")).toBe("-1");
     expect(document.body.style.overflow).toBe("hidden");
 
-    fireEvent.click(screen.getByRole("button", { name: "关闭侧边对话" }));
+    fireEvent.click(screen.getByRole("button", { name: "关闭右侧面板" }));
 
-    expect(screen.queryByRole("dialog", { name: "侧边对话" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "右侧面板" })).toBeNull();
+    expect(useAppStore.getState().sideChatOpen).toBe(true);
     expect(document.body.style.overflow).toBe("");
   });
 
@@ -303,22 +322,22 @@ describe("WorkbenchShell narrow navigation", () => {
     fireEvent.click(screen.getByRole("button", { name: "打开左侧栏" }));
     expect(screen.getByRole("dialog", { name: "左侧栏" })).toBeTruthy();
 
-    act(() => useAppStore.setState({ sideChatOpen: true }));
+    act(() => useAppStore.getState().toggleSideChat());
 
     expect(screen.queryByRole("dialog", { name: "左侧栏" })).toBeNull();
-    expect(screen.getByRole("dialog", { name: "侧边对话" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "右侧面板" })).toBeTruthy();
   });
 
-  it("returns Side Chat focus to stable shell UI when a Cowork drawer trigger unmounts", () => {
-    useAppStore.setState({ appMode: "cowork", conversations: [], messages: [] });
+  it("keeps the same right panel mounted when a desktop is narrowed and hidden", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440, writable: true });
     render(<WorkbenchShell />);
-    fireEvent.click(screen.getByRole("button", { name: "打开左侧栏" }));
-    screen.getByTestId("left-sidebar").focus();
-
-    act(() => useAppStore.setState({ sideChatOpen: true }));
-    fireEvent.click(screen.getByRole("button", { name: "关闭侧边对话" }));
-
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "命令面板" }));
+    const panel = screen.getByTestId("right-sidebar");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    act(() => { window.innerWidth = 390; window.dispatchEvent(new Event("resize")); });
+    expect(screen.getByTestId("right-sidebar")).toBe(panel);
+    fireEvent.click(screen.getByRole("button", { name: "打开右侧栏" }));
+    expect(screen.getByRole("dialog", { name: "右侧面板" })).toBeTruthy();
+    expect(screen.getByTestId("right-sidebar")).toBe(panel);
   });
 
   it("hides sidebar controls in modes where no sidebar can render", () => {
@@ -345,7 +364,7 @@ describe("WorkbenchShell narrow navigation", () => {
 
     expect(screen.getByRole("button", { name: "打开左侧栏" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "打开右侧栏" })).toBeTruthy();
-    expect(screen.queryByTestId("right-sidebar")).toBeNull();
+    expect(screen.getByTestId("right-sidebar").getAttribute("data-visible")).toBe("false");
     expect(screen.getByText("Code workspace")).toBeTruthy();
     expect(screen.queryByText("Cowork")).toBeNull();
   });

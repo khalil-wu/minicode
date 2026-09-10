@@ -596,14 +596,13 @@ class ExecutionJournal:
         if not self.path.exists():
             self._seq = 0
             _WRITE_SEQUENCES[key] = 0
-        self._seq = max(self._seq, _WRITE_SEQUENCES.get(key, 0), durable_seq) + 1
-        _WRITE_SEQUENCES[key] = self._seq
+        next_seq = max(self._seq, _WRITE_SEQUENCES.get(key, 0), durable_seq) + 1
         event = JournalEvent(
             event_type=clean_type,
             agent_id=self.agent_id,
             payload=dict(payload or {}),
             event_id=str(event_id or uuid4().hex),
-            seq=self._seq,
+            seq=next_seq,
             ts_ms=int(ts_ms or epoch_ms()),
             parent_event_id=str(parent_event_id or ""),
         )
@@ -613,6 +612,8 @@ class ExecutionJournal:
             handle.write(line + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        self._seq = next_seq
+        _WRITE_SEQUENCES[key] = next_seq
         durable_events.append(event)
         self._event_cache_signature = self._file_signature_unlocked()
         if os.name != "nt":
@@ -1005,20 +1006,30 @@ class ExecutionJournal:
         """Return terminal conversation projections without commit receipts."""
 
         pending: dict[str, JournalEvent] = {}
-        committed: set[str] = set()
         for event in self.read_events():
             lifecycle = str(event.payload.get("lifecycle") or "")
             if lifecycle == "conversation_projection_pending":
                 pending[event.event_id] = event
             elif lifecycle == "conversation_projection_committed":
                 pending_id = str(event.payload.get("pending_event_id") or "").strip()
-                if pending_id:
-                    committed.add(pending_id)
-        return [
-            event
-            for event_id, event in pending.items()
-            if event_id not in committed
-        ]
+                committed = pending.pop(pending_id, None)
+                if committed is None:
+                    continue
+                message = committed.payload.get("assistant_message") or {}
+                message_id = str(message.get("id") or event.payload.get("message_id") or "")
+                conversation_id = committed.payload.get("conversation_id")
+                if message_id:
+                    # A later committed replacement owns this message's whole
+                    # projection, including earlier partial writes that failed.
+                    for earlier_id, earlier in tuple(pending.items()):
+                        earlier_message = earlier.payload.get("assistant_message") or {}
+                        if (
+                            earlier.seq < committed.seq
+                            and earlier.payload.get("conversation_id") == conversation_id
+                            and earlier_message.get("id") == message_id
+                        ):
+                            pending.pop(earlier_id)
+        return list(pending.values())
 
     def unprojected_terminal_projections(self) -> list[dict[str, Any]]:
         """Build replay payloads only for runtime-committed terminal facts.

@@ -13,6 +13,7 @@ def test_plugin_mentions_use_enabled_local_inventory_and_connected_mcp(monkeypat
             "plugins": [
                 {
                     "name": "docs",
+                    "id": "docs@local",
                     "displayName": "Official Docs",
                     "description": "Trusted local metadata",
                     "shortDescription": "Trusted local summary",
@@ -41,7 +42,7 @@ def test_plugin_mentions_use_enabled_local_inventory_and_connected_mcp(monkeypat
             {"path": "plugin://disabled"},
             {"path": "plugin://missing"},
         ],
-        connected_mcp_servers=["docs-search", "forged-server", "disabled-server"],
+        connected_mcp_servers=["plugin:docs@local:docs-search", "forged-server", "disabled-server"],
     )
 
     assert resolved == [{
@@ -49,7 +50,7 @@ def test_plugin_mentions_use_enabled_local_inventory_and_connected_mcp(monkeypat
         "display_name": "Official Docs",
         "description": "Trusted local summary",
         "has_skills": True,
-        "mcp_server_names": ["docs-search"],
+        "mcp_server_names": ["plugin:docs@local:docs-search"],
         "available_apps": [],
     }]
 

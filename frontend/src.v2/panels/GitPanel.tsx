@@ -274,7 +274,7 @@ const WorkspaceGitPanel = ({ workingDirectory }: { workingDirectory: string }) =
           </span>
           {selectedFile && (
             <button
-              onClick={() => useAppStore.getState().openEditorFile(selectedFile, selectedFile.split(/[/\\]/).pop())}
+              onClick={() => useAppStore.getState().openEditorFile(selectedFile, selectedFile.split(/[/\\]/).pop(), { exact: true })}
               title="在编辑器中打开文件"
               aria-label="在编辑器中打开文件"
               className="w-6 h-6 border rounded inline-flex items-center justify-center p-0 bg-transparent cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm)", color: "var(--text-muted)" }}

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from contextlib import AsyncExitStack, aclosing
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -27,7 +29,8 @@ from backend.agent.run_context import RunContext
 from backend.agent.query_recovery import prepare_query_recovery
 from backend.agent.query_terminal import QueryTerminalTransaction
 from backend.agent.state import AgentState
-from backend.agent.turn_budget import TurnBudgetController
+from backend.agent.turn_budget import TurnBudgetController, TurnDeadlineController
+from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.turn_input import TurnInputQueue
 from backend.agent.turn_kernel import TurnKernel
 from backend.artifact.store import ArtifactStore
@@ -210,9 +213,10 @@ class QueryEngine:
         all execution through the canonical lifecycle.
         """
         hidden = {"agent.run.started", "agent.run.completed"}
-        async for event in self.submit(submission):
-            if event.type not in hidden:
-                yield event
+        async with aclosing(self.submit(submission)) as owned_events:
+            async for event in owned_events:
+                if event.type not in hidden:
+                    yield event
 
     async def submit(self, submission: QuerySubmission) -> AsyncIterator[AgentEvent]:
         """Run one query while enforcing MiniCode session single-flight."""
@@ -275,11 +279,16 @@ class QueryEngine:
         )
         terminal = QueryTerminalTransaction(turn_ctx=turn_ctx, journal=journal)
         lifecycle = LifecycleObserverOwner()
-        runner: AsyncGenerator[AgentEvent, None] | None = None
+        runner_scope = AsyncExitStack()
         terminal_event: AgentEvent | None = None
         try:
             try:
-                self._publish_system_prompt(turn_ctx)
+                deadline = submission.runtime.deadline_controller.turn_deadline
+                await await_preflight(
+                    self._publish_system_prompt(turn_ctx),
+                    deadline=deadline,
+                    cancel_event=turn_ctx.cancel_event,
+                )
                 lifecycle = LifecycleObserverOwner.create(
                     turn_ctx.lifecycle_observer_factory
                     or session.lifecycle_observer_factory,
@@ -290,12 +299,16 @@ class QueryEngine:
                     images=turn_ctx.state.attachments or None,
                 )
                 journal.record_turn_started()
-                observer_error = await lifecycle.start()
+                observer_error = await await_preflight(
+                    lifecycle.start(), deadline=deadline, cancel_event=turn_ctx.cancel_event,
+                )
                 if observer_error is not None:
                     journal.record_event(observer_error)
                     envelope.stamp(observer_error)
                     yield observer_error
-                runner = self._create_runner(turn_ctx, submission)
+                runner = await runner_scope.enter_async_context(
+                    aclosing(self._create_runner(turn_ctx, submission))
+                )
                 if turn_ctx.turn_kernel is not None:
                     for started_event in turn_ctx.turn_kernel.start_events():
                         envelope.stamp(started_event)
@@ -316,6 +329,14 @@ class QueryEngine:
                 ):
                     yield event
                 raise
+            except PhaseDeadlineExceeded:
+                async for event in self._terminal_events(
+                    terminal, lifecycle, envelope,
+                    AgentEvent.done(status="partial", reason="max_turn_seconds"),
+                    validate=False,
+                ):
+                    yield event
+                return
             except Exception:
                 logger.exception("MiniCode turn startup failed")
                 async for event in self._terminal_events(
@@ -337,27 +358,31 @@ class QueryEngine:
                 return
 
             try:
-                async for event in runner:
-                    journal.record_event(event)
-                    terminal.observe_runner_event(event)
-                    if event.type in {
-                        "agent.run.started",
-                        "agent.run.completed",
-                        "agent.terminal.intent",
-                    }:
-                        continue
-                    if not should_emit_event(event):
-                        continue
-                    observer_error = await lifecycle.observe(event)
-                    if observer_error is not None:
-                        journal.record_event(observer_error)
-                        envelope.stamp(observer_error)
-                        yield observer_error
-                    if event.type == "done":
-                        terminal_event = terminal.accept_done(event)
-                        continue
-                    envelope.stamp(event)
-                    yield event
+                # Cancellation can arrive in the observer while the runner
+                # is suspended at a tool event. Close that execution scope
+                # before the exception path commits its terminal state.
+                async with runner_scope:
+                    async for event in runner:
+                        journal.record_event(event)
+                        terminal.observe_runner_event(event)
+                        if event.type in {
+                            "agent.run.started",
+                            "agent.run.completed",
+                            "agent.terminal.intent",
+                        }:
+                            continue
+                        if not should_emit_event(event):
+                            continue
+                        observer_error = await lifecycle.observe(event)
+                        if observer_error is not None:
+                            journal.record_event(observer_error)
+                            envelope.stamp(observer_error)
+                            yield observer_error
+                        if event.type == "done":
+                            terminal_event = terminal.accept_done(event)
+                            continue
+                        envelope.stamp(event)
+                        yield event
             except asyncio.CancelledError:
                 async for event in self._terminal_events(
                     terminal,
@@ -400,24 +425,27 @@ class QueryEngine:
             ):
                 yield event
         finally:
-            if not terminal.finalized:
-                closed = terminal.commit(
-                    AgentEvent.done(
-                        status="cancelled",
-                        reason="consumer_closed",
-                    ),
-                    validate=False,
-                )
-                observer_error = await lifecycle.finish(
-                    status=closed.status,
-                    reason=closed.reason,
-                )
-                if observer_error is not None:
-                    terminal.record_post_commit_event(observer_error)
-            if runner is not None:
-                await runner.aclose()
-            if submission.runtime.metadata is not None:
-                submission.runtime.metadata.update(turn_ctx.metadata)
+            try:
+                # Also owns a runner constructed before a startup event yield.
+                # The stack is empty once the iteration scope has closed it.
+                await runner_scope.aclose()
+            finally:
+                if not terminal.finalized:
+                    closed = terminal.commit(
+                        AgentEvent.done(
+                            status="cancelled",
+                            reason="consumer_closed",
+                        ),
+                        validate=False,
+                    )
+                    observer_error = await lifecycle.finish(
+                        status=closed.status,
+                        reason=closed.reason,
+                    )
+                    if observer_error is not None:
+                        terminal.record_post_commit_event(observer_error)
+                if submission.runtime.metadata is not None:
+                    submission.runtime.metadata.update(turn_ctx.metadata)
 
     def _setup_failure_events(
         self,
@@ -466,11 +494,11 @@ class QueryEngine:
         return tuple(events)
 
     @staticmethod
-    def _publish_system_prompt(turn_ctx: QueryTurnContext) -> None:
+    async def _publish_system_prompt(turn_ctx: QueryTurnContext) -> None:
         if str(turn_ctx.metadata.get("system_prompt") or "").strip():
             return
         rendered_prompt = str(
-            turn_ctx.context_builder.base_system_prompt(turn_ctx.state) or ""
+            await turn_ctx.context_builder.prepare_system_prompt(turn_ctx.state) or ""
         ).strip()
         if rendered_prompt:
             turn_ctx.metadata["system_prompt"] = rendered_prompt
@@ -553,6 +581,7 @@ class QueryEngine:
         initialization, and per-turn ephemeral clearing that was previously
         the first phase of ``run_agent_loop``.
         """
+        started_at = time.monotonic()
         session = submission.session
         if session is None:  # guarded by QuerySubmission.__post_init__
             raise TypeError("QuerySubmission session was not initialized")
@@ -617,6 +646,10 @@ class QueryEngine:
 
         # Resolve settings from the session/config snapshot.
         settings = session.agent_settings or AgentSettings()
+        sc.deadline_controller = TurnDeadlineController(
+            max_turn_seconds=max(0.0, float(settings.max_turn_seconds or 0.0)),
+        )
+        sc.deadline_controller.start_turn(now=started_at)
 
         budget = session.token_budget or TokenBudget()
 
@@ -634,7 +667,12 @@ class QueryEngine:
         state = submission.state or AgentState(
             user_message=submission.user_message,
             max_iterations=max_iterations_limit,
+            workspace_root=sc.workspace_root,
         )
+        if sc.workspace_root is not None:
+            state.workspace_root = sc.workspace_root
+        else:
+            sc.workspace_root = state.workspace_root
 
         # Clear per-turn ephemeral state in the lifecycle owner. Only touch
         # real AgentState instances; compatibility tests may pass mock objects.
@@ -642,6 +680,8 @@ class QueryEngine:
             prepare_turn_state(
                 state,
                 settings=settings,
+                user_message=submission.user_message,
+                max_iterations=max_iterations_limit,
             )
         # Permission checker with workspace root.
         permission_checker = session.permission_checker

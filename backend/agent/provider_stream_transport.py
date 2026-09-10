@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from backend.agent.first_byte_waiter import ProviderStreamFailure
+from backend.agent.loop_preflight import PhaseDeadlineExceeded
 from backend.agent.loop_runtime_helpers import plan_stream_retry, sleep_or_cancel
 from backend.agent.message import AgentEvent
 from backend.agent.provider_attempt import provider_progress_id
@@ -87,6 +88,7 @@ async def handle_provider_transport_failure(
         not stream_text.full_text
         and not pending_tool_calls
         and not stream_state.saw_partial_tool_call
+        and not stream_state.has_non_text_result
     )
     new_attempt, retry_delay = (
         plan_stream_retry(
@@ -207,7 +209,10 @@ async def handle_provider_transport_failure(
                 retry_after_seconds=retry_delay,
                 message="Provider rate limit reached; retrying after the requested delay.",
             )
-        await sleep_or_cancel(retry_delay, cancel_event)
+        wait_seconds, deadline_capped = budget_runtime.bounded_provider_timeout(retry_delay)
+        await sleep_or_cancel(wait_seconds, cancel_event)
+        if deadline_capped:
+            raise PhaseDeadlineExceeded
         retry_reset = None
         async for reset_update in reset_for_provider_retry(
             stream_text=stream_text,

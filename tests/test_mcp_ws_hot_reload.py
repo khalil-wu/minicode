@@ -240,6 +240,9 @@ class _RealPathMcpManager:
     def get_client(self, server: str):
         return _StubMcpClient() if server in self._servers else None
 
+    def get_server_contract(self, server: str):
+        return (server, "") if server in self._servers else None
+
 
 def _make_real_bootstrap(manager: _RealPathMcpManager) -> AppBootstrap:
     async def _noop_status(name, status):  # pragma: no cover - never invoked here

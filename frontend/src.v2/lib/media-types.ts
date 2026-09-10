@@ -31,6 +31,13 @@ const MEDIA_TYPE_BY_EXTENSION: Readonly<Record<string, string>> = {
 };
 
 const extensionForPath = (path: string): string => {
+  // Local filenames may contain # or ?. Resolve a literal filename suffix
+  // before interpreting those characters as URL query/fragment separators.
+  if (!/^[a-z][a-z\d+.-]*:\/\//i.test(path)) {
+    const name = path.replace(/\\/g, "/").split("/").pop() || "";
+    const extension = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
+    if (MEDIA_TYPE_BY_EXTENSION[extension]) return extension;
+  }
   let cleanPath = String(path || "").split(/[?#]/, 1)[0];
   // Workspace paths can arrive from a transcript or resource URL with one
   // level of percent encoding. Decode only for classification; the original

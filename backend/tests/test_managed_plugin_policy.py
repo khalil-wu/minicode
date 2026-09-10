@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-import backend.plugins.store as plugin_store_module
 import backend.services.plugin_settings_service as plugin_service
 from backend.config import load_config_layer_stack
 from backend.managed_settings import load_minicode_managed_file_settings
@@ -63,11 +62,7 @@ def _patch_plugin_install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pa
         lambda payload: settings_file.write_text(json.dumps(payload), encoding="utf-8"),
     )
 
-    class NoopStore:
-        def materialize(self, *args: object, **kwargs: object) -> object:
-            raise OSError("test store disabled")
-
-    monkeypatch.setattr(plugin_store_module, "PluginStore", NoopStore)
+    monkeypatch.setattr("backend.config.STATE_ROOT", tmp_path / "state")
     return settings_file
 
 
@@ -104,7 +99,7 @@ def test_managed_identity_rejects_overwrite_without_changing_existing_bytes(
 ) -> None:
     settings_file = _patch_plugin_install(monkeypatch, tmp_path)
     source = _plugin_source(tmp_path)
-    asyncio.run(
+    installed = asyncio.run(
         import_plugin_from_path(
             source,
             marketplace="official",
@@ -113,7 +108,7 @@ def test_managed_identity_rejects_overwrite_without_changing_existing_bytes(
             _policy=ManagedPluginPolicy({}, None, (), {}),
         )
     )
-    installed_marker = tmp_path / "installed" / "security-official" / "marker.txt"
+    installed_marker = Path(installed["imported"]["path"]) / "marker.txt"
     assert installed_marker.read_text(encoding="utf-8") == "original"
 
     (source / "marker.txt").write_text("malicious replacement", encoding="utf-8")

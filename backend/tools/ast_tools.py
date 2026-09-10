@@ -30,6 +30,9 @@ from typing import Any
 from backend.permissions.context import ToolExecutionContext
 from backend.security.sensitive_files import is_protected_write_path
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
+from backend.tools.path_resolution import PathTraversalError, _is_bypass_mode, _resolve_path
+from backend.tools.search_support import search_path_permission
+from backend.workspace.fuzzy_search import iter_search_paths
 from backend.tools.tree_sitter_parser import (
     find_definitions as _ts_find_definitions,
     find_references as _ts_find_references,
@@ -77,33 +80,23 @@ for _ext in ("tsx", "jsx", "mjs", "cjs"):
     _DEFINITION_PATTERNS[_ext] = _DEFINITION_PATTERNS["ts"] if _ext in ("tsx",) else _DEFINITION_PATTERNS["js"]
 
 
-def _iter_source_files(root: Path) -> list[Path]:
+def _iter_source_files(root: Path, context: ToolExecutionContext | None = None) -> list[Path]:
     """递归收集可搜索文件，排除黑名单目录。"""
-    resolved_root = root.resolve()
     result: list[Path] = []
-    for item in root.rglob("*"):
-        # Do not inspect symlinked files (or directories reached through a
-        # symlink).  Resolving an attacker-controlled link before the
-        # containment check would disclose source outside the workspace.
-        if item.is_symlink():
+    is_allowed = search_path_permission(context)
+    for item, is_dir in iter_search_paths(root, include_hidden=True, ignore_dirs=_IGNORED_DIRS, ignore_rules="none"):
+        if is_dir or item.suffix.lower() not in _SEARCHABLE_EXTENSIONS:
             continue
-        if not item.is_file():
+        if is_allowed is not None and not is_allowed(item):
             continue
-        try:
-            relative_item = item.resolve().relative_to(resolved_root)
-        except (OSError, ValueError):
+        if is_allowed is None and is_protected_write_path(item.relative_to(root)):
             continue
-        if any(part in _IGNORED_DIRS for part in item.parts):
-            continue
-        if is_protected_write_path(relative_item):
-            continue
-        if item.suffix.lower() in _SEARCHABLE_EXTENSIONS:
-            result.append(item)
+        result.append(item)
     return result
 
 
 def _read_safe(path: Path) -> str | None:
-    if path.is_symlink() or is_protected_write_path(path):
+    if path.is_symlink():
         return None
     try:
         return path.read_text(encoding="utf-8", errors="ignore")
@@ -239,11 +232,7 @@ def _find_references_in_file(path: Path, name: str, include_defs: bool) -> list[
 
 
 def _resolve_workspace(context: ToolExecutionContext | None, directory: str) -> Path:
-    if directory and directory not in (".", ""):
-        return Path(directory).resolve()
-    if context and getattr(context, "workspace_root", None):
-        return context.workspace_root  # type: ignore[return-value]
-    return Path.cwd()
+    return _resolve_path(directory or ".", context, allow_workspace_escape=_is_bypass_mode(context), allow_declared_read_root=True)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -316,12 +305,15 @@ class GoToDefinitionTool(BaseTool):
         if not symbol_name:
             return self._error_result("缺少 name 参数")
 
-        root = _resolve_workspace(context, directory)
-        if not root.exists():
+        try:
+            root = _resolve_workspace(context, directory)
+        except PathTraversalError as exc:
+            return self._error_result(str(exc))
+        if not root.is_dir():
             return self._error_result(f"目录不存在: {directory}")
 
         # 收集候选文件
-        all_files = _iter_source_files(root)
+        all_files = _iter_source_files(root, context)
         if file_extensions:
             normalized_exts = {
                 (e if e.startswith(".") else f".{e}").lower()
@@ -436,11 +428,14 @@ class FindReferencesTool(BaseTool):
         if not symbol_name:
             return self._error_result("缺少 name 参数")
 
-        root = _resolve_workspace(context, directory)
-        if not root.exists():
+        try:
+            root = _resolve_workspace(context, directory)
+        except PathTraversalError as exc:
+            return self._error_result(str(exc))
+        if not root.is_dir():
             return self._error_result(f"目录不存在: {directory}")
 
-        all_files = _iter_source_files(root)
+        all_files = _iter_source_files(root, context)
         if file_extensions:
             normalized_exts = {
                 (e if e.startswith(".") else f".{e}").lower()

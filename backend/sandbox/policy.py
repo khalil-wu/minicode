@@ -523,7 +523,8 @@ def sandbox_policy_for_permission_context(
     requirements = stack.requirements
     effective_permission = permission_context
     resolved_mode, _violation = requirements.resolve_permission_mode(
-        getattr(effective_permission, "mode", "confirm")
+        getattr(effective_permission, "mode", "confirm"),
+        sandbox_mode=effective_permission.sandbox_mode,
     )
     if _violation is not None:
         raise _violation
@@ -546,7 +547,9 @@ def sandbox_policy_for_permission_context(
         effective_permission,
         mode=resolved_mode,
         approval_policy=requirements.approval_policy_for_mode(resolved_mode),
-        sandbox_mode=requirements.sandbox_mode_for_permission_mode(resolved_mode),
+        sandbox_mode=requirements.sandbox_mode_for_permission_mode(
+            resolved_mode, sandbox_mode=effective_permission.sandbox_mode,
+        ),
         filesystem_constraints=constraints,
     )
     effective_sandbox = effective_config.get("sandbox")

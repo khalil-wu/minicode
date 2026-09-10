@@ -124,6 +124,7 @@ def test_turn_kernel_applies_structured_context_from_steer(monkeypatch, tmp_path
         "get_plugin_settings",
         lambda: {
             "plugins": [{
+                "id": "docs",
                 "name": "docs",
                 "displayName": "Docs",
                 "enabled": True,
@@ -141,7 +142,7 @@ def test_turn_kernel_applies_structured_context_from_steer(monkeypatch, tmp_path
     kernel = _kernel(
         tmp_path,
         turn_input_queue=queue,
-        connected_mcp_servers=("docs-search",),
+        connected_mcp_servers=("plugin:docs:docs-search",),
     )
 
     async def consume():
@@ -156,7 +157,7 @@ def test_turn_kernel_applies_structured_context_from_steer(monkeypatch, tmp_path
         "path": "C:/skills/review/SKILL.md",
     }]
     assert kernel.state.prompt_context["plugin_injections"][0]["config_name"] == "docs"
-    assert kernel.state.prompt_context["plugin_injections"][0]["mcp_server_names"] == ["docs-search"]
+    assert kernel.state.prompt_context["plugin_injections"][0]["mcp_server_names"] == ["plugin:docs:docs-search"]
 
 
 def test_turn_kernel_refreshes_live_permission_at_safe_boundary(tmp_path: Path) -> None:

@@ -174,8 +174,13 @@ const appendLocalUserTurn = ({
     if (targetId && state.sideChats[targetId]) {
       const thread = state.sideChats[targetId];
       return {
-        ...(queued ? {} : resetRunState),
         ...(queued || !targetId ? {} : { turnDiffs: omitConversationTurnDiff(state.turnDiffs, targetId) }),
+        ...(!queued ? {
+          conversationAgentStates: {
+            ...state.conversationAgentStates,
+            [targetId]: resetRunState,
+          },
+        } : {}),
         sideChats: {
           ...state.sideChats,
           [targetId]: {
@@ -292,7 +297,7 @@ const recoverStaleStreamingState = (conversationId?: string): boolean => {
     : state.isStreaming;
   if (!targetStreaming) return false;
   const activeMessages = conversationId && conversationId !== state.conversationId
-    ? state.conversationMessages[conversationId] ?? []
+    ? state.sideChats[conversationId]?.messages ?? state.conversationMessages[conversationId] ?? []
     : state.messages;
   const hasLiveAssistant = activeMessages.some((message) => message.isStreaming || message.isThinkingStreaming);
   if (hasLiveAssistant) return false;
@@ -369,6 +374,9 @@ export const sendChatMessage = ({
     ? state.conversations.find((item) => item.id === targetConversationId)
     : undefined;
   const targetWorkspaceRoot = targetConversation?.worktreePath || targetConversation?.workspaceRoot || "";
+  const targetPermissionMode = !targetConversationId || targetConversationId === state.conversationId
+    ? state.permissionMode
+    : undefined;
 
   const sendSignature = JSON.stringify({
     conversationId: targetConversationId,
@@ -391,14 +399,17 @@ export const sendChatMessage = ({
   // A manual right-panel tab selection locks auto-routing for the rest of the
   // current interaction. A new user turn should re-enable auto-routing (so the
   // next diff/preview can open) instead of staying locked forever.
-  useAppStore.getState().setRightStackTabLocked(false);
+  if (!targetConversationId || targetConversationId === state.conversationId) {
+    useAppStore.getState().setRightStackTabLocked(false);
+  }
 
   const command: UserMessageCommand = {
     type: "user_message",
     content: contentForBackend,
     ...(targetWorkspaceRoot ? { workspace_root: targetWorkspaceRoot } : {}),
-    ...(targetWorkspaceRoot && state.activeTabPath ? { primary_file: state.activeTabPath, active_tab_path: state.activeTabPath } : {}),
-    permission_mode: toBackendPermissionMode(state.permissionMode),
+    ...(targetWorkspaceRoot && targetConversationId === state.conversationId && state.activeTabPath
+      ? { primary_file: state.activeTabPath, active_tab_path: state.activeTabPath } : {}),
+    ...(targetPermissionMode ? { permission_mode: toBackendPermissionMode(targetPermissionMode) } : {}),
     agent_mode: state.agentMode,
     ...(targetConversationId ? { conversation_id: targetConversationId } : {}),
     ...(transportAttachments.length > 0 ? { attachments: transportAttachments } : {}),

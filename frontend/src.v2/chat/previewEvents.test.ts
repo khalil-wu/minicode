@@ -87,6 +87,15 @@ describe("live preview browser routing", () => {
     expect(useAppStore.getState().rightStackTab).toBe("tasks");
   });
 
+  it("caches readiness for a background conversation in a different workspace", () => {
+    useAppStore.setState({ conversations: [{ id: "conv-background", title: "Background", workspaceRoot: "C:/other" }] });
+    send({ type: "preview.launch.started", ...launch, workspace_root: "C:/other" }, "conv-background");
+    send({ type: "preview.server.ready", id: launch.id, port: launch.port, url, workspace_root: "C:/other" }, "conv-background");
+    expect(selectPreviewForConversation(useAppStore.getState(), "conv-background").livePreviewUrl).toBe(url);
+    expect(useAppStore.getState().livePreviewUrl).toBeNull();
+    expect(browserRequests).not.toHaveBeenCalled();
+  });
+
   it("reuses the existing browser request deduplication for an already-ready launch", () => {
     send({ type: "preview.launch.started", ...launch, status: "ready" });
     send({ type: "preview.server.ready", id: launch.id, port: launch.port, url });

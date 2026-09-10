@@ -1,9 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.tools.agent_artifact_tools import PresentFileTool
+
+
+def test_present_svg_keeps_a_browser_renderable_type_independent_of_the_host_registry(tmp_path, monkeypatch):
+    mimetypes.init()
+    monkeypatch.setitem(mimetypes.types_map, ".svg", "image/svg")
+    image = tmp_path / "logo.svg"
+    image.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
+    context = ToolExecutionContext(permission=PermissionContext(), workspace_root=tmp_path)
+    result = asyncio.run(PresentFileTool().execute({"file_path": str(image)}, context=context))
+    assert result.is_error is False
+    assert result.output_files[0]["mime_type"] == "image/svg+xml"
+    assert result.output_files[0]["is_image"] is True
 
 
 def test_present_file_validates_and_registers_known_folder_deliverable(tmp_path, monkeypatch) -> None:

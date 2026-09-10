@@ -36,7 +36,8 @@ import { RollingNumber } from "../../components/RollingNumber";
 import { InlineDiff } from "../diff/InlineDiff";
 import { workspaceRelativeDiffPath } from "../diffPaths";
 import { getWebSocket } from "../../hooks/useWebSocket";
-import { openArtifactPreview } from "../openAttachmentPreview";
+import { openArtifactPreview, openWorkspaceFilePreview } from "../openAttachmentPreview";
+import { workspaceRootsEqual } from "../../lib/workspace-path";
 import {
   artifactImageResourceUrl,
   withPreviewCacheBust,
@@ -82,15 +83,18 @@ export const ActivityCell = memo(function ActivityCell({
   cell,
   isActive = false,
   conversationId,
+  workspaceRoot,
 }: {
   cell: ActivityCellState;
   isActive?: boolean;
   /** Explicit owner for artifacts in this cell.  Cells can be rendered from a
    * historical or child transcript while the app's active conversation differs. */
   conversationId?: string;
+  workspaceRoot?: string;
 }) {
   const developerMode = useAppStore((s) => s.viewMode === "verbose");
-  const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const activeWorkspace = useAppStore((s) => s.workingDirectory);
+  const workingDirectory = workspaceRoot ?? activeWorkspace;
   const ownerConversationId = String(conversationId || "").trim();
   const records = useMemo(() => cell.toolCallRecords ?? [], [cell.toolCallRecords]);
   const hasRecords = records.length > 0;
@@ -390,7 +394,7 @@ export const ActivityCell = memo(function ActivityCell({
               <div key={record.id || `${record.name}-${index}`} className="activity-cell-tool-detail-card">
                 {target && recordDetail && (
                   <div className="activity-cell-tool-record-target">
-                    <DetailTarget target={target} targetKind={recordDetail.targetKind} />
+                      <DetailTarget target={target} targetKind={recordDetail.targetKind} workspaceRoot={workingDirectory} conversationId={conversationId} />
                     {recordDetail.lineInfo && <span className="activity-cell-detail-meta">{recordDetail.lineInfo}</span>}
                   </div>
                 )}
@@ -421,7 +425,7 @@ export const ActivityCell = memo(function ActivityCell({
                   {/* The header row already shows this cell's target. Repeating it
                       verbatim one line below is the duplication that made browser
                       and command cells read as two stacked boxes. */}
-                  {target !== detail && <DetailTarget target={target} targetKind={targetKind} />}
+                  {target !== detail && <DetailTarget target={target} targetKind={targetKind} workspaceRoot={workingDirectory} conversationId={conversationId} />}
                   {lineInfo && <span className="activity-cell-detail-meta">{lineInfo}</span>}
                   {count > 1 && <span className="activity-cell-detail-count">{`x${count}`}</span>}
                 </div>
@@ -675,9 +679,13 @@ function buildChangeDetails(records: ActivityToolRecord[], workingDirectory: str
 function DetailTarget({
   target,
   targetKind,
+  workspaceRoot,
+  conversationId,
 }: {
   target: string;
   targetKind: ActivityDetail["targetKind"];
+  workspaceRoot: string;
+  conversationId?: string;
 }) {
   const text = target.trim();
   if (!text) return null;
@@ -708,7 +716,12 @@ function DetailTarget({
         aria-label={`打开 ${text}`}
         onClick={(event) => {
           event.stopPropagation();
-          useAppStore.getState().openEditorFile(text, fileLabel(text));
+          const store = useAppStore.getState();
+          if (workspaceRootsEqual(workspaceRoot, store.workingDirectory)) {
+            store.openEditorFile(text, fileLabel(text));
+          } else {
+            openWorkspaceFilePreview({ path: text, name: fileLabel(text), workspaceRoot, conversationId });
+          }
         }}
       >
         {text}

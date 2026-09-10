@@ -1,0 +1,6 @@
+interface:
+  display_name: "Verify"
+  short_description: "按需求、测试和真实流程核对交付结果"
+  icon_small: "./assets/verify.svg"
+  icon_large: "./assets/verify.svg"
+  brand_color: "#22a06b"

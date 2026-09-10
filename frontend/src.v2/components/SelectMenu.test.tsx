@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SelectMenu } from "./SelectMenu";
 
 const ControlledSelect = ({ disabled = false }: { disabled?: boolean }) => {
@@ -49,5 +49,32 @@ describe("SelectMenu", () => {
 
     expect(screen.queryByRole("listbox")).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  it("skips a disabled selected group and keeps Escape inside the select", async () => {
+    const parentKey = vi.fn();
+    render(<div onKeyDown={parentKey}>
+      <SelectMenu ariaLabel="Model" value="old" onValueChange={vi.fn()}>
+        <optgroup label="Unavailable" disabled><option value="old">Old</option></optgroup>
+        <option value="new">New</option>
+      </SelectMenu>
+    </div>);
+    fireEvent.click(screen.getByRole("button", { name: "Model，当前：Old" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("option", { name: "New" })));
+    expect((screen.getByRole("option", { name: "Old" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(parentKey).not.toHaveBeenCalled();
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("closes when focus leaves or the select becomes disabled", async () => {
+    const view = render(<><ControlledSelect /><button>Next</button></>);
+    fireEvent.click(screen.getByRole("button", { name: "推理强度，当前：自动" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("option", { name: "自动" })));
+    fireEvent.blur(document.activeElement!, { relatedTarget: screen.getByRole("button", { name: "Next" }) });
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "推理强度，当前：自动" }));
+    view.rerender(<><ControlledSelect disabled /><button>Next</button></>);
+    expect(screen.queryByRole("listbox")).toBeNull();
   });
 });

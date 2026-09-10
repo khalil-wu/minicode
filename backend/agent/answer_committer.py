@@ -38,13 +38,14 @@ class AnswerCommitter:
     ) -> TurnTerminalProjection:
         deps = self._deps
         state = deps.state
-        if final_text:
+        if final_text or provider_items:
             deps.append_assistant_history(
                 deps.context,
                 final_text,
                 phase=provider_phase or "final_answer",
                 provider_items=provider_items,
             )
+        if final_text:
             state.reply = (
                 str(getattr(state, "max_output_partial_text", "") or "")
                 + final_text

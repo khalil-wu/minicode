@@ -649,12 +649,19 @@ class ExtensionLoader:
             path=path_label, resolved_path=str(resolved_path), source=source
         )
         api = ExtensionAPI(runner, extension)
-        if hasattr(factory, "setup") and callable(getattr(factory, "setup")):
-            await _maybe_await(factory.setup(api))
-        elif callable(factory):
-            await _maybe_await(factory(api))
-        else:
-            raise TypeError(f"extension factory is not callable: {path_label}")
+        existing_flags = set(runner.runtime.flag_values)
+        try:
+            if hasattr(factory, "setup") and callable(getattr(factory, "setup")):
+                await _maybe_await(factory.setup(api))
+            elif callable(factory):
+                await _maybe_await(factory(api))
+            else:
+                raise TypeError(f"extension factory is not callable: {path_label}")
+        except BaseException:
+            runner.runtime.unregister_owner(extension.path)
+            for name in extension.flags.keys() - existing_flags:
+                runner.runtime.flag_values.pop(name, None)
+            raise
         return extension
 
     def _load_factory(

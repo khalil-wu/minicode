@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from backend.atomic_io import atomic_write_bytes, file_mutation_locks
+from backend.atomic_io import atomic_write_bytes, file_mutation_locks, run_blocking_io
 from backend.checkpoint.store import (
     CheckpointFileSnapshot,
     CheckpointRecord,
@@ -132,7 +132,7 @@ class CheckpointManager:
                         snapshot,
                     )
 
-        await asyncio.to_thread(
+        await run_blocking_io(
             self._restore_files, root, list(restore_files.values())
         )
         return record

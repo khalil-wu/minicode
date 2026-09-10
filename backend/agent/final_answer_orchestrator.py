@@ -47,6 +47,7 @@ async def orchestrate_final_answer(
     provider_raw_final_text: dict[str, Any],
     provider_raw_done: dict[str, Any],
     degraded_reason: str,
+    has_non_text_result: bool = False,
 ) -> AsyncIterator[AgentEvent | TurnTerminalProjection | FinalAnswerOutcome]:
     """Run the no-tools acceptance pipeline and return an explicit loop action."""
 
@@ -75,6 +76,7 @@ async def orchestrate_final_answer(
         turn_usage=turn_usage,
         finish_reason=finish_reason,
         provider_raw_done=provider_raw_done,
+        has_non_text_result=has_non_text_result,
     )
     for event in empty_recovery.events:
         yield event

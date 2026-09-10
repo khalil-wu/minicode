@@ -128,6 +128,7 @@ test("pty tombstones expire and stay bounded", () => {
 
 test("large pty writes are chunked without truncating pasted input", async () => {
   const writes = [];
+  let onExit;
   manager.init({
     pty: {
       spawn: () => ({
@@ -135,9 +136,9 @@ test("large pty writes are chunked without truncating pasted input", async () =>
         process: "pwsh",
         write: (value) => writes.push(value),
         resize: () => {},
-        kill: () => {},
+        kill: () => onExit({ exitCode: 0 }),
         onData: () => {},
-        onExit: () => {},
+        onExit: (callback) => { onExit = callback; },
       }),
     },
     sanitizedPtyEnv: () => ({}),
@@ -203,14 +204,18 @@ test("killConversation terminates only sessions owned by that conversation", asy
     pty: {
       spawn: () => {
         const current = pid++;
+        let onExit;
         return {
           pid: 0,
           process: "pwsh",
           write: () => {},
           resize: () => {},
-          kill: () => killed.push(current),
+          kill: () => {
+            killed.push(current);
+            onExit({ exitCode: 0 });
+          },
           onData: () => {},
-          onExit: () => {},
+          onExit: (callback) => { onExit = callback; },
         };
       },
     },

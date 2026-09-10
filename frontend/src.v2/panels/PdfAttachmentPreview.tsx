@@ -17,6 +17,7 @@ export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string 
   const [status, setStatus] = useState<PdfStatus>("loading");
   const [error, setError] = useState("");
   const [pageNumber, setPageNumber] = useState(1);
+  const [pageInput, setPageInput] = useState("1");
   const [pageCount, setPageCount] = useState(0);
   const [scale, setScale] = useState("page-width");
 
@@ -28,19 +29,22 @@ export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string 
     setStatus("loading");
     setError("");
     setPageNumber(1);
+    setPageInput("1");
     setPageCount(0);
     setScale("page-width");
 
     let disposed = false;
     let loadingTask: ReturnType<typeof pdfjs.getDocument> | undefined;
-    let documentProxy: pdfjs.PDFDocumentProxy | undefined;
+    const viewerLifetime = new AbortController();
     const eventBus = new EventBus();
     const linkService = new PDFLinkService({
       eventBus,
       externalLinkTarget: LinkTarget.BLANK,
       externalLinkRel: "noopener noreferrer",
     });
-    const pdfViewer = new PDFViewer({
+    // pdf.js 4.10 accepts abortSignal at runtime; its options declaration
+    // omits it. Keep the runtime lifecycle option in the concrete object.
+    const viewerOptions = {
       container,
       viewer: viewerElement,
       eventBus,
@@ -49,20 +53,39 @@ export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string 
       textLayerMode: 1,
       annotationMode: 1,
       maxCanvasPixels: 4096 * 4096,
-    });
+      abortSignal: viewerLifetime.signal,
+    };
+    const pdfViewer = new PDFViewer(viewerOptions);
+    linkService.setViewer(pdfViewer);
     pdfViewerRef.current = pdfViewer;
+    // The sidebar opens and resizes independently of the browser window.
+    // pdf.js tracks its height, but the host owns reapplying fit presets.
+    const resizeObserver = new ResizeObserver(() => {
+      // Hidden workspace tabs have no layout. Preserve their scale and page
+      // until the host becomes visible instead of scrolling a detached layout.
+      if (!container.clientWidth || !container.clientHeight) return;
+      const preset = pdfViewer.currentScaleValue || "page-width";
+      if (["page-width", "page-fit", "page-height", "auto"].includes(preset)) {
+        pdfViewer.currentScaleValue = preset;
+      }
+      pdfViewer.update();
+    });
+    resizeObserver.observe(container);
 
     const handlePagesInit = () => {
       if (disposed) return;
-      pdfViewer.currentScaleValue = "page-width";
+      if (container.clientWidth && container.clientHeight) pdfViewer.currentScaleValue = "page-width";
       setScale("page-width");
       setStatus("ready");
     };
     const handlePageChanging = (event: { pageNumber?: number }) => {
-      if (!disposed && typeof event.pageNumber === "number") setPageNumber(event.pageNumber);
+      if (!disposed && typeof event.pageNumber === "number") {
+        setPageNumber(event.pageNumber);
+        setPageInput(String(event.pageNumber));
+      }
     };
-    const handleScaleChanging = (event: { value?: string }) => {
-      if (!disposed && typeof event.value === "string") setScale(event.value);
+    const handleScaleChanging = (event: { scale: number; presetValue?: string }) => {
+      if (!disposed) setScale(event.presetValue === "page-width" ? "page-width" : String(event.scale));
     };
     eventBus.on("pagesinit", handlePagesInit);
     eventBus.on("pagechanging", handlePageChanging);
@@ -71,11 +94,7 @@ export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string 
     loadingTask = pdfjs.getDocument({ url, rangeChunkSize: 64 * 1024, disableAutoFetch: false });
     loadingTask.promise
       .then((loadedDocument) => {
-        if (disposed) {
-          void loadedDocument.destroy();
-          return;
-        }
-        documentProxy = loadedDocument;
+        if (disposed) return;
         setPageCount(loadedDocument.numPages);
         linkService.setDocument(loadedDocument, null);
         pdfViewer.setDocument(loadedDocument);
@@ -88,13 +107,15 @@ export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string 
 
     return () => {
       disposed = true;
+      resizeObserver.disconnect();
+      viewerLifetime.abort();
       eventBus.off("pagesinit", handlePagesInit);
       eventBus.off("pagechanging", handlePageChanging);
       eventBus.off("scalechanging", handleScaleChanging);
       pdfViewer.cleanup();
       pdfViewer.setDocument(undefined as never);
+      linkService.setDocument(null);
       pdfViewerRef.current = null;
-      if (documentProxy) void documentProxy.destroy();
       if (loadingTask) void loadingTask.destroy();
     };
   }, [url]);
@@ -109,9 +130,16 @@ export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string 
   const goToPage = (next: number) => {
     const viewer = pdfViewerRef.current;
     if (!viewer || pageCount === 0) return;
-    const bounded = Math.min(pageCount, Math.max(1, next));
+    const bounded = Math.min(pageCount, Math.max(1, Math.trunc(next)));
     viewer.currentPageNumber = bounded;
     setPageNumber(bounded);
+    setPageInput(String(bounded));
+  };
+
+  const commitPageInput = () => {
+    const next = Number(pageInput);
+    if (pageInput.trim() && Number.isFinite(next)) goToPage(next);
+    else setPageInput(String(pageNumber));
   };
 
   return (
@@ -121,7 +149,13 @@ export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string 
           <ChevronLeft size={15} />
         </button>
         <label className="mc-pdf-page-control">
-          <input aria-label="当前页" value={pageNumber} onChange={(event) => goToPage(Number(event.target.value) || 1)} inputMode="numeric" />
+          <input aria-label="当前页" value={pageInput} onChange={(event) => setPageInput(event.target.value)} onBlur={commitPageInput}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                commitPageInput();
+              }
+            }} inputMode="numeric" disabled={status !== "ready"} />
           <span>/ {pageCount || "--"}</span>
         </label>
         <button type="button" className="mc-pdf-icon-button" title="下一页" aria-label="下一页" onClick={() => goToPage(pageNumber + 1)} disabled={pageCount === 0 || pageNumber >= pageCount}>
@@ -133,7 +167,7 @@ export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string 
         </button>
         <button type="button" className="mc-pdf-scale" title="适合宽度" aria-label="适合宽度" onClick={() => setViewerScale("page-width")} disabled={status !== "ready"}>
           <ScanLine size={14} />
-          <span>{scale === "page-width" ? "适合宽度" : `${Math.round((pdfViewerRef.current?.currentScale || 1) * 100)}%`}</span>
+          <span>{scale === "page-width" ? "适合宽度" : `${Math.round(Number(scale) * 100)}%`}</span>
         </button>
         <button type="button" className="mc-pdf-icon-button" title="放大" aria-label="放大" onClick={() => pdfViewerRef.current?.increaseScale()} disabled={status !== "ready"}>
           <Plus size={14} />

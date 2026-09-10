@@ -10,6 +10,12 @@ incarnation of the same logical agent.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+def coordination_agent_id(metadata: Mapping[str, Any]) -> str:
+    """Stable child identity; root coordination remains query-run scoped."""
+    return str(metadata.get("agent_id") or metadata.get("run_id") or metadata.get("task_id") or "").strip()
 
 
 @dataclass(frozen=True)

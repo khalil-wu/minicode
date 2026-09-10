@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import mimetypes
 import hashlib
 import os
 import shutil
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse
 from backend.atomic_io import atomic_write_bytes, file_mutation_locks
 from backend.security.sensitive_files import is_protected_write_path
 from backend.documents.service import parse_document_preview
+from backend.media_types import media_type_for_path
 
 from .models import (
     WorkspaceDeleteResponse,
@@ -26,8 +27,6 @@ from .models import (
 
 WORKSPACE_IGNORED_NAMES = {
     ".git",
-    ".idea",
-    ".vscode",
     ".venv",
     "venv",
     "node_modules",
@@ -171,10 +170,13 @@ class WorkspaceService:
         if not target.is_file():
             raise HTTPException(status_code=400, detail="Path must point to a file.")
         self.ensure_not_sensitive_file(target)
-        media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        media_type = media_type_for_path(target)
         ascii_name = target.name.encode("ascii", errors="ignore").decode("ascii").replace('"', "") or "file"
         disposition = f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(target.name)}"
-        return FileResponse(target, media_type=media_type, headers={"Content-Disposition": disposition})
+        return FileResponse(target, media_type=media_type, headers={
+            "Content-Disposition": disposition,
+            "Cache-Control": "no-cache",
+        })
 
     def preview_file(self, path: str) -> dict[str, object]:
         """Build the same bounded preview payload used for uploaded files.
@@ -218,7 +220,7 @@ class WorkspaceService:
         # Match uploaded-attachment preview bounds so a large workspace file
         # cannot flood the right rail or the clipboard.
         visible_content = content[: 2 * 1024 * 1024]
-        media_type = str(parsed.get("media_type") or mimetypes.guess_type(target.name)[0] or "application/octet-stream")
+        media_type = str(parsed.get("media_type") or media_type_for_path(target))
         kind = str(parsed.get("kind") or "document")
         return {
             "file_name": target.name,
@@ -363,7 +365,9 @@ class WorkspaceService:
             with file_mutation_locks([source, destination]):
                 if not source.exists() and not source.is_symlink():
                     raise HTTPException(status_code=404, detail=f"Path not found: {path}")
-                if destination.exists() or destination.is_symlink():
+                if (destination.exists() or destination.is_symlink()) and not (
+                    source == destination and source.samefile(destination)
+                ):
                     raise HTTPException(status_code=409, detail=f"Target already exists: {new_path}")
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 source.rename(destination)
@@ -461,8 +465,6 @@ class WorkspaceService:
         name = path.name
         if name in WORKSPACE_IGNORED_NAMES:
             return True
-        if name.startswith(".") and name not in {".env.example"}:
-            return True
         if path.is_file() and path.suffix.lower() in WORKSPACE_IGNORED_SUFFIXES:
             return True
         return False
@@ -476,8 +478,6 @@ class WorkspaceService:
         """
         name = entry.name
         if name in WORKSPACE_IGNORED_NAMES:
-            return True
-        if name.startswith(".") and name not in {".env.example"}:
             return True
         try:
             if entry.is_file(follow_symlinks=False) and os.path.splitext(name)[1].lower() in WORKSPACE_IGNORED_SUFFIXES:
@@ -553,14 +553,13 @@ class WorkspaceService:
         WorkspaceService.ensure_not_sensitive_file(path, operation="modify")
 
     def workspace_path_payload(self, path: Path) -> WorkspacePathResponse:
-        is_symlink = path.is_symlink()
-        stat = path.lstat() if is_symlink else path.stat()
-        is_dir = path.is_dir() and not is_symlink
+        metadata = path.lstat()
+        is_dir = stat.S_ISDIR(metadata.st_mode)
         return WorkspacePathResponse(
             workspace_root=str(self.workspace_root_path()),
-            path=self.to_workspace_relative(path, follow_symlinks=not is_symlink),
+            path=self.to_workspace_relative(path, follow_symlinks=False),
             name=path.name,
             is_dir=is_dir,
-            size_bytes=None if is_dir else stat.st_size,
-            modified_at=self.iso_timestamp(stat.st_mtime),
+            size_bytes=None if is_dir else metadata.st_size,
+            modified_at=self.iso_timestamp(metadata.st_mtime),
         )

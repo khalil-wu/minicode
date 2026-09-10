@@ -459,8 +459,14 @@ def is_unsafe_env_override_name(name: str) -> bool:
 
 def _is_sensitive_env_name(name: str) -> bool:
     normalized = str(name or "").upper()
-    return normalized in _SENSITIVE_ENV_NAMES or normalized.endswith(
-        _SENSITIVE_ENV_SUFFIXES
+    return (
+        normalized in _SENSITIVE_ENV_NAMES
+        or normalized.endswith(_SENSITIVE_ENV_SUFFIXES)
+        or normalized.startswith((
+            "OPENAI_API_KEY_", "ANTHROPIC_API_KEY_", "CUSTOM_API_KEY_",
+            "MINICODE_OPENAI_IMAGE_API_KEY_", "MINICODE_ANTHROPIC_IMAGE_API_KEY_",
+            "MINICODE_CUSTOM_IMAGE_API_KEY_",
+        ))
     )
 
 

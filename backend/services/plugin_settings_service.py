@@ -20,7 +20,6 @@ from backend.feature_flags import feature_enabled
 from backend.hooks.runtime import raise_if_config_change_blocked
 from backend.plugins.dependencies import find_reverse_dependents, verify_and_demote
 from backend.plugins.identity import (
-    has_explicit_marketplace,
     normalize_plugin_id,
     parse_plugin_id,
     parse_plugin_id_strict,
@@ -205,29 +204,16 @@ def _collect_configured_plugin_states(
 
 def _configured_plugin_state(
     plugin_id: str,
-    plugin_name: str,
     version: str,
     states: Mapping[str, bool | tuple[str, ...]],
 ) -> tuple[bool | None, tuple[str, ...]]:
     """Resolve one inventory item against the canonical user selection map."""
 
     target_id = normalize_plugin_id(plugin_id)
-    target_name = normalize_plugin_name(plugin_name)
-    candidates: list[tuple[str, bool | tuple[str, ...]]] = []
-    for raw_id, state in states.items():
-        if normalize_plugin_id(raw_id) == target_id:
-            candidates.append((raw_id, state))
-            continue
-        parsed = parse_plugin_id(raw_id)
-        if normalize_plugin_name(parsed.name) == target_name and not has_explicit_marketplace(plugin_name):
-            candidates.append((raw_id, state))
+    candidates = [state for raw_id, state in states.items() if normalize_plugin_id(raw_id) == target_id]
     if not candidates:
         return None, ()
-    # A bare-name match is only safe when it resolves to one canonical id.
-    identities = {normalize_plugin_id(raw_id) for raw_id, _state in candidates}
-    if len(identities) > 1:
-        return None, ()
-    state = candidates[-1][1]
+    state = candidates[-1]
     if isinstance(state, bool):
         return state, ()
     constraints = tuple(state)
@@ -446,7 +432,6 @@ def get_plugin_settings(
         else:
             configured_state, configured_constraints = _configured_plugin_state(
                 plugin_id,
-                str(entry.get("name") or ""),
                 str(entry.get("version") or ""),
                 configured_states,
             )
@@ -683,7 +668,17 @@ async def remove_plugin(
         str(target.get("name") or ""), str(target.get("marketplace") or "local")
     ))
     policy.assert_plugin_mutable(plugin_id)
-    installed = [target]
+    # Remove every owned flat projection as well as the canonical store. The
+    # inventory intentionally selects one active version and cannot enumerate
+    # the compatibility copies that also have to leave disk on uninstall.
+    from backend.commands.plugins import _iter_plugin_manifests
+
+    installed_paths = []
+    for manifest in _iter_plugin_manifests([install_root]):
+        manifest_name = plugin_name_from_manifest(manifest)
+        marketplace = _plugin_marketplace_for_manifest(manifest, _read_plugin_manifest(manifest), [install_root])
+        if normalize_plugin_id(plugin_id_for_name(manifest_name, marketplace)) == normalize_plugin_id(plugin_id):
+            installed_paths.append(plugin_directory_for_manifest(manifest))
     removal_root = install_root / ".removals" / uuid4().hex
     moved: list[tuple[Path, Path]] = []
     store_removal: Any | None = None
@@ -703,8 +698,7 @@ async def remove_plugin(
         raise PluginSettingsError(str(exc), status_code=409) from exc
     try:
         removal_root.mkdir(parents=True, exist_ok=False)
-        for index, item in enumerate(installed):
-            plugin_path = Path(str(item.get("path") or ""))
+        for index, plugin_path in enumerate(installed_paths):
             if not _is_relative_to(plugin_path, install_root) and not _is_relative_to(plugin_path, store_root):
                 raise PluginSettingsError(
                     "Refusing to remove a path outside the plugin root",
@@ -761,6 +755,7 @@ async def import_plugin_from_path(
     _policy: ManagedPluginPolicy | None = None,
     _trusted_marketplace: bool = False,
     _marketplace_source_descriptor: Mapping[str, Any] | None = None,
+    _expected_plugin_id: str | None = None,
 ) -> dict[str, Any]:
     policy = _policy or _plugin_policy_from_stack()
     if not feature_enabled("plugin_lifecycle_api", True):
@@ -784,6 +779,7 @@ async def import_plugin_from_path(
             _policy=policy,
             _trusted_marketplace=_trusted_marketplace,
             _marketplace_source_descriptor=_marketplace_source_descriptor,
+            _expected_plugin_id=_expected_plugin_id,
         )
     source_text = str(source_path or "").strip()
     if _looks_like_remote_plugin_source(source_text):
@@ -816,6 +812,7 @@ async def import_plugin_from_path(
                         **source_descriptor,
                         "provenance": materialized.to_dict(),
                     },
+                    expected_plugin_id=_expected_plugin_id,
                 )
             finally:
                 if destination.exists():
@@ -844,6 +841,7 @@ async def import_plugin_from_path(
         trusted_marketplace=_trusted_marketplace,
         marketplace_source_descriptor=_marketplace_source_descriptor,
         source_descriptor=source_descriptor,
+        expected_plugin_id=_expected_plugin_id,
     )
 
 
@@ -857,6 +855,7 @@ async def import_plugin_package(
     _policy: ManagedPluginPolicy | None = None,
     _trusted_marketplace: bool = False,
     _marketplace_source_descriptor: Mapping[str, Any] | None = None,
+    _expected_plugin_id: str | None = None,
 ) -> dict[str, Any]:
     policy = _policy or _plugin_policy_from_stack()
     if not feature_enabled("plugin_lifecycle_api", True):
@@ -907,6 +906,7 @@ async def import_plugin_package(
             trusted_marketplace=_trusted_marketplace,
             marketplace_source_descriptor=_marketplace_source_descriptor,
             source_descriptor=source_descriptor,
+            expected_plugin_id=_expected_plugin_id,
         )
     finally:
         if tmp_extract.exists():
@@ -925,6 +925,7 @@ async def _install_plugin_directory(
     source_descriptor: Mapping[str, Any] | None = None,
     trusted_marketplace: bool = False,
     marketplace_source_descriptor: Mapping[str, Any] | None = None,
+    expected_plugin_id: str | None = None,
 ) -> dict[str, Any]:
     linked_paths = _plugin_symlink_paths(source)
     if linked_paths:
@@ -963,6 +964,11 @@ async def _install_plugin_directory(
     except ValueError as exc:
         raise PluginSettingsError(f"Invalid plugin identity: {exc}", status_code=400) from exc
     plugin_id = plugin_id_for_name(plugin_name, marketplace)
+    if expected_plugin_id is not None and normalize_plugin_id(plugin_id) != normalize_plugin_id(expected_plugin_id):
+        raise PluginSettingsError(
+            f"Plugin manifest '{plugin_id}' does not match requested marketplace plugin '{expected_plugin_id}'",
+            status_code=400,
+        )
     effective_policy.assert_plugin_installable(
         plugin_id,
         version=str((manifest_payload or {}).get("version") or "").strip(),
@@ -980,12 +986,12 @@ async def _install_plugin_directory(
     destination_folder = (
         folder_name
         if marketplace.casefold() == "local"
-        else _safe_plugin_folder_name(f"{plugin_name}@{marketplace}")
+        else plugin_id
     )
     destination = install_root / destination_folder
     source_resolved = source.resolve()
     install_root_resolved = install_root.resolve()
-    destination_resolved = destination.resolve() if destination.exists() else (install_root_resolved / folder_name)
+    destination_resolved = destination.resolve()
     if not _is_relative_to(destination_resolved, install_root_resolved):
         raise PluginSettingsError("Plugin destination escapes the plugin root", status_code=400)
     if _same_path(source_resolved, destination_resolved):
@@ -1003,14 +1009,13 @@ async def _install_plugin_directory(
     if destination.exists() and not overwrite:
         raise PluginSettingsError(f"Plugin '{plugin_name}' is already installed", status_code=409)
 
-    token = uuid4().hex
-    tmp_destination = install_root / f".{folder_name}.{token}.tmp"
-    backup_destination = install_root / f".{folder_name}.{token}.backup"
-    destination_replaced = False
-    backup_created = False
-    # Run the hook before any destination replacement or settings write.  A
-    # blocked ConfigChange must leave both the compatibility projection and
-    # the versioned store untouched.
+    from backend.plugins.store import PluginStore
+
+    store = PluginStore()
+    version = str((manifest_payload or {}).get("version") or "local")
+    canonical_destination = store.version_path(marketplace, plugin_name, version)
+    if canonical_destination.exists() and not overwrite:
+        raise PluginSettingsError(f"Plugin '{plugin_name}' is already installed", status_code=409)
     hook_result = await config_change_hook(source="plugins", file_path=str(settings_file))
     try:
         raise_if_config_change_blocked(
@@ -1020,70 +1025,21 @@ async def _install_plugin_directory(
         )
     except Exception as exc:
         raise PluginSettingsError(str(exc), status_code=409) from exc
-    try:
-        shutil.copytree(
-            source,
-            tmp_destination,
-            ignore=shutil.ignore_patterns(
-                ".git",
-                "__pycache__",
-                ".pytest_cache",
-                "node_modules",
-                "dist",
-                "build",
-            ),
-        )
-        if destination.exists():
-            if not overwrite:
-                raise PluginSettingsError(
-                    f"Plugin '{plugin_name}' is already installed",
-                    status_code=409,
-                )
-            destination.replace(backup_destination)
-            backup_created = True
-        tmp_destination.replace(destination)
-        destination_replaced = True
+    def activate_plugin(_record: Any) -> None:
+        _update_settings_json(lambda settings_data: _persist_user_plugin_enablement(settings_data, plugin_id, True))
 
-        # An explicit install is an explicit activation. Persist that positive
-        # selection before exposing the materialized directory to consumers.
-        def activate_plugin(settings_data: dict[str, Any]) -> None:
-            _persist_user_plugin_enablement(settings_data, plugin_id, True)
-
-        _update_settings_json(activate_plugin)
-
-    except Exception:
-        if destination_replaced and destination.exists():
-            _remove_within_root(destination, install_root)
-        if backup_created and backup_destination.exists():
-            backup_destination.replace(destination)
-        if tmp_destination.exists():
-            _remove_within_root(tmp_destination, install_root)
-        raise
-    if backup_destination.exists():
-        _remove_within_root(backup_destination, install_root)
-
-    # Materialize a versioned provenance copy as the canonical store.  The
-    # flat destination remains as a compatibility projection for existing
-    # clients; runtime discovery can select the active version from the store
-    # without exposing historical versions.
-    store_record: dict[str, Any] | None = None
-    try:
-        from backend.plugins.store import PluginStore
-
-        stored = PluginStore().materialize(
-            source,
-            name=plugin_name,
-            marketplace=marketplace,
-            version=str((manifest_payload or {}).get("version") or "local"),
-            source=policy_source,
-            activate=True,
-            overwrite=overwrite,
-        )
-        store_record = stored.to_dict()
-    except Exception as exc:
-        # A read-only/legacy home must not make a validated flat import fail;
-        # expose the degradation explicitly so callers can reconcile later.
-        logger.warning("Failed to materialize versioned plugin store for %s: %s", plugin_id, exc)
+    # The canonical store retains its old tree and selector until enablement
+    # commits. A failed store update cannot publish a different flat runtime.
+    stored = store.materialize(
+        source,
+        name=plugin_name,
+        marketplace=marketplace,
+        version=version,
+        source=policy_source,
+        activate=True,
+        overwrite=overwrite,
+        after_activate=activate_plugin,
+    )
 
     # cc surfaces declared-but-missing plugin dependencies instead of letting
     # an install silently proceed without them (installedPluginsManager tracks
@@ -1108,11 +1064,11 @@ async def _install_plugin_directory(
         "imported": {
             "name": plugin_name,
             "id": plugin_id,
-            "path": str(destination),
+            "path": str(stored.path),
             "already_installed": False,
             "kind": import_kind,
             **({"package_path": str(package_path)} if package_path is not None else {}),
-            **({"store": store_record} if store_record is not None else {"store_error": "versioned store unavailable"}),
+            "store": stored.to_dict(),
             **({"missing_dependencies": missing_dependencies} if missing_dependencies else {}),
         },
     }
@@ -1409,7 +1365,7 @@ def resolve_enabled_plugin_mentions(
             continue
         seen.add(resolved_key)
         declared_servers = {
-            str(name).strip()
+            f"plugin:{plugin['id']}:{str(name).strip()}"
             for name in plugin.get("mcp_server_names", [])
             if str(name).strip()
         }

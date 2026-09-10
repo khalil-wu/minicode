@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 from typing import Any
 
 from backend.async_cleanup import cancel_and_drain, cancel_and_drain_receipt
@@ -35,6 +34,10 @@ async def wait_for_provider_event(
     if cancel_task is not None:
         wait_set.add(cancel_task)
     try:
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise asyncio.TimeoutError
         done_tasks, _ = await asyncio.wait(
             wait_set,
             timeout=(
@@ -45,20 +48,8 @@ async def wait_for_provider_event(
             return_when=asyncio.FIRST_COMPLETED,
         )
         if cancel_task is not None and cancel_task in done_tasks:
-            await cancel_and_drain_receipt(
-                [event_task],
-                timeout=0.25,
-                label="provider stream cancellation",
-                owner=owner,
-            )
             raise asyncio.CancelledError
         if event_task not in done_tasks:
-            await cancel_and_drain_receipt(
-                [event_task],
-                timeout=0.25,
-                label="provider stream timeout",
-                owner=owner,
-            )
             raise asyncio.TimeoutError
         try:
             return event_task.result()
@@ -67,6 +58,14 @@ async def wait_for_provider_event(
         except Exception as exc:
             raise ProviderStreamFailure(exc) from exc
     finally:
+        # Task.cancel() can interrupt asyncio.wait itself. The read belongs to
+        # this waiter on every exit, including cancellation by the host task.
+        await cancel_and_drain_receipt(
+            [event_task],
+            timeout=0.25,
+            label="provider stream read",
+            owner=owner,
+        )
         if cancel_task is not None and not cancel_task.done():
             await cancel_and_drain(
                 [cancel_task],

@@ -44,7 +44,11 @@ export const KeyboardShortcutsHelp = () => {
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(event) => {
-          if (event.key === "Escape") toggleShortcutsHelp();
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            toggleShortcutsHelp();
+          }
         }}
         style={{
           width: "min(440px, 90vw)",

@@ -19,7 +19,7 @@ import sys
 import tempfile
 import time
 from uuid import uuid4
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, BinaryIO, Callable
 
@@ -403,6 +403,31 @@ def _bubblewrap_capability() -> tuple[bool, str]:
     return result
 
 
+def cleanup_owned_container(engine: str, container_ref: str, cidfile: str = "") -> bool:
+    """Remove one exactly owned container, retaining its CID file on failure."""
+    try:
+        removed = subprocess.run(
+            [engine, "rm", "--force", container_ref],
+            capture_output=True, timeout=5.0,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Container cleanup failed for %s: %s", container_ref, exc)
+        return False
+    error = removed.stderr.decode("utf-8", errors="replace").lower()
+    absent = "no such container" in error or "no container with name or id" in error
+    if removed.returncode != 0 and not absent:
+        logger.warning("Container cleanup failed for %s: %s", container_ref, error.strip())
+        return False
+    if cidfile:
+        try:
+            Path(cidfile).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Container CID cleanup failed for %s: %s", container_ref, exc)
+            return False
+    return True
+
+
 class SandboxRunner:
     """Execute shell commands within a SandboxPolicy.
 
@@ -421,6 +446,7 @@ class SandboxRunner:
         self._container_engine = ""
         self._container_cidfile: Path | None = None
         self._container_name = ""
+        self.process: asyncio.subprocess.Process | None = None
         self._synthetic_mount_targets: list[_SyntheticMountTarget] = []
         self._synthetic_mount_overrides: dict[str, Path] = {}
         self._sandbox_ready_file: Path | None = None
@@ -665,7 +691,43 @@ class SandboxRunner:
             return path
         return str(workspace.expanduser().resolve().joinpath(*relative.parts))
 
-    async def run(
+    async def run(self, command: str, **kwargs: Any) -> SandboxResult:
+        """Run one command and retain any resource whose cleanup is pending."""
+        try:
+            result = await self._run(command, **kwargs)
+        except BaseException as exc:
+            container_removed = (
+                await self._cleanup_container(force=True)
+                if self.process is None else False
+            )
+            if self.process is not None or not container_removed:
+                exc.cleanup_pending = True
+                exc.cleanup_reason = "command_resource_cleanup_pending"
+            raise
+        if result.cleanup_pending:
+            return result
+        container_removed = await self._cleanup_container(force=True)
+        if not container_removed:
+            result = replace(result, cleanup_pending=True, cleanup_reason="container_cleanup_pending")
+        if not result.cleanup_pending:
+            self.process = None
+        return result
+
+    async def cleanup(self) -> bool:
+        """Retry termination of resources retained by this runner."""
+        if self.process is not None:
+            return await self._kill_tree(self.process)
+        return await self._cleanup_container(force=True)
+
+    @property
+    def container_ownership(self) -> dict[str, str]:
+        return {
+            "container_engine": self._container_engine,
+            "container_ref": self._container_name,
+            "container_cidfile": str(self._container_cidfile or ""),
+        }
+
+    async def _run(
         self,
         command: str,
         *,
@@ -732,7 +794,7 @@ class SandboxRunner:
                 proc = await spawn_exec(*wrapped_command, **spawn_kwargs)
             else:
                 proc = await spawn_shell(wrapped_command, **spawn_kwargs)
-            await self._await_sandbox_ready(proc)
+            self.process = proc
             if process_ready_callback is not None:
                 ready_result = process_ready_callback(proc)
                 if inspect.isawaitable(ready_result):
@@ -741,6 +803,7 @@ class SandboxRunner:
                 started_result = process_started_callback(proc.pid)
                 if inspect.isawaitable(started_result):
                     await started_result
+            await self._await_sandbox_ready(proc)
 
             if cancel_event:
                 async def _wait_cancel() -> None:
@@ -943,6 +1006,8 @@ class SandboxRunner:
                 stderr=f"Sandbox unavailable: {exc}",
                 exit_code=126,
                 sandbox_unavailable=True,
+                cleanup_pending=self.process is not None,
+                cleanup_reason="sandbox_setup_cleanup_pending" if self.process is not None else "",
             )
         except OSError as exc:
             tree_reaped = True
@@ -998,7 +1063,6 @@ class SandboxRunner:
                 if transport is not None:
                     with suppress(Exception):
                         transport.close()
-            await self._cleanup_container()
             self._cleanup_sandbox_setup_state()
 
     def _build_env(self) -> dict[str, str]:
@@ -1182,9 +1246,12 @@ class SandboxRunner:
         # The sandbox owns container cleanup, while the host child still uses
         # the shared process-group lifecycle used by every other execution path.
         reaped = await terminate_process_tree(proc)
-        await self._cleanup_container(force=True)
+        container_removed = await self._cleanup_container(force=True)
         self._cleanup_sandbox_setup_state()
-        return reaped
+        completed = reaped and container_removed
+        if completed and self.process is proc:
+            self.process = None
+        return completed
 
     def _container_command(
         self,
@@ -1392,34 +1459,26 @@ class SandboxRunner:
         # The final pwsh/sh argument is still interpreted inside the container.
         return args
 
-    async def _cleanup_container(self, *, force: bool = False) -> None:
+    async def _cleanup_container(self, *, force: bool = False) -> bool:
         cidfile = self._container_cidfile
         engine = self._container_engine
         container_name = self._container_name
-        self._container_cidfile = None
-        self._container_engine = ""
-        self._container_name = ""
         if cidfile is None and not container_name:
-            return
+            return True
         container_id = ""
         if cidfile is not None:
             with suppress(OSError):
                 container_id = cidfile.read_text(encoding="utf-8").strip()
         container_ref = container_name or container_id
-        if force and engine and container_ref:
-            with suppress(Exception):
-                cleanup = await spawn_exec(
-                    engine,
-                    "rm",
-                    "--force",
-                    container_ref,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await communicate(cleanup, timeout=5.0)
-        if cidfile is not None:
-            with suppress(OSError):
-                cidfile.unlink()
+        if engine and container_ref:
+            if not await asyncio.to_thread(cleanup_owned_container, engine, container_ref, str(cidfile or "")):
+                return False
+        elif cidfile is not None:
+            cidfile.unlink(missing_ok=True)
+        self._container_cidfile = None
+        self._container_engine = ""
+        self._container_name = ""
+        return True
 
 
 def _shell_quote(s: str) -> str:

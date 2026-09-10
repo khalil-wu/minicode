@@ -7,6 +7,7 @@ import { handlePreviewEvent } from "../chat/previewEvents";
 import type { ServerEvent } from "../protocol/events";
 import type { EmbeddedBrowserState } from "../desktop/runtime";
 import { BrowserPanel, normalizeBrowserInput } from "./BrowserPanel";
+import { ContextMenu } from "../components/ContextMenu";
 import { __resetOpenWebInBrowserForTests, openWebInBrowser } from "../chat/openWebInBrowser";
 
 vi.hoisted(() => {
@@ -77,6 +78,7 @@ vi.mock("../desktop/runtime", async (importOriginal) => {
 
 class ResizeObserverMock {
   observe() {}
+  unobserve() {}
   disconnect() {}
 }
 
@@ -118,6 +120,7 @@ describe("BrowserPanel", () => {
 
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -125,6 +128,51 @@ describe("BrowserPanel", () => {
     expect(normalizeBrowserInput("example.com/docs")).toBe("https://example.com/docs");
     expect(normalizeBrowserInput("localhost:5173")).toBe("http://localhost:5173");
     expect(normalizeBrowserInput("MiniCode browser")).toBe("https://www.bing.com/search?q=MiniCode%20browser");
+  });
+
+  it("yields the native view to overlapping menus and restores it after all overlays close", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains("context-menu-surface")
+        ? new DOMRect(740, 90, 240, 300)
+        : new DOMRect(700, 150, 300, 600);
+    });
+    render(<BrowserPanel />);
+    const address = await screen.findByRole("textbox", { name: "地址栏" });
+    fireEvent.change(address, { target: { value: "example.com" } });
+    fireEvent.submit(address.closest("form")!);
+    await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ width: 300, height: 600 })));
+
+    const menu = render(<ContextMenu position={{ x: 740, y: 90 }} items={[{ label: "文件" }]} onClose={() => {}} />);
+    await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ width: 0, height: 0 })));
+    const modal = render(<div role="dialog" aria-modal="true">Modal</div>);
+    await act(async () => {});
+    menu.unmount();
+    await act(async () => {});
+    expect(runtimeMocks.setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ width: 0, height: 0 }));
+    modal.unmount();
+    await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ width: 300, height: 600 })));
+    expect(runtimeMocks.navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the native view visible for non-overlapping popups and avoids IPC for streaming text", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.getAttribute("role") === "menu"
+        ? new DOMRect(10, 90, 240, 300)
+        : new DOMRect(700, 150, 300, 600);
+    });
+    render(<BrowserPanel />);
+    const address = await screen.findByRole("textbox", { name: "地址栏" });
+    fireEvent.change(address, { target: { value: "example.com" } });
+    fireEvent.submit(address.closest("form")!);
+    const menu = render(<div role="menu">Menu</div>);
+    await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ width: 300, height: 600 })));
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    runtimeMocks.setBounds.mockClear();
+    const text = render(<div>streaming</div>);
+    text.rerender(<div>streaming more text</div>);
+    await act(async () => {});
+    expect(runtimeMocks.setBounds).not.toHaveBeenCalled();
+    menu.unmount();
   });
 
   it("renders a native-browser shell and opens typed addresses in the embedded view", async () => {

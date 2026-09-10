@@ -181,8 +181,8 @@
   --easing-exit: cubic-bezier(0.4, 0, 1, 1);
   --easing-pulse: cubic-bezier(0.42, 0, 0.18, 1);
   --easing-status-sweep: cubic-bezier(0.2, 0.7, 0.25, 1);
-  /* Gentle overshoot for panel/card entrances only — not for hover states. */
-  --easing-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  /* Panels settle without overshooting the text baseline. */
+  --easing-spring: var(--easing-enter);
 
   /* ── Duration primitives (4) — raw ms values for @keyframes
      Used by animations.css utility classes. The --transition-*

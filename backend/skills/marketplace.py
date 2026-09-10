@@ -13,8 +13,9 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
-from backend.atomic_io import atomic_write_text, file_mutation_locks
+from backend.atomic_io import file_mutation_locks
 from backend.agent.markdown_scopes import get_minicode_config_home_dir
+from backend.plugins.materializer import materialize_source
 
 USER_SKILLS_DIR = get_minicode_config_home_dir() / "skills"
 
@@ -205,6 +206,7 @@ def registry_server_to_marketplace_mcp(record: dict[str, Any], installed_names: 
         ),
         None,
     )
+    transport = "sse" if remote and str(remote.get("type", "")).lower() == "sse" else "http"
     repository = server.get("repository") if isinstance(server.get("repository"), dict) else {}
     website_url = str(server.get("websiteUrl") or repository.get("url") or (remote or {}).get("url") or "").strip()
     icons = server.get("icons") if isinstance(server.get("icons"), list) else []
@@ -220,7 +222,7 @@ def registry_server_to_marketplace_mcp(record: dict[str, Any], installed_names: 
         {
             "name": provider_name,
             "server": {
-                "transport": "http",
+                "transport": transport,
                 "url": remote["url"],
                 "auto_start": False,
             },
@@ -243,7 +245,7 @@ def registry_server_to_marketplace_mcp(record: dict[str, Any], installed_names: 
         "actionable": config_snippet is not None,
         "setup_mode": "remote" if config_snippet else "manual",
         "config_snippet": config_snippet,
-        "transport": "http" if remote else "manual",
+        "transport": transport if remote else "manual",
         "url": str((remote or {}).get("url") or ""),
         "auto_start": False,
         "website_url": website_url,
@@ -306,10 +308,10 @@ async def list_extensions_marketplace(
 
     installed_names = installed_names or set()
     installed_mcp_names = installed_mcp_names or set()
-    # Network catalogs are opt-in. MiniCode should remain deterministic and
-    # must not import another user's extension marketplace state by default.
+    # Browsing a public catalog does not import another user's installed state.
+    # Keep the explicit offline switch, while making the catalog usable by default.
     network_enabled = fetch_json is not None or fetch_text is not None or str(
-        os.environ.get("MINICODE_ENABLE_NETWORK_MARKETPLACE") or ""
+        os.environ.get("MINICODE_ENABLE_NETWORK_MARKETPLACE", "1")
     ).strip().lower() in {"1", "true", "yes", "on"}
     if not network_enabled:
         return _apply_installed_flags({
@@ -379,29 +381,34 @@ async def list_extensions_marketplace(
 async def install_marketplace_skill(
     skill_name: str,
     skills_dir: Path | None = None,
-    *,
-    fetch_text: FetchText | None = None,
 ) -> dict[str, Any]:
     normalized_name = _safe_skill_name(skill_name)
     target_root = skills_dir or USER_SKILLS_DIR
     skill_dir = target_root / normalized_name
     skill_file = skill_dir / "SKILL.md"
-    if skill_dir.exists():
-        raise FileExistsError(f"Skill '{normalized_name}' is already installed.")
+    metadata: dict[str, str] = {}
 
-    fetch_text = fetch_text or _default_fetch_text
-    content = await _maybe_await(fetch_text(OPENAI_SKILL_RAW_URL.format(name=normalized_name)))
+    def validate_bundle(root: Path) -> None:
+        metadata.update(_parse_skill_frontmatter(
+            (root / "SKILL.md").read_text(encoding="utf-8"), normalized_name,
+        ))
 
-    metadata = _parse_skill_frontmatter(content, normalized_name)
-    with file_mutation_locks([skill_file]):
-        if skill_dir.exists() or skill_dir.is_symlink():
-            raise FileExistsError(f"Skill '{normalized_name}' is already installed.")
-        skill_dir.mkdir(parents=True, exist_ok=False)
-        try:
-            atomic_write_text(skill_file, content.rstrip() + "\n", encoding="utf-8")
-        except Exception:
-            shutil.rmtree(skill_dir, ignore_errors=True)
-            raise
+    def install_bundle() -> None:
+        # Share the mutation boundary with local import/removal. Materialize the
+        # complete directory: skills can depend on scripts, assets and agents/.
+        with file_mutation_locks([skill_file]):
+            if skill_dir.exists() or skill_dir.is_symlink():
+                raise FileExistsError(f"Skill '{normalized_name}' is already installed.")
+            materialize_source(
+                {"source": "github", "repo": "openai/skills", "ref": "main",
+                 "path": f"skills/.curated/{normalized_name}"},
+                skill_dir,
+                overwrite=False,
+                validate=validate_bundle,
+                timeout_seconds=90,
+            )
+
+    await asyncio.to_thread(install_bundle)
 
     return {
         "installed": True,

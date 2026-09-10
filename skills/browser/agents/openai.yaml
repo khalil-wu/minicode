@@ -1,0 +1,6 @@
+interface:
+  display_name: "Browser"
+  short_description: "在授权的浏览器中检查页面与交互"
+  icon_small: "./assets/browser.svg"
+  icon_large: "./assets/browser.svg"
+  brand_color: "#3b82f6"

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from functools import partial
@@ -30,52 +29,11 @@ class PostStreamRecoveryResult:
     degraded_reason: str
 
 
-_FENCED_CODE_RE = re.compile(r"(?s)(?:```|~~~).*?(?:```|~~~)")
-_INLINE_CODE_RE = re.compile(r"`[^`\r\n]*`")
-_TEXTUAL_INVOKE_RE = re.compile(
-    r"<\s*invoke\b[^>]*\bname\s*=\s*['\"]?([A-Za-z_][A-Za-z0-9_.:-]*)['\"]?[^>]*>",
-    re.IGNORECASE,
-)
-_TEXTUAL_PARAMETER_RE = re.compile(
-    r"<\s*parameter\b[^>]*\bname\s*=",
-    re.IGNORECASE,
-)
 _PROVIDER_CONTINUATION_RECOVERY_LIMIT = 8
 _PROVIDER_CONTINUATION_ERROR = (
     "The provider repeatedly stopped for a managed continuation and the "
     "bounded recovery limit was exhausted."
 )
-
-
-def textual_tool_call_imitation(
-    text: str,
-    *,
-    exposed_tool_names: set[str],
-) -> str:
-    """Return an exposed tool name imitated with XML instead of the wire protocol.
-
-    Provider-native structured tool items are the only executable tool-call
-    transport. This is a validator, not an XML compatibility parser:
-    fenced/inline examples remain ordinary answer text, while an
-    executable-looking ``<invoke name=...><parameter ...>`` sequence fails
-    visibly.
-    """
-
-    if not text or "<" not in text or not exposed_tool_names:
-        return ""
-    visible = _INLINE_CODE_RE.sub("", _FENCED_CODE_RE.sub("", text))
-    for match in _TEXTUAL_INVOKE_RE.finditer(visible):
-        tool_name = match.group(1)
-        if tool_name not in exposed_tool_names:
-            continue
-        # Requiring a parameter tag near the invocation avoids treating prose
-        # that merely names the XML form as an attempted execution.  The window
-        # also catches malformed/missing closing tags such as the observed
-        # provider output while keeping the check bounded.
-        tail = visible[match.end() : match.end() + 4096]
-        if _TEXTUAL_PARAMETER_RE.search(tail):
-            return tool_name
-    return ""
 
 
 async def recover_provider_response(
@@ -91,7 +49,6 @@ async def recover_provider_response(
     scrub_text: Any,
     tool_batch_count: int,
     degraded_reason: str,
-    exposed_tool_names: set[str] | None = None,
 ) -> AsyncIterator[AgentEvent | TurnTerminalProjection | PostStreamRecoveryResult]:
     pending_tool_calls = stream_state.tool_calls
     normalized_finish_reason = str(finish_reason or "").strip().lower()
@@ -248,44 +205,6 @@ async def recover_provider_response(
         yield PostStreamRecoveryResult("terminate", tool_batch_count, degraded_reason)
         return
 
-    if not pending_tool_calls:
-        imitated_tool = textual_tool_call_imitation(
-            stream_text.accepted_answer_text(scrub_text),
-            exposed_tool_names=set(exposed_tool_names or ()),
-        )
-        if imitated_tool:
-            failed_message = stream_text.complete_active_agent_message(
-                stream_text.active_agent_message_text,
-                source="provider_protocol_error",
-                status="failed",
-                finish_reason="invalid_model_action",
-            )
-            if failed_message is not None:
-                yield failed_message
-            stream_text.clear_pending()
-            state.mark_transition(
-                "invalid_model_action",
-                protocol_reason="textual_tool_call_imitation",
-                tool_name=imitated_tool,
-            )
-            yield AgentEvent.error(
-                message=(
-                    f"模型把工具 {imitated_tool} 写成了普通 XML 文本，而不是结构化工具调用；"
-                    "该工具没有执行，本轮结果未完成。请重试或切换支持原生工具调用的模型。"
-                ),
-                recoverable=True,
-                error_type="invalid_model_action",
-                error_code="textual_tool_call_imitation",
-            )
-            _set_terminal_reason(state, "invalid_model_action", status="failed")
-            yield usage_terminal_projection(
-                turn_usage,
-                status="failed",
-                reason="invalid_model_action",
-            )
-            yield PostStreamRecoveryResult(
-                "terminate", tool_batch_count, degraded_reason
-            )
-            return
-
+    # The native tool blocks own execution. Assistant text remains an answer
+    # even when it contains tool names or example invocation syntax.
     yield PostStreamRecoveryResult("proceed", tool_batch_count, degraded_reason)

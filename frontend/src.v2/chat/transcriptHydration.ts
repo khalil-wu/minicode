@@ -6,6 +6,8 @@ import {
   providerReasoningType,
 } from "../lib/provider-reasoning";
 import {
+  AGENT_PROGRESS_STAGES,
+  type AgentProgressStage,
   isAgentProgressPhase,
   isAgentProgressProviderState,
 } from "../protocol/streaming-types";
@@ -21,6 +23,8 @@ import type {
 
 export type BackendTranscriptMessage = {
   id?: unknown;
+  turnId?: unknown;
+  turn_id?: unknown;
   role?: unknown;
   content?: unknown;
   thinking?: unknown;
@@ -203,8 +207,8 @@ const toUsage = (value: unknown): MessageUsage | undefined => {
 
 const toArray = <T,>(value: unknown): T[] => Array.isArray(value) ? value as T[] : [];
 
-const isProgressStage = (value: unknown): value is "status" | "planning" | "tool" | "approval" | "verification" | "final" =>
-  value === "status" || value === "planning" || value === "tool" || value === "approval" || value === "verification" || value === "final";
+const isProgressStage = (value: unknown): value is AgentProgressStage =>
+  (AGENT_PROGRESS_STAGES as readonly unknown[]).includes(value);
 
 const isProgressStatus = (value: unknown): value is "running" | "completed" | "partial" | "failed" | "info" =>
   value === "running" || value === "completed" || value === "partial" || value === "failed" || value === "info";
@@ -803,6 +807,7 @@ export const hydrateMessages = (
     const timestamp = toTimestamp(message.timestamp, index);
     return {
       id: typeof message.id === "string" && message.id ? message.id : `m-${index}-${timestamp}`,
+      turnId: stringValue(message.turnId ?? message.turn_id),
       role,
       content,
       messageSource: toMessageSource(message.metadata),
@@ -905,6 +910,9 @@ export const hydrateMessages = (
     if (
       !message.content
       && !(message.blocks?.length)
+      && !message.artifacts.length
+      && !message.attachmentRefs?.length
+      && !message.replyAttachments?.length
       && !(message.terminalStatus === "failed" && message.failureMessage)
     ) continue;
     projected.push(message);

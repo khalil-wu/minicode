@@ -21,14 +21,20 @@ const mocks = vi.hoisted(() => ({
   isDesktop: vi.fn(() => false),
   fsListTree: vi.fn(),
   searchWorkspaceFiles: vi.fn(),
+  writeWorkspaceFile: vi.fn(),
+  createWorkspaceDirectory: vi.fn(),
+  showPrompt: vi.fn(),
+  showAlert: vi.fn(),
 }));
 
 vi.mock("../protocol/workspace", () => ({
   listWorkspaceTree: (...args: unknown[]) => mocks.listWorkspaceTree(...args),
-  writeWorkspaceFile: vi.fn(),
-  createWorkspaceDirectory: vi.fn(),
+  writeWorkspaceFile: mocks.writeWorkspaceFile,
+  createWorkspaceDirectory: mocks.createWorkspaceDirectory,
   searchWorkspaceFiles: mocks.searchWorkspaceFiles,
 }));
+
+vi.mock("../overlays/DialogService", () => ({ showPrompt: mocks.showPrompt, showAlert: mocks.showAlert }));
 
 vi.mock("../desktop/runtime", () => ({
   desktop: () => undefined,
@@ -81,6 +87,10 @@ describe("FileTree directory request ownership", () => {
     mocks.isDesktop.mockReturnValue(false);
     mocks.fsListTree.mockReset();
     mocks.searchWorkspaceFiles.mockReset().mockResolvedValue([]);
+    mocks.writeWorkspaceFile.mockReset();
+    mocks.createWorkspaceDirectory.mockReset();
+    mocks.showPrompt.mockReset();
+    mocks.showAlert.mockReset();
     useAppStore.setState({
       workingDirectory: "workspace-a",
       fileTreeVersion: 0,
@@ -114,6 +124,19 @@ describe("FileTree directory request ownership", () => {
     expect(await screen.findByText("needle.ts")).toBeTruthy();
     expect(mocks.searchWorkspaceFiles).toHaveBeenLastCalledWith("workspace-a", "needle", 60, "all");
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it.each([
+    ["新建文件", mocks.writeWorkspaceFile],
+    ["新建文件夹", mocks.createWorkspaceDirectory],
+  ] as const)("preserves the backend error in the %s toolbar flow", async (name, mutation) => {
+    mocks.listWorkspaceTree.mockResolvedValue(rootNode("workspace-a"));
+    mocks.showPrompt.mockResolvedValueOnce("already-exists");
+    mutation.mockRejectedValueOnce(new Error("Path already exists: already-exists"));
+    render(<FileTree />);
+    fireEvent.click(await screen.findByRole("button", { name: "更多文件操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name }));
+    await waitFor(() => expect(mocks.showAlert).toHaveBeenCalledWith({ title: "创建失败", message: "Path already exists: already-exists" }));
   });
 
   it("ignores a failed search from the previous workspace", async () => {

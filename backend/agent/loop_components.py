@@ -153,13 +153,21 @@ def build_agent_loop_components(
     tool_context.metadata[ACTIVE_TOOLSET_POLICY_METADATA_KEY] = active_toolset_policy
     bootstrap.run_context.toolset_policy = active_toolset_policy
     mcp_manager = bootstrap.run_context.mcp_manager
+    def mcp_catalog(registry):
+        if registry.mcp_tool_registry is not None:
+            registry.mcp_tool_registry.sync()
+        return (
+            mcp_registry_version(mcp_manager),
+            collect_mcp_instructions(mcp_manager) if mcp_manager is not None else {},
+        )
+
+    mcp_version, mcp_instructions = mcp_catalog(tool_registry)
     base_tool_schemas = tool_registry.get_schemas(
         permission_checker=permission_checker,
         permission_context=tool_context.permission,
         toolset_policy=active_toolset_policy,
-        mcp_registry_version=mcp_registry_version(mcp_manager),
+        mcp_registry_version=mcp_version,
     )
-    mcp_instructions = collect_mcp_instructions(mcp_manager)
     turn_tool_schema_state = derive_turn_tool_schema_state(
         base_tool_schemas=base_tool_schemas,
         mcp_instructions=mcp_instructions,
@@ -184,8 +192,7 @@ def build_agent_loop_components(
         turn_kernel=turn_kernel,
         metadata=metadata,
         workspace_root=bootstrap.workspace_root,
-        mcp_instructions=mcp_instructions,
-        mcp_registry_version=lambda: mcp_registry_version(mcp_manager),
+        mcp_catalog=mcp_catalog,
         active_toolset_policy_factory=lambda *, permission_context: (
             active_toolset_policy_for_context(
                 permission_context=permission_context,

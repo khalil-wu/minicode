@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from backend.config import (
@@ -60,7 +61,7 @@ def build_wire_adapter(
                 or MINICODE_CAPPED_DEFAULT_MAX_TOKENS,
             ),
             context_window=settings.context_window,
-            thinking_budget=thinking_budget,
+            thinking_budget=(settings.thinking_budget or None) if thinking_budget is None else thinking_budget,
             use_auth_token=bool(settings.auth_header),
             cache_editing_beta_header=cache_editing_beta_header,
             default_headers=dict(settings.default_headers),
@@ -138,6 +139,7 @@ def _openai_compatible_settings(
             section.get("responses_reasoning_summary") or "off"
         ),
         max_tokens=max(0, int(section.get("max_tokens") or 0)),
+        thinking_budget=int(section.get("thinking_budget") or 0),
         wire_api=wire_api,
         proxy_mode=str(section.get("proxy_mode") or "inherit"),
         prompt_cache_retention=str(section.get("prompt_cache_retention") or ""),
@@ -166,9 +168,10 @@ def build_provider_adapter(
     model_override: str | None = None,
     *,
     model_runtime: "ModelRuntime | None" = None,
+    settings_snapshot: dict | None = None,
 ) -> LLMAdapter:
     """Construct one provider adapter, or fail explicitly."""
-    requested_provider = (provider or "").strip() or get_llm_provider()
+    requested_provider = (provider or "").strip() or get_llm_provider(settings_snapshot)
     # Provider ids are registry keys and remain case-sensitive. Built-in MiniCode
     # settings retain their normalized lowercase ids, while an extension-owned
     # ModelRuntime must receive the exact id registered by the extension.
@@ -188,10 +191,18 @@ def build_provider_adapter(
         if not models:
             raise ValueError(f"Selected provider '{normalized}' has no model configuration")
         spec = model_runtime.resolve_adapter_spec(normalized, model_id)
-        return _build_registered_provider_adapter(spec)
+        adapter = _build_registered_provider_adapter(spec)
+        cost_models = [spec.model]
+        if spec.small_fast_model and spec.small_fast_model != model_id:
+            cost_models.append(model_runtime.get_model(normalized, spec.small_fast_model))
+        adapter._request_model_costs = {
+            model.id: dict(model.cost)
+            for model in cost_models if model is not None and model.cost
+        }
+        return adapter
 
     if normalized == "anthropic":
-        anthropic_settings = get_anthropic_settings()
+        anthropic_settings = get_anthropic_settings(settings_snapshot)
         api_key = anthropic_settings["api_key"]
 
         model = (model_override or anthropic_settings["model"]).strip()
@@ -230,7 +241,7 @@ def build_provider_adapter(
 
     if normalized in ("openai", "custom"):
         if normalized == "custom":
-            custom = get_custom_settings()
+            custom = get_custom_settings(settings_snapshot)
             from backend.llm.capabilities import is_gpt_image_model
 
             selected_model = str(model_override or custom.get("model") or "").strip()
@@ -255,10 +266,11 @@ def build_provider_adapter(
                 model_override=model_override,
             )
         else:
-            if not str(model_override or get_openai_settings().get("model") or "").strip():
+            openai_section = get_openai_settings(settings_snapshot)
+            if not str(model_override or openai_section.get("model") or "").strip():
                 raise ValueError("Selected provider 'openai' requires an explicit model selection")
             openai_settings = _openai_compatible_settings(
-                get_openai_settings(),
+                openai_section,
                 provider="openai",
                 model_override=model_override,
             )
@@ -341,22 +353,33 @@ def create_session_llm(
     model_runtime: "ModelRuntime | None" = None,
 ) -> LLMAdapter:
     """Create the one explicitly selected provider transport for this session."""
-    # ``config`` is unused: every provider section is read back from the
-    # persisted settings payload inside ``build_provider_adapter``. The
-    # positional slot is part of the composition-root factory contract
-    # (backend/bootstrap/app.py always calls ``factory(effective_config, ...)``)
-    # so it stays until that DI signature is renegotiated.
-    del config
-    requested_provider = str(provider_override or get_llm_provider()).strip()
+    requested_provider = str(provider_override or config.llm.provider).strip()
     primary_provider = (
         requested_provider
         if model_runtime is not None
         else requested_provider.lower()
     )
-    primary = build_provider_adapter(
+    if model_runtime is None and primary_provider == config.llm.provider:
+        selected_model = str(model_override or config.llm.model).strip()
+        if not selected_model:
+            raise ValueError(f"Selected provider '{primary_provider}' requires an explicit model selection")
+        if selected_model == config.llm.model or config.config_layer_stack is None:
+            return build_wire_adapter(
+                replace(config.llm, model=selected_model),
+                cache_editing_beta_header=os.getenv("MINICODE_ANTHROPIC_CACHE_EDITING_BETA_HEADER", ""),
+            )
+    settings_snapshot = (
+        config.config_layer_stack.effective_config()
+        if config.config_layer_stack is not None else None
+    )
+    if model_runtime is None and (
+        settings_snapshot is None
+        or primary_provider not in settings_snapshot.get("llm", {})
+    ):
+        raise ValueError(f"Provider '{primary_provider}' is not configured in this session")
+    return build_provider_adapter(
         primary_provider,
         model_override=model_override,
         model_runtime=model_runtime,
+        settings_snapshot=settings_snapshot,
     )
-
-    return primary

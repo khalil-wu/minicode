@@ -504,8 +504,9 @@ def _windows_command_portability_hint(
     if inline_env:
         return (
             "[windows-portability] This command used a POSIX inline environment assignment. "
-            "Retry with run_command's structured env object (for example env={\"PYTHONPATH\":\"..\"}) "
-            "and leave the command as `python ...`; do not repeat `NAME=value command`."
+            "Use cwd and `python -m ...` for Python module resolution. For ordinary variables, "
+            "use the structured env object (for example env={\"TASK_MODE\":\"audit\"}); "
+            "do not repeat `NAME=value command`."
         )
     if posix_names:
         equivalents = {

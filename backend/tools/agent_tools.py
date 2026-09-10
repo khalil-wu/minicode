@@ -1,6 +1,7 @@
 """Agent helper tools: user clarification, artifacts, and subagents."""
 
 from __future__ import annotations
+from backend.agent.agent_identity import coordination_agent_id
 
 import asyncio
 import hashlib
@@ -35,7 +36,9 @@ from backend.agents.loader import discover_agents, get_custom_agent
 from backend.artifact.store import ArtifactStore
 from backend.config import AgentSettings, AppConfig, TokenBudget, load_config
 from backend.feature_flags import feature_enabled
-from backend.llm.base import LLMAdapter
+from backend.llm.base import LLMAdapter, UsageInfo
+from backend.agent.provider_protocol import add_usage
+from dataclasses import asdict
 from backend.llm.model_selection import (
     REASONING_LEVEL_ORDER,
     apply_model_thinking_level,
@@ -107,6 +110,7 @@ from backend.tools.subagent_support import (
     _close_subagent_llm_resolution,
     _configured_subagent_overrides,
     _custom_agent_deny_rules,
+    _admit_subagent_workspace,
     _exclusive_parallel_task_scopes,
     _externalize_large_subagent_result,
     _fork_snapshot_for_child,
@@ -418,94 +422,8 @@ class TaskTool(BaseTool):
                 "Named teammates are spawned as individual task calls; "
                 "parallel_tasks is reserved for ordinary independent subagents."
             )
-        # ── Parallel execution path ──
-        if isinstance(parallel_tasks, list) and len(parallel_tasks) > MAX_PARALLEL_TASKS:
-            return self._error_result(
-                f"Too many parallel tasks ({len(parallel_tasks)}). Max is {MAX_PARALLEL_TASKS}."
-            )
-        if isinstance(parallel_tasks, list) and len(parallel_tasks) == 1:
-            return self._error_result(
-                "parallel_tasks requires at least two tasks; use the single-task fields instead."
-            )
-        if isinstance(parallel_tasks, list) and len(parallel_tasks) >= 2:
-            workspace_root = context.workspace_root if context is not None else None
-
-            def resolve_custom_agent(name: str) -> dict[str, Any] | None:
-                return get_custom_agent(name, workspace_root)
-
-            tasks: list[dict[str, Any]] = []
-            for item in parallel_tasks:
-                if not isinstance(item, dict):
-                    continue
-                t_desc = str(item.get("description") or "").strip()
-                t_prompt = str(item.get("prompt") or "").strip()
-                t_type = str(item.get("agent_type") or "general-purpose").strip()
-                if t_desc and t_prompt:
-                    try:
-                        resolved_type = normalize_agent_type(
-                            t_type,
-                            get_custom_agent=resolve_custom_agent,
-                        )
-                    except ValueError as exc:
-                        return self._error_result(str(exc))
-                    task_payload = {
-                        "description": t_desc,
-                        "prompt": t_prompt,
-                        "agent_type": resolved_type,
-                        **_nonempty_subagent_metadata(item),
-                    }
-                    tasks.append(task_payload)
-                    if tasks[-1]["agent_type"] in {"explore", "plan"}:
-                        tasks[-1]["read_only"] = True
-            # A single-item batch follows the same batch path; a len>=2 gate
-            # used to fall through to the single-execution
-            # path, which reads a top-level prompt that parallel calls lack.
-            if tasks:
-                try:
-                    for task in tasks:
-                        task_runtime_config = _subagent_metadata(task)
-                        await _resolve_subagent_llm(
-                            llm,
-                            parent_metadata=parent_metadata,
-                            run_context=run_context,
-                            agent_type=str(task.get("agent_type") or "general-purpose"),
-                            model_override=str(task_runtime_config.get("model") or ""),
-                            effort_override=str(task_runtime_config.get("effort") or ""),
-                            workspace_root=workspace_root,
-                            build_adapter=False,
-                        )
-                except (RuntimeError, ValueError) as exc:
-                    return self._error_result(str(exc))
-                scopes = _exclusive_parallel_task_scopes(tasks)
-                if len(scopes) != len(tasks):
-                    return self._error_result(
-                        "Parallel write-capable tasks have overlapping explicit write_scope paths. "
-                        "Give each worker a disjoint write_scope or run those mutations sequentially."
-                    )
-                undeclared_writers = _parallel_undeclared_writers(tasks)
-                if undeclared_writers:
-                    names = ", ".join(
-                        f"'{task.get('description') or task.get('prompt', '')[:40]}'"
-                        for task in undeclared_writers
-                    )
-                    return self._error_result(
-                        "Parallel write-capable task(s) declare no write_scope: "
-                        f"{names}. Two writers without disjoint write_scope would race on "
-                        "the same file (last-writer-wins). Give each write-capable task an "
-                        "explicit disjoint write_scope, or run the writes sequentially."
-                    )
-                if bool(args.get("run_in_background")):
-                    return await self._start_background_subtasks(
-                        tasks=tasks,
-                        context=context,
-                    )
-                return await self._run_parallel_subtasks(tasks, context)
-
-        # ── Single execution path ──
-        prompt = str(args.get("prompt") or "").strip()
         teammate_name = str(args.get("name") or "").strip()
-        team_name = str(args.get("team_name") or "").strip()
-        teammate_mode = str(args.get("mode") or "").strip()
+        workspace_root = context.workspace_root if context is not None else None
         if self._is_recursive_subagent_call(context):
             permission = getattr(context, "permission", None)
             profile = resolve_agent_execution_profile(permission, parent_metadata)
@@ -564,32 +482,103 @@ class TaskTool(BaseTool):
                     display_summary=summary,
                     result_kind="subagent",
                 )
-        isolation = str(args.get("isolation") or "").strip().lower()
-        if isolation and isolation != "worktree":
+        # ── Parallel execution path ──
+        if isinstance(parallel_tasks, list) and len(parallel_tasks) > MAX_PARALLEL_TASKS:
             return self._error_result(
-                f"Unsupported isolation mode: {isolation!r}. Only 'worktree' is supported."
+                f"Too many parallel tasks ({len(parallel_tasks)}). Max is {MAX_PARALLEL_TASKS}."
             )
-        workspace_root = context.workspace_root if context is not None else None
-        requested_cwd = str(args.get("cwd") or "").strip()
-        if requested_cwd and isolation:
+        if isinstance(parallel_tasks, list) and len(parallel_tasks) == 1:
             return self._error_result(
-                'cwd is mutually exclusive with isolation: "worktree"'
+                "parallel_tasks requires at least two tasks; use the single-task fields instead."
             )
-        if requested_cwd:
-            candidate = Path(requested_cwd).expanduser()
-            if not candidate.is_absolute():
-                return self._error_result("cwd must be an absolute path")
-            candidate = candidate.resolve()
-            owning_root = Path(workspace_root).resolve() if workspace_root else None
-            if owning_root is None:
-                return self._error_result("cwd requires an active workspace")
-            try:
-                candidate.relative_to(owning_root)
-            except ValueError:
-                return self._error_result("cwd must be inside the active workspace")
-            if not candidate.is_dir():
-                return self._error_result("cwd must reference an existing directory")
-            args = {**args, "cwd": str(candidate)}
+        if isinstance(parallel_tasks, list) and len(parallel_tasks) >= 2:
+            workspace_root = context.workspace_root if context is not None else None
+
+            def resolve_custom_agent(name: str) -> dict[str, Any] | None:
+                return get_custom_agent(name, workspace_root)
+
+            tasks: list[dict[str, Any]] = []
+            for item in parallel_tasks:
+                if not isinstance(item, dict):
+                    continue
+                t_desc = str(item.get("description") or "").strip()
+                t_prompt = str(item.get("prompt") or "").strip()
+                t_type = str(item.get("agent_type") or "general-purpose").strip()
+                if t_desc and t_prompt:
+                    try:
+                        resolved_type = normalize_agent_type(
+                            t_type,
+                            get_custom_agent=resolve_custom_agent,
+                        )
+                    except ValueError as exc:
+                        return self._error_result(str(exc))
+                    task_payload = {
+                        "description": t_desc,
+                        "prompt": t_prompt,
+                        "agent_type": resolved_type,
+                        **_nonempty_subagent_metadata(item),
+                    }
+                    try:
+                        task_payload = _admit_subagent_workspace(task_payload, workspace_root)
+                    except ValueError as exc:
+                        return self._error_result(str(exc))
+                    tasks.append(task_payload)
+                    if tasks[-1]["agent_type"] in {"explore", "plan"}:
+                        tasks[-1]["read_only"] = True
+            # A single-item batch follows the same batch path; a len>=2 gate
+            # used to fall through to the single-execution
+            # path, which reads a top-level prompt that parallel calls lack.
+            if tasks:
+                try:
+                    for task in tasks:
+                        task_runtime_config = _subagent_metadata(task)
+                        await _resolve_subagent_llm(
+                            llm,
+                            parent_metadata=parent_metadata,
+                            run_context=run_context,
+                            agent_type=str(task.get("agent_type") or "general-purpose"),
+                            model_override=str(task_runtime_config.get("model") or ""),
+                            provider_override=str(task_runtime_config.get("provider") or ""),
+                            effort_override=str(task_runtime_config.get("effort") or ""),
+                            workspace_root=workspace_root,
+                            build_adapter=False,
+                        )
+                except (RuntimeError, ValueError) as exc:
+                    return self._error_result(str(exc))
+                scopes = _exclusive_parallel_task_scopes(tasks, workspace_root)
+                if len(scopes) != len(tasks):
+                    return self._error_result(
+                        "Parallel write-capable tasks have overlapping explicit write_scope paths. "
+                        "Give each worker a disjoint write_scope or run those mutations sequentially."
+                    )
+                undeclared_writers = _parallel_undeclared_writers(tasks)
+                if undeclared_writers:
+                    names = ", ".join(
+                        f"'{task.get('description') or task.get('prompt', '')[:40]}'"
+                        for task in undeclared_writers
+                    )
+                    return self._error_result(
+                        "Parallel write-capable task(s) declare no write_scope: "
+                        f"{names}. Two writers without disjoint write_scope would race on "
+                        "the same file (last-writer-wins). Give each write-capable task an "
+                        "explicit disjoint write_scope, or run the writes sequentially."
+                    )
+                if bool(args.get("run_in_background")):
+                    return await self._start_background_subtasks(
+                        tasks=tasks,
+                        context=context,
+                    )
+                return await self._run_parallel_subtasks(tasks, context)
+
+        # ── Single execution path ──
+        prompt = str(args.get("prompt") or "").strip()
+        team_name = str(args.get("team_name") or "").strip()
+        teammate_mode = str(args.get("mode") or "").strip()
+        try:
+            args = _admit_subagent_workspace(args, workspace_root)
+        except ValueError as exc:
+            return self._error_result(str(exc))
+        isolation = args["isolation"]
         try:
             agent_type = normalize_agent_type(
                 str(args.get("agent_type") or "general-purpose"),
@@ -641,6 +630,7 @@ class TaskTool(BaseTool):
                 run_context=run_context,
                 agent_type=agent_type,
                 model_override=str(single_runtime_config.get("model") or ""),
+                provider_override=str(single_runtime_config.get("provider") or ""),
                 effort_override=str(single_runtime_config.get("effort") or ""),
                 workspace_root=workspace_root,
                 build_adapter=False,
@@ -921,7 +911,7 @@ class TaskTool(BaseTool):
             if context is not None and context.run_context is not None
             else None
         )
-        parent_run_id = str(metadata_from_context(context).get("run_id") or "").strip()
+        parent_run_id = coordination_agent_id(metadata_from_context(context))
         try:
             # Validate every TaskCreated hook before queueing any worker.  A
             # parallel TaskTool call is one user operation; allowing the
@@ -1134,7 +1124,7 @@ class TaskTool(BaseTool):
 
         task = asyncio.create_task(_run_background())
         parent_metadata = metadata_from_context(context)
-        parent_run_id = str(parent_metadata.get("run_id", "")).strip()
+        parent_run_id = coordination_agent_id(parent_metadata)
         canonical_task_name = _normalize_child_task_name(
             (subagent_metadata or {}).get("_task_name")
             if isinstance(subagent_metadata, dict)
@@ -1308,7 +1298,12 @@ class TaskTool(BaseTool):
                     f"Subagent {subagent_id} used worktree isolation, but its worktree is unavailable."
                 )
             candidate = Path(raw_worktree).resolve()
-            allowed_root = (current_root / ".minicode" / "worktrees").resolve()
+            from backend.agent.worktree import find_git_root
+
+            owner_root = find_git_root(current_root)
+            if owner_root is None:
+                raise RuntimeError("Cannot resolve the resumed worktree's repository owner")
+            allowed_root = (owner_root / ".minicode" / "worktrees").resolve()
             try:
                 candidate.relative_to(allowed_root)
             except ValueError as exc:
@@ -1495,6 +1490,7 @@ class TaskTool(BaseTool):
             run_context=run_context,
             agent_type=agent_type,
             model_override=str(requested.get("model") or ""),
+            provider_override=str(requested.get("provider") or ""),
             effort_override=str(requested.get("effort") or ""),
             workspace_root=context.workspace_root if context is not None else None,
             build_adapter=True,
@@ -1738,7 +1734,7 @@ class TaskTool(BaseTool):
         # A child owns its cancellation signal. Reusing the parent's event lets a
         # child deadline cancel the parent and every sibling sharing that context.
         subagent_cancel_event = cancel_event or asyncio.Event()
-        parent_run_id = str(parent_metadata.get("run_id", ""))
+        parent_run_id = coordination_agent_id(parent_metadata)
 
         # TaskCreated is a gate, not an audit-only notification. Run it before
         # allocating the child runtime/worktree so a veto cannot
@@ -1929,6 +1925,7 @@ class TaskTool(BaseTool):
         last_error = ""
         cumulative_iterations = 0
         cumulative_tool_calls = 0
+        cumulative_usage = UsageInfo(cost_usd=0.0)
 
         async def _cleanup_worktree() -> str:
             """Remove the worktree when unchanged; return a keep-note otherwise."""
@@ -1982,8 +1979,8 @@ class TaskTool(BaseTool):
                 "content": content,
                 "error": error,
                 "duration_ms": elapsed_ms,
-                "iterations": sub_state.iterations,
-                "tool_call_count": len(sub_state.tool_calls),
+                "iterations": cumulative_iterations,
+                "tool_call_count": cumulative_tool_calls,
                 "terminal_reason": reason or status,
                 "input_tokens": int(terminal_usage.get("input_tokens") or 0),
                 "output_tokens": int(terminal_usage.get("output_tokens") or 0),
@@ -2089,6 +2086,24 @@ class TaskTool(BaseTool):
                 if context is not None and context.workspace_root
                 else Path.cwd()
             )
+            if resume_workspace_root is not None:
+                from backend.agent.worktree import resume_agent_worktree
+
+                agent_worktree = await asyncio.to_thread(
+                    resume_agent_worktree,
+                    resume_workspace_root,
+                    expected_repo_root=parent_workspace_root,
+                    expected_subagent_id=subagent_id,
+                    expected_head_commit=str(subagent_record.resume_config.get("worktree_head_commit") or ""),
+                )
+                if agent_worktree is None:
+                    raise RuntimeError("The saved worktree could not be adopted by its subagent owner")
+                runtime.register_subagent_cleanup_resource(
+                    subagent_id,
+                    resource_kind="worktree",
+                    resource_id=str(agent_worktree.worktree_path),
+                    metadata={"git_root": str(agent_worktree.git_root), "branch": agent_worktree.branch, "head_commit": agent_worktree.head_commit},
+                )
             explicit_child_workspace = None
             raw_child_cwd = str(subagent_config.get("cwd") or "").strip()
             if raw_child_cwd:
@@ -2135,6 +2150,7 @@ class TaskTool(BaseTool):
                         "cancel_with_parent": bool(subagent_record.cancel_with_parent),
                         "detach_from_parent": bool(subagent_record.detach_from_parent),
                         "plan_slug": str(subagent_config.get("plan_slug") or ""),
+                        "worktree_head_commit": agent_worktree.head_commit if agent_worktree is not None else "",
                         "worktree_path": str(
                             resume_workspace_root
                             or (
@@ -2320,6 +2336,7 @@ class TaskTool(BaseTool):
                 "agent_mode": "subagent",
                 "query_source": "background" if background else "subagent",
                 "run_id": subagent_id,
+                "agent_id": subagent_id,
                 "artifact_owner_workspace_root": artifact_owner_workspace,
                 **subagent_fence,
                 "cancel_event": subagent_cancel_event,
@@ -2332,6 +2349,9 @@ class TaskTool(BaseTool):
                 **_narrowed_subagent_scope_metadata(
                     inherited_subagent_metadata,
                     _nonempty_subagent_metadata(subagent_config),
+                    workspace_root=parent_workspace_root,
+                    child_workspace_root=effective_child_workspace,
+                    isolated=agent_worktree is not None or resume_workspace_root is not None,
                 ),
             }
             child_session_policy = restored_session_policy
@@ -2710,9 +2730,9 @@ class TaskTool(BaseTool):
             async def _run_query_turn(turn_prompt: str, turn_state: AgentState) -> None:
                 nonlocal last_tool_name, terminal_status, terminal_reason
                 nonlocal terminal_usage, terminal_provider_raw, last_error
-                nonlocal current_turn_metadata
+                nonlocal current_turn_metadata, cumulative_iterations, cumulative_tool_calls
 
-                turn_run_id = new_run_id() if team_mode else subagent_id
+                turn_run_id = new_run_id()
                 terminal_status = "completed"
                 terminal_reason = ""
                 terminal_usage = {}
@@ -3157,6 +3177,15 @@ class TaskTool(BaseTool):
                                     await queued_item
                         with suppress(asyncio.CancelledError, Exception):
                             await pump_task
+                    turn_usage = (
+                        child_run_context.llm_turn_context.usage
+                        if child_run_context.llm_turn_context is not None
+                        else UsageInfo(cost_usd=0.0)
+                    )
+                    add_usage(cumulative_usage, turn_usage)
+                    terminal_usage = asdict(cumulative_usage)
+                    cumulative_iterations += turn_state.iterations
+                    cumulative_tool_calls += len(turn_state.tool_calls)
             await _run_query_turn(effective_user_prompt, sub_state)
 
             if not team_mode:
@@ -3198,9 +3227,6 @@ class TaskTool(BaseTool):
                         )
                     if not turn_summary:
                         raise RuntimeError("Teammate turn ended without a final response.")
-
-                    cumulative_iterations += sub_state.iterations
-                    cumulative_tool_calls += len(sub_state.tool_calls)
 
                     exit_decision = await lifecycle_owner.after_subagent_stop(
                         sub_state
@@ -3523,53 +3549,8 @@ class TaskTool(BaseTool):
                 terminal_status = "failed"
                 terminal_reason = terminal_reason or "missing_final_summary"
                 last_error = "Subagent ended without a final response."
-            if terminal_usage:
-                if rollout_budget is not None:
-                    rollout_budget.record_usage_total(subagent_id, terminal_usage)
-                from backend.llm.cost_tracker import CostTracker
-
-                request_summary = terminal_provider_raw.get("request_summary")
-                provider = str(
-                    (request_summary.get("wire_api") if isinstance(request_summary, dict) else "")
-                    or terminal_provider_raw.get("provider")
-                    or type(llm).__name__
-                )
-                CostTracker.get_instance().record_usage(
-                    input_tokens=int(terminal_usage.get("input_tokens") or 0),
-                    output_tokens=int(terminal_usage.get("output_tokens") or 0),
-                    cache_creation_input_tokens=int(terminal_usage.get("cache_creation_input_tokens") or 0),
-                    cache_read_input_tokens=int(terminal_usage.get("cache_read_input_tokens") or 0),
-                    ordinary_input_tokens=(
-                        int(terminal_usage.get("ordinary_input_tokens") or 0)
-                        if "ordinary_input_tokens" in terminal_usage
-                        else None
-                    ),
-                    prompt_cache_total_tokens=(
-                        int(terminal_usage.get("prompt_cache_total_tokens") or 0)
-                        if "prompt_cache_total_tokens" in terminal_usage
-                        else None
-                    ),
-                    reasoning_output_tokens=int(terminal_usage.get("reasoning_output_tokens") or 0),
-                    model_id=getattr(llm, "_model", None),
-                    provider=provider,
-                    session_id=str(
-                        parent_run_context.cost_session_id
-                        or (context.session_id if context else "")
-                    ),
-                    input_includes_cache_read=bool(
-                        terminal_usage.get("input_includes_cache_read", True)
-                    ),
-                    input_includes_cache_write=bool(
-                        terminal_usage.get("input_includes_cache_write", True)
-                    ),
-                    cost_usd=float(terminal_usage.get("cost_usd") or 0.0),
-                )
             display_summary = _subagent_display_summary(summary)
-            tool_call_count = (
-                cumulative_tool_calls + len(sub_state.tool_calls)
-                if team_mode
-                else len(sub_state.tool_calls)
-            )
+            tool_call_count = cumulative_tool_calls
 
             if terminal_status == "cancelled":
                 raise asyncio.CancelledError
@@ -3599,7 +3580,7 @@ class TaskTool(BaseTool):
                     content=full_result_text,
                     artifact_id=result_artifact_id,
                     duration_ms=elapsed_ms,
-                    iterations=sub_state.iterations,
+                    iterations=cumulative_iterations,
                     tool_call_count=tool_call_count,
                     terminal_reason=terminal_reason or result_status,
                     usage=terminal_usage,
@@ -3625,7 +3606,7 @@ class TaskTool(BaseTool):
                     subagent_id=subagent_id,
                     summary=display_summary,
                     duration_ms=elapsed_ms,
-                    iterations=sub_state.iterations,
+                    iterations=cumulative_iterations,
                     tool_call_count=tool_call_count,
                     status=result_status,
                     termination_reason=terminal_reason or (
@@ -3686,8 +3667,8 @@ class TaskTool(BaseTool):
                     content=retained,
                     error="cancelled",
                     duration_ms=elapsed_ms,
-                    iterations=sub_state.iterations,
-                    tool_call_count=len(sub_state.tool_calls),
+                    iterations=cumulative_iterations,
+                    tool_call_count=cumulative_tool_calls,
                     terminal_reason=cancel_reason,
                     usage=terminal_usage,
                     **subagent_fence,
@@ -3700,7 +3681,7 @@ class TaskTool(BaseTool):
                     subagent_id,
                     "cancelled",
                     summary="cancelled",
-                    tool_count=len(sub_state.tool_calls),
+                    tool_count=cumulative_tool_calls,
                     **subagent_fence,
                 )
                 if record is None:
@@ -3712,7 +3693,7 @@ class TaskTool(BaseTool):
                     status="cancelled",
                     termination_reason=cancel_reason,
                     duration_ms=elapsed_ms,
-                    iterations=sub_state.iterations,
+                    iterations=cumulative_iterations,
                     usage=terminal_usage,
                     **subagent_fence,
                 )
@@ -3762,8 +3743,8 @@ class TaskTool(BaseTool):
                     content=partial_text,
                     error=f"{type(exc).__name__}: {exc}",
                     duration_ms=elapsed_ms,
-                    iterations=sub_state.iterations,
-                    tool_call_count=len(sub_state.tool_calls),
+                    iterations=cumulative_iterations,
+                    tool_call_count=cumulative_tool_calls,
                     terminal_reason=terminal_reason or type(exc).__name__,
                     usage=terminal_usage,
                     **subagent_fence,
@@ -3784,7 +3765,7 @@ class TaskTool(BaseTool):
                     subagent_id,
                     failure_status,
                     summary=str(exc),
-                    tool_count=len(sub_state.tool_calls),
+                    tool_count=cumulative_tool_calls,
                     **subagent_fence,
                 )
                 if record is None:
@@ -3801,8 +3782,8 @@ class TaskTool(BaseTool):
                     summary=_subagent_display_summary(partial_text),
                     error=str(exc),
                     duration_ms=elapsed_ms,
-                    iterations=sub_state.iterations,
-                    tool_call_count=len(sub_state.tool_calls),
+                    iterations=cumulative_iterations,
+                    tool_call_count=cumulative_tool_calls,
                     status=failure_status,
                     termination_reason=terminal_reason or type(exc).__name__,
                     usage=terminal_usage,

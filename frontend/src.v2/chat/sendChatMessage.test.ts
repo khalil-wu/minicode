@@ -70,6 +70,29 @@ describe("sendChatMessage attachment feedback", () => {
     vi.useRealTimers();
   });
 
+  it("keeps a live side-chat turn live when another message is rejected", () => {
+    useAppStore.setState({ sideChats: {
+      side: { id: "side", draft: "", isStreaming: true, messages: [{ id: "side-answer", role: "assistant", content: "working", isStreaming: true, artifacts: [], timestamp: 1 }] },
+    } });
+    expect(sendChatMessage({ displayContent: "follow up", conversationId: "side" })).toBe(false);
+    expect(sent).toHaveLength(0);
+    expect(useAppStore.getState().sideChats.side.messages[0].isStreaming).toBe(true);
+  });
+
+  it("keeps the main plan and editor context out of a side-chat submission", () => {
+    const mainPlan = { title: "Main task", steps: [], status: "in_progress" as const };
+    useAppStore.setState({
+      plan: mainPlan, activeTabPath: "main-only.ts",
+      conversations: [{ id: "side", title: "Side", workspaceRoot: "C:/side" }],
+      sideChats: { side: { id: "side", draft: "", isStreaming: false, messages: [] } },
+    });
+    expect(sendChatMessage({ displayContent: "side task", conversationId: "side" })).toBe(true);
+    expect(useAppStore.getState().plan).toEqual(mainPlan);
+    expect(useAppStore.getState().sideChats.side.messages).toHaveLength(2);
+    expect(sent[0]).not.toHaveProperty("primary_file");
+    expect(sent[0]).not.toHaveProperty("active_tab_path");
+  });
+
   it("keeps uploaded file refs on the local user message", () => {
     const ok = sendChatMessage({
       displayContent: "please inspect this",
@@ -1246,6 +1269,19 @@ describe("sendChatMessage attachment feedback", () => {
     expect(ok).toBe(false);
     expect(state.isStreaming).toBe(false);
     expect(state.messages.some((message) => message.role === "system" && /后端连接尚未就绪/.test(message.content))).toBe(true);
+  });
+
+  it("preserves another thread's permission policy and the selected main panel", () => {
+    useAppStore.setState({
+      conversationId: "main-owner", conversations: [], isConnected: true,
+      permissionMode: "bypass", rightStackTabLocked: true, runtimeSession: null,
+      sideChats: { "side-owner": { id: "side-owner", draft: "", messages: [], isStreaming: false } },
+    });
+    const ok = sendChatMessage({ conversationId: "side-owner", backendContent: "side request", skipLocalAppend: true });
+    expect(ok).toBe(true);
+    expect(sent.at(-1)).not.toHaveProperty("permission_mode");
+    expect(sent.at(-1)).not.toHaveProperty("workspace_root");
+    expect(useAppStore.getState().rightStackTabLocked).toBe(true);
   });
 
   it("keeps a side-chat send failure in the side-chat transcript", () => {

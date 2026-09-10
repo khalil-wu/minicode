@@ -156,7 +156,7 @@ describe("AgentEditor MiniCode source contract", () => {
     render(<AgentEditor />);
     await screen.findByText("暂无自定义 Agent");
 
-    fireEvent.change(screen.getByLabelText("位置"), {
+    fireEvent.change(screen.getByLabelText("位置", { selector: "select" }), {
       target: { value: "user" },
     });
     fireEvent.change(screen.getByLabelText("名称"), {
@@ -186,7 +186,7 @@ describe("AgentEditor MiniCode source contract", () => {
     const description = await screen.findByText("managed description");
     fireEvent.click(description.closest("button") as HTMLButtonElement);
 
-    expect((screen.getByLabelText("位置") as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByLabelText("位置", { selector: "select" }) as HTMLSelectElement).disabled).toBe(true);
     expect((screen.getByLabelText("说明") as HTMLInputElement).disabled).toBe(true);
     expect(screen.getByRole("button", { name: "只读来源" })).toBeTruthy();
     expect(screen.queryByText(/创建项目覆盖/)).toBeNull();
@@ -225,7 +225,7 @@ describe("AgentEditor MiniCode source contract", () => {
     render(<AgentEditor />);
     await screen.findByText("暂无自定义 Agent");
 
-    const model = screen.getByLabelText("模型") as HTMLSelectElement;
+    const model = screen.getByLabelText("模型", { selector: "select" }) as HTMLSelectElement;
     expect(Array.from(model.options).map((option) => option.text)).toEqual(expect.arrayContaining([
       "Sonnet（均衡）",
       "Opus（复杂推理）",
@@ -234,7 +234,7 @@ describe("AgentEditor MiniCode source contract", () => {
     ]));
 
     fireEvent.change(model, { target: { value: "zai/glm-5" } });
-    const effort = screen.getByLabelText("推理强度") as HTMLSelectElement;
+    const effort = screen.getByLabelText("推理强度", { selector: "select" }) as HTMLSelectElement;
     expect(Array.from(effort.options).map((option) => option.text)).toEqual(expect.arrayContaining(["off", "low", "high"]));
     expect(Array.from(effort.options).map((option) => option.text)).not.toContain("medium");
     expect(screen.getByText("目标模型默认：high")).toBeTruthy();
@@ -253,8 +253,8 @@ describe("AgentEditor MiniCode source contract", () => {
     const description = await screen.findByText("project description");
     fireEvent.click(description.closest("button") as HTMLButtonElement);
 
-    const model = screen.getByLabelText("模型") as HTMLSelectElement;
-    const effort = screen.getByLabelText("推理强度") as HTMLSelectElement;
+    const model = screen.getByLabelText("模型", { selector: "select" }) as HTMLSelectElement;
+    const effort = screen.getByLabelText("推理强度", { selector: "select" }) as HTMLSelectElement;
     expect(model.value).toBe("legacy-provider/custom-model");
     expect(Array.from(model.options).map((option) => option.text)).toContain("legacy-provider/custom-model（现有定义）");
     expect(effort.value).toBe("legacy-effort");

@@ -103,7 +103,9 @@ def generate_plan_slug(
         slug = "-".join((
             secrets.choice(_ADJECTIVES),
             secrets.choice(_VERBS),
-            secrets.choice(_NOUNS),
+            # A slug is persisted before its file is written. Include enough
+            # entropy to separate those unpublished conversation owners too.
+            f"{secrets.choice(_NOUNS)}{secrets.token_hex(8)}",
         ))
         if not (plans_dir / f"{slug}.md").exists():
             return slug

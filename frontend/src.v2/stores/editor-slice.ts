@@ -2,14 +2,19 @@ import type { StateCreator } from "zustand";
 import type { AppStore, EditorSlice, EditorTab } from "./types";
 import {
   editorPathsEqual,
+  editorPathComparisonKey,
+  cacheEditorStateForWorkspace,
+  editorStateForWorkspace,
   ensureCodePanelSlots,
   loadPersistedEditorTabs,
   normalizeEditorPath,
   normalizePanelSlots,
   persistPanelSlots,
   persistEditorTabs,
+  uniqueMessageId,
 } from "./shared-helpers";
 import { isPreviewableMediaPath } from "../lib/media-types";
+import { workspaceRootsEqual } from "../lib/workspace-path";
 
 const panelSlotsAfterClosingLastEditor = (state: AppStore) => {
   if (state.appMode !== "code") {
@@ -27,19 +32,34 @@ const panelSlotsAfterClosingLastEditor = (state: AppStore) => {
 
 export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (set, get) => {
   const initialEditorTabs = loadPersistedEditorTabs("");
+  type WorkspaceEditorState = Pick<AppStore, "editorTabs" | "activeTabPath" | "activeEditorPath" | "editorOpenRequests">;
+  const updateWorkspace = (workspaceRoot: string, update: (state: WorkspaceEditorState) => Partial<WorkspaceEditorState>) => {
+    set((state) => {
+      if (workspaceRootsEqual(workspaceRoot, state.workingDirectory)) return update(state);
+      const cached = editorStateForWorkspace(workspaceRoot);
+      const next = { ...cached, ...update(cached) };
+      cacheEditorStateForWorkspace(workspaceRoot, next.editorTabs, next.activeTabPath, next.activeEditorPath);
+      return {};
+    });
+  };
   return {
     editorTabs: initialEditorTabs,
     activeTabPath: initialEditorTabs[0]?.path ?? null,
-    openEditorTab: (path) =>
+    openEditorTab: (path, { activate = true } = {}) =>
       set((s) => {
         const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
         const existing = s.editorTabs.find((t) => editorPathsEqual(t.path, normalizedPath, s.workingDirectory));
+        const selection = activate ? {
+          activeTabPath: existing?.path ?? normalizedPath,
+          activeEditorPath: existing?.path ?? normalizedPath,
+          activeEditorOpenRequestId: null,
+        } : {};
         if (existing) {
           if (!existing.externalChanged || !isPreviewableMediaPath(normalizedPath)) {
-            return { activeTabPath: existing.path };
+            return selection;
           }
           return {
-            activeTabPath: existing.path,
+            ...selection,
             editorTabs: s.editorTabs.map((tab) => (
               editorPathsEqual(tab.path, existing.path, s.workingDirectory)
                 ? { ...tab, externalChanged: false }
@@ -48,6 +68,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
           };
         }
         const tab: EditorTab = {
+          id: uniqueMessageId("editor"),
           path: normalizedPath,
           content: "",
           original: "",
@@ -60,7 +81,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
         };
         const next = [...s.editorTabs, tab];
         persistEditorTabs(next, s.workingDirectory);
-        return { editorTabs: next, activeTabPath: normalizedPath };
+        return { editorTabs: next, ...selection };
       }),
     closeEditorTab: (path) =>
       set((s) => {
@@ -68,6 +89,9 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
         const idx = s.editorTabs.findIndex((t) => editorPathsEqual(t.path, normalizedPath, s.workingDirectory));
         if (idx === -1) return {};
         const targetPath = s.editorTabs[idx].path;
+        const editorOpenRequests = s.editorOpenRequests.filter((request) => !editorPathsEqual(request.path, targetPath, s.workingDirectory));
+        const activeEditorOpenRequestId = editorOpenRequests.some((request) => request.id === s.activeEditorOpenRequestId)
+          ? s.activeEditorOpenRequestId : null;
         const next = s.editorTabs.filter((t) => !editorPathsEqual(t.path, targetPath, s.workingDirectory));
         persistEditorTabs(next, s.workingDirectory);
         let activeTabPath = s.activeTabPath;
@@ -75,13 +99,15 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
           activeTabPath = next[Math.max(0, idx - 1)]?.path ?? null;
         }
         const activeEditorPath = editorPathsEqual(s.activeEditorPath, targetPath, s.workingDirectory) ? activeTabPath : s.activeEditorPath;
-        if (next.length > 0) return { editorTabs: next, activeTabPath, activeEditorPath };
+        if (next.length > 0) return { editorTabs: next, activeTabPath, activeEditorPath, editorOpenRequests, activeEditorOpenRequestId };
         const panelSlots = panelSlotsAfterClosingLastEditor(s);
         persistPanelSlots(panelSlots);
         return {
           editorTabs: next,
           activeTabPath,
           activeEditorPath,
+          editorOpenRequests,
+          activeEditorOpenRequestId,
           panelSlots,
         };
       }),
@@ -95,7 +121,9 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
         return {
           editorTabs: next,
           activeTabPath: selected.path,
-          activeEditorPath: s.activeEditorPath && !editorPathsEqual(s.activeEditorPath, selected.path, s.workingDirectory) ? selected.path : s.activeEditorPath,
+          editorOpenRequests: [],
+          activeEditorOpenRequestId: null,
+          activeEditorPath: selected.path,
         };
       }),
     closeAllEditorTabs: () =>
@@ -107,13 +135,51 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
           editorTabs: [],
           activeTabPath: null,
           activeEditorPath: null,
+          editorOpenRequests: [],
+          activeEditorOpenRequestId: null,
           panelSlots,
         };
       }),
+    renameEditorPath: (path, newPath, workspaceRoot) => {
+      const source = normalizeEditorPath(path, workspaceRoot);
+      const destination = normalizeEditorPath(newPath, workspaceRoot);
+      const sourceKey = editorPathComparisonKey(source, workspaceRoot);
+      const renamedPath = (value: string): string => {
+        const normalized = normalizeEditorPath(value, workspaceRoot);
+        const key = editorPathComparisonKey(normalized, workspaceRoot);
+        return key === sourceKey || key.startsWith(`${sourceKey}/`)
+          ? `${destination}${normalized.slice(source.length)}`
+          : value;
+      };
+      updateWorkspace(workspaceRoot, (state) => {
+        const editorTabs = state.editorTabs.map((tab) => {
+          const path = renamedPath(tab.path);
+          return path === tab.path ? tab : { ...tab, path };
+        });
+        persistEditorTabs(editorTabs, workspaceRoot);
+        return {
+          editorTabs,
+          activeTabPath: state.activeTabPath && renamedPath(state.activeTabPath),
+          activeEditorPath: state.activeEditorPath && renamedPath(state.activeEditorPath),
+          editorOpenRequests: state.editorOpenRequests.map((request) => {
+            const path = renamedPath(request.path);
+            return path === request.path ? request : { ...request, path };
+          }),
+        };
+      });
+      set((state) => {
+        if (!workspaceRootsEqual(workspaceRoot, state.workingDirectory) || !state.activeTabPath) return {};
+        const label = state.activeTabPath.split("/").at(-1)!;
+        const panelSlots = state.panelSlots.map((slot) => slot.kind === "editor" ? { ...slot, label } : slot);
+        persistPanelSlots(panelSlots);
+        return { panelSlots };
+      });
+    },
     setActiveTab: (path) => set((s) => {
       const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
       const existing = s.editorTabs.find((tab) => editorPathsEqual(tab.path, normalizedPath, s.workingDirectory));
-      return { activeTabPath: existing?.path ?? normalizedPath };
+      const activePath = existing?.path ?? normalizedPath;
+      return { activeTabPath: activePath, activeEditorPath: activePath, activeEditorOpenRequestId: null };
     }),
     updateTabContent: (path, content) =>
       set((s) => {
@@ -147,24 +213,24 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
         persistEditorTabs(loadedTabs, s.workingDirectory);
         return { editorTabs: loadedTabs };
       }),
-    markTabSaved: (path, savedContent, contentHash, sizeBytes) =>
-      set((s) => {
-        const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
+    markTabSaved: (path, savedContent, contentHash, sizeBytes, workspaceRoot = get().workingDirectory) =>
+      updateWorkspace(workspaceRoot, (s) => {
+        const normalizedPath = normalizeEditorPath(path, workspaceRoot);
         return {
           editorTabs: s.editorTabs.map((tab) =>
-            editorPathsEqual(tab.path, normalizedPath, s.workingDirectory)
+            editorPathsEqual(tab.path, normalizedPath, workspaceRoot)
               ? { ...tab, original: savedContent, contentHash, sizeBytes, externalChanged: false, error: null }
               : tab,
           ),
         };
       }),
-    markTabExternalChanged: (path) =>
-      set((s) => {
+    markTabExternalChanged: (path, { workspaceRoot = get().workingDirectory, changed = true } = {}) =>
+      updateWorkspace(workspaceRoot, (s) => {
         const normalized = path.replace(/\\/g, "/");
         return {
           editorTabs: s.editorTabs.map((t) => {
-            return editorPathsEqual(t.path, normalized, s.workingDirectory)
-              ? { ...t, externalChanged: true }
+            return editorPathsEqual(t.path, normalized, workspaceRoot)
+              ? { ...t, externalChanged: changed }
               : t;
           }),
         };

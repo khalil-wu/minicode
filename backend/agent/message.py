@@ -136,7 +136,7 @@ def _event_string(
         raise ValueError(f"{field_name} must be a string")
     if len(value) > maximum:
         raise ValueError(f"{field_name} exceeds {maximum} characters")
-    if not allow_empty and not value.strip():
+    if not allow_empty and not value:
         raise ValueError(f"{field_name} is required")
     return value
 
@@ -1312,7 +1312,7 @@ class AgentEvent:
         cache_read_input_tokens: int = 0,
         cache_deleted_input_tokens: int = 0,
         reasoning_output_tokens: int = 0,
-        cost_usd: float = 0.0,
+        cost_usd: float | None = None,
         input_includes_cache_read: bool = True,
         input_includes_cache_write: bool = True,
         ordinary_input_tokens: int = 0,
@@ -1374,12 +1374,16 @@ class AgentEvent:
             reasoning_output_tokens,
             field_name="reasoning_output_tokens",
         )
-        clean_cost = _non_negative_event_number(cost_usd, field_name="cost_usd")
+        clean_cost = (
+            _non_negative_event_number(cost_usd, field_name="cost_usd")
+            if cost_usd is not None
+            else None
+        )
         if clean_cache_deleted:
             usage["cache_deleted_input_tokens"] = clean_cache_deleted
         if clean_reasoning_output:
             usage["reasoning_output_tokens"] = clean_reasoning_output
-        if clean_cost:
+        if clean_cost is not None:
             usage["cost_usd"] = clean_cost
         if cache_read_input_tokens or cache_creation_input_tokens:
             usage.update(prompt_cache_usage_stats(usage, provider_raw))

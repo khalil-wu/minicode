@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import inspect
 import asyncio
-from contextlib import suppress
+from contextlib import aclosing, suppress
 import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable, Iterable, get_args, get_origin
+from typing import Any, Callable, Iterable, get_args, get_origin, get_type_hints
 from uuid import uuid4
 
 from backend.agent.context import ContextBuilder, clone_context_builder
@@ -159,16 +159,16 @@ class SDKSession:
             **run_kwargs,
         )
         try:
-            async for event in stream:
-                yield event
+            async with aclosing(stream):
+                async for event in stream:
+                    yield event
         finally:
-            with suppress(Exception):
-                await stream.aclose()
             self._active_query = False
 
     async def resume_with_context(self, message: str = "继续", **overrides: Any) -> AsyncIterator[AgentEvent]:
-        async for event in self.query(message, **overrides):
-            yield event
+        async with aclosing(self.query(message, **overrides)) as stream:
+            async for event in stream:
+                yield event
 
     def fork(
         self,
@@ -290,7 +290,7 @@ async def query(
         yield done
         return
     try:
-        async for event in _query_unclaimed(
+        async with aclosing(_query_unclaimed(
             message,
             llm=llm,
             tool_registry=tool_registry,
@@ -307,13 +307,14 @@ async def query(
             workspace_root=workspace_root,
             max_iterations=max_iterations,
             metadata=effective_metadata,
-        ):
-            if not conversation_query_guards().owns(claim):
-                done = AgentEvent.done(status="cancelled", reason="conversation_ownership_lost")
-                done.data["conversation_id"] = conversation_id
-                yield done
-                return
-            yield event
+        )) as stream:
+            async for event in stream:
+                if not conversation_query_guards().owns(claim):
+                    done = AgentEvent.done(status="cancelled", reason="conversation_ownership_lost")
+                    done.data["conversation_id"] = conversation_id
+                    yield done
+                    return
+                yield event
     finally:
         conversation_query_guards().end(claim)
 
@@ -439,18 +440,20 @@ async def _query_unclaimed(
             metadata=effective_metadata,
         ),
     )
-    async for event in QueryEngine().submit(submission):
-        yield event
+    async with aclosing(QueryEngine().submit(submission)) as stream:
+        async for event in stream:
+            yield event
 
 
 def _schema_from_callable(func: ToolCallable) -> JsonSchema:
     signature = inspect.signature(func)
+    annotations = get_type_hints(func)
     properties: dict[str, Any] = {}
     required: list[str] = []
     for name, parameter in signature.parameters.items():
         if name == "context":
             continue
-        properties[name] = _json_schema_for_annotation(parameter.annotation)
+        properties[name] = _json_schema_for_annotation(annotations.get(name, parameter.annotation))
         if parameter.default is inspect.Parameter.empty:
             required.append(name)
     return {
@@ -683,7 +686,7 @@ def _coerce_permission(permission: PermissionLevel | str) -> PermissionLevel:
     for level in PermissionLevel:
         if normalized in {level.value, level.name.lower()}:
             return level
-    return PermissionLevel.AUTO
+    raise ValueError(f"Unsupported tool permission: {permission!r}")
 
 
 def _coerce_tool_result(value: Any) -> ToolResult:

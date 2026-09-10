@@ -150,6 +150,34 @@ def test_workspace_diff_includes_untracked_files(audit_repo: Path) -> None:
     assert asyncio.run(get_untracked_files(str(audit_repo))) == ["未跟踪.txt"]
 
 
+def test_git_panels_keep_subdirectory_paths_scoped_and_actionable(audit_repo: Path) -> None:
+    nested = audit_repo / "package"
+    nested.mkdir()
+    name = "工作 文件.txt"
+    (nested / name).write_text("before\n", encoding="utf-8")
+    _git(audit_repo, "add", "--all")
+    _git(audit_repo, "commit", "-qm", "nested fixture")
+    (nested / name).write_text("inside change\n", encoding="utf-8")
+    (audit_repo / "plain.txt").write_text("outside change\n", encoding="utf-8")
+    (nested / "new.txt").write_text("inside untracked\n", encoding="utf-8")
+    (audit_repo / "outside-new.txt").write_text("outside untracked\n", encoding="utf-8")
+
+    status = workspace_git_status_payload(nested)
+    assert status["modified"] == [name]
+    assert status["untracked"] == ["new.txt"]
+    diff = asyncio.run(get_working_tree_diff(str(nested)))
+    assert [file.path for file in diff.files] == [name]
+    combined = workspace_git_diff_payload(nested, "")["diff"]
+    assert "+inside change" in combined and "+inside untracked" in combined
+    assert "outside" not in combined
+
+    assert asyncio.run(stage_file(str(nested), diff.files[0].path)) is True
+    assert [file.path for file in asyncio.run(get_staged_diff(str(nested))).files] == [name]
+    assert workspace_git_status_payload(nested)["staged"] == [name]
+    assert asyncio.run(unstage_file(str(nested), name)) is True
+    assert workspace_git_status_payload(nested)["modified"] == [name]
+
+
 def test_workspace_diff_and_unstage_work_before_the_first_commit(tmp_path: Path) -> None:
     root = tmp_path / "unborn"
     root.mkdir()

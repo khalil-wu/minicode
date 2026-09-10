@@ -62,7 +62,7 @@ export const LEFT_SIDEBAR_MIN_WIDTH = 272;
 export const LEFT_SIDEBAR_MAX_WIDTH = 400;
 export const RIGHT_SIDEBAR_DEFAULT_WIDTH = 380;
 export const RIGHT_SIDEBAR_MAX = 1040;
-export const COMPACT_WORKBENCH_MAX_WIDTH = 1599;
+export const COMPACT_WORKBENCH_MAX_WIDTH = 1199;
 
 export const isCompactWorkbenchViewport = () => (
   typeof window !== "undefined" && window.innerWidth <= COMPACT_WORKBENCH_MAX_WIDTH
@@ -318,6 +318,7 @@ export const editorPathsEqual = (
 };
 
 const blankEditorTab = (path: string): EditorTab => ({
+  id: uniqueMessageId("editor"),
   path,
   content: "",
   original: "",
@@ -340,6 +341,27 @@ type CachedEditorWorkspace = {
 // index is intentionally small and durable; this cache preserves unsaved work
 // while the user moves between workspaces during one renderer session.
 const editorWorkspaceBuffers = new Map<string, CachedEditorWorkspace>();
+
+/** Dirty buffers include workspaces that are currently hidden from the editor. */
+export const dirtyEditorFiles = (
+  state: Pick<AppStore, "workingDirectory" | "editorTabs">,
+  workspaceRoot?: string,
+): string[] => {
+  const activeKey = editorWorkspaceKey(state.workingDirectory);
+  const selectedKey = workspaceRoot === undefined ? undefined : editorWorkspaceKey(workspaceRoot);
+  const workspaces = new Map(editorWorkspaceBuffers);
+  workspaces.set(activeKey, { tabs: state.editorTabs, activeTabPath: null, activeEditorPath: null });
+  return [...workspaces].flatMap(([root, workspace]) => {
+    if (selectedKey !== undefined && root !== selectedKey) return [];
+    return workspace.tabs.filter((tab) => !tab.readOnly && tab.content !== tab.original).map((tab) => {
+      const path = normalizeWorkspacePath(tab.path);
+      return root === DEFAULT_WORKSPACE_KEY || path.startsWith("/") || /^[A-Za-z]:\//.test(path)
+        ? path
+        : `${root}${root.endsWith("/") ? "" : "/"}${path}`;
+    });
+  });
+
+};
 
 export const cacheEditorStateForWorkspace = (
   workspace: string | null | undefined,
@@ -414,6 +436,7 @@ export const editorStateForWorkspace = (workspace: string | null | undefined) =>
         : editorTabs[0]?.path ?? null,
       activeEditorPath: cached.activeEditorPath,
       editorOpenRequests: [],
+      activeEditorOpenRequestId: null,
     };
   }
   const editorTabs = loadPersistedEditorTabs(workspace);
@@ -422,6 +445,7 @@ export const editorStateForWorkspace = (workspace: string | null | undefined) =>
     activeTabPath: editorTabs[0]?.path ?? null,
     activeEditorPath: null as string | null,
     editorOpenRequests: [],
+    activeEditorOpenRequestId: null,
   };
 };
 

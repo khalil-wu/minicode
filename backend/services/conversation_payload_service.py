@@ -50,6 +50,7 @@ class ConversationDeleteRequest:
     conversation_id: str
     cleanup_worktree: bool
     force_cleanup: bool
+    client_resource_cleanup: bool = False
 
 
 @dataclass(frozen=True)
@@ -146,6 +147,7 @@ def parse_conversation_delete_request(data: dict[str, Any]) -> ConversationDelet
         conversation_id=str(data.get("conversation_id", "")),
         cleanup_worktree=bool(data.get("cleanup_worktree")),
         force_cleanup=bool(data.get("force")),
+        client_resource_cleanup=data.get("client_resource_cleanup") is True,
     )
 
 
@@ -422,6 +424,7 @@ def cleanup_isolated_worktree(
     conversation: Any,
     *,
     force: bool = False,
+    check_only: bool = False,
     current_workspace_root: Path | None,
     main_worktree_root: Any,
     is_path_within: Any,
@@ -492,6 +495,8 @@ def cleanup_isolated_worktree(
             "error": "Worktree has local changes; confirm force cleanup to remove it",
         }
 
+    if check_only:
+        return {"ready": True, "conversation_id": conversation_id, "path": str(worktree_path)}
     try:
         manager_factory = worktree_manager_factory or WorktreeManager
         manager = manager_factory(base_root)

@@ -181,6 +181,8 @@ class MCPPromptDef:
 class MCPCallResult:
     content: list[dict[str, Any]] = field(default_factory=list)
     is_error: bool = False
+    structured_content: dict[str, Any] | None = None
+    meta: dict[str, Any] = field(default_factory=dict)
 
     @property
     def text(self) -> str:
@@ -195,6 +197,8 @@ class MCPCallResult:
         text = self.text.strip()
         if text:
             return text
+        if self.structured_content is not None:
+            return json.dumps(self.structured_content, ensure_ascii=False)
         parts: list[str] = []
         for item in self.content:
             if not isinstance(item, dict):
@@ -921,6 +925,8 @@ class MCPClient:
         return MCPCallResult(
             content=list(result.get("content") or []),
             is_error=bool(result.get("isError", False)),
+            structured_content=result.get("structuredContent"),
+            meta=dict(result.get("_meta") or {}),
         )
 
     def _tool_exception(self, exc: BaseException) -> MCPCallResult:

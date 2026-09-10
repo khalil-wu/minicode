@@ -155,7 +155,7 @@ class _SSRFGuardedNetworkBackend(httpcore.AsyncNetworkBackend):
         socket_options=None,
     ):
         addresses = await _resolve_safe_addresses(host, port)
-        last_error: BaseException | None = None
+        last_error: Exception | None = None
         for address in addresses:
             try:
                 return await self._backend.connect_tcp(
@@ -165,7 +165,7 @@ class _SSRFGuardedNetworkBackend(httpcore.AsyncNetworkBackend):
                     local_address=local_address,
                     socket_options=socket_options,
                 )
-            except BaseException as exc:
+            except (httpcore.ConnectError, httpcore.ConnectTimeout, OSError) as exc:
                 last_error = exc
         if last_error is not None:
             raise last_error

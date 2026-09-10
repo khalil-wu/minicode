@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import subprocess
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,7 +31,6 @@ _GIT_TIMEOUT_S = 60
 _ACTIVE_WORKTREE_PATHS: set[str] = set()
 # Git roots already swept this process; stale cleanup runs once per root.
 _STALE_SWEEP_DONE: set[str] = set()
-_STALE_SWEEP_COOLDOWN_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -98,7 +96,7 @@ def create_agent_worktree(slug: str, base: Path) -> tuple[AgentWorktree | None, 
     if git_root is None:
         return None, f"{base} is not inside a git repository (or git is unavailable)"
 
-    head = _git_output(git_root, "rev-parse", "HEAD")
+    head = _git_output(base, "rev-parse", "HEAD")
     if not head:
         return None, f"could not resolve HEAD in {git_root} (empty repository?)"
 
@@ -211,11 +209,12 @@ def resume_agent_worktree(
     *,
     expected_repo_root: str | Path,
     expected_subagent_id: str,
+    expected_head_commit: str = "",
 ) -> AgentWorktree | None:
     """Re-adopt a worktree recorded in a checkpoint for a resumed subagent.
 
-    Returns ``None`` when the directory is gone or no longer a valid worktree,
-    letting the caller degrade to non-isolated execution.
+    Returns ``None`` when the directory is gone or no longer a valid worktree;
+    the caller must then refuse the isolated resume.
     """
     try:
         from backend.agent.checkpoint import validate_storage_id
@@ -245,7 +244,7 @@ def resume_agent_worktree(
         # commits made before the process died then look "ahead" to
         # has_worktree_changes, so cleanup keeps the worktree instead of
         # deleting a branch that holds real work.
-        head = _git_output(git_root, "rev-parse", "HEAD") or _git_output(path, "rev-parse", "HEAD")
+        head = expected_head_commit or _git_output(git_root, "rev-parse", "HEAD") or _git_output(path, "rev-parse", "HEAD")
         if not branch or not head:
             return None
         resolved = path.resolve()
@@ -262,78 +261,16 @@ def resume_agent_worktree(
 
 
 def cleanup_stale_worktrees(base: Path) -> None:
-    """Best-effort janitor for orphaned ``.minicode/worktrees/`` entries.
+    """Prune missing registrations without guessing another process is dead.
 
-    A killed process leaves worktrees behind. On the first delegation per git
-    root we prune deleted-directory registrations and remove any leftover
-    worktree that is not active in this process and has no changes. Worktrees
-    with uncommitted files or new commits are always kept. Idempotent; never
-    raises.
+    Live directory cleanup belongs to its durable subagent resource owner or
+    an explicit user operation. A process-local active set cannot prove that
+    another process abandoned a clean worktree.
     """
-    try:
-        git_root = find_git_root(base)
-        if git_root is None:
-            return
-        root_key = canonical_file_path_key(git_root)
-        if root_key in _STALE_SWEEP_DONE:
-            return
-        # Drop registrations whose directories were deleted out-of-band.
+    git_root = find_git_root(base)
+    if git_root is None:
+        return
+    root_key = canonical_file_path_key(git_root)
+    if root_key not in _STALE_SWEEP_DONE:
         _git(git_root, "worktree", "prune")
-
-        worktrees_dir = git_root / ".minicode" / "worktrees"
-        if not worktrees_dir.is_dir():
-            return
-        lease_path = worktrees_dir / ".janitor.lease"
-        now = time.time()
-        with file_mutation_locks([lease_path]):
-            try:
-                previous = float(lease_path.read_text(encoding="ascii").strip())
-            except (FileNotFoundError, ValueError, OSError):
-                previous = 0.0
-            if now - previous < _STALE_SWEEP_COOLDOWN_SECONDS:
-                _STALE_SWEEP_DONE.add(root_key)
-                return
-            atomic_write_text(lease_path, f"{now:.6f}")
         _STALE_SWEEP_DONE.add(root_key)
-        for entry in worktrees_dir.iterdir():
-            try:
-                if not entry.is_dir():
-                    continue
-                resolved = entry.resolve()
-                if canonical_file_path_key(resolved) in _ACTIVE_WORKTREE_PATHS:
-                    continue
-                branch = _git_output(resolved, "rev-parse", "--abbrev-ref", "HEAD")
-                if not branch:
-                    # Not a functioning worktree (e.g. registration pruned but
-                    # directory remains). Leave it alone — deleting unknown
-                    # directories is riskier than a little disk residue.
-                    continue
-                candidate = AgentWorktree(
-                    worktree_path=resolved,
-                    branch=branch,
-                    head_commit=_git_output(resolved, "rev-parse", "HEAD"),
-                    git_root=git_root.resolve(),
-                )
-                # head_commit == current HEAD, so "new commits" cannot be seen
-                # here; uncommitted changes (porcelain status) still keep it.
-                # Committed-only orphans keep their branch: the branch ref keeps
-                # the commits reachable even after worktree removal, but to stay
-                # conservative we keep the whole worktree unless status is clean
-                # AND the branch is not ahead of any other ref — simplified to:
-                # clean status keeps nothing uncommitted, and we skip branch
-                # deletion when the branch has commits beyond the repo HEAD.
-                status = _git(resolved, "status", "--porcelain")
-                if status is None or status.returncode != 0 or (status.stdout or "").strip():
-                    logger.info("Keeping stale worktree with changes: %s", resolved)
-                    continue
-                repo_head = _git_output(git_root, "rev-parse", "HEAD")
-                ahead = _git_output(resolved, "rev-list", "--count", f"{repo_head}..HEAD") if repo_head else ""
-                if ahead and ahead != "0":
-                    logger.info("Keeping stale worktree with commits: %s", resolved)
-                    continue
-                logger.info("Removing stale agent worktree: %s", resolved)
-                remove_agent_worktree(candidate)
-            except Exception as exc:  # noqa: BLE001 — janitor must never break delegation
-                logger.warning("Stale worktree sweep skipped %s: %s", entry, exc)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Stale worktree sweep failed for %s: %s", base, exc)

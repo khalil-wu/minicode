@@ -51,7 +51,7 @@ def compact_diagnostic_payload(
         for key, value in payload.items()
         if key in {
             "kind", "provider", "model", "finish_reason", "event_type", "usage",
-            "raw_usage", "loop_metrics", "safety",
+            "raw_usage", "loop_metrics", "safety", "price_source",
             "prompt_cache_diagnostic", "iteration_id", "call_index", "trace_id",
             "citations", "search_sources", "container", "refusal",
         }

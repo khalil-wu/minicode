@@ -1,4 +1,5 @@
 import http.client
+import mimetypes
 import os
 import threading
 from functools import partial
@@ -51,6 +52,22 @@ def _request(server: ThreadingHTTPServer, path: str, method: str = "GET"):
         client.request(method, path)
         response = client.getresponse()
         return response.status, int(response.getheader("Content-Length")), response.read()
+    finally:
+        client.close()
+
+
+def test_svg_preview_uses_the_standard_type_when_a_host_application_registered_image_svg(tmp_path, static_http_server, monkeypatch):
+    mimetypes.init()
+    monkeypatch.setitem(mimetypes.types_map, ".svg", "image/svg")
+    content = b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>'
+    (tmp_path / "logo.svg").write_bytes(content)
+    client = http.client.HTTPConnection("127.0.0.1", static_http_server.server_port, timeout=3)
+    try:
+        client.request("GET", "/preview-token/logo.svg")
+        response = client.getresponse()
+        assert response.status == 200
+        assert response.getheader("Content-Type") == "image/svg+xml"
+        assert response.read() == content
     finally:
         client.close()
 

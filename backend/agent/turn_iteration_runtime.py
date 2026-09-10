@@ -49,8 +49,7 @@ class TurnIterationRuntime:
         turn_kernel: Any,
         metadata: dict[str, Any],
         workspace_root: Any,
-        mcp_instructions: str,
-        mcp_registry_version: Any,
+        mcp_catalog: Any,
         active_toolset_policy_factory: Any,
         populate_prompt_context: Any,
         run_record: Any,
@@ -66,8 +65,7 @@ class TurnIterationRuntime:
         self.turn_kernel = turn_kernel
         self.metadata = metadata
         self.workspace_root = workspace_root
-        self.mcp_instructions = mcp_instructions
-        self.mcp_registry_version = mcp_registry_version
+        self.mcp_catalog = mcp_catalog
         self.active_toolset_policy_factory = active_toolset_policy_factory
         self.populate_prompt_context = populate_prompt_context
         self.run_record = run_record
@@ -102,6 +100,8 @@ class TurnIterationRuntime:
         pending_turn_context: list[str],
     ) -> TurnIterationPreparation:
         self.sync_active_session_model()
+        mcp_version, mcp_instructions = self.mcp_catalog(self.tool_registry)
+        self.state.loaded_deferred_tools.intersection_update(self.tool_registry.list_tools())
         self.turn_kernel.refresh_live_permission_context()
         base_policy = self.active_toolset_policy_factory(
             permission_context=self.tool_context.permission,
@@ -146,11 +146,11 @@ class TurnIterationRuntime:
             permission_checker=self.permission_checker,
             permission_context=self.tool_context.permission,
             toolset_policy=active_policy,
-            mcp_registry_version=self.mcp_registry_version(),
+            mcp_registry_version=mcp_version,
         )
         schema_state = derive_turn_tool_schema_state(
             base_tool_schemas=base_schemas,
-            mcp_instructions=self.mcp_instructions,
+            mcp_instructions=mcp_instructions,
             tool_registry=self.tool_registry,
             permission_checker=self.permission_checker,
             permission_context=self.tool_context.permission,

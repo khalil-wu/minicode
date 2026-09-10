@@ -683,13 +683,16 @@ class MemoryJobStore:
             connection.execute(
                 """
                 UPDATE jobs SET
-                    status = 'succeeded', worker_id = NULL, ownership_token = NULL,
+                    status = CASE WHEN input_revision > ? THEN 'pending' ELSE 'succeeded' END,
+                    worker_id = NULL, ownership_token = NULL,
                     finished_at = ?, lease_until = NULL, retry_at = NULL,
-                    last_error = NULL, last_success_revision = input_revision
+                    last_error = NULL, last_success_revision = ?
                 WHERE kind = ? AND job_key = ? AND ownership_token = ?
                 """,
                 (
+                    claim.input_revision,
                     timestamp,
+                    claim.input_revision,
                     claim.kind,
                     claim.job_key,
                     claim.ownership_token,
@@ -709,10 +712,8 @@ class MemoryJobStore:
         timestamp = self._now(now)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            # Phase-2 failure is a state transition just like completion.  A
-            # stale worker must match the claimed input revision as well as
-            # its token; otherwise it can consume the retry budget for a
-            # newer phase-2 generation after the row was advanced in place.
+            # Ownership is the worker token. Pending inputs can advance while
+            # this worker still owns its selected consolidation revision.
             if not self._owns(connection, claim):
                 connection.commit()
                 return False
@@ -772,12 +773,14 @@ class MemoryJobStore:
             """
             SELECT 1 FROM jobs
             WHERE kind = ? AND job_key = ? AND status = 'running'
-              AND ownership_token = ? AND input_revision = ?
+              AND ownership_token = ? AND (? = ? OR input_revision = ?)
             """,
             (
                 claim.kind,
                 claim.job_key,
                 claim.ownership_token,
+                claim.kind,
+                PHASE2_JOB_KIND,
                 claim.input_revision,
             ),
         ).fetchone()
@@ -809,10 +812,7 @@ class MemoryJobStore:
             connection.execute(
                 """
                 UPDATE jobs SET
-                    status = 'pending', worker_id = NULL, ownership_token = NULL,
-                    started_at = NULL, finished_at = NULL, lease_until = NULL,
-                    retry_at = NULL, retry_remaining = MAX(retry_remaining, 3),
-                    last_error = NULL, input_revision = ?
+                    input_revision = ?, retry_remaining = MAX(retry_remaining, 3)
                 WHERE kind = ? AND job_key = ?
                 """,
                 (next_revision, PHASE2_JOB_KIND, PHASE2_JOB_KEY),

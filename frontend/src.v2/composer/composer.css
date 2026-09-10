@@ -33,7 +33,6 @@
  * are owned by ui-polish; this keeps box behavior and growth limits. */
 .composer-textarea {
   width: 100%;
-  max-height: 300px;
   overflow-y: auto;
   overscroll-behavior: contain;
   resize: none;
@@ -42,7 +41,16 @@
 }
 
 .composer-textarea-frame {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 4px 8px;
   min-width: 0;
+  padding: 8px 12px 6px;
+}
+
+.composer-textarea-frame[data-minimal="true"] {
+  padding: 9px 16px;
 }
 
 .composer-attachment-strip {
@@ -60,9 +68,59 @@
   flex-shrink: 0;
 }
 
-/* Inline prefix token row (e.g. command/file chip above the input). */
+/* Tokens participate in the same flow as the editable text. */
 .composer-context-prefix-row {
-  padding: 7px 9px 1px;
+  display: contents;
+}
+
+.composer-skill-token {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  max-width: 100%;
+  color: var(--accent-primary);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-semibold);
+  line-height: var(--leading-normal);
+}
+
+.composer-skill-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-skill-remove {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast), background-color var(--transition-fast);
+}
+
+.composer-skill-token:hover .composer-skill-remove,
+.composer-skill-token:focus-within .composer-skill-remove {
+  opacity: 1;
+}
+
+.composer-skill-remove:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+@media (hover: none) {
+  .composer-skill-remove { opacity: 1; }
 }
 
 .composer-prefix-token {

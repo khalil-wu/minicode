@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from filelock import FileLock, Timeout
 
 from backend.memory import file_memory
 from backend.workspace import recent_projects
@@ -18,7 +19,10 @@ def test_default_memory_and_reset_lock_stay_inside_test_storage(tmp_path, scoped
     memory = file_memory.FileMemory.for_workspace(workspace)
     assert memory.memory_dir.is_relative_to(data_root / "memory")
     assert memory.reset_lock_path == data_root / ".memory.reset.lock"
-    assert memory.reset_lock_path.exists()
+    with memory.reset_lock.acquire(timeout=0):
+        assert memory.reset_lock_path.exists()
+        with pytest.raises(Timeout):
+            FileLock(memory.reset_lock_path).acquire(timeout=0)
     assert (memory.memory_dir / "MEMORY.md").exists()
 
 

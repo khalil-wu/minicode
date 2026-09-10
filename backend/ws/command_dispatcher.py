@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -372,7 +373,7 @@ class SessionCommandDispatcher:
         connection_generation: int,
     ) -> None:
         async def _guarded_handle() -> None:
-            async with self._command_semaphore:
+            async with (nullcontext() if command.type in COMMAND_BACKLOG_BYPASS_TYPES else self._command_semaphore):
                 with self._session.event_outbox.bind_client_command(
                     self._client_command_id(command),
                     command.type,
@@ -415,7 +416,7 @@ class SessionCommandDispatcher:
         if command is None:
             return
         try:
-            async with self._command_semaphore:
+            async with (nullcontext() if command.type in COMMAND_BACKLOG_BYPASS_TYPES else self._command_semaphore):
                 with self._session.event_outbox.bind_client_command(
                     client_command_id,
                     command.type,
@@ -679,6 +680,7 @@ class SessionCommandDispatcher:
             (success, updated_target_conversation_id)
         """
         from backend.services.workspace_service import (
+            conversation_workspace_path,
             parse_user_message_workspace_request,
             workspace_path_needs_activation,
         )
@@ -699,6 +701,13 @@ class SessionCommandDispatcher:
             if target_conversation_id
             else self._session.active_conversation
         )
+        bound_workspace = conversation_workspace_path(target_conversation)
+        if bound_workspace and not workspace_path_needs_activation(
+            requested_workspace_path, Path(bound_workspace)
+        ):
+            # A message repeats its owner's cwd; it is not a workspace handoff.
+            # Rebinding here erased the worktree path and isolation metadata.
+            return True, target_conversation.id
         current_workspace_root = self._session.session_lifecycle.workspace_root_for_conversation(
             target_conversation
         )
@@ -741,20 +750,9 @@ class SessionCommandDispatcher:
         requested_permission_mode: str | None,
         target_conversation_id: str
     ) -> bool:
-        """Handle permission mode update for user_message command."""
+        """Apply validated prompt permissions after start/steer admission."""
         if requested_permission_mode is None:
             return True
-
-        from backend.config import get_config_requirements
-        from backend.config_requirements import RequirementViolation
-
-        try:
-            get_config_requirements().ensure_permission_mode(requested_permission_mode)
-        except RequirementViolation as exc:
-            await self._session.send_event(
-                AgentEvent.error(str(exc), recoverable=True, error_type="tool")
-            )
-            return False
 
         if target_conversation_id:
             self._session.conversation_repo.update_permission_mode(
@@ -896,38 +894,26 @@ class SessionCommandDispatcher:
                     )
                     return
 
-            # Handle workspace switching if requested
+            # Validate prompt settings before admission; queued and rejected
+            # input must not alter the running turn's workspace or permissions.
+            if requested_permission_mode is not None:
+                from backend.services.conversation_permission_service import plan_permission_mode_update
+
+                permission_plan = plan_permission_mode_update(
+                    {"mode": requested_permission_mode, "conversation_id": target_conversation_id},
+                    active_conversation_id=self._session.active_conversation_id or "",
+                )
+                if permission_plan.error_event is not None:
+                    await self._session.send_event(permission_plan.error_event)
+                    await self._seal_unstarted_user_message(
+                        target_conversation_id,
+                        reason="permission_mode_rejected",
+                        message_id=str(command.data.get("assistant_message_id") or ""),
+                    )
+                    return
             requested_workspace_root = str(
                 command.data.get("workspace_root") or ""
             ).strip()
-            if requested_workspace_root:
-                success, target_conversation_id = await self._handle_user_message_workspace(
-                    requested_workspace_root,
-                    target_conversation_id
-                )
-                if not success:
-                    await self._seal_unstarted_user_message(
-                        target_conversation_id,
-                        reason="workspace_activation_failed",
-                        message_id=str(
-                            command.data.get("assistant_message_id") or ""
-                        ),
-                    )
-                    return
-
-            # Handle permission mode update if requested
-            permission_result = await self._handle_user_message_permission(
-                requested_permission_mode, target_conversation_id
-            )
-            if not permission_result:
-                await self._seal_unstarted_user_message(
-                    target_conversation_id,
-                    reason="permission_mode_rejected",
-                    message_id=str(
-                        command.data.get("assistant_message_id") or ""
-                    ),
-                )
-                return
 
             message_metadata: dict[str, Any] = {
                 key: str(command.data.get(key) or "").strip()
@@ -1072,11 +1058,6 @@ class SessionCommandDispatcher:
                 if not target_conversation_id:
                     self._session._ensure_active_conversation()
                     target_conversation_id = self._session.active_conversation_id or ""
-                    if requested_permission_mode is not None and target_conversation_id:
-                        self._session.conversation_repo.update_permission_mode(
-                            str(target_conversation_id),
-                            requested_permission_mode,
-                        )
                 queued_dispatch = bool(command.data.pop("_queued_user_message_dispatch", False))
                 message_metadata["_queued_user_message_dispatch"] = queued_dispatch
                 if retry_from_message_id:
@@ -1160,6 +1141,25 @@ class SessionCommandDispatcher:
                         or command.data.get("streamingBehavior")
                         or ""
                     ).strip().lower()
+                    if streaming_behavior == "steer" and requested_workspace_root:
+                        from backend.services.workspace_service import parse_user_message_workspace_request, workspace_path_needs_activation
+
+                        workspace_request = parse_user_message_workspace_request(
+                            requested_workspace_root, conversation_id=target_conversation_id,
+                        )
+                        if workspace_request.error_event is not None:
+                            await self._session.send_event(workspace_request.error_event)
+                            await self._seal_unstarted_user_message(
+                                target_conversation_id, reason="workspace_activation_failed", message_id=assistant_message_id,
+                            )
+                            return
+                        current_workspace = self._session.session_lifecycle.workspace_root_for_conversation(
+                            self._session.conversation_repo.get_conversation(target_conversation_id)
+                        )
+                        if current_workspace is None or workspace_path_needs_activation(workspace_request.project_path, current_workspace):
+                            # A running turn's tool context owns its cwd. Apply
+                            # a different cwd when this queued prompt starts.
+                            streaming_behavior = "follow_up"
                     if streaming_behavior == "steer" and running_for_target is not None:
                         stream_state = self._session._conversation_streams.get(target_conversation_id) or {}
                         target_message_id = str(stream_state.get("message_id") or "").strip()
@@ -1169,6 +1169,9 @@ class SessionCommandDispatcher:
                             target_message_id=target_message_id,
                         )
                         if steered is not None:
+                            await self._handle_user_message_permission(
+                                requested_permission_mode, target_conversation_id,
+                            )
                             await self._session.send_event(
                                 AgentEvent.user_message_queue_updated(
                                     status="dequeued",
@@ -1200,6 +1203,18 @@ class SessionCommandDispatcher:
                     )
                     return
 
+                if requested_workspace_root:
+                    success, target_conversation_id = await self._handle_user_message_workspace(
+                        requested_workspace_root, target_conversation_id,
+                    )
+                    if not success:
+                        await self._seal_unstarted_user_message(
+                            target_conversation_id, reason="workspace_activation_failed", message_id=assistant_message_id,
+                        )
+                        return
+                await self._handle_user_message_permission(
+                    requested_permission_mode, target_conversation_id,
+                )
                 await self._session.start_agent_run(
                     content,
                     attachments=attachments,

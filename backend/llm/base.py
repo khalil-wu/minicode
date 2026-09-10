@@ -341,6 +341,7 @@ class StreamEventType(Enum):
     TOOL_CALL_START = "tool_call_start"  # 工具块开始（id+name 已知，args 未完成）
     TOOL_CALL_DELTA = "tool_call_delta"  # 工具参数 JSON 片段
     TOOL_CALL = "tool_call"  # 工具调用请求（完整参数）
+    USAGE = "usage"  # Cumulative usage reported before the terminal frame.
     DONE = "done"  # 生成完毕
     ERROR = "error"  # 错误
 
@@ -413,9 +414,8 @@ class UsageInfo:
     # Diagnostic subset reported by reasoning models. Providers normally count
     # this inside output_tokens, so total_tokens intentionally does not add it.
     reasoning_output_tokens: int = 0
-    # Whether input_tokens already includes cache_read_input_tokens. Each
-    # adapter sets this from its wire contract; downstream accounting does not
-    # infer it from provider or model names.
+    # Constructor inputs accept the wire convention. __post_init__ converts
+    # input_tokens to the complete prompt so every stored UsageInfo agrees.
     input_includes_cache_read: bool = True
     # OpenAI reports cache writes as a classification inside input_tokens,
     # while Anthropic/Pi report them as an additional counter.
@@ -425,14 +425,21 @@ class UsageInfo:
     # incompatible booleans.
     ordinary_input_tokens: int = 0
     prompt_cache_total_tokens: int = 0
-    # Provider-reported request cost. MiniCode intentionally has no local
-    # pricing table; zero means the provider did not report an authoritative cost.
-    cost_usd: float = 0.0
+    # A request is priced before aggregation. None remains unknown; zero is free.
+    cost_usd: float | None = None
+
+    def __post_init__(self) -> None:
+        ordinary = self.normalized_ordinary_input_tokens
+        total = self.normalized_prompt_cache_total_tokens
+        self.input_tokens = total
+        self.ordinary_input_tokens = ordinary
+        self.prompt_cache_total_tokens = total
+        self.input_includes_cache_read = True
+        self.input_includes_cache_write = True
 
     @property
     def total_tokens(self) -> int:
-        # Cache fields are provider-specific diagnostics and are often a
-        # subset of input_tokens (OpenAI) rather than additional tokens.
+        # Every provider uses complete prompt input after normalization.
         return self.input_tokens + self.output_tokens
 
     @property
@@ -452,11 +459,7 @@ class UsageInfo:
         subtracting them would under-count billable input.
         """
         ordinary = self.normalized_ordinary_input_tokens
-        cache_write = (
-            0
-            if self.input_includes_cache_write
-            else max(0, self.cache_creation_input_tokens)
-        )
+        cache_write = max(0, self.cache_creation_input_tokens)
         return ordinary + cache_write + max(0, self.output_tokens)
 
     @property
@@ -505,15 +508,15 @@ def _normalize_usage_int(value: Any) -> int:
     return 0
 
 
-def _normalize_usage_cost(value: Any) -> float:
+def _normalize_usage_cost(value: Any) -> float | None:
     """Normalize an optional provider-reported cost without raising."""
-    if isinstance(value, bool):
-        return 0.0
+    if value is None or isinstance(value, bool):
+        return None
     try:
-        parsed = float(value or 0.0)
+        parsed = float(value)
     except (TypeError, ValueError, OverflowError):
-        return 0.0
-    return parsed if math.isfinite(parsed) and parsed > 0 else 0.0
+        return None
+    return parsed if math.isfinite(parsed) and parsed >= 0 else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,7 +557,7 @@ class SideQueryOptions:
 class LLMTurnContext:
     """Explicit accounting and lifecycle owner for provider calls in one turn."""
 
-    usage: UsageInfo = field(default_factory=UsageInfo)
+    usage: UsageInfo = field(default_factory=lambda: UsageInfo(cost_usd=0.0))
     side_call_records: list[dict[str, Any]] = field(default_factory=list)
     cost_session_id: str = ""
     lifecycle_runtime: Any | None = None
@@ -600,7 +603,7 @@ class StreamEvent:
     # assistant message. Adapters may emit earlier TOOL_CALL events with
     # tool_calls_final=False as individual tool_use blocks become complete.
     tool_calls_final: bool = True
-    usage: UsageInfo = field(default_factory=UsageInfo)
+    usage: UsageInfo | None = None
     image_data: str = ""
     image_media_type: str = ""
     # Provider-normalized terminal reason on DONE events, e.g. "stop",
@@ -913,19 +916,18 @@ class LLMAdapter(ABC):
 
         self._reasoning_policy = policy
 
-    def small_fast_model_id(self) -> str:
-        """Return the explicitly configured small/fast model.
-
-        MiniCode never substitutes a provider default or the primary model
-        when a side call asks for a small model. Missing configuration is a
-        capability error at the request boundary.
-        """
+    def configured_small_fast_model_id(self) -> str:
+        """Return the optional configured model for auxiliary operations."""
         settings = getattr(self, "_settings", None)
-        configured = str(
+        return str(
             getattr(settings, "small_fast_model", "")
             or getattr(self, "_small_fast_model", "")
             or ""
         ).strip()
+
+    def small_fast_model_id(self) -> str:
+        """Require the configured small model when an operation requests it."""
+        configured = self.configured_small_fast_model_id()
         if configured:
             return configured
         raise RuntimeError(
@@ -1100,133 +1102,52 @@ class LLMAdapter(ABC):
         input_includes_cache_read: bool,
         input_includes_cache_write: bool = True,
         context: LLMSideCallContext | None = None,
+        model_cost: Mapping[str, Any] | None = None,
+        raw_usage: Mapping[str, Any] | None = None,
     ) -> None:
-        """Record token usage from a non-streaming response to the global
-        CostTracker. Adapters should call this in ``simple_chat`` so that side
-        calls (last-resort recovery and context compaction) are counted
-        toward totals/budgets instead of only the main streaming DONE frames.
-        Defensive: silently no-ops if usage is missing or shaped unexpectedly.
-        """
+        """Price the auxiliary request before adding it to its owning turn."""
+        from backend.agent.provider_protocol import add_usage
+        from backend.llm.cost_tracker import CostTracker
+        from backend.llm.openai_usage import (
+            _first_usage_field, _get_cached_prompt_tokens,
+            _get_cache_creation_prompt_tokens, _get_chat_prompt_tokens,
+            _get_reasoning_output_tokens, _get_usage_cost_usd, _raw_usage_metadata,
+        )
 
-        if usage_obj is None:
-            return
-        try:
-            # Reuse the streaming parser so Responses/DeepSeek cache and
-            # reasoning fields stay consistent between stream DONE and simple_chat.
-            from backend.llm.openai_usage import (
-                _first_usage_field,
-                _get_cached_prompt_tokens,
-                _get_cache_creation_prompt_tokens,
-                _get_chat_prompt_tokens,
-                _get_reasoning_output_tokens,
-                _get_usage_cost_usd,
-            )
-
-            input_tokens = _first_usage_field(
-                usage_obj, "input_tokens", "prompt_tokens"
-            )
-            if not input_tokens:
-                input_tokens = _get_chat_prompt_tokens(usage_obj)
-            output_tokens = _first_usage_field(
-                usage_obj, "output_tokens", "completion_tokens"
-            )
-            cache_creation = _get_cache_creation_prompt_tokens(usage_obj)
-            cache_read = _get_cached_prompt_tokens(usage_obj)
-            reasoning_output_tokens = _get_reasoning_output_tokens(usage_obj)
-            cost_usd = _get_usage_cost_usd(usage_obj)
-            input_tokens = _normalize_usage_int(input_tokens)
-            output_tokens = _normalize_usage_int(output_tokens)
-            cache_creation = _normalize_usage_int(cache_creation)
-            cache_read = _normalize_usage_int(cache_read)
-            reasoning_output_tokens = _normalize_usage_int(reasoning_output_tokens)
-            cost_usd = _normalize_usage_cost(cost_usd)
-            ordinary_input = input_tokens
-            if input_includes_cache_read:
-                ordinary_input -= min(cache_read, ordinary_input)
-            if input_includes_cache_write:
-                ordinary_input -= min(cache_creation, ordinary_input)
-            ordinary_input = max(0, ordinary_input)
-            prompt_cache_total = ordinary_input + cache_read + cache_creation
-            side_record = context.record if context is not None else None
-            if side_record is not None:
-                side_record["provider"] = str(provider or "")
-                side_record["model"] = str(model_id or "")
-                side_record["usage"] = {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "cache_creation_input_tokens": cache_creation,
-                    "cache_read_input_tokens": cache_read,
-                    "reasoning_output_tokens": reasoning_output_tokens,
-                    "cost_usd": cost_usd,
-                    "input_includes_cache_read": bool(input_includes_cache_read),
-                    "input_includes_cache_write": bool(input_includes_cache_write),
-                    "ordinary_input_tokens": ordinary_input,
-                    "prompt_cache_total_tokens": prompt_cache_total,
-                }
-            if not (
-                input_tokens
-                or output_tokens
-                or cache_creation
-                or cache_read
-                or reasoning_output_tokens
-                or cost_usd
-            ):
-                return
-            bucket = (
-                context.turn.usage
-                if context is not None and context.turn is not None
-                else None
-            )
-            if bucket is not None:
-                bucket.input_tokens += input_tokens
-                bucket.output_tokens += output_tokens
-                bucket.cache_creation_input_tokens += cache_creation
-                bucket.cache_read_input_tokens += cache_read
-                bucket.ordinary_input_tokens += ordinary_input
-                bucket.prompt_cache_total_tokens += prompt_cache_total
-                bucket.reasoning_output_tokens += reasoning_output_tokens
-                bucket.cost_usd += cost_usd
-                # A turn can contain Anthropic-style side calls alongside an
-                # OpenAI-style main stream. If any provider reports cache reads
-                # separately, preserve that fact for billable-token math rather
-                # than subtracting those tokens from the combined input.
-                bucket.input_includes_cache_read = (
-                    bucket.input_includes_cache_read and bool(input_includes_cache_read)
-                )
-                bucket.input_includes_cache_write = (
-                    bucket.input_includes_cache_write
-                    and bool(input_includes_cache_write)
-                )
-            # The loop commits the complete turn bucket once. Standalone side
-            # calls without a bound turn still write directly to the tracker.
-            if bucket is not None:
-                return
-            from backend.llm.cost_tracker import CostTracker
-
-            CostTracker.get_instance().record_usage(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cache_creation_input_tokens=cache_creation,
-                cache_read_input_tokens=cache_read,
-                ordinary_input_tokens=ordinary_input,
-                prompt_cache_total_tokens=prompt_cache_total,
-                reasoning_output_tokens=reasoning_output_tokens,
-                model_id=model_id,
-                provider=provider,
-                input_includes_cache_read=input_includes_cache_read,
-                input_includes_cache_write=input_includes_cache_write,
-                cost_usd=cost_usd,
-                session_id=(
-                    context.turn.cost_session_id
-                    if context is not None and context.turn is not None
-                    else ""
-                ),
-            )
-        except Exception:  # noqa: BLE001 — accounting must never break the call
-            # Accounting must not fail the call, but it must not fail silently
-            # either: a dropped record understates session cost and leaves the
-            # rollout/turn budget short of the tokens actually spent.
-            logger.warning("Failed to record non-stream usage", exc_info=True)
+        usage = usage_obj if isinstance(usage_obj, UsageInfo) else UsageInfo(
+            input_tokens=_get_chat_prompt_tokens(usage_obj),
+            output_tokens=_first_usage_field(usage_obj, "output_tokens", "completion_tokens"),
+            cache_creation_input_tokens=_get_cache_creation_prompt_tokens(usage_obj),
+            cache_read_input_tokens=_get_cached_prompt_tokens(usage_obj),
+            reasoning_output_tokens=_get_reasoning_output_tokens(usage_obj),
+            input_includes_cache_read=input_includes_cache_read,
+            input_includes_cache_write=input_includes_cache_write,
+            cost_usd=_get_usage_cost_usd(usage_obj),
+        )
+        turn = context.turn if context is not None else None
+        price_source = CostTracker.get_instance().record_usage_info(
+            usage,
+            model_id=str(model_id or ""),
+            provider=provider,
+            session_id=turn.cost_session_id if turn is not None else "",
+            model_cost=model_cost,
+            usage_reported=usage_obj is not None,
+        )
+        if context is not None:
+            request_record = {
+                "provider": provider,
+                "model": str(model_id or ""),
+                "usage": dict(vars(usage)),
+                "raw_usage": dict(raw_usage) if raw_usage is not None else _raw_usage_metadata(usage_obj),
+                "price_source": price_source,
+            }
+            previous_usage = context.record.get("usage")
+            operation_usage = UsageInfo(**previous_usage) if previous_usage is not None else UsageInfo(cost_usd=0.0)
+            add_usage(operation_usage, usage)
+            context.record.setdefault("requests", []).append(request_record)
+            context.record.update({**request_record, "usage": dict(vars(operation_usage))})
+        if turn is not None:
+            add_usage(turn.usage, usage)
 
     def supports_hosted_web_search(self) -> bool:
         """Whether this exact provider wire contract supports hosted search."""

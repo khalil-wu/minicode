@@ -42,11 +42,13 @@ describe("editor workspace isolation", () => {
     useAppStore.getState().openEditorTab("src/alpha.ts");
     useAppStore.getState().markTabLoaded("src/alpha.ts", "const original = true;", null);
     useAppStore.getState().updateTabContent("src/alpha.ts", "const edited = true;");
+    const bufferId = useAppStore.getState().editorTabs[0].id;
 
     useAppStore.getState().setWorkingDirectory("C:\\projects\\beta");
     useAppStore.getState().setWorkingDirectory("C:\\projects\\alpha");
 
     expect(useAppStore.getState().editorTabs[0]).toMatchObject({
+      id: bufferId,
       path: "src/alpha.ts",
       content: "const edited = true;",
       original: "const original = true;",
@@ -190,8 +192,8 @@ describe("editor workspace isolation", () => {
   it("inserts generated code into the active editor tab without touching unloaded tabs", () => {
     useAppStore.setState({
       editorTabs: [
-        { path: "src/active.ts", content: "const a = 1;", original: "const a = 1;", loading: false, error: null },
-        { path: "src/loading.ts", content: "", original: "", loading: true, error: null },
+        { id: "editor-fixture-2", path: "src/active.ts", content: "const a = 1;", original: "const a = 1;", loading: false, error: null },
+        { id: "editor-fixture-3", path: "src/loading.ts", content: "", original: "", loading: true, error: null },
       ],
       activeTabPath: "src/active.ts",
       activeEditorPath: "src/active.ts",
@@ -208,7 +210,7 @@ describe("editor workspace isolation", () => {
   it("keeps editor tabs visible when a file load fails", () => {
     useAppStore.setState({
       workingDirectory: "C:\\projects\\demo",
-      editorTabs: [{ path: "missing.txt", content: "", original: "", loading: true, error: null }],
+      editorTabs: [{ id: "editor-fixture-4", path: "missing.txt", content: "", original: "", loading: true, error: null }],
       activeTabPath: "missing.txt",
       activeEditorPath: "missing.txt",
     });
@@ -253,6 +255,7 @@ describe("editor workspace isolation", () => {
     useAppStore.setState({
       workingDirectory: "C:\\projects\\demo",
       editorTabs: [{
+        id: "editor-fixture-6",
         path: "assets/preview.PNG",
         content: "",
         original: "",
@@ -273,6 +276,7 @@ describe("editor workspace isolation", () => {
     useAppStore.setState({
       workingDirectory: "C:\\projects\\demo",
       editorTabs: [{
+        id: "editor-fixture-7",
         path: "src/app.ts",
         content: "local",
         original: "disk",
@@ -292,7 +296,7 @@ describe("editor workspace isolation", () => {
     useAppStore.setState({
       appMode: "code",
       editorTabs: [
-        { path: "README.md", content: "", original: "", loading: false, error: null },
+        { id: "editor-fixture-8", path: "README.md", content: "", original: "", loading: false, error: null },
       ],
       activeTabPath: "README.md",
       activeEditorPath: "README.md",

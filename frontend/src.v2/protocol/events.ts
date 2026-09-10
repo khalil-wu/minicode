@@ -1231,6 +1231,7 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "diff.git_unstage_all",
   "diff.git_revert_file",
   // MCP / Environment / Git status
+  "diff.git_revert_patch",
   "mcp.list",
   "mcp.inventory.list",
   "mcp.inventory.cancel",

@@ -3,6 +3,7 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -31,6 +32,21 @@ from backend.ws.agent_runner import (
 from backend.ws.run_manager import SessionRunManager
 from backend.ws.command_dispatcher import SessionCommandDispatcher
 from backend.ws.session_lifecycle import SessionLifecycle
+
+
+def _run_session_scenario(awaitable):
+    async def run_and_close():
+        from backend.memory.generation import drain_memory_background_tasks
+
+        try:
+            return await awaitable
+        finally:
+            # Mirror AppBootstrap.shutdown before asyncio cancels its own
+            # subprocess pipe-setup tasks when this test loop exits.
+            pending = await drain_memory_background_tasks(timeout=5.0)
+            assert not pending, "Session memory workers did not finish closing"
+
+    return asyncio.run(run_and_close())
 
 
 class _NoopLLM(LLMAdapter):
@@ -90,7 +106,7 @@ def test_runner_streams_raw_reasoning_but_persists_only_summary(tmp_path, monkey
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(session._run_agent_locked(
+    _run_session_scenario(session._run_agent_locked(
         "Inspect reasoning lifecycle",
         conversation_id="conv_runnerdone",
         metadata={
@@ -331,7 +347,7 @@ def test_runner_marks_external_context_and_disables_memory_generation(tmp_path, 
         lambda session, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(session._run_agent_locked(
+    _run_session_scenario(session._run_agent_locked(
         "Find the current release",
         conversation_id="conv_runnerdone",
         metadata={
@@ -453,7 +469,7 @@ def test_runner_persists_all_yielded_provider_progress_for_restore(
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "Audit provider projection",
             conversation_id="conv_runnerdone",
@@ -766,7 +782,7 @@ def test_persisted_ui_agent_snapshot_is_repaired_before_restore(tmp_path, monkey
 
     monkeypatch.setattr("backend.ws.agent_runner.default_runtime", lambda: _Runtime())
 
-    refreshed = asyncio.run(
+    refreshed = _run_session_scenario(
         session.reconcile_persisted_ui_agent_state("conv_runnerdone")
     )
 
@@ -789,7 +805,7 @@ def test_persisted_ui_agent_reconcile_reuses_loaded_conversation(tmp_path, monke
 
     monkeypatch.setattr(session.conversation_repo, "get_conversation", unexpected_reload)
 
-    refreshed = asyncio.run(
+    refreshed = _run_session_scenario(
         session.reconcile_persisted_ui_agent_state(
             "conv_runnerdone",
             conversation=loaded,
@@ -855,7 +871,7 @@ def test_persisted_ui_agent_reconcile_keeps_projection_ownership_through_patch(
         owned_patch,
     )
 
-    asyncio.run(session.reconcile_persisted_ui_agent_state("conv_runnerdone"))
+    _run_session_scenario(session.reconcile_persisted_ui_agent_state("conv_runnerdone"))
 
     assert ownership_observed == [True]
 
@@ -885,7 +901,7 @@ def test_automatic_compaction_uses_conversation_projection_ownership() -> None:
             projection_lock=lock,
         )
 
-    asyncio.run(scenario())
+    _run_session_scenario(scenario())
 
     assert ownership_observed == [True]
 
@@ -911,7 +927,7 @@ def test_runner_sends_done_when_filtered_stream_omits_done(tmp_path, monkeypatch
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "写一个 html",
             conversation_id="conv_runnerdone",
@@ -977,7 +993,7 @@ def test_new_turn_replays_terminal_projection_before_resetting_context(
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "start after recovery",
             conversation_id="conv_runnerdone",
@@ -1047,7 +1063,7 @@ def test_runner_persists_partial_work_and_replaces_it_when_user_cancels(tmp_path
         await task
 
 
-    asyncio.run(scenario())
+    _run_session_scenario(scenario())
 
     restored = ConversationRepository(session.conversation_repo._base_dir).get_conversation("conv_runnerdone")
     assert restored is not None
@@ -1082,7 +1098,7 @@ def test_projection_flush_does_not_wait_on_debounce_task_holding_the_same_lock(t
                 timeout=1,
             )
 
-    asyncio.run(scenario())
+    _run_session_scenario(scenario())
     saved = session.conversation_repo.get_conversation("conv_runnerdone")
     assert saved is not None
     assert saved.context_snapshot["ui_agent_state"]["todos"][0]["id"] == "todo-1"
@@ -1120,7 +1136,7 @@ def test_projection_flush_keeps_pending_state_when_persistence_fails(tmp_path, m
         assert "conv_runnerdone" in session.ui_agent_state_store.pending
         await session._flush_ui_agent_state_now("conv_runnerdone")
 
-    asyncio.run(scenario())
+    _run_session_scenario(scenario())
     assert "conv_runnerdone" not in session.ui_agent_state_store.pending
     saved = session.conversation_repo.get_conversation("conv_runnerdone")
     assert saved is not None
@@ -1153,7 +1169,7 @@ def test_reconcile_retries_retained_pending_state_before_runtime_merge(tmp_path,
         )
         return await session.reconcile_persisted_ui_agent_state("conv_runnerdone")
 
-    refreshed = asyncio.run(scenario())
+    refreshed = _run_session_scenario(scenario())
 
     assert refreshed is not None
     saved = session.conversation_repo.get_conversation("conv_runnerdone")
@@ -1193,7 +1209,7 @@ def test_late_terminal_turn_events_are_fenced_but_next_turn_is_accepted(tmp_path
         )
         await session._flush_ui_agent_state_now("conv_runnerdone")
 
-    asyncio.run(scenario())
+    _run_session_scenario(scenario())
     saved = session.conversation_repo.get_conversation("conv_runnerdone")
     assert saved is not None
     assert saved.context_snapshot["ui_agent_state"]["todos"][0]["id"] == "new-todo"
@@ -1227,7 +1243,7 @@ def test_runner_sends_done_when_terminal_projections_fail(tmp_path, monkeypatch)
 
     monkeypatch.setattr(session.conversation_repo, "save_context_snapshot", fail_terminal_snapshot)
 
-    asyncio.run(session._run_agent_locked(
+    _run_session_scenario(session._run_agent_locked(
         "write",
         conversation_id="conv_runnerdone",
         metadata={
@@ -1277,7 +1293,7 @@ def test_runner_emits_no_synthetic_tool_failure_answer_before_failed_done(tmp_pa
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "运行失败命令",
             conversation_id="conv_runnerdone",
@@ -1318,7 +1334,7 @@ def test_runner_initialization_failure_emits_idle_and_failed_done(tmp_path, monk
 
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", fail_create_llm)
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "hello",
             conversation_id="conv_runnerdone",
@@ -1369,7 +1385,7 @@ def test_runner_persists_and_emits_terminal_failure_recoverability(tmp_path, mon
     monkeypatch.setattr("backend.ws.agent_runner.get_available_models", lambda provider="openai": ["gpt-test"])
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", lambda config, model_override=None, **_kwargs: _NoopLLM())
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "imitate a tool",
             conversation_id="conv_runnerdone",
@@ -1417,7 +1433,7 @@ def test_runner_clears_transient_failure_metadata_after_success(tmp_path, monkey
     monkeypatch.setattr("backend.ws.agent_runner.get_available_models", lambda provider="openai": ["gpt-test"])
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", lambda config, model_override=None, **_kwargs: _NoopLLM())
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "recover",
             conversation_id="conv_runnerdone",
@@ -1463,7 +1479,7 @@ def test_runner_preserves_partial_done_status_when_deferring_terminal_event(tmp_
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "continue",
             conversation_id="conv_runnerdone",
@@ -1527,7 +1543,7 @@ def test_runner_projects_durable_terminal_over_conflicting_provider_done(
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "conflicting terminal",
             conversation_id="conv_runnerdone",
@@ -1577,7 +1593,7 @@ def test_runner_downgrades_tool_only_success_to_partial_and_persists_status(tmp_
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "read the project overview",
             conversation_id="conv_runnerdone",
@@ -1652,7 +1668,7 @@ def test_runner_persists_presented_file_and_suppresses_deleted_helper(tmp_path, 
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "创建 PDF 报告",
             conversation_id="conv_runnerdone",
@@ -1704,7 +1720,7 @@ def test_runner_preserves_query_done_provider_metadata(tmp_path, monkeypatch):
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "continue",
             conversation_id="conv_runnerdone",
@@ -1756,7 +1772,7 @@ def test_runner_keeps_low_value_reply_when_no_tool_summary_exists(tmp_path, monk
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "write a report",
             conversation_id="conv_runnerdone",
@@ -1804,7 +1820,7 @@ def test_runner_reuses_session_llm_adapter_for_consecutive_turns(tmp_path, monke
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", create_llm)
 
     for message in ("第一轮", "第二轮"):
-        asyncio.run(
+        _run_session_scenario(
             session._run_agent_locked(
                 message,
                 conversation_id="conv_runnerdone",
@@ -1958,7 +1974,7 @@ def test_runner_persists_completed_agent_message_as_final_text_block(tmp_path, m
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "今天北京天气如何",
             conversation_id="conv_runnerdone",
@@ -2014,7 +2030,7 @@ def test_runner_settles_in_progress_item_as_partial_when_done_has_no_completed_i
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "今天北京天气如何",
             conversation_id="conv_runnerdone",
@@ -2094,7 +2110,7 @@ def test_runner_preserves_collaboration_final_report_narration(tmp_path, monkeyp
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "用子代理分头检查这个 UX",
             conversation_id="conv_runnerdone",
@@ -2157,7 +2173,7 @@ def test_runner_preserves_collaboration_answer_announcement(tmp_path, monkeypatc
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "用子代理分头检查这个 UX",
             conversation_id="conv_runnerdone",
@@ -2219,7 +2235,7 @@ def test_runner_does_not_emit_tool_only_failure_after_live_final_answer(tmp_path
         lambda config, model_override=None, **_kwargs: _NoopLLM(),
     )
 
-    asyncio.run(
+    _run_session_scenario(
         session._run_agent_locked(
             "今天北京天气如何",
             conversation_id="conv_runnerdone",

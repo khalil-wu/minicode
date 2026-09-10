@@ -12,6 +12,25 @@ from backend.workspace.file_watcher import WorkspaceFileWatcher
 from backend.workspace.service import WorkspaceService
 
 
+def test_user_data_directories_are_watched_while_only_the_runtime_store_is_ignored(tmp_path, monkeypatch):
+    runtime_data = tmp_path / "application-state/data"
+    monkeypatch.setattr("backend.workspace.file_watcher.DATA_ROOT", runtime_data)
+    user_data = tmp_path / "data/chart.svg"
+    nested_data = tmp_path / "project/data/metrics.csv"
+
+    async def exercise():
+        on_change = Mock()
+        watcher = WorkspaceFileWatcher(tmp_path, on_change, stability_threshold=0)
+        handler = watcher._create_handler()
+        for path in [user_data, nested_data, runtime_data / "transcript.json"]:
+            handler.on_any_event(FileModifiedEvent(str(path)))
+        # The watchdog callback schedules its coroutine across the loop boundary.
+        await asyncio.sleep(0.02)
+        assert on_change.call_args_list == [((user_data, "modified"),), ((nested_data, "modified"),)]
+
+    asyncio.run(exercise())
+
+
 def test_debounce_keeps_only_latest_task(tmp_path: Path) -> None:
     calls: list[tuple[Path, str]] = []
 

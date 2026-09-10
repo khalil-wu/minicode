@@ -174,7 +174,7 @@ def ingest_uploaded_document(
         raise ValueError("Uploaded file is empty.")
 
     parsed = parse_document_preview(safe_name, raw_content)
-    full_text = str(parsed.get("full_text", "")).strip()
+    full_text = str(parsed.get("full_text", ""))
     parse_error = str(parsed.get("parse_error") or "").strip()
     if parse_error:
         logger.warning(
@@ -228,10 +228,10 @@ def parse_document_preview(file_name: str, raw_content: bytes) -> dict[str, Any]
     resource-limit violations intentionally remain hard failures.
     """
     parsed = dict(_parse_uploaded_content(file_name, raw_content))
-    full_text = str(parsed.get("full_text") or "").strip()
+    full_text = str(parsed.get("full_text") or "")
     parse_error = str(parsed.get("parse_error") or "").strip()
 
-    if not full_text:
+    if not full_text.strip():
         media_type = str(parsed.get("media_type") or _guess_media_type(file_name))
         kind = str(parsed.get("kind") or "document")
         full_text = _unavailable_text_fallback(file_name, media_type, kind)

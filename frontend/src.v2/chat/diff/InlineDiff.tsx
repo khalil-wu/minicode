@@ -22,12 +22,8 @@ function parseLines(patch: string, contextLines: number | undefined): ParsedDiff
     if (hunk) {
       const rawOldLine = Number(hunk[1]);
       const rawNewLine = Number(hunk[2]);
-      // A turn may contain several tool snapshots concatenated together. A
-      // later snapshot can repeat the same hunk start even though the visible
-      // rows already advanced. Keep the single displayed line-number column
-      // monotonic while still honoring genuinely later hunk starts.
-      oldLine = Math.max(rawOldLine, oldLine);
-      newLine = Math.max(rawNewLine, newLine);
+      oldLine = rawOldLine;
+      newLine = rawNewLine;
       return { text, kind: "header" };
     }
     if (kind === "meta" || kind === "hunk") {

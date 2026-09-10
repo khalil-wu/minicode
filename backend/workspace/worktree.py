@@ -781,9 +781,10 @@ def summarize_worktree_status(current_path: Path, worktrees: list[WorktreeInfo])
         )
         for worktree in worktrees
     ]
-    current_entry = next(
-        (worktree for worktree in resolved_worktrees if worktree.path == resolved_current_path),
-        None,
+    current_entry = max(
+        (worktree for worktree in resolved_worktrees if resolved_current_path.is_relative_to(worktree.path)),
+        key=lambda worktree: len(worktree.path.parts),
+        default=None,
     )
     main_repo_entry = next(
         (worktree for worktree in resolved_worktrees if (worktree.path / ".git").is_dir()),
@@ -792,8 +793,8 @@ def summarize_worktree_status(current_path: Path, worktrees: list[WorktreeInfo])
     main_repo_path = main_repo_entry.path if main_repo_entry else None
 
     return WorktreeStatus(
-        is_worktree=bool(main_repo_path and main_repo_path != resolved_current_path),
-        current_path=resolved_current_path,
+        is_worktree=bool(current_entry and main_repo_path and current_entry.path != main_repo_path),
+        current_path=current_entry.path if current_entry else resolved_current_path,
         main_repo_path=main_repo_path,
         current_branch=current_entry.branch or None if current_entry else None,
         worktree_count=len(resolved_worktrees),

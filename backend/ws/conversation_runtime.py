@@ -7,7 +7,7 @@ from copy import deepcopy
 from typing import Any
 
 from backend.agent.context import ContextBuilder
-from backend.async_cleanup import CANCELLATION_DRAIN_TIMEOUT_SECONDS, cancel_and_drain
+from backend.async_cleanup import CANCELLATION_DRAIN_TIMEOUT_SECONDS, cancel_and_drain, _consume_task_result
 from backend.conversations.repository import ConversationRepository
 from backend.memory.pollution import pollution_sources_from_transcript
 
@@ -146,11 +146,7 @@ class ConversationRuntime:
         )
         self._hydration_task = task
 
-        def clear_current(completed: asyncio.Task[None]) -> None:
-            if self._hydration_task is completed:
-                self._hydration_task = None
-
-        task.add_done_callback(clear_current)
+        task.add_done_callback(_consume_task_result)
         return True
 
     def start_hydration(self, conversation_id: str) -> bool:
@@ -169,11 +165,7 @@ class ConversationRuntime:
         )
         self._hydration_task = task
 
-        def clear_current(completed: asyncio.Task[None]) -> None:
-            if self._hydration_task is completed:
-                self._hydration_task = None
-
-        task.add_done_callback(clear_current)
+        task.add_done_callback(_consume_task_result)
         return True
 
     def _create_hydration_task(
@@ -292,6 +284,13 @@ class ConversationRuntime:
                 "Failed to hydrate conversation history snapshot for %s",
                 conversation_id,
             )
+            if (
+                notify
+                and on_hydration_complete is not None
+                and generation == self._hydration_generation
+                and conversation_id == self.active_conversation_id
+            ):
+                await on_hydration_complete(conversation_id)
             raise
 
         async with self._projection_lock_for(conversation_id):

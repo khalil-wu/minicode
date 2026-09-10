@@ -974,10 +974,12 @@ def test_main_responses_max_output_incomplete_is_a_recoverable_done() -> None:
     )
 
     assert [event.type for event in events] == [
+        StreamEventType.USAGE,
         StreamEventType.TEXT_CHUNK,
         StreamEventType.DONE,
     ]
-    assert events[0].content == "partial answer"
+    assert events[1].content == "partial answer"
+    assert events[0].usage == events[-1].usage
     assert events[-1].finish_reason == "max_output_tokens"
     assert events[-1].usage.input_tokens == 7
     assert events[-1].usage.output_tokens == 9
@@ -1481,12 +1483,8 @@ def test_main_responses_ignores_frames_after_first_terminal_event() -> None:
         for event in events
         if event.type == StreamEventType.TEXT_CHUNK and event.content
     ] == ["done"]
-    assert events[-1].raw["post_terminal_events"] == [
-        {
-            "event_type": "response.output_text.delta",
-            "sequence_number": 1,
-        }
-    ]
+    assert events[-1].type == StreamEventType.DONE
+    assert "post_terminal_events" not in events[-1].raw
 
 
 def test_main_responses_recovers_terminal_only_reasoning_summary() -> None:

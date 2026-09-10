@@ -684,6 +684,10 @@ class ContextBuilder:
         workspace_root = self._workspace_root_for_state(state)
         return self._build_prompt_parts(state, workspace_root).render_system()
 
+    async def prepare_system_prompt(self, state: AgentState) -> str:
+        await self._ensure_git_status_context(self._workspace_root_for_state(state))
+        return self.base_system_prompt(state)
+
     def _get_project_guidelines(
         self,
         workspace_root: Path | None = None,
@@ -1325,6 +1329,8 @@ class ContextBuilder:
 
     @staticmethod
     def _workspace_root_for_state(state: AgentState) -> Path | None:
+        if state.workspace_root is not None:
+            return state.workspace_root
         if hasattr(state, "workspace_context") and state.workspace_context:
             return getattr(state.workspace_context, "root_path", None)
         return None
@@ -1771,20 +1777,11 @@ class ContextBuilder:
             ).strip()
             or "confirm"
         )
-        if os.name == "nt":
-            shell = (
-                "powershell (Windows host, bypass execution)"
-                if mode
-                == "bypass"
-                else "pwsh (Linux workspace sandbox; use relative workspace paths)"
-            )
-        else:
-            shell = str(
-                environment.get("shell")
-                or prompt_context.get("shell")
-                or os.environ.get("SHELL")
-                or "unknown"
-            ).strip()
+        shell = str(
+            environment.get("shell")
+            or prompt_context.get("shell")
+            or ("powershell" if os.name == "nt" else os.environ.get("SHELL") or "unknown")
+        ).strip()
         source = (
             str(
                 permission.get("source")
@@ -3560,7 +3557,7 @@ class ContextBuilder:
 
         self._load_snapshot_metadata(snapshot)
         self._history = self.deserialize_snapshot_history(
-            self.sanitize_snapshot_history(snapshot.get("history", []))
+            snapshot.get("history", [])
         )
         if not self._history_frozen_metadata_present and self._history:
             self._history_frozen_count = len(self._history)
@@ -3685,7 +3682,6 @@ class ContextBuilder:
         for raw in raw_history:
             if not isinstance(raw, dict):
                 continue
-            had_runtime_provenance = "runtime_context" in raw
             role = _normalize_message_role(raw.get("role", "user"))
             content = _message_content_text(raw.get("content", ""))
             if _is_prompt_instruction_role(role):
@@ -3702,35 +3698,10 @@ class ContextBuilder:
             )
             raw["is_error"] = bool(raw.get("is_error", False))
             raw["phase"] = str(raw.get("phase") or "")[:40]
-            runtime_context = str(raw.get("runtime_context") or "")
-            if role == "user" and not had_runtime_provenance:
-                # Pre-provenance snapshots omitted the field entirely.  Migrate
-                # only at this trusted persistence boundary; live user messages
-                # with an empty provenance field are never classified by tag
-                # spelling alone.
-                legacy_runtime, _ = ContextBuilder._extract_legacy_runtime_wrapper(
-                    content
-                )
-                if legacy_runtime:
-                    runtime_context = legacy_runtime
-            raw["runtime_context"] = runtime_context
-            if role == "user" and _is_internal_control_prompt(content):
-                continue
-            if (
-                role == "assistant"
-                and content.strip() == INTERNAL_EMPTY_ASSISTANT_MARKER
-                and not raw.get("tool_calls")
-            ):
-                continue
-            previous = sanitized[-1] if sanitized else None
-            if (
-                role == "user"
-                and previous is not None
-                and str(previous.get("role", "")) == "user"
-                and content.strip()
-                and content.strip() == str(previous.get("content", "")).strip()
-            ):
-                continue
+            # Content is data, including repeated prompts and literal internal
+            # marker examples. Only explicit provenance may identify runtime
+            # context; importing history must not guess from text spelling.
+            raw["runtime_context"] = str(raw.get("runtime_context") or "")
             sanitized.append(raw)
         return sanitized
 

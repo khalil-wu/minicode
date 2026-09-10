@@ -125,6 +125,7 @@ class LLMSettings:
     image_model: str = ""
     image_size: str = "1024x1024"
     image_quality: str = ""
+    thinking_budget: int = 0
 
 
 @dataclass(frozen=True)
@@ -1039,7 +1040,7 @@ def _history_identity(provider: str, base_url: str, wire_api: str) -> tuple[str,
     normalized_base_url = _normalized_provider_base_url(
         base_url,
         collapse_root_v1=True,
-    ).lower()
+    )
     default_wire_api = (
         "anthropic"
         if normalized_provider == "anthropic"
@@ -1471,6 +1472,8 @@ def get_image_generation_settings(
     longer creates a second image endpoint.
     """
 
+    if settings_data is None:
+        settings_data = _load_effective_settings_json()
     selected_provider = _normalize_provider(provider or get_llm_provider(settings_data))
     if selected_provider == "anthropic":
         section = get_anthropic_settings(settings_data)
@@ -1673,6 +1676,8 @@ def get_llm_settings_payload(
     *,
     include_api_keys: bool = False,
 ) -> dict[str, Any]:
+    if settings_data is None:
+        settings_data = _load_effective_settings_json()
     openai = get_openai_settings(settings_data)
     anthropic = get_anthropic_settings(settings_data)
     custom = get_custom_settings(settings_data)
@@ -1818,6 +1823,8 @@ def get_llm_settings_payload(
 
 def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSettings:
     """从环境变量与 settings.json 加载 LLM 配置。"""
+    if settings_data is None:
+        settings_data = _load_effective_settings_json()
     active_provider = get_llm_provider(settings_data)
 
     if active_provider == "anthropic":
@@ -1835,6 +1842,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
             reasoning_effort="",
             responses_reasoning_summary="",
             max_tokens=anthropic["max_tokens"],
+            thinking_budget=anthropic["thinking_budget"],
             wire_api="anthropic",
             proxy_mode=anthropic["proxy_mode"],
             prompt_cache_retention="",
@@ -1878,6 +1886,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
             reasoning_effort=custom["reasoning_effort"],
             responses_reasoning_summary=custom["responses_reasoning_summary"],
             max_tokens=custom["max_tokens"],
+            thinking_budget=custom["thinking_budget"],
             wire_api="chat" if image_config else custom["wire_api"],
             proxy_mode=custom["proxy_mode"],
             prompt_cache_retention=custom["prompt_cache_retention"],

@@ -105,19 +105,19 @@ export const HistoryCellRenderer = memo(function HistoryCellRenderer({
       return <StatusNoticeCell cell={cell} />;
 
     case "thinking":
-      return <ThinkingCell cell={cell} isStreaming={cell.isStreaming || isActive} />;
+      return <ThinkingCell cell={cell} isStreaming={cell.isStreaming || isActive} conversationId={conversationId} workspaceRoot={workspaceRoot} />;
 
     case "collaboration":
       return <CollaborationCell cell={cell} />;
 
     case "activity":
-      return <ActivityCell cell={cell} isActive={isActive} conversationId={conversationId} />;
+      return <ActivityCell cell={cell} isActive={isActive} conversationId={conversationId} workspaceRoot={workspaceRoot} />;
 
     case "exec":
       return <ExecCell cell={cell} isActive={isActive} onStop={isTranscriptMode ? undefined : onStopExecution} />;
 
     case "diff":
-      return <DiffCell cell={cell} showActions={!isTranscriptMode} />;
+      return <DiffCell cell={cell} showActions={!isTranscriptMode} conversationId={conversationId} workspaceRoot={workspaceRoot} />;
 
     case "error":
       return <ErrorCell cell={cell} />;

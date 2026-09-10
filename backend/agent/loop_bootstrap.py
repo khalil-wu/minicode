@@ -221,9 +221,13 @@ async def bootstrap_agent_loop(
         prepare_turn_state(
             state,
             settings=settings,
+            user_message=user_message,
+            max_iterations=initial_max_iterations_limit,
         )
 
-    deadline_controller = TurnDeadlineController(
+    deadline_controller = (
+        session_context.deadline_controller if session_context is not None else None
+    ) or TurnDeadlineController(
         max_turn_seconds=max(0.0, float(settings.max_turn_seconds or 0.0)),
     )
     turn_kernel = request.turn_kernel or TurnKernel.create(
@@ -241,7 +245,7 @@ async def bootstrap_agent_loop(
 
     # The absolute turn fence includes hooks and skill preflight, rather than
     # starting only at the first provider request.
-    turn_started_at = epoch_ms()
+    turn_started_at = turn_kernel.run_record.started_at
     deadline_controller.start_turn()
     workspace_root = session_context.workspace_root if session_context is not None else None
     if workspace_root is None:
@@ -282,7 +286,8 @@ async def bootstrap_agent_loop(
     if isinstance(turn_permission_checker, PermissionChecker):
         turn_permission_checker = turn_permission_checker.with_workspace_root(workspace_root)
     resolved_mode, requirement_violation = managed_requirements.resolve_permission_mode(
-        effective_permission_context.mode
+        effective_permission_context.mode,
+        sandbox_mode=effective_permission_context.sandbox_mode,
     )
     if requirement_violation is not None:
         raise requirement_violation
@@ -295,7 +300,9 @@ async def bootstrap_agent_loop(
         effective_permission_context,
         mode=resolved_mode,
         approval_policy=managed_requirements.approval_policy_for_mode(resolved_mode),
-        sandbox_mode=managed_requirements.sandbox_mode_for_permission_mode(resolved_mode),
+        sandbox_mode=managed_requirements.sandbox_mode_for_permission_mode(
+            resolved_mode, sandbox_mode=effective_permission_context.sandbox_mode,
+        ),
         requirements_source=(
             requirement_source
             or str(approval_source or sandbox_source or "")
@@ -395,7 +402,9 @@ async def bootstrap_agent_loop(
     )
 
     def _normalize_live_permission(current: PermissionContext) -> PermissionContext:
-        live_mode, live_violation = managed_requirements.resolve_permission_mode(current.mode)
+        live_mode, live_violation = managed_requirements.resolve_permission_mode(
+            current.mode, sandbox_mode=current.sandbox_mode,
+        )
         if live_violation is not None:
             raise live_violation
         live_constraints = {
@@ -415,7 +424,9 @@ async def bootstrap_agent_loop(
             current,
             mode=live_mode,
             approval_policy=managed_requirements.approval_policy_for_mode(live_mode),
-            sandbox_mode=managed_requirements.sandbox_mode_for_permission_mode(live_mode),
+            sandbox_mode=managed_requirements.sandbox_mode_for_permission_mode(
+                live_mode, sandbox_mode=current.sandbox_mode,
+            ),
             filesystem_constraints=_with_skill_read_roots(live_constraints),
             requirements_source=(
                 str(live_violation.source)
@@ -562,8 +573,9 @@ async def bootstrap_agent_loop(
         deadline=deadline_controller.turn_deadline,
         cancel_event=cancel_event,
         hook_manager=hook_manager,
-        resume_from_checkpoint=bool(
+        input_restored=bool(
             resolved_metadata.get("_query_engine_recovery_restored")
+            or resolved_metadata.get("_turn_admission_restored")
         ),
     )
     user_message = preflight.user_message

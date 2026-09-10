@@ -1,0 +1,6 @@
+interface:
+  display_name: "Skill Creator"
+  short_description: "编写并验证任务专用技能"
+  icon_small: "./assets/skill-creator.svg"
+  icon_large: "./assets/skill-creator.svg"
+  brand_color: "#8b5cf6"

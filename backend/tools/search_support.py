@@ -23,7 +23,6 @@ from backend.tools.base import (
 from backend.tools.path_resolution import (
     PathTraversalError,
     _is_declared_readable_path,
-    denied_path_patterns,
 )
 from backend.workspace.path_filters import is_windows_reserved_path
 from backend.workspace.fuzzy_search import iter_search_paths
@@ -39,6 +38,7 @@ from typing import (
 import asyncio
 import os
 import re
+import subprocess
 import time
 
 
@@ -90,6 +90,7 @@ REGEX_MAX_PATTERN_CHARS = 4096
 REGEX_MAX_LINE_CHARS = 1_000_000
 
 RIPGREP_TRANSPORT_LIMIT_BYTES = 20_000_000
+RIPGREP_ARGV_LIMIT = 24_000
 
 PYTHON_SEARCH_TIMEOUT_SECONDS = RIPGREP_TIMEOUT_SECONDS
 
@@ -212,7 +213,7 @@ def _resolve_search_path(
     workspace_root: Path | None = None
     if workspace_bound_context and context.workspace_root:
         workspace_root = Path(context.workspace_root).resolve()
-    elif fallback_workspace_root is not None:
+    elif not workspace_bound_context and fallback_workspace_root is not None:
         workspace_root = Path(fallback_workspace_root).resolve()
 
     path = Path(path_str)
@@ -409,26 +410,13 @@ def clear_search_caches() -> None:
     return None
 
 
-def _denied_path_patterns(context: Any) -> list[str]:
-    """Delegate to the shared workspace denylist projection (path_resolution)."""
-    return denied_path_patterns(context)
-
-
-def _denylist_ripgrep_globs(patterns: list[str]) -> list[str]:
-    """Translate denylist patterns into ripgrep exclude globs."""
-    globs: list[str] = []
-    for pattern in patterns:
-        stripped = pattern.rstrip("/")
-        if not stripped:
-            continue
-        if pattern.endswith("/"):
-            # A trailing slash denies the whole subtree, as in gitignore.
-            globs.append(f"!**/{stripped}/**")
-            continue
-        globs.append(f"!{stripped}" if "/" in stripped else f"!**/{stripped}")
-        if not stripped.endswith("**"):
-            globs.append(f"!**/{stripped}/**" if "/" not in stripped else f"!{stripped}/**")
-    return globs
+def search_path_permission(context: Any) -> Callable[[Path], bool] | None:
+    checker = getattr(context, "permission_checker", None)
+    if checker is None:
+        return None
+    permission = getattr(context, "permission", None)
+    is_allowed = checker.prepare_path_check(context=permission)
+    return lambda path: is_allowed(str(path))
 
 
 class _BinaryFileDetected(RuntimeError):
@@ -888,6 +876,37 @@ def _grep_candidates(
     )
 
 
+def _ripgrep_path_batches(
+    command: list[str], paths: Iterator[Path], deadline: float,
+    search_root: Path, is_allowed: Callable[[Path], bool],
+) -> Iterator[list[str]]:
+    def command_size(arguments: list[str]) -> int:
+        if os.name == "nt":
+            return len(subprocess.list2cmdline(arguments).encode("utf-16-le")) // 2
+        return sum(len(os.fsencode(argument)) + 1 for argument in arguments)
+
+    base_size = command_size(command)
+    batch: list[str] = []
+    size = base_size
+    for path in paths:
+        if time.monotonic() >= deadline:
+            raise SearchResourceLimitError("ripgrep candidate selection exceeded the search time limit")
+        if not is_allowed(path):
+            continue
+        argument = str(path.relative_to(search_root))
+        cost = command_size([argument]) + 1
+        if base_size + cost > RIPGREP_ARGV_LIMIT:
+            raise SearchResourceLimitError("ripgrep arguments exceed the platform command-line budget; narrow the query")
+        if batch and size + cost > RIPGREP_ARGV_LIMIT:
+            yield batch
+            batch = []
+            size = base_size
+        batch.append(argument)
+        size += cost
+    if batch:
+        yield batch
+
+
 async def _grep_with_ripgrep(
     pattern: str,
     search_root: Path,
@@ -904,6 +923,7 @@ async def _grep_with_ripgrep(
     file_type: str | None = None,
     file_extensions: list[str] | None = None,
     exclude_globs: list[str] | None = None,
+    is_allowed: Callable[[Path], bool] | None = None,
 ) -> tuple[str, bool]:
     """
     Execute grep using ripgrep (rg) binary.
@@ -913,6 +933,9 @@ async def _grep_with_ripgrep(
     # Search hidden files but exclude VCS metadata dirs. --no-ignore is
     # deliberately not passed, so .gitignore is still respected.
     cmd = ["rg", "--color=never", "--hidden"]
+    authorized_directory = is_allowed is not None and search_root.is_dir()
+    if authorized_directory:
+        cmd.append("--with-filename")
     cmd.extend(["--max-columns", "500"])
     if output_mode == "files_with_matches":
         cmd.extend(["--files-with-matches", "--sort=modified"])
@@ -941,18 +964,19 @@ async def _grep_with_ripgrep(
         elif context_lines > 0:
             cmd.extend(["-C", str(context_lines)])
 
+    file_filters: list[str] = []
     if glob_pattern:
-        cmd.extend(["--glob", glob_pattern])
+        file_filters.extend(["--glob", glob_pattern])
 
-    # Ripgrep's last matching glob wins. Apply exclusions after the query's
-    # include glob, as CC does for permission-derived ignore patterns.
+    # Ripgrep's last matching glob wins. Apply query exclusions after the
+    # include glob; concrete-file authorization is handled before spawning.
     for vcs_dir in (".git", ".svn", ".hg", ".bzr", ".jj", ".sl"):
-        cmd.extend(["--glob", f"!{vcs_dir}"])
+        file_filters.extend(["--glob", f"!{vcs_dir}"])
     for reserved in ("nul", "con", "prn", "aux", "com[1-9]", "lpt[1-9]"):
-        cmd.extend(["--iglob", f"!**/{reserved}"])
-        cmd.extend(["--iglob", f"!**/{reserved}.*"])
+        file_filters.extend(["--iglob", f"!**/{reserved}"])
+        file_filters.extend(["--iglob", f"!**/{reserved}.*"])
     for exclude in exclude_globs or []:
-        cmd.extend(["--glob", exclude])
+        file_filters.extend(["--glob", exclude])
 
     normalized_extensions = sorted({extension.casefold() for extension in file_extensions or []})
     if normalized_extensions:
@@ -960,10 +984,11 @@ async def _grep_with_ripgrep(
         # path so it intersects with a caller's --glob instead of broadening it
         # through several positive glob overrides.
         for extension in normalized_extensions:
-            cmd.extend(["--type-add", f"minicodeextensions:*{extension}"])
-        cmd.extend(["--type", "minicodeextensions"])
+            file_filters.extend(["--type-add", f"minicodeextensions:*{extension}"])
+        file_filters.extend(["--type", "minicodeextensions"])
     elif file_type:
-        cmd.extend(["--type", file_type])
+        file_filters.extend(["--type", file_type])
+    cmd.extend(file_filters)
 
     # NOTE: do NOT pass rg --max-count here. --max-count caps matches *per file*,
     # which combined with output-side offset pagination silently dropped results
@@ -973,47 +998,75 @@ async def _grep_with_ripgrep(
         cmd.extend(["-e", pattern])
     else:
         cmd.append(pattern)
-    cmd.append(str(search_root))
+    cmd.append("--")
+    deadline = time.monotonic() + RIPGREP_TIMEOUT_SECONDS
+    if not authorized_directory and is_allowed is not None and not is_allowed(search_root):
+        return "(no matches)", False
 
+    outputs: list[bytes] = []
+    transport_bytes = 0
     try:
-        proc = await spawn_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except OSError as exc:
-        return f"failed to start ripgrep: {exc}", True
-
-    try:
-        stdout, stderr = await communicate_bounded(
-            proc,
-            timeout=RIPGREP_TIMEOUT_SECONDS,
-            stdout_limit_bytes=RIPGREP_TRANSPORT_LIMIT_BYTES,
-            stderr_limit_bytes=RIPGREP_TRANSPORT_LIMIT_BYTES,
-        )
-    except asyncio.TimeoutError:
-        return (
-            f"ripgrep search exceeded the {RIPGREP_TIMEOUT_SECONDS:.0f}s time limit",
-            True,
-        )
+        if authorized_directory:
+            # Explicit rg file arguments bypass glob/type/ignore filters. Let
+            # rg apply those while listing names, then authorize each concrete
+            # file before any content-search process can open it.
+            proc = await spawn_exec(
+                "rg", "--files", "--null", "--hidden", *file_filters, "--", str(search_root),
+                cwd=str(search_root),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            filenames, stderr = await communicate_bounded(
+                proc, timeout=max(0, deadline - time.monotonic()),
+                stdout_limit_bytes=RIPGREP_TRANSPORT_LIMIT_BYTES,
+                stderr_limit_bytes=RIPGREP_TRANSPORT_LIMIT_BYTES,
+            )
+            transport_bytes = len(filenames) + len(stderr)
+            if transport_bytes > RIPGREP_TRANSPORT_LIMIT_BYTES:
+                return "search output exceeded the 20 MB ripgrep transport limit; narrow the path/pattern", True
+            if proc.returncode not in (0, 1):
+                return f"ripgrep error: {decode_process_output(stderr)}", True
+            candidates = (
+                search_root / name
+                for name in decode_process_output(filenames).split("\0") if name
+            )
+            batches = _ripgrep_path_batches(cmd, candidates, deadline, search_root, is_allowed)
+        else:
+            batches = iter([[str(search_root)]])
+        while (batch := await asyncio.to_thread(next, batches, None)) is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            proc = await spawn_exec(
+                *cmd, *batch,
+                cwd=str(search_root if search_root.is_dir() else search_root.parent),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            budget = RIPGREP_TRANSPORT_LIMIT_BYTES - transport_bytes
+            stdout, stderr = await communicate_bounded(
+                proc, timeout=max(0, deadline - time.monotonic()),
+                stdout_limit_bytes=budget, stderr_limit_bytes=budget,
+            )
+            transport_bytes += len(stdout) + len(stderr)
+            if transport_bytes > RIPGREP_TRANSPORT_LIMIT_BYTES:
+                return "search output exceeded the 20 MB ripgrep transport limit; narrow the path/pattern", True
+            if proc.returncode not in (0, 1):
+                return f"ripgrep error: {decode_process_output(stderr)}", True
+            outputs.append(stdout)
+    except (asyncio.TimeoutError, SearchResourceLimitError):
+        return f"ripgrep search exceeded the {RIPGREP_TIMEOUT_SECONDS:.0f}s time or command-line budget", True
     except SubprocessOutputLimitError:
-        return (
-            "search output exceeded the 20 MB ripgrep transport limit; "
-            "narrow the path/pattern or use pagination",
-            True,
-        )
+        return "search output exceeded the 20 MB ripgrep transport limit; narrow the path/pattern or use pagination", True
+    except OSError as exc:
+        return f"ripgrep search failed: {exc}", True
 
-    if proc.returncode not in (0, 1):  # 1 = no matches
-        error = decode_process_output(stderr)
-        return f"ripgrep error: {error}", True
-
-    output = decode_process_output(stdout)
+    output = decode_process_output(b"".join(outputs))
     if not output:
         output = "(no matches)"
     else:
         output_lines = [_relativize_prefixed_line(line, search_root) for line in output.splitlines()]
         if output_mode == "files_with_matches":
-            # rg sorts modified time oldest-first; CC presents newest-first.
+            # A permitted path batch is only transport, not a new result page.
+            output_lines = await asyncio.to_thread(_sort_glob_matches, search_root, output_lines)
             output_lines.reverse()
         output_lines, truncated = _apply_pagination(output_lines, offset=offset, head_limit=limit)
         output = "\n".join(output_lines) or "(no matches on this page)"
@@ -1029,12 +1082,14 @@ async def _glob_with_ripgrep(
     limit: int | None,
     offset: int,
     exclude_globs: list[str] | None = None,
+    is_allowed: Callable[[Path], bool] | None = None,
 ) -> tuple[list[str], bool, str | None]:
     """Run CC's ripgrep-backed glob with bounded transport semantics."""
 
     cmd = [
         "rg",
         "--files",
+        "--null",
         "--color=never",
         "--hidden",
         "--no-ignore",
@@ -1054,6 +1109,7 @@ async def _glob_with_ripgrep(
     try:
         proc = await spawn_exec(
             *cmd,
+            cwd=str(search_root),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -1086,8 +1142,8 @@ async def _glob_with_ripgrep(
 
     all_matches = [
         _relativize_prefixed_line(line, search_root)
-        for line in decode_process_output(stdout).splitlines()
-        if line.strip()
+        for line in decode_process_output(stdout).split("\0")
+        if line and (is_allowed is None or is_allowed(search_root / line))
     ]
     # Normalize the order ourselves because rg's modified-time ordering is
     # not consistent across runner platforms. This is CC's oldest-first

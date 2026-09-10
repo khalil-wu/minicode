@@ -12,7 +12,7 @@ from backend.sandbox.runner import SandboxCapability, SandboxRunner
 @pytest.mark.parametrize("settings,network_requested,unavailable_action", [
     (
         {"sandbox_workspace_write": {"network_access": True}, "sandbox": {"enabled": False}},
-        False, "run_unsandboxed",
+        False, "reject_command",
     ),
     (
         {"sandbox": {"enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": False}},
@@ -35,4 +35,5 @@ def test_sandbox_diagnostics_use_the_effective_command_configuration(
     assert diagnostic["requested"]["network"] is network_requested
     assert diagnostic["requested"]["network"] is not command_policy.resolve().allow_network
     assert diagnostic["unavailable_action"] == unavailable_action
-    assert diagnostic["fail_closed"] is command_policy.preflight_required
+    assert diagnostic["fail_closed"] is True
+    assert command_policy.preflight_required is (unavailable_action == "reject_turn")

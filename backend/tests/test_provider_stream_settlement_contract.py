@@ -23,11 +23,6 @@ class _Budget:
         return None
 
 
-class _Chain:
-    def record_usage(self, **_kwargs) -> None:
-        return None
-
-
 def _settle(*, provider_done: bool):
     kernel = _Kernel()
 
@@ -52,7 +47,6 @@ def _settle(*, provider_done: bool):
                 context_builder=SimpleNamespace(record_actual_usage=lambda *_args, **_kwargs: None),
                 usage=UsageInfo(),
                 turn_usage=UsageInfo(),
-                chain=_Chain(),
             )
         ]
         return updates, kernel.closed

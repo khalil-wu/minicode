@@ -107,14 +107,25 @@ class SessionRunManager:
             return
         queue.close()
 
-    def _persist_user_queues(self) -> None:
-        if self._durable_queue is None:
-            return
-        self._durable_queue.save(
-            {conversation_id: list(commands) for conversation_id, commands in self._user_message_queues.items()},
-            self._inflight_user_messages,
-            self._durable_turn_inputs,
-        )
+    def _persist_user_queues(
+        self,
+        *,
+        queues: dict[str, deque[Any]] | None = None,
+        inflight: dict[str, Any] | None = None,
+        turn_inputs: dict[str, list[Any]] | None = None,
+    ) -> None:
+        queues = self._user_message_queues if queues is None else queues
+        inflight = self._inflight_user_messages if inflight is None else inflight
+        turn_inputs = self._durable_turn_inputs if turn_inputs is None else turn_inputs
+        if self._durable_queue is not None:
+            self._durable_queue.save(
+                {owner: list(commands) for owner, commands in queues.items()},
+                inflight,
+                turn_inputs,
+            )
+        self._user_message_queues = queues
+        self._inflight_user_messages = inflight
+        self._durable_turn_inputs = turn_inputs
 
     def mark_terminal_status(self, conversation_id: str, status: str) -> None:
         conversation_id = str(conversation_id or "").strip()
@@ -158,9 +169,9 @@ class SessionRunManager:
         )
 
     def enqueue_user_message(self, conversation_id: str, command: Any) -> int:
-        queue = self._user_message_queues.setdefault(conversation_id, deque())
+        queue = deque(self._user_message_queues.get(conversation_id, ()))
         queue.append(command)
-        self._persist_user_queues()
+        self._persist_user_queues(queues={**self._user_message_queues, conversation_id: queue})
         return len(queue)
 
     def dequeue_user_message(self, conversation_id: str) -> Any | None:
@@ -240,11 +251,12 @@ class SessionRunManager:
             if str(getattr(command, "data", {}).get("assistant_message_id") or "").strip() != message_id
         )
         removed = len(kept) != len(queue)
+        queues = dict(self._user_message_queues)
         if kept:
-            self._user_message_queues[conversation_id] = kept
+            queues[conversation_id] = kept
         else:
-            self._user_message_queues.pop(conversation_id, None)
-        self._persist_user_queues()
+            queues.pop(conversation_id, None)
+        self._persist_user_queues(queues=queues)
         return removed
 
     def pop_queued_user_message(self, conversation_id: str, message_id: str) -> Any | None:
@@ -264,12 +276,16 @@ class SessionRunManager:
         if index < 0:
             return None
         command = commands.pop(index)
+        queues = dict(self._user_message_queues)
         if commands:
-            self._user_message_queues[conversation_id] = deque(commands)
+            queues[conversation_id] = deque(commands)
         else:
-            self._user_message_queues.pop(conversation_id, None)
-        self._durable_turn_inputs.setdefault(conversation_id, []).append(command)
-        self._persist_user_queues()
+            queues.pop(conversation_id, None)
+        turn_inputs = {
+            **self._durable_turn_inputs,
+            conversation_id: [*self._durable_turn_inputs.get(conversation_id, ()), command],
+        }
+        self._persist_user_queues(queues=queues, turn_inputs=turn_inputs)
         return command
 
     def queued_user_messages(self, conversation_id: str) -> list[Any]:
@@ -294,16 +310,18 @@ class SessionRunManager:
         return result
 
     def replace_user_message_queue(self, conversation_id: str, commands: list[Any]) -> None:
+        queues = dict(self._user_message_queues)
         if commands:
-            self._user_message_queues[conversation_id] = deque(commands)
+            queues[conversation_id] = deque(commands)
         else:
-            self._user_message_queues.pop(conversation_id, None)
-        self._persist_user_queues()
+            queues.pop(conversation_id, None)
+        self._persist_user_queues(queues=queues)
 
-    def _discard_durable_turn_input(self, conversation_id: str, command: Any) -> bool:
-        pending = self._durable_turn_inputs.get(conversation_id)
+    def _without_durable_turn_input(self, conversation_id: str, command: Any) -> tuple[dict[str, list[Any]], bool]:
+        turn_inputs = dict(self._durable_turn_inputs)
+        pending = list(turn_inputs.get(conversation_id, ()))
         if not pending:
-            return False
+            return turn_inputs, False
         index = next(
             (item_index for item_index, item in enumerate(pending) if item is command),
             -1,
@@ -325,17 +343,20 @@ class SessionRunManager:
                 -1,
             )
         if index < 0:
-            return False
+            return turn_inputs, False
         pending.pop(index)
-        if not pending:
-            self._durable_turn_inputs.pop(conversation_id, None)
-        return True
+        if pending:
+            turn_inputs[conversation_id] = pending
+        else:
+            turn_inputs.pop(conversation_id, None)
+        return turn_inputs, True
 
     def acknowledge_turn_input(self, conversation_id: str, command: Any) -> bool:
         """Acknowledge one promoted steer after it entered model context."""
-        if not self._discard_durable_turn_input(conversation_id, command):
+        turn_inputs, removed = self._without_durable_turn_input(conversation_id, command)
+        if not removed:
             return False
-        self._persist_user_queues()
+        self._persist_user_queues(turn_inputs=turn_inputs)
         return True
 
     def restore_turn_input_as_follow_up(
@@ -345,9 +366,11 @@ class SessionRunManager:
     ) -> list[Any]:
         """Atomically return a failed steer promotion to the FIFO queue."""
         queue = [command, *self.queued_user_messages(conversation_id)]
-        self._user_message_queues[conversation_id] = deque(queue)
-        self._discard_durable_turn_input(conversation_id, command)
-        self._persist_user_queues()
+        turn_inputs, _removed = self._without_durable_turn_input(conversation_id, command)
+        self._persist_user_queues(
+            queues={**self._user_message_queues, conversation_id: deque(queue)},
+            turn_inputs=turn_inputs,
+        )
         return queue
 
     def turn_input_queue(self, conversation_id: str) -> TurnInputQueue:
@@ -392,16 +415,17 @@ class SessionRunManager:
         queue = self._turn_input_queues.get(conversation_id)
         if queue is None or queue.sealed:
             return None
-        item = queue.enqueue_command(
+        return queue.enqueue_command(
             command,
             mode="steer",
             target_message_id=target_message_id,
+            before_publish=lambda _item: self._persist_user_queues(
+                turn_inputs={
+                    **self._durable_turn_inputs,
+                    conversation_id: [*self._durable_turn_inputs.get(conversation_id, ()), command],
+                },
+            ),
         )
-        if item is None:
-            return None
-        self._durable_turn_inputs.setdefault(conversation_id, []).append(command)
-        self._persist_user_queues()
-        return item
 
     def pending_turn_input_snapshot(self) -> list[dict[str, Any]]:
         """Return non-destructive turn-local input state for session restore."""
@@ -435,20 +459,26 @@ class SessionRunManager:
         return snapshots
 
     def _seal_turn_input_queue(self, conversation_id: str) -> None:
-        queue = self._turn_input_queues.pop(conversation_id, None)
-        unconsumed = queue.seal_and_drain_commands() if queue is not None else []
-        durable_pending = self._durable_turn_inputs.pop(conversation_id, [])
+        queue = self._turn_input_queues.get(conversation_id)
+        unconsumed = [item.original_command for item in queue.snapshot()] if queue is not None else []
+        durable_pending = self._durable_turn_inputs.get(conversation_id, [])
         restored = list(durable_pending)
         restored.extend(
             command
             for command in unconsumed
             if not any(command is pending for pending in durable_pending)
         )
-        if not restored:
-            return
-        existing = list(self._user_message_queues.get(conversation_id) or ())
-        self._user_message_queues[conversation_id] = deque([*restored, *existing])
-        self._persist_user_queues()
+        if restored:
+            existing = list(self._user_message_queues.get(conversation_id) or ())
+            turn_inputs = dict(self._durable_turn_inputs)
+            turn_inputs.pop(conversation_id, None)
+            self._persist_user_queues(
+                queues={**self._user_message_queues, conversation_id: deque([*restored, *existing])},
+                turn_inputs=turn_inputs,
+            )
+        self._turn_input_queues.pop(conversation_id, None)
+        if queue is not None:
+            queue.seal_and_drain_commands()
 
     def promote_queued_user_message(self, conversation_id: str, message_id: str) -> list[Any] | None:
         """Move one queued prompt to the front and return the new queue order."""
@@ -468,20 +498,22 @@ class SessionRunManager:
             return None
         command = commands.pop(index)
         commands.insert(0, command)
-        self._user_message_queues[conversation_id] = deque(commands)
-        self._persist_user_queues()
+        self._persist_user_queues(queues={**self._user_message_queues, conversation_id: deque(commands)})
         return commands
 
     def clear_user_message_queue(self, conversation_id: str) -> None:
-        self._user_message_queues.pop(conversation_id, None)
-        self._inflight_user_messages.pop(conversation_id, None)
+        queues = dict(self._user_message_queues)
+        queues.pop(conversation_id, None)
+        inflight = dict(self._inflight_user_messages)
+        inflight.pop(conversation_id, None)
+        turn_inputs = dict(self._durable_turn_inputs)
+        turn_inputs.pop(conversation_id, None)
+        self._persist_user_queues(queues=queues, inflight=inflight, turn_inputs=turn_inputs)
         self._queue_dispatching.discard(conversation_id)
         self._queue_steering.discard(conversation_id)
-        self._durable_turn_inputs.pop(conversation_id, None)
         queue = self._turn_input_queues.pop(conversation_id, None)
         if queue is not None:
             queue.seal_and_drain_commands()
-        self._persist_user_queues()
 
     def forget_conversation(self, conversation_id: str) -> None:
         """Drop all stopped runtime bookkeeping for a deleted conversation."""
@@ -509,15 +541,12 @@ class SessionRunManager:
             wake_task.cancel()
 
     def clear_all_user_message_queues(self) -> None:
-        self._user_message_queues.clear()
+        self._persist_user_queues(queues={}, inflight={}, turn_inputs={})
         self._queue_dispatching.clear()
         self._queue_steering.clear()
         for queue in self._turn_input_queues.values():
             queue.seal_and_drain_commands()
         self._turn_input_queues.clear()
-        self._durable_turn_inputs.clear()
-        self._inflight_user_messages.clear()
-        self._persist_user_queues()
 
     def begin_queue_steering(self, conversation_id: str) -> bool:
         """Pause automatic dequeue while one queued prompt is being promoted."""
@@ -1008,11 +1037,12 @@ class SessionRunManager:
         seen_task_ids: set[str] = set()
         tasks_to_wait: set[asyncio.Task[Any]] = set()
 
+        # Capture and signal the concrete runs before awaiting cleanup. A
+        # completed run may be replaced while its children are still draining.
         for cid in target_ids:
             task_id = self.run_task_ids.get(cid)
             if task_id:
                 seen_task_ids.add(str(task_id))
-                await self._cancel_run_tree(str(task_id), reason=reason)
 
             cancel_event = self.cancel_events.get(cid)
             if isinstance(cancel_event, asyncio.Event):
@@ -1022,7 +1052,7 @@ class SessionRunManager:
                 seen_tasks.add(task)
                 tasks_to_wait.add(task)
                 cancelled_any = True
-                if not task.done():
+                if not task.done() and not task.cancelling():
                     task.cancel()
 
         active_task = self._active_run_task
@@ -1033,11 +1063,12 @@ class SessionRunManager:
             if isinstance(active_cancel_event, asyncio.Event):
                 active_cancel_event.set()
             if active_task is not None and active_task not in seen_tasks and not active_task.done():
-                active_task.cancel()
+                if not active_task.cancelling():
+                    active_task.cancel()
                 tasks_to_wait.add(active_task)
                 cancelled_any = True
             if active_task_id and active_task_id not in seen_task_ids:
-                await self._cancel_run_tree(str(active_task_id), reason=reason)
+                seen_task_ids.add(str(active_task_id))
 
         await await_with_deadline(
             self._session.cancel_pending_approvals(
@@ -1048,6 +1079,10 @@ class SessionRunManager:
             label="pending approval cancellation",
             owner=self._session.cleanup_tasks,
         )
+        await asyncio.gather(*(
+            self._cancel_run_tree(task_id, reason=reason)
+            for task_id in seen_task_ids
+        ))
         current = asyncio.current_task()
         waitable = [task for task in tasks_to_wait if task is not current and not task.done()]
         if waitable:

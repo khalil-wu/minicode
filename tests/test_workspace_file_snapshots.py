@@ -119,7 +119,7 @@ def test_workspace_preview_size_matches_the_bytes_sent_to_the_parser(tmp_path, m
 
     snapshot = service.preview_file("sample.txt")
 
-    assert snapshot["content"] == "中文新快照"
+    assert snapshot["content"] == "中文新快照\r\n"
     assert snapshot["size_bytes"] == len(expected.encode("utf-8"))
 
 

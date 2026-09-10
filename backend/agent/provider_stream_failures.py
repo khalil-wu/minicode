@@ -15,7 +15,6 @@ from backend.agent.loop_runtime_helpers import (
     terminal_reason_from_error_type,
 )
 from backend.agent.message import AgentEvent
-from backend.agent.provider_protocol import add_usage
 from backend.agent.recovery_controller import RecoveryProfile
 from backend.agent.stream_sanitizer import scrub_thinking_tags
 from backend.agent.tool_events import (
@@ -180,7 +179,7 @@ async def recover_stream_timeout(
     async for recovery_event in degrade_and_finish(
         state=state,
         ctx=context_builder,
-        usage=add_usage(turn_usage, usage),
+        usage=turn_usage,
         stream_text=stream_text,
         full_text=stream_text.pending_recovery_text(scrub_thinking_tags),
         pending_tool_calls=pending_tool_calls,
@@ -219,7 +218,7 @@ async def recover_provider_failure(
     async for recovery_event in degrade_and_finish(
         state=state,
         ctx=context_builder,
-        usage=add_usage(turn_usage, usage),
+        usage=turn_usage,
         stream_text=stream_text,
         full_text=stream_text.pending_recovery_text(scrub_thinking_tags),
         pending_tool_calls=pending_tool_calls,

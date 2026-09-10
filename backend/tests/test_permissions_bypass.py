@@ -66,12 +66,12 @@ def test_bypass_allows_normal_workspace_write():
     assert decision.capability_allowed
 
 
-def test_bypass_keeps_shell_substitution_at_confirmation_boundary(tmp_path: Path) -> None:
+def test_bypass_distinguishes_destructive_substitution_from_normal_expansion(tmp_path: Path) -> None:
     checker = PermissionChecker(settings=PermissionSettings(), workspace_root=tmp_path)
     tool = RunCommandTool(ArtifactStore(storage_dir=str(tmp_path)))
     context = PermissionContext(mode="bypass")
 
-    for command in ("$(rm -rf /)", "`rm -rf /`", "echo $(date)"):
+    for command in ("$(rm -rf /)", "`rm -rf /`"):
         decision = checker.evaluate(
             "run_command",
             {"command": command},
@@ -79,7 +79,13 @@ def test_bypass_keeps_shell_substitution_at_confirmation_boundary(tmp_path: Path
             tool=tool,
         )
         assert decision.permission_level.value == "confirm"
-        assert decision.matched_rule_source == "injection_risk"
+        assert decision.matched_rule_source == "capability_boundary"
+
+    for command in ("echo $(date)", 'Write-Output "$(Get-Location)"', 'printf "%s" "${PYTHONPATH}"'):
+        decision = checker.evaluate(
+            "run_command", {"command": command}, context=context, tool=tool,
+        )
+        assert decision.decision == "allow"
 
 
 def test_bypass_keeps_destructive_git_and_external_commands_at_confirmation_boundary(

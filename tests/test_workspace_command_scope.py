@@ -13,6 +13,8 @@ from backend.permissions.checker import PermissionChecker
 from backend.services.workspace_service import resolve_requested_workspace
 from backend.ws.command_scope import resolve_command_scope
 from backend.ws.handlers import preview, terminal
+from backend.ws.handlers import diff
+from backend.ws.command_dispatcher import SessionCommandDispatcher
 
 
 def _session(workspace: Path | None, bound_workspace: str = "") -> SimpleNamespace:
@@ -42,6 +44,13 @@ def _session(workspace: Path | None, bound_workspace: str = "") -> SimpleNamespa
     ("terminal.exec", terminal.handle_terminal_exec),
     ("preview.launch.config", preview.handle_preview_launch_config),
     ("preview.launch.start", preview.handle_preview_launch_start),
+    ("diff.git_working_tree", diff.handle_diff_git_working_tree),
+    ("diff.git_staged", diff.handle_diff_git_staged),
+    ("diff.git_stage_file", diff.handle_diff_git_stage_file),
+    ("diff.git_unstage_file", diff.handle_diff_git_unstage_file),
+    ("diff.git_stage_all", diff.handle_diff_git_stage_all),
+    ("diff.git_unstage_all", diff.handle_diff_git_unstage_all),
+    ("diff.git_revert_file", diff.handle_diff_git_revert_file),
 ])
 def test_workspace_commands_reject_missing_mount_before_accessing_the_server_cwd(
     tmp_path: Path, monkeypatch, bound: bool, command: str, handler,
@@ -107,3 +116,24 @@ def test_mounted_workspace_reaches_terminal_execution_and_preview_config(tmp_pat
     assert event.type == "preview.launch.config"
     assert event.data["workspace_root"] == str(workspace)
     assert event.data["configs"][0]["cwd"] == str(workspace)
+
+
+def test_message_cwd_keeps_the_existing_isolated_worktree(tmp_path: Path, monkeypatch) -> None:
+    from unittest.mock import Mock
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    owner = SimpleNamespace(id="isolated-task", workspace_root=str(tmp_path / "repo"), worktree_path=str(worktree), git_isolated=True)
+    update_binding = Mock()
+    session = SimpleNamespace(
+        session_id="worktree-session", active_conversation_id=owner.id,
+        conversation_repo=SimpleNamespace(get_conversation=lambda _id: owner, update_workspace_binding=update_binding),
+        activate_workspace_path=AsyncMock(), send_event=AsyncMock(),
+    )
+    monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda _root: True)
+    dispatcher = SessionCommandDispatcher(session, root_dir=tmp_path / "commands")
+
+    assert asyncio.run(dispatcher._handle_user_message_workspace(str(worktree), owner.id)) == (True, owner.id)
+    assert (owner.workspace_root, owner.worktree_path, owner.git_isolated) == (str(tmp_path / "repo"), str(worktree), True)
+    update_binding.assert_not_called()
+    session.activate_workspace_path.assert_not_awaited()

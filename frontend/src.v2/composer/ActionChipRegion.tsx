@@ -29,7 +29,7 @@ export const ContextChipRegion = () => {
             <button
               type="button"
               aria-label={`打开 ${item.name}`}
-              onClick={() => openEditorFile(item.path, item.name)}
+              onClick={() => openEditorFile(item.path, item.name, { exact: true })}
               style={mentionLabelButtonStyle}
             >
               {fileIcon(item.name || item.path || "file", { size: 12, className: "composer-context-icon-svg" })}
@@ -71,7 +71,7 @@ export const ContextChipRegion = () => {
               onClick={() => {
                 addSelectedMention(item);
                 setMentionResults([]);
-                if (item.kind === "file") openEditorFile(item.path, item.name);
+                if (item.kind === "file") openEditorFile(item.path, item.name, { exact: true });
               }}
               style={searchTokenStyle}
             >

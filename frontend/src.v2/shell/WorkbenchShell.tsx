@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { X } from "lucide-react";
 import { HeaderBar } from "./HeaderBar";
@@ -6,7 +6,6 @@ import { SidebarLeft } from "./SidebarLeft";
 import { SidebarRight } from "./SidebarRight";
 import { BottomDock } from "./BottomDock";
 import { MainSlots } from "./MainSlots";
-import { SideChatPanel } from "../panels/SideChatPanel";
 import { ChatPane } from "../chat/ChatPane";
 import { useAppStore } from "../stores";
 import { selectPreviewSurface } from "../lib/preview-projection";
@@ -16,6 +15,8 @@ import { ChatErrorFallback } from "../components/ChatErrorFallback";
 import { isDesktop, runtime } from "../desktop/runtime";
 import { useEscapeKey, useFocusTrap } from "../hooks/useFocusTrap";
 import { getConnectionPresentation } from "./connectionPresentation";
+
+const SkillsMarketplace = lazy(() => import("../overlays/SkillsMarketplace").then((m) => ({ default: m.SkillsMarketplace })));
 
 const useCompactWorkbench = () => {
   const [compact, setCompact] = useState(isCompactWorkbenchViewport);
@@ -120,41 +121,45 @@ const NarrowSidebarDrawer = ({
   label,
   onClose,
   side,
+  modal = true,
+  open = true,
 }: {
   children: ReactNode;
   id: string;
   label: string;
   onClose: () => void;
   side: "left" | "right";
+  modal?: boolean;
+  open?: boolean;
 }) => {
-  const dialogRef = useFocusTrap(true);
-  useEscapeKey(onClose);
+  const dialogRef = useFocusTrap(modal && open);
+  useEscapeKey(onClose, modal && open, dialogRef);
   return (
     <div
-      className="mc-narrow-drawer-backdrop"
+      className={modal && open ? "mc-narrow-drawer-backdrop" : undefined}
       data-side={side}
-      onMouseDown={onClose}
-      style={{
+      onMouseDown={modal ? onClose : undefined}
+      style={modal ? {
         position: "fixed",
         inset: 0,
         zIndex: "var(--z-drawer)",
-        display: "flex",
+        display: open ? "flex" : "none",
         justifyContent: side === "left" ? "flex-start" : "flex-end",
         background: "var(--backdrop-subtle)",
         padding: 8,
-      }}
+      } : { display: open ? "contents" : "none" }}
     >
       <div
-        className="mc-narrow-drawer-surface"
+        className={modal && open ? "mc-narrow-drawer-surface" : undefined}
         data-side={side}
         ref={dialogRef}
         id={id}
-        role="dialog"
-        aria-modal="true"
-        aria-label={label}
-        tabIndex={-1}
+        role={modal ? "dialog" : undefined}
+        aria-modal={modal ? true : undefined}
+        aria-label={modal ? label : undefined}
+        tabIndex={modal ? -1 : undefined}
         onMouseDown={(event) => event.stopPropagation()}
-        style={{
+        style={modal ? {
           width: side === "right" ? "min(480px, calc(100vw - 16px))" : "min(380px, calc(100vw - 16px))",
           minWidth: 0,
           display: "flex",
@@ -164,9 +169,9 @@ const NarrowSidebarDrawer = ({
           border: "1px solid var(--border-subtle)",
           borderRadius: "var(--radius-md, 8px)",
           boxShadow: "var(--shadow-strong, var(--shadow-medium))",
-        }}
+        } : { display: "contents" }}
       >
-        <div
+        {modal && <div
           style={{
             minHeight: 40,
             display: "flex",
@@ -185,17 +190,22 @@ const NarrowSidebarDrawer = ({
           >
             <X size={16} />
           </button>
-        </div>
-        <div style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>{children}</div>
+        </div>}
+        <div style={modal ? { flex: 1, minHeight: 0, display: "flex", overflow: "hidden" } : { display: "contents" }}>{children}</div>
       </div>
     </div>
   );
 };
 
 export const WorkbenchShell = () => {
+  const skillsMarketplaceOpen = useAppStore((s) => s.skillsMarketplaceOpen);
+  const [marketplaceVisited, setMarketplaceVisited] = useState(skillsMarketplaceOpen);
+  useEffect(() => {
+    if (skillsMarketplaceOpen) setMarketplaceVisited(true);
+  }, [skillsMarketplaceOpen]);
   const sideChatOpen = useAppStore((s) => s.sideChatOpen);
-  const toggleSideChat = useAppStore((s) => s.toggleSideChat);
   const appMode = useAppStore((s) => s.appMode);
+  const settingsOpen = useAppStore((s) => s.settingsOpen);
   const leftSidebarWidth = useAppStore((s) => s.leftSidebarWidth);
   const panelSlots = useAppStore((s) => s.panelSlots);
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
@@ -207,9 +217,6 @@ export const WorkbenchShell = () => {
   const [compactPanel, setCompactPanel] = useState<"left" | "right" | null>(null);
   const previousRightPanelOpenRef = useRef(rightPanelOpen);
   const previousRightStackTabRef = useRef(rightStackTab);
-  const sideChatFallbackButtonRef = useRef<HTMLButtonElement>(null);
-  const sideChatDialogRef = useFocusTrap(sideChatOpen, sideChatFallbackButtonRef);
-  useEscapeKey(toggleSideChat, sideChatOpen);
   const activeCodeSlot =
     panelSlots.find((slot) => slot.focused) ??
     panelSlots.find((slot) => slot.kind !== "chat") ??
@@ -217,16 +224,12 @@ export const WorkbenchShell = () => {
   const codePanelMaximized = Boolean(
     appMode === "code" && activeCodeSlot?.maximized && activeCodeSlot.kind !== "chat",
   );
-  const leftPanelAvailable = appMode === "cowork" || (appMode === "code" && !codePanelMaximized);
-  const rightPanelAvailable = appMode === "cowork" || (appMode === "code" && !codePanelMaximized);
+  const leftPanelAvailable = skillsMarketplaceOpen || appMode === "cowork" || (appMode === "code" && !codePanelMaximized);
+  const rightPanelAvailable = !skillsMarketplaceOpen && (sideChatOpen || appMode === "cowork" || (appMode === "code" && !codePanelMaximized));
 
   useEffect(() => {
     if (!compact) setCompactPanel(null);
   }, [compact]);
-
-  useEffect(() => {
-    if (sideChatOpen) setCompactPanel(null);
-  }, [sideChatOpen]);
 
   useEffect(() => {
     if (compactPanel === "left" && !leftPanelAvailable) setCompactPanel(null);
@@ -235,10 +238,12 @@ export const WorkbenchShell = () => {
 
   useEffect(() => {
     const panelWasOpened = !previousRightPanelOpenRef.current && rightPanelOpen;
+    const panelWasClosed = previousRightPanelOpenRef.current && !rightPanelOpen;
     const requestedTabChanged = previousRightStackTabRef.current !== rightStackTab;
     previousRightPanelOpenRef.current = rightPanelOpen;
     previousRightStackTabRef.current = rightStackTab;
     if (compact && rightPanelAvailable && (panelWasOpened || requestedTabChanged)) setCompactPanel("right");
+    if (compact && panelWasClosed) setCompactPanel(null);
   }, [compact, rightPanelAvailable, rightPanelOpen, rightStackTab]);
 
   useEffect(() => {
@@ -255,6 +260,7 @@ export const WorkbenchShell = () => {
 
   const toggleWorkbenchRightPanel = () => {
     if (compact) {
+      if (compactPanel !== "right" && !rightPanelOpen) toggleRightPanel();
       setCompactPanel((current) => current === "right" ? null : "right");
       return;
     }
@@ -280,99 +286,40 @@ export const WorkbenchShell = () => {
         leftPanelOpen={compact ? compactPanel === "left" : leftSidebarWidth > 0}
         rightPanelControls={compact ? "right-panel-drawer" : undefined}
         rightPanelAvailable={rightPanelAvailable}
-        sideChatFallbackButtonRef={sideChatFallbackButtonRef}
         rightPanelOpen={compact ? compactPanel === "right" : rightPanelOpen}
         onToggleLeftPanel={toggleLeftPanel}
         onToggleRightPanel={toggleWorkbenchRightPanel}
       />
       <ConnectionBanner />
 
-      {appMode === "chat" && <ChatModeShell />}
-      {appMode !== "chat" && (
         <div className="workbench-mode-body" style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
           {!compact && leftPanelAvailable && leftSidebarWidth > 0 && <SidebarLeft />}
           <div className="workbench-stage" style={{ position: "relative", flex: 1, minWidth: 0, minHeight: 0, display: "flex", overflow: "hidden" }}>
-            <div className="workbench-primary" style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            <div className="workbench-primary" hidden={skillsMarketplaceOpen} style={{ flex: 1, minWidth: 0, minHeight: 0, display: skillsMarketplaceOpen ? "none" : "flex", flexDirection: "column", overflow: "hidden" }}>
               <div className="workbench-content" style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", overflow: "hidden" }}>
-                <WorkbenchModeShell mode={appMode === "code" ? "code" : "cowork"} />
+                {appMode === "chat" ? <ChatModeShell /> : <WorkbenchModeShell mode={appMode === "code" ? "code" : "cowork"} />}
               </div>
-              {!codePanelMaximized && <BottomDock />}
+              {appMode !== "chat" && !codePanelMaximized && <BottomDock />}
             </div>
-            {!compact && rightPanelAvailable && <SidebarRight />}
+            <div hidden={!skillsMarketplaceOpen} style={{ display: skillsMarketplaceOpen ? "flex" : "none", flex: 1, minWidth: 0 }}>
+              <Suspense fallback={<div role="status" className="skills-empty-state">正在加载插件与技能…</div>}>
+                {(marketplaceVisited || skillsMarketplaceOpen) && <SkillsMarketplace />}
+              </Suspense>
+            </div>
+            <NarrowSidebarDrawer
+              id="right-panel-drawer" label="右侧面板" side="right"
+              modal={compact} open={!settingsOpen && rightPanelAvailable && (!compact || compactPanel === "right")}
+              onClose={() => setCompactPanel(null)}
+            >
+              <SidebarRight embedded={compact} visible={!settingsOpen && rightPanelAvailable && (compact ? compactPanel === "right" : rightPanelOpen)} />
+            </NarrowSidebarDrawer>
           </div>
         </div>
-      )}
 
-      {compact && !sideChatOpen && leftPanelAvailable && compactPanel === "left" && (
+      {compact && !settingsOpen && leftPanelAvailable && compactPanel === "left" && (
         <NarrowSidebarDrawer id="left-sidebar-drawer" label="左侧栏" side="left" onClose={() => setCompactPanel(null)}>
           <SidebarLeft embedded onNavigate={() => setCompactPanel(null)} />
         </NarrowSidebarDrawer>
-      )}
-      {compact && !sideChatOpen && rightPanelAvailable && compactPanel === "right" && (
-        <NarrowSidebarDrawer id="right-panel-drawer" label="右侧面板" side="right" onClose={() => setCompactPanel(null)}>
-          <SidebarRight key={rightStackTab} embedded initialTab={rightStackTab} />
-        </NarrowSidebarDrawer>
-      )}
-
-      {sideChatOpen && (
-        <div
-          className="mc-side-chat-backdrop"
-          onMouseDown={toggleSideChat}
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: "var(--z-drawer)",
-            background: "var(--backdrop-subtle)",
-            display: "flex",
-            justifyContent: "flex-end",
-            padding: "48px 16px 16px",
-            pointerEvents: "auto",
-          }}
-        >
-          <div
-            className="mc-side-chat-surface"
-            ref={sideChatDialogRef}
-            role="dialog"
-            aria-modal="true"
-            aria-label="侧边对话"
-            tabIndex={-1}
-            onMouseDown={(event) => event.stopPropagation()}
-            style={{
-              width: "min(420px, calc(100vw - 32px))",
-              maxWidth: "100%",
-              display: "flex",
-              flexDirection: "column",
-              background: "var(--surface-page)",
-              border: "1px solid var(--border-subtle)",
-              borderRadius: "var(--radius-md, 8px)",
-              boxShadow: "var(--shadow-medium)",
-              overflow: "hidden",
-            }}
-          >
-            <div
-              style={{
-                alignItems: "center",
-                display: "flex",
-                padding: "8px 12px",
-                borderBottom: "1px solid var(--border-subtle)",
-                background: "var(--surface-soft)",
-              }}
-            >
-              <span style={{ flex: 1, fontSize: "var(--text-sm)", fontWeight: "var(--fw-semibold)" }}>侧边对话</span>
-              <span style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", marginRight: 8 }}>Ctrl+;</span>
-              <button
-                type="button"
-                onClick={toggleSideChat}
-                aria-label="关闭侧边对话"
-                title="关闭侧边对话"
-                className="btn-ghost mc-icon-button mc-icon-button-compact"
-              >
-                <X size={14} />
-              </button>
-            </div>
-            <SideChatPanel />
-          </div>
-        </div>
       )}
     </div>
   );

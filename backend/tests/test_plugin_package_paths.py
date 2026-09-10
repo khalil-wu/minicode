@@ -191,16 +191,17 @@ def test_regular_plugin_validation_and_packaging_keep_their_metadata(tmp_path: P
     skill = source / "skills" / "example" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: example\ndescription: fixture\n---\n# Example\n", encoding="utf-8")
-    excluded = source / "node_modules" / "not-packed.txt"
-    excluded.parent.mkdir()
-    excluded.write_text("excluded", encoding="utf-8")
+    dependency = source / "node_modules" / "runtime.txt"
+    dependency.parent.mkdir()
+    dependency.write_text("runtime dependency", encoding="utf-8")
 
     result = package.package_plugin_directory(source, tmp_path / "packages")
 
     assert result["ok"] is True
     assert result["validation"]["plugin"]["name"] == "regular-fixture"
     assert result["validation"]["plugin"]["skill_count"] == 1
-    assert result["validation"]["plugin"]["file_count"] == 2
+    assert result["validation"]["plugin"]["file_count"] == 3
     with zipfile.ZipFile(result["package"]["path"]) as archive:
-        assert archive.namelist() == [".minicode-plugin/plugin.json", "skills/example/SKILL.md"]
+        assert archive.namelist() == [".minicode-plugin/plugin.json", "node_modules/runtime.txt", "skills/example/SKILL.md"]
+        assert archive.read("node_modules/runtime.txt") == dependency.read_bytes()
         assert archive.read("skills/example/SKILL.md") == skill.read_bytes()

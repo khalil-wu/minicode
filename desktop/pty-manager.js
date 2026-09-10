@@ -327,31 +327,32 @@ async function waitForSessionExit(session, timeoutMs) {
 }
 
 async function terminateSession(sessionId, session) {
-  if (session.exitSettled || session.isAlive === false) return;
-  const hasValidPid = Number.isFinite(session.process.pid) && session.process.pid > 0;
+  if (session.exitSettled || session.isAlive === false) return true;
   if (!session.killPromise) {
     session.killPromise = (async () => {
       await killProcessTreeAndWait(session.process.pid, () => session.process.kill());
-      // node-pty normally exposes a positive OS pid. Test doubles and a few
-      // embedders may only expose the process-level kill primitive; once that
-      // fallback has been invoked there is no tree handle to wait on or force.
-      if (!hasValidPid) return;
-      if (await waitForSessionExit(session, killExitTimeoutMs)) return;
+      if (await waitForSessionExit(session, killExitTimeoutMs)) return true;
 
       appendDesktopLog(`[desktop] pty ${sessionId} did not exit after termination; forcing kill`);
       session.process.kill();
       if (!await waitForSessionExit(session, forceKillExitTimeoutMs)) {
         appendDesktopLog(`[desktop] pty ${sessionId} did not report exit after forced kill`);
+        return false;
       }
+      return true;
     })();
   }
-  await session.killPromise;
+  try {
+    return await session.killPromise;
+  } finally {
+    session.killPromise = null;
+  }
 }
 
 async function killSession(sessionId, conversationId) {
   const session = ptySessions.get(sessionId);
   if (isOwnedBy(session, conversationId)) {
-    await terminateSession(sessionId, session);
+    if (!await terminateSession(sessionId, session)) return false;
     if (ptySessions.get(sessionId) === session) ptySessions.delete(sessionId);
     return true;
   }

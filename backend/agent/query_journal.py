@@ -293,7 +293,6 @@ class QueryJournalRecorder:
         now = time.monotonic()
         if (
             not previous_content
-            or len(message["content"]) - len(previous_content) >= 128
             or now - previous_at >= 0.12
         ):
             if self.journal is None:

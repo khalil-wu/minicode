@@ -495,6 +495,7 @@ describe("handleNoticeEvent", () => {
       conversationId: "conv-active",
       workingDirectory: "C:\\repo",
       editorTabs: [{
+        id: "editor-fixture-1",
         path: "assets/screenshot.png",
         content: "",
         original: "",

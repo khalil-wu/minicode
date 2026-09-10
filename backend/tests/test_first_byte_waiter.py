@@ -58,3 +58,61 @@ def test_wait_for_provider_event_enforces_timeout() -> None:
 
     with pytest.raises(asyncio.TimeoutError):
         asyncio.run(run())
+
+
+@pytest.mark.parametrize("signal_cancel", [False, True], ids=["host-task", "cancel-signal"])
+def test_cancellation_closes_the_owned_provider_read(signal_cancel: bool) -> None:
+    async def run() -> None:
+        entered = asyncio.Event()
+        closed = asyncio.Event()
+        cancel = asyncio.Event()
+
+        async def provider():
+            try:
+                entered.set()
+                await asyncio.Event().wait()
+                yield "unreachable"
+            finally:
+                closed.set()
+
+        stream = provider()
+        owner = set()
+        waiter = asyncio.create_task(wait_for_provider_event(
+            stream, timeout_seconds=None, cancel_event=cancel, owner=owner,
+        ))
+        await entered.wait()
+        if signal_cancel:
+            cancel.set()
+        else:
+            waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert closed.is_set()
+        assert not owner
+        await stream.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("boundary", ["cancelled", "expired"])
+def test_ended_wait_does_not_start_a_provider_request(boundary: str) -> None:
+    async def run():
+        calls = []
+        cancel = asyncio.Event()
+        if boundary == "cancelled":
+            cancel.set()
+
+        async def provider():
+            calls.append("request sent")
+            yield "response"
+
+        stream = provider()
+        try:
+            error = asyncio.CancelledError if boundary == "cancelled" else asyncio.TimeoutError
+            with pytest.raises(error):
+                await wait_for_provider_event(stream, timeout_seconds=0 if boundary == "expired" else 1, cancel_event=cancel, owner=set())
+            assert calls == []
+        finally:
+            await stream.aclose()
+
+    asyncio.run(run())

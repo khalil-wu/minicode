@@ -413,8 +413,7 @@ svg.lucide {
 }
 
 .mc-sidebar-right [role="tab"],
-.mc-sidebar-tab-label,
-.mc-sidebar-launcher > button {
+.mc-sidebar-tab-label {
   font-size: var(--mc-font-secondary) !important;
 }
 
@@ -605,7 +604,9 @@ svg.lucide {
 }
 
 #root .composer-textarea {
+  field-sizing: content;
   min-height: 50px !important;
+  max-height: 260px;
   padding: 3px 3px 6px !important;
   border: 0 !important;
   background: transparent !important;
@@ -1180,30 +1181,25 @@ svg.lucide {
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-/* Workbench controls keep a stable text baseline; modal feedback is unchanged. */
+/* Only compact action controls compress on press. Navigation, menu rows and
+   text-bearing surfaces keep their baseline and selected-state feedback. */
 #root :where(
-  button,
-  [role="button"],
-  [role="menuitem"],
-  [role="option"]
-):not(:disabled):not([aria-disabled="true"]):not(:where(.header-bar *, .workbench-mode-body *, .chat-pane *)):active {
-  animation: mc-control-press var(--duration-micro) var(--easing-standard) both;
-}
-
-#root :where(
-  .command-palette-option[aria-selected="true"]
+  .mc-icon-button, .settings-icon-button, .plugin-icon-button,
+  .skills-icon-button, .cell-action-btn, .mc-pdf-icon-button, .btn
 ) {
-  animation: mc-control-settle var(--duration-base) var(--easing-enter) both;
+  transition: background-color var(--transition-fast), color var(--transition-fast),
+    border-color var(--transition-fast), transform var(--transition-micro);
 }
 
-@keyframes mc-control-press {
-  from { transform: scale(1); }
-  to { transform: scale(0.985); }
+#root :where(
+  .mc-icon-button, .settings-icon-button, .plugin-icon-button,
+  .skills-icon-button, .cell-action-btn, .mc-pdf-icon-button, .btn
+):not(:disabled):not([aria-disabled="true"]):active {
+  transform: scale(0.96);
 }
 
-@keyframes mc-control-settle {
-  from { opacity: 0.78; transform: translateY(1px) scale(0.985); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
+.command-palette-option {
+  transition: background-color var(--transition-fast), color var(--transition-fast);
 }
 
 html[data-reduced-motion="true"] *,

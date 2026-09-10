@@ -253,8 +253,10 @@ def apply_update_hunks(original: str, hunks: list[PatchHunk], path: str) -> str:
     ApplyPatchError if a hunk's context cannot be found.
     """
     orig_lines = original.split("\n")
-    result: list[str] = []
-    cursor = 0  # index into orig_lines already consumed into result
+    if orig_lines and orig_lines[-1] == "":
+        orig_lines.pop()
+    replacements: list[tuple[int, int, list[str]]] = []
+    cursor = 0
 
     for hunk in hunks:
         if hunk.change_context:
@@ -269,38 +271,22 @@ def apply_update_hunks(original: str, hunks: list[PatchHunk], path: str) -> str:
                         label="change context",
                     )
                 )
-            # Match the hunk after the orientation line. Preserve everything
-            # through the anchor.
-            anchor_end = context_at + 1
-            result.extend(orig_lines[cursor:anchor_end])
-            cursor = anchor_end
+            cursor = context_at + 1
 
         old_block = hunk.old_lines
         if not old_block:
-            # A pure insertion is safe when @@ supplied an orientation anchor;
-            # insert immediately after it. Without an anchor, require an explicit
-            # EOF marker rather than guessing a location.
-            if hunk.change_context:
-                result.extend(hunk.new_lines)
-                continue
-            if not hunk.is_eof:
-                raise ApplyPatchError(
-                    f"Update File '{path}': a hunk has no context lines to locate it. "
-                    "Add surrounding context lines, use '@@ <exact anchor>', or mark it "
-                    "'*** End of File' for an append."
-                )
-            result.extend(orig_lines[cursor:])
-            cursor = len(orig_lines)
-            result.extend(hunk.new_lines)
+            # Codex treats a chunk without old lines as an append, including
+            # when an orientation anchor was provided.
+            insertion = len(orig_lines) - int(bool(orig_lines and orig_lines[-1] == ""))
+            replacements.append((insertion, 0, list(hunk.new_lines)))
             continue
-        if hunk.is_eof:
-            # Combining context/removal lines with *** End of File is malformed:
-            # the EOF intent would otherwise be silently dropped. Reject.
-            raise ApplyPatchError(
-                f"Update File '{path}': a hunk mixes context/removal lines with "
-                "'*** End of File'. Drop the context or split into separate hunks."
-            )
-        match_at = _find_block(orig_lines, old_block, cursor)
+        new_block = hunk.new_lines
+        match_at = _find_block(orig_lines, old_block, cursor, eof=hunk.is_eof)
+        if match_at < 0 and old_block[-1] == "":
+            old_block = old_block[:-1]
+            if new_block and new_block[-1] == "":
+                new_block = new_block[:-1]
+            match_at = _find_block(orig_lines, old_block, cursor, eof=hunk.is_eof)
         if match_at < 0:
             raise ApplyPatchError(
                 _missing_context_message(
@@ -311,16 +297,18 @@ def apply_update_hunks(original: str, hunks: list[PatchHunk], path: str) -> str:
                     label="hunk",
                 )
             )
-        # Emit untouched lines before the match, then the replacement.
-        result.extend(orig_lines[cursor:match_at])
-        result.extend(hunk.new_lines)
+        replacements.append((match_at, len(old_block), list(new_block)))
         cursor = match_at + len(old_block)
 
-    result.extend(orig_lines[cursor:])
+    result = list(orig_lines)
+    for start, old_length, replacement in reversed(sorted(replacements, key=lambda item: item[0])):
+        result[start:start + old_length] = replacement
+    if not result or result[-1] != "":
+        result.append("")
     return "\n".join(result)
 
 
-def _find_block(haystack: list[str], block: list[str], start: int) -> int:
+def _find_block(haystack: list[str], block: list[str], start: int, *, eof: bool = False) -> int:
     """Return the index where ``block`` matches in ``haystack`` at/after ``start``.
 
     Match with a descending strictness ladder: exact, trailing-whitespace-
@@ -334,6 +322,8 @@ def _find_block(haystack: list[str], block: list[str], start: int) -> int:
     if blen > len(haystack):
         return -1
     last = len(haystack) - blen
+    if eof:
+        start = max(start, last)
 
     def seek(normalize) -> int:
         normalized_block = [normalize(line) for line in block]

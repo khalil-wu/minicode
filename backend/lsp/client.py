@@ -150,7 +150,8 @@ class LSPClient:
 
     def is_running(self) -> bool:
         return (
-            self._process is not None
+            self._initialized
+            and self._process is not None
             and self._process.returncode is None
             and self._reader_task is not None
             and not self._reader_task.done()
@@ -164,8 +165,9 @@ class LSPClient:
             # reached EOF.  Terminate that stale process before replacing it;
             # otherwise a direct ``start()`` call leaks the old server.
             try:
-                await self._sandbox_runner.terminate(self._process)
-            except (ProcessLookupError, OSError):
+                if not await self._sandbox_runner.terminate(self._process):
+                    raise RuntimeError("Language server termination is unconfirmed; retaining its process")
+            except ProcessLookupError:
                 pass
             for task_attr in ("_reader_task", "_stderr_task"):
                 task = getattr(self, task_attr)
@@ -177,9 +179,11 @@ class LSPClient:
                 except asyncio.CancelledError:
                     pass
                 setattr(self, task_attr, None)
-            self._process = None
-            self._stdin = None
-            self._stdout = None
+        self._process = None
+        self._stdin = None
+        self._stdout = None
+        self._initialized = False
+        self._opened_files.clear()
         try:
             self._process = await self._sandbox_runner.spawn_interactive(
                 [self._command, *self._args],
@@ -219,7 +223,8 @@ class LSPClient:
                 pass
         if self._process is not None:
             try:
-                await self._sandbox_runner.terminate(self._process)
+                if not await self._sandbox_runner.terminate(self._process):
+                    raise RuntimeError("Language server termination is unconfirmed; retaining its process")
             except ProcessLookupError:
                 pass
         for task_attr in ("_reader_task", "_stderr_task"):
@@ -517,10 +522,7 @@ class LSPManager:
         async with self._lock:
             client = self._clients.get(key)
             if client is not None and not client.is_running():
-                try:
-                    await client.stop()
-                except Exception:
-                    pass
+                await client.stop()
                 client = None
                 self._clients.pop(key, None)
             if client is None:
@@ -540,16 +542,20 @@ class LSPManager:
                     server_name=server,
                     sandbox_runner=runner,
                 )
+                self._clients[key] = client
                 try:
                     await client.start()
-                except RuntimeError as exc:
+                except (RuntimeError, asyncio.CancelledError) as exc:
                     logger.debug("LSP start failed for %s: %s", server, exc)
                     try:
                         await client.stop()
-                    except Exception:
+                    except (RuntimeError, OSError):
                         logger.debug("LSP cleanup failed after start error for %s", server, exc_info=True)
+                    else:
+                        self._clients.pop(key, None)
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
                     return None
-                self._clients[key] = client
             return client
 
     async def close_file(self, file_path: str, workspace_root: str) -> None:
@@ -562,12 +568,16 @@ class LSPManager:
 
     async def shutdown_all(self) -> None:
         async with self._lock:
-            for client in self._clients.values():
+            failures = []
+            for key, client in list(self._clients.items()):
                 try:
                     await client.stop()
-                except Exception:
-                    pass
-            self._clients.clear()
+                except (RuntimeError, OSError) as exc:
+                    failures.append(str(exc))
+                else:
+                    self._clients.pop(key, None)
+            if failures:
+                raise RuntimeError("Language servers remain owned after failed shutdown: " + "; ".join(failures))
 
 
 # ── Helpers ─────────────────────────────────────────────────────────

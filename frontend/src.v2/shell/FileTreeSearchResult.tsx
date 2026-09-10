@@ -43,7 +43,7 @@ export const SearchResultRow = ({
       useAppStore.getState().requestFileTreeReveal(result.path, "folder");
       return;
     }
-    useAppStore.getState().openEditorFile(result.path, result.name);
+    useAppStore.getState().openEditorFile(result.path, result.name, { exact: true });
     onNavigate?.();
   };
   return (

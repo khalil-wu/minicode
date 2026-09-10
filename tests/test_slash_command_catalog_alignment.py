@@ -1,5 +1,6 @@
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,7 @@ from backend.commands.catalog import (
     get_file_command_catalog,
 )
 from backend.commands.registry import CommandRegistry
+from backend.permissions.context import PermissionContext
 from backend.commands.slash_commands import (
     SKILL_DIR_TOKEN,
     _build_template_handler,
@@ -21,6 +23,7 @@ class _FakeSession:
         self.command_registry = CommandRegistry()
         self.active_conversation_id = "conv_test"
         self.command_results: list[dict[str, Any]] = []
+        self.permission_context = PermissionContext()
 
     async def emit_command_result(
         self,
@@ -292,7 +295,11 @@ def test_permissions_rules_add_override_invalid_usage_returns_warning() -> None:
 def test_permissions_auto_alias_matches_frontend_auto_mode() -> None:
     session = _FakeSession()
     calls: list[dict[str, Any]] = []
-    _register_recorder(session.command_registry, "conversation.permission_mode.set", calls)
+    async def set_mode(payload):
+        calls.append(dict(payload))
+        session.permission_context = replace(session.permission_context, mode=payload["mode"])
+        return True
+    session.command_registry.register("conversation.permission_mode.set", set_mode)
     register_all_slash_commands(session.command_registry)
 
     handled, next_content = _dispatch_slash(session, "/permissions", "auto")

@@ -38,12 +38,17 @@ async def handle_checkpoint_list(session: "WebSocketSession", data: dict[str, An
 
 
 async def handle_checkpoint_rewind(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from uuid import uuid4
+
+    from backend.agent.conversation_query_guard import conversation_query_guards
     from backend.services.checkpoint_service import CheckpointServiceError, rewind_checkpoint
 
+    guards = conversation_query_guards()
+    claim = None
     try:
         scope = resolve_command_scope(session, data)
-        running_task = session.running_agent_task_for(scope.conversation_id)
-        if running_task is not None and not running_task.done():
+        claim = guards.try_start(scope.conversation_id, owner_id=f"mutation:checkpoint.rewind:{uuid4().hex}")
+        if claim is None:
             raise CheckpointServiceError(
                 "Cannot rewind a checkpoint while the conversation has an active agent turn. "
                 "Stop the turn and retry the rewind."
@@ -58,6 +63,9 @@ async def handle_checkpoint_rewind(session: "WebSocketSession", data: dict[str, 
     except (CheckpointServiceError, ValueError) as exc:
         await emit_command_error(session, "checkpoint.rewind", exc)
         return True
+    finally:
+        if claim is not None:
+            guards.end(claim)
     await session.send_payload(
         scope.apply({"type": "checkpoint.rewound", "checkpoint": result.checkpoint}),
         log_context="checkpoint.rewound",
@@ -787,9 +795,9 @@ async def handle_user_message_queue_steer(session: "WebSocketSession", data: dic
 
 
 async def handle_skills_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.services.skills_service import list_skills
+    from backend.services.skills_api_service import refresh_skill_list
 
-    skills = list_skills(session.skill_manager)
+    skills = refresh_skill_list(session.skill_manager)
     conversation_id = str(
         data.get("conversation_id")
         or data.get("owner_conversation_id")
@@ -1147,7 +1155,13 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
         else None
     )
     if model_runtime is not None:
-        model_runtime.refresh()
+        model_runtime.refresh(
+            settings_snapshot=(
+                session.config.config_layer_stack.effective_config()
+                if session.config.config_layer_stack is not None
+                else None
+            )
+        )
         refresh_oauth = getattr(model_runtime, "refresh_oauth_credentials", None)
         if callable(refresh_oauth):
             await refresh_oauth(session.provider)

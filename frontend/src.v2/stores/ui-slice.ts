@@ -294,6 +294,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   envVars: [],
   gitChanges: { workingTree: [], staged: [], untracked: [], loading: false },
   skillsMarketplaceOpen: false,
+  skillsMarketplaceTab: "skills",
   skillsMarketplaceReturnTarget: "app",
   liveArtifactsOpen: false,
   agentEditorOpen: false,
@@ -405,6 +406,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       writeLS(LS.layout.rightOpen, "1");
       return {
         rightStackTab: canonicalTab,
+        ...(canonicalTab === "sidechat" ? { sideChatOpen: true } : {}),
         rightStackTabLocked: options?.automatic ? s.rightStackTabLocked : true,
         rightPanelOpen: true,
         rightSidebarWidth,
@@ -492,7 +494,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         agentEditorOpen: false,
       };
     }),
-  toggleSkillsMarketplace: (returnTarget = "app") =>
+  toggleSkillsMarketplace: (returnTarget = "app", tab = "skills") =>
     set((s) => {
       if (s.skillsMarketplaceOpen) {
         return { skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app" };
@@ -500,6 +502,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       // Close all other modals when opening skills marketplace
       return {
         skillsMarketplaceOpen: true,
+        skillsMarketplaceTab: tab,
         skillsMarketplaceReturnTarget: returnTarget,
         commandPaletteOpen: false,
         settingsOpen: false,
@@ -619,7 +622,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         previewOwnerConversationId: targetId ?? null,
         terminalSessions,
         activeTerminalSessionId,
-        rightStackTab: next.rightStackTab,
+        rightStackTab: next.rightStackTab === "sidechat" && !s.sideChatOpen ? "tasks" : next.rightStackTab,
         rightPanelOpen: next.rightPanelOpen,
         rightStackTabLocked: next.rightStackTabLocked,
         draft: next.draft,

@@ -27,6 +27,8 @@ def _command_result_session(*, conversation_id: str, repository) -> SimpleNamesp
         session_id="session-a",
         active_conversation_id=conversation_id,
         conversation_repo=repository,
+        attachment_store=SimpleNamespace(share_for_conversation=Mock()),
+        artifact_store=SimpleNamespace(share_for_conversation=Mock()),
         emit_command_result=AsyncMock(),
         running_agent_task_for=lambda _conversation_id: None,
     )
@@ -794,6 +796,8 @@ def test_local_to_worktree_binding_failure_restores_source_and_removes_created_g
     session = SimpleNamespace(
         session_id="session-handoff-local",
         conversation_repo=Repository(),
+        attachment_store=SimpleNamespace(share_for_conversation=Mock()),
+        artifact_store=SimpleNamespace(share_for_conversation=Mock()),
         current_workspace_root=lambda: source,
         main_worktree_root=lambda _path: source,
         emit_command_result=AsyncMock(),
@@ -961,6 +965,8 @@ def test_worktree_to_local_binding_failure_recreates_worktree_before_restoring_s
     session = SimpleNamespace(
         session_id="session-handoff-protected",
         conversation_repo=Repository(),
+        attachment_store=SimpleNamespace(share_for_conversation=Mock()),
+        artifact_store=SimpleNamespace(share_for_conversation=Mock()),
         main_worktree_root=lambda _path: base_root,
         emit_command_result=AsyncMock(),
     )
@@ -1095,7 +1101,11 @@ def test_post_commit_binding_error_is_detected_without_rolling_back_authority() 
             assert conversation_id == expected.id
             return expected
 
-    session = SimpleNamespace(conversation_repo=Repository())
+    session = SimpleNamespace(
+        conversation_repo=Repository(),
+        attachment_store=SimpleNamespace(share_for_conversation=Mock()),
+        artifact_store=SimpleNamespace(share_for_conversation=Mock()),
+    )
     updated, warning = asyncio.run(
         conversation_handlers._persist_workspace_binding(
             session,

@@ -41,7 +41,7 @@ async def handle_diff_git_working_tree(session: "WebSocketSession", data: dict[s
     from backend.services.diff_service import working_tree_diff_event
 
     try:
-        scope = resolve_command_scope(session, data, require_conversation=False)
+        scope = resolve_command_scope(session, data, require_conversation=False, require_workspace=True)
     except ValueError as exc:
         await emit_command_error(session, "diff.git_working_tree", exc)
         return True
@@ -60,7 +60,7 @@ async def handle_diff_git_staged(session: "WebSocketSession", data: dict[str, An
     from backend.services.diff_service import staged_diff_event
 
     try:
-        scope = resolve_command_scope(session, data, require_conversation=False)
+        scope = resolve_command_scope(session, data, require_conversation=False, require_workspace=True)
     except ValueError as exc:
         await emit_command_error(session, "diff.git_staged", exc)
         return True
@@ -78,7 +78,7 @@ async def handle_diff_git_stage_file(session: "WebSocketSession", data: dict[str
     from backend.services.diff_service import git_file_action_event
 
     try:
-        scope = resolve_command_scope(session, data, require_conversation=False)
+        scope = resolve_command_scope(session, data, require_conversation=False, require_workspace=True)
         path = session.validate_git_relative_path(str(data.get("path", "")))
     except ValueError as exc:
         await emit_command_error(session, "diff.git_stage_file", exc)
@@ -97,7 +97,7 @@ async def handle_diff_git_unstage_file(session: "WebSocketSession", data: dict[s
     from backend.services.diff_service import git_file_action_event
 
     try:
-        scope = resolve_command_scope(session, data, require_conversation=False)
+        scope = resolve_command_scope(session, data, require_conversation=False, require_workspace=True)
         path = session.validate_git_relative_path(str(data.get("path", "")))
     except ValueError as exc:
         await emit_command_error(session, "diff.git_unstage_file", exc)
@@ -116,7 +116,7 @@ async def handle_diff_git_stage_all(session: "WebSocketSession", data: dict[str,
     from backend.services.diff_service import git_all_action_event
 
     try:
-        scope = resolve_command_scope(session, data, require_conversation=False)
+        scope = resolve_command_scope(session, data, require_conversation=False, require_workspace=True)
     except ValueError as exc:
         await emit_command_error(session, "diff.git_stage_all", exc)
         return True
@@ -134,7 +134,7 @@ async def handle_diff_git_unstage_all(session: "WebSocketSession", data: dict[st
     from backend.services.diff_service import git_all_action_event
 
     try:
-        scope = resolve_command_scope(session, data, require_conversation=False)
+        scope = resolve_command_scope(session, data, require_conversation=False, require_workspace=True)
     except ValueError as exc:
         await emit_command_error(session, "diff.git_unstage_all", exc)
         return True
@@ -152,7 +152,7 @@ async def handle_diff_git_revert_file(session: "WebSocketSession", data: dict[st
     from backend.services.diff_service import git_file_action_event
 
     try:
-        scope = resolve_command_scope(session, data, require_conversation=False)
+        scope = resolve_command_scope(session, data, require_conversation=False, require_workspace=True)
         path = session.validate_git_relative_path(str(data.get("path", "")))
     except ValueError as exc:
         await emit_command_error(session, "diff.git_revert_file", exc)
@@ -177,6 +177,27 @@ async def handle_diff_git_revert_file(session: "WebSocketSession", data: dict[st
     return True
 
 
+async def handle_diff_git_revert_patch(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.diff.git_integration import revert_patch
+
+    try:
+        scope = resolve_command_scope(session, data, require_workspace=True)
+        patch = data.get("patch")
+        if not isinstance(patch, str) or not patch.strip():
+            raise ValueError("The displayed patch is required to undo this edit")
+        if data.get("confirmed") is not True:
+            raise ValueError("Confirm undoing the displayed edit before applying its reverse patch")
+        await revert_patch(scope.workspace_root, patch)
+    except Exception as exc:
+        await _emit_git_error(session, "diff.git_revert_patch", exc)
+        return True
+    await session.emit_command_result(
+        "diff.git_revert_patch", "Displayed changes reverted.", level="success",
+        data={"conversation_id": scope.conversation_id, "workspace_root": scope.workspace_root},
+    )
+    return True
+
+
 HANDLERS: dict[str, Any] = {
     "diff.git_working_tree": handle_diff_git_working_tree,
     "diff.git_staged": handle_diff_git_staged,
@@ -185,4 +206,5 @@ HANDLERS: dict[str, Any] = {
     "diff.git_stage_all": handle_diff_git_stage_all,
     "diff.git_unstage_all": handle_diff_git_unstage_all,
     "diff.git_revert_file": handle_diff_git_revert_file,
+    "diff.git_revert_patch": handle_diff_git_revert_patch,
 }

@@ -68,7 +68,7 @@ def test_stage1_uses_durable_revision_when_updates_share_one_second(tmp_path: Pa
     assert _claim_stage1(store, "thread-a", 2, now=104) is None
 
 
-def test_phase2_catalog_revision_revokes_running_owner_on_new_output(
+def test_phase2_catalog_revision_keeps_running_owner_and_queues_new_output(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -91,8 +91,13 @@ def test_phase2_catalog_revision_revokes_running_owner_on_new_output(
     assert second is not None
     _complete_stage1(store, second, source_updated_at=1_800_000_000, now=104)
 
+    assert store.owns_phase2(phase2)
+    assert store.claim_phase2(
+        worker_id="phase2-b", lease_seconds=60, retry_limit=3,
+        success_cooldown_seconds=0, now=105,
+    ) is None
+    assert store.complete_phase2(phase2, [], now=105)
     assert not store.owns_phase2(phase2)
-    assert not store.complete_phase2(phase2, [], now=105)
 
     replacement = store.claim_phase2(
         worker_id="phase2-b",

@@ -21,6 +21,7 @@ from backend.atomic_io import (
     file_mutation_locks,
     normalize_text_newlines,
     preserve_text_line_endings,
+    run_blocking_io,
 )
 from backend.permissions.context import ToolExecutionContext
 from backend.security.sensitive_files import is_protected_write_path
@@ -41,6 +42,7 @@ from backend.tools.file_tools_common import (
     _generate_limited_unified_diff,
     _workspace_display_path,
     content_hash,
+    record_file_hash,
     invalidate_workspace_file_caches,
 )
 
@@ -212,16 +214,20 @@ class ApplyPatchTool(BaseTool):
             # This is MiniCode's same-file mutation queue generalized to a MiniCode
             # multi-file patch; unrelated files remain parallel and overlapping
             # patches cannot interleave or deadlock.
-            with file_mutation_locks(mutation_paths):
-                stale_error = self._review_snapshot_error(plans, expected_hashes)
-                if stale_error:
-                    return self._error_result(stale_error)
-                for plan in plans:
-                    adds, dels = self._commit_plan(plan, cache)
-                    total_add += adds
-                    total_del += dels
-                    summary_lines.append(plan.summary(adds, dels))
-                    committed_paths.append(plan.raw_path)
+            def commit_patch():
+                nonlocal total_add, total_del
+                with file_mutation_locks(mutation_paths):
+                    stale_error = self._review_snapshot_error(plans, expected_hashes)
+                    if stale_error:
+                        raise ApplyPatchError(stale_error)
+                    for plan in plans:
+                        adds, dels = self._commit_plan(plan, cache, context)
+                        total_add += adds
+                        total_del += dels
+                        summary_lines.append(plan.summary(adds, dels))
+                        committed_paths.append(plan.raw_path)
+
+            await run_blocking_io(commit_patch)
         except (PermissionError, OSError) as exc:
             reason = (
                 f"No permission to write: {exc}"
@@ -445,12 +451,13 @@ class ApplyPatchTool(BaseTool):
             overwritten_new_content=plan.overwritten_move_content,
         )
 
-    def _commit_plan(self, plan: "_ChangePlan", cache: Any) -> tuple[int, int]:
+    def _commit_plan(self, plan: "_ChangePlan", cache: Any, context: ToolExecutionContext | None = None) -> tuple[int, int]:
         if plan.kind == ChangeKind.DELETE:
             try:
                 plan.path.unlink()
             except FileNotFoundError:
                 pass
+            record_file_hash(context, plan.path, None)
             cache.invalidate(plan.path)
             _, adds, dels = self._diff_stats(plan.old_content, "")
             return adds, dels
@@ -462,6 +469,7 @@ class ApplyPatchTool(BaseTool):
         if plan.move_to_path is not None:
             plan.move_to_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_bytes(target, plan.new_content.encode("utf-8"))
+        record_file_hash(context, target, content_hash(plan.new_content))
         cache.invalidate(plan.path)
         if plan.move_to_path is not None and plan.move_to_path != plan.path:
             # Rename: remove the original after writing the destination.
@@ -470,6 +478,7 @@ class ApplyPatchTool(BaseTool):
             except FileNotFoundError:
                 pass
             cache.invalidate(plan.move_to_path)
+            record_file_hash(context, plan.path, None)
         _, adds, dels = self._diff_stats(plan.old_content, plan.new_content)
         return adds, dels
 

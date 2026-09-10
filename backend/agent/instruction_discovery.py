@@ -664,7 +664,9 @@ def _schedule_instructions_loaded_hook(
         except Exception:
             logger.debug("instructions_loaded hook failed for %s", path)
 
-    loop.create_task(_run())
+    from backend.hooks.models import HookEvent
+
+    hook_mgr._track_async_task(loop.create_task(_run()), HookEvent.INSTRUCTIONS_LOADED)
 
 
 def load_project_guideline_bundle(

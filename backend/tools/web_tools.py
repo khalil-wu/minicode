@@ -89,7 +89,7 @@ class WebFetchTool(BaseTool):
     max_result_chars = WEB_FETCH_MAX_CHARS
     description = """IMPORTANT: WebFetch WILL FAIL for authenticated or private URLs. Before using this tool, check whether the URL points to an authenticated service such as Google Docs, Confluence, Jira, or GitHub. If so, use a specialized MCP tool when one is available.
 
-Fetches content from a specified URL and processes it using an AI model. Takes a URL and a prompt, converts HTML to text, processes the content with a small, fast model, and returns the model's response. Prefer an MCP-provided fetch tool when available. The URL must be fully formed. For GitHub URLs, prefer the gh CLI."""
+Fetches content from a specified URL and processes it using an AI model. Takes a URL and a prompt, converts HTML to text, uses the configured small, fast model or the current model when no auxiliary model is configured, and returns the model's response. Prefer an MCP-provided fetch tool when available. The URL must be fully formed. For GitHub URLs, prefer the gh CLI."""
     permission = PermissionLevel.AUTO
 
     def model_description(self) -> str:
@@ -148,7 +148,7 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
                 options=SideQueryOptions(
                     operation="web_fetch_apply",
                     query_source="background",
-                    use_small_fast_model=True,
+                    use_small_fast_model=bool(llm.configured_small_fast_model_id()),
                     disable_reasoning=True,
                     enable_prompt_cache=False,
                 ),

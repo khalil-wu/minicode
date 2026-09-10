@@ -13,9 +13,12 @@ import asyncio
 from collections import Counter
 import hashlib
 import json
+import math
 import os
+import statistics
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,7 +29,7 @@ from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmissio
 from backend.agent.state import AgentState
 from backend.agent.loop import AgentLoopSessionContext
 from backend.artifact.store import ArtifactStore
-from backend.config import AgentSettings, LLMSettings, PermissionSettings, TokenBudget
+from backend.config import AgentSettings, AppConfig, LLMSettings, PermissionSettings, TokenBudget
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
 from backend.runtime_env import ensure_utf8_console_logging
@@ -146,6 +149,8 @@ def _test_integrity_violations(
 
 def _repository_eval_permission(
     workspace: Path,
+    *,
+    external_sandbox: bool = False,
 ) -> tuple[PermissionChecker, PermissionContext]:
     """Build the autonomous permission boundary for an isolated eval checkout."""
 
@@ -161,6 +166,7 @@ def _repository_eval_permission(
         },
         workspace_scope="worktree",
         source="repository_eval",
+        sandbox_mode="external-sandbox" if external_sandbox else "",
     )
     return checker, permission
 
@@ -279,6 +285,21 @@ def _runtime_elapsed_ms(
     )
 
 
+def _runtime_occupied_ms(spans: list[dict[str, object]], event_names: set[str]) -> int:
+    intervals = sorted(
+        (int(span["started_at"]), int(span["ended_at"]))
+        for span in spans
+        if str(span.get("event") or "") in event_names
+        and span.get("started_at") is not None and span.get("ended_at") is not None
+    )
+    total = 0
+    end = 0
+    for start, stop in intervals:
+        total += max(0, stop - max(start, end))
+        end = max(end, stop)
+    return total
+
+
 def _runtime_recovery_ids(spans: list[dict[str, object]]) -> set[str]:
     """Return distinct recovery attempts emitted through runtime spans."""
 
@@ -302,14 +323,13 @@ def _eval_max_turn_seconds() -> float:
 
     explicit = os.environ.get("MINICODE_EVAL_MAX_TURN_SECONDS")
     if explicit is not None:
-        try:
-            return max(0.0, float(explicit))
-        except ValueError:
-            return 0.0
-    try:
-        outer_timeout = float(os.environ.get("MINICODE_EVAL_AGENT_TIMEOUT_SECONDS", "0"))
-    except ValueError:
-        return 0.0
+        value = float(explicit)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("MINICODE_EVAL_MAX_TURN_SECONDS must be finite and nonnegative")
+        return value
+    outer_timeout = float(os.environ.get("MINICODE_EVAL_AGENT_TIMEOUT_SECONDS", "0"))
+    if not math.isfinite(outer_timeout) or outer_timeout < 0:
+        raise ValueError("MINICODE_EVAL_AGENT_TIMEOUT_SECONDS must be finite and nonnegative")
     if outer_timeout <= 0:
         return 0.0
     reserve = max(90.0, min(300.0, outer_timeout * 0.17))
@@ -466,41 +486,54 @@ def _subagent_event_from_task_tool(
 async def _run(prompt: str) -> int:
     workspace = Path(_required("MINICODE_EVAL_WORKSPACE")).resolve()
     initial_test_snapshot = _test_file_snapshot(workspace)
-    base_url = os.environ.get("MINICODE_EVAL_BASE_URL", "https://api.openai.com/v1").strip()
+    profile = json.loads(os.environ.get("MINICODE_EVAL_PROFILE_JSON", "{}"))
+    if not isinstance(profile, dict):
+        raise ValueError("MINICODE_EVAL_PROFILE_JSON must be an object")
+    llm_values = dict(profile.get("llm", {}))
     model = _required("MINICODE_EVAL_MODEL")
-    wire_api = os.environ.get("MINICODE_EVAL_WIRE_API", "chat").strip() or "chat"
-    settings = LLMSettings(
-        api_key=_required("MINICODE_EVAL_API_KEY"),
-        provider="custom",
-        base_url=base_url,
-        model=model,
-        small_fast_model=os.environ.get(
-            "MINICODE_EVAL_SMALL_FAST_MODEL",
-            "",
-        ).strip(),
-        wire_api=wire_api,
-        max_tokens=_optional_int_env("MINICODE_EVAL_MAX_TOKENS") or 0,
-        reasoning_effort=os.environ.get("MINICODE_EVAL_REASONING_EFFORT", "").strip(),
-        responses_reasoning_summary=os.environ.get(
-            "MINICODE_EVAL_RESPONSES_REASONING_SUMMARY",
-            "off",
-        ).strip(),
-        # The repository seed identifies an independent evaluation run. It is
-        # not automatically forwarded as a provider sampling parameter because
-        # competing agents do not expose equivalent semantics and many
-        # OpenAI-compatible gateways only partially implement it.
-        seed=_optional_int_env("MINICODE_EVAL_PROVIDER_SEED"),
-        auth_header=_env_bool("MINICODE_EVAL_AUTH_HEADER"),
-    )
-    llm = build_wire_adapter(
-        settings,
-        thinking_budget=_optional_int_env("MINICODE_EVAL_THINKING_BUDGET"),
-        provider_id="custom",
-    )
+    base_url = os.environ.get("MINICODE_EVAL_BASE_URL", llm_values.get("base_url", "https://api.openai.com/v1")).strip()
+    wire_api = os.environ.get("MINICODE_EVAL_WIRE_API", llm_values.get("wire_api", "chat")).strip()
+    llm_values.update(api_key=_required("MINICODE_EVAL_API_KEY"), model=model, base_url=base_url, wire_api=wire_api)
+    for env_name, field in (
+        ("MINICODE_EVAL_SMALL_FAST_MODEL", "small_fast_model"),
+        ("MINICODE_EVAL_REASONING_EFFORT", "reasoning_effort"),
+        ("MINICODE_EVAL_RESPONSES_REASONING_SUMMARY", "responses_reasoning_summary"),
+        ("MINICODE_EVAL_PROXY_MODE", "proxy_mode"),
+    ):
+        if env_name in os.environ:
+            llm_values[field] = os.environ[env_name].strip()
+    for env_name, field in (
+        ("MINICODE_EVAL_MAX_TOKENS", "max_tokens"),
+        ("MINICODE_EVAL_THINKING_BUDGET", "thinking_budget"),
+        ("MINICODE_EVAL_PROVIDER_SEED", "seed"),
+    ):
+        if env_name in os.environ:
+            llm_values[field] = _optional_int_env(env_name)
+    if "MINICODE_EVAL_AUTH_HEADER" in os.environ:
+        llm_values["auth_header"] = _env_bool("MINICODE_EVAL_AUTH_HEADER")
+    llm_values["default_headers"] = tuple(tuple(item) for item in llm_values.get("default_headers", ()))
+    settings = LLMSettings(**llm_values)
+    llm = build_wire_adapter(settings, provider_id=settings.provider)
+    agent_values = dict(profile.get("agent", {}))
+    for env_name, field in (
+        ("MINICODE_EVAL_MAX_ITERATIONS", "max_iterations"),
+        ("MINICODE_EVAL_MAX_TOOL_CALLS", "max_tool_calls"),
+    ):
+        if env_name in os.environ:
+            agent_values[field] = int(os.environ[env_name])
+    if "MINICODE_EVAL_MAX_TURN_SECONDS" in os.environ or "MINICODE_EVAL_AGENT_TIMEOUT_SECONDS" in os.environ:
+        agent_values["max_turn_seconds"] = _eval_max_turn_seconds()
+    agent_settings = AgentSettings(**agent_values)
+    token_budget = TokenBudget(**profile.get("token_budget", {}))
     artifacts = ArtifactStore()
     registry = build_tool_registry(
         artifacts,
         workspace_root=workspace,
+        config=AppConfig(
+            llm=settings,
+            agent=agent_settings,
+            token_budget=token_budget,
+        ),
         llm_provider=lambda: llm,
     )
     # Repository evaluation is an autonomous host boundary: there is no
@@ -508,9 +541,12 @@ async def _run(prompt: str) -> int:
     # capabilities required by this isolated task; the normal permission
     # checker, path ownership, sandbox policy, and tool capability floors still
     # evaluate every call.
-    checker, permission = _repository_eval_permission(workspace)
+    checker, permission = _repository_eval_permission(
+        workspace,
+        external_sandbox=_env_bool("MINICODE_EVAL_EXTERNAL_SANDBOX"),
+    )
 
-    state = AgentState(user_message=prompt, max_iterations=int(os.environ.get("MINICODE_EVAL_MAX_ITERATIONS", "0")))
+    state = AgentState(user_message=prompt, max_iterations=agent_settings.max_iterations, workspace_root=workspace)
     runtime_spans: list[dict[str, object]] = []
     runtime_subagent_events: list[tuple[str, dict[str, object]]] = []
     task_tool_subagent_events: list[tuple[str, dict[str, object]]] = []
@@ -556,15 +592,8 @@ async def _run(prompt: str) -> int:
             # The evaluator owns this isolated checkout and records approval
             # through the same canonical boundary used by the desktop channel.
             approval_handler=_approve_isolated_eval_call,
-            agent_settings=AgentSettings(
-                max_iterations=state.max_iterations,
-                # Evaluation must not add a hidden loop fuse. Set
-                # MINICODE_EVAL_MAX_TOOL_CALLS explicitly for a bounded run.
-                max_tool_calls=int(os.environ.get("MINICODE_EVAL_MAX_TOOL_CALLS", "0")),
-                max_turn_seconds=_eval_max_turn_seconds(),
-                live_text_streaming=False,
-            ),
-            token_budget=TokenBudget(total=200_000),
+            agent_settings=agent_settings,
+            token_budget=token_budget,
         ),
         state=state,
         runtime=runtime,
@@ -594,10 +623,14 @@ async def _run(prompt: str) -> int:
     final_text_parts: list[str] = []
     thinking_text_parts: list[str] = []
     thinking_chars = 0
+    submitted_at = time.monotonic()
+    first_tool_ms: int | None = None
     async for event in QueryEngine().submit(submission):
         event_counts[event.type] += 1
         event_data = event.data if isinstance(event.data, dict) else {}
         if event.type == "tool_call":
+            if first_tool_ms is None and event_data.get("status") == "running":
+                first_tool_ms = round((time.monotonic() - submitted_at) * 1000)
             _observe_tool_call(tool_call_names, event_data)
             projected = _subagent_event_from_task_tool(
                 event.type,
@@ -611,8 +644,8 @@ async def _run(prompt: str) -> int:
             error_kind = str(event_data.get("error_kind") or "").strip()
             if error_kind:
                 tool_error_kinds[error_kind] += 1
-            tool_name = str(event_data.get("name") or event_data.get("tool_name") or "").lower()
-            if "search" in tool_name and error_kind in {"no_match", "invalid_arguments", "not_found"}:
+            tool_name = tool_call_names.get(str(event_data.get("id") or ""), "")
+            if tool_name in {"grep_files", "glob_files", "fuzzy_search"} and event_data.get("is_error"):
                 invalid_search_count += 1
             projected = _subagent_event_from_task_tool(
                 event.type,
@@ -690,6 +723,7 @@ async def _run(prompt: str) -> int:
             for key, value in final_usage.items():
                 if value > 0 or usage_totals[key] == 0:
                     usage_totals[key] = value
+    turn_elapsed_ms = round((time.monotonic() - submitted_at) * 1000)
     runtime_metrics = _subagent_metrics_from_runtime_events(runtime_subagent_events)
     if runtime_metrics is None:
         runtime_metrics = _subagent_metrics_from_runtime_events(
@@ -758,7 +792,12 @@ async def _run(prompt: str) -> int:
         max(0, int(item.get("elapsed_ms") or 0)) for item in side_calls
     )
     test_integrity = _test_integrity_violations(initial_test_snapshot, workspace)
-    test_integrity_satisfied = not any(test_integrity.values())
+    protect_existing_tests = _env_bool("MINICODE_EVAL_PROTECT_EXISTING_TESTS", default=True)
+    # SWE-bench supplies an external oracle and permits regression test edits.
+    # Keep the edits in the trace without treating them as a failed agent run.
+    test_integrity_satisfied = not protect_existing_tests or not any(test_integrity.values())
+    first_event_latencies = [int(span["duration_ms"]) for span in runtime_spans
+                             if span.get("event") == "provider.first_event"]
     print(
         json.dumps(
             {
@@ -776,11 +815,29 @@ async def _run(prompt: str) -> int:
                     "tool_call_count": sum(tool_call_counts.values()),
                     "provider_elapsed_ms": provider_elapsed_ms,
                     "tool_elapsed_ms": tool_elapsed_ms,
+                    "timing_semantics": "elapsed fields are cumulative service time; occupied fields are unions of wall-clock spans",
+                    "provider_occupied_ms": _runtime_occupied_ms(runtime_spans, provider_terminal_events),
+                    "tool_occupied_ms": _runtime_occupied_ms(runtime_spans, {"tool.completed"}),
+                    "provider_or_tool_occupied_ms": _runtime_occupied_ms(runtime_spans, provider_terminal_events | {"tool.completed"}),
+                    "runtime_configuration": {
+                        "agent": asdict(agent_settings),
+                        "token_budget": asdict(token_budget),
+                        "profile_supplied": bool(profile),
+                    },
                     "side_call_count": len(side_calls),
                     "side_call_elapsed_ms": side_call_elapsed_ms,
                     "side_call_usage": side_call_usage,
                     "side_calls": _compact_trace_value(side_calls),
                     "test_integrity": test_integrity,
+                    "test_integrity_enforced": protect_existing_tests,
+                    "turn_elapsed_ms": turn_elapsed_ms,
+                    "time_to_first_tool_ms": first_tool_ms,
+                    "provider_first_event_ms": {
+                        "count": len(first_event_latencies),
+                        "first": first_event_latencies[0] if first_event_latencies else None,
+                        "median": statistics.median(first_event_latencies) if first_event_latencies else None,
+                        "max": max(first_event_latencies) if first_event_latencies else None,
+                    },
                     "seed_semantics": (
                         "provider_sampling"
                         if settings.seed is not None
@@ -792,6 +849,7 @@ async def _run(prompt: str) -> int:
                         if status not in {"success", "partial"}
                     ),
                     "invalid_search_count": invalid_search_count,
+                    "requested_sandbox_mode": permission.sandbox_mode or "workspace-write",
                     "recovery_count": len(recovery_events),
                     "usage": usage_totals,
                     "subagents_started": sorted(subagents_started),

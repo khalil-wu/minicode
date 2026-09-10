@@ -433,10 +433,10 @@ def _scan_expired(storage_dir: Path, ttl_seconds: int, now: float) -> list[str]:
             if not _is_expired(sidecar.created_at, now, ttl_seconds):
                 continue
             try:
-                meta_path.unlink()
                 # The content unit may legitimately be missing if the prior write
                 # rolled back after the sidecar landed.
                 content_path.unlink(missing_ok=True)
+                meta_path.unlink()
             except FileNotFoundError:
                 continue
             except OSError as exc:
@@ -644,8 +644,8 @@ class ArtifactStore:
                         self._metadata_index[updated.artifact_id] = updated.to_meta()
                     continue
                 try:
-                    meta_path.unlink()
                     content_path.unlink(missing_ok=True)
+                    meta_path.unlink()
                 except FileNotFoundError:
                     continue
                 artifact_ids.append(sidecar.artifact_id)
@@ -667,7 +667,7 @@ class ArtifactStore:
 
         source = str(source_conversation_id or "").strip()
         target = str(target_conversation_id or "").strip()
-        if not source or not target or source == target:
+        if not source or not target:
             return 0
         shared = 0
         for meta_path in self._storage_dir.glob(f"art_*{META_SIDECAR_SUFFIX}"):

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { ContextMenu } from "../components/ContextMenu";
 import {
   Copy,
   Eye,
@@ -45,29 +45,12 @@ export const FileContextMenu = ({
   onRefresh: () => void;
   onClose: () => void;
 }) => {
-  useEffect(() => {
-    const handler = () => onClose();
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("click", handler);
-    document.addEventListener("contextmenu", handler);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("click", handler);
-      document.removeEventListener("contextmenu", handler);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [onClose]);
-
   const copyPath = () => {
     navigator.clipboard.writeText(menu.path);
-    onClose();
   };
 
   const openInEditor = () => {
-    useAppStore.getState().openEditorFile(menu.path, menu.path.split(/[/\\]/).pop() ?? menu.path);
-    onClose();
+    useAppStore.getState().openEditorFile(menu.path, menu.path.split(/[/\\]/).pop() ?? menu.path, { exact: true });
   };
 
   const openPreview = () => {
@@ -78,42 +61,35 @@ export const FileContextMenu = ({
       mediaType: mediaTypeForPath(menu.path),
       workspaceRoot: workingDirectory,
     });
-    onClose();
   };
 
   const createChildFile = async () => {
     const { showPrompt, showAlert } = await import("../overlays/DialogService");
     const name = await showPrompt({ title: "新建文件", message: "文件名：", placeholder: "example.ts" });
-    if (!name) { onClose(); return; }
+    if (!name) return;
     const base = menu.path === "." ? "" : menu.path.replace(/[\\/]+$/, "");
     const path = base ? `${base}/${name}` : name;
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
-      if (!(await writeWorkspaceFile(targetPath, "", workingDirectory))) {
-        await showAlert({ title: "创建失败", message: `无法创建文件：${path}。目标可能已存在或不可写。` });
-        return;
-      }
+      await writeWorkspaceFile(targetPath, "", workingDirectory);
       onRefresh();
-    } finally {
-      onClose();
+    } catch (error) {
+      await showAlert({ title: "创建失败", message: error instanceof Error ? error.message : String(error) });
     }
   };
 
   const createChildFolder = async () => {
     const { showPrompt, showAlert } = await import("../overlays/DialogService");
     const name = await showPrompt({ title: "新建文件夹", message: "文件夹名：", placeholder: "components" });
-    if (!name) { onClose(); return; }
+    if (!name) return;
     const base = menu.path === "." ? "" : menu.path.replace(/[\\/]+$/, "");
     const path = base ? `${base}/${name}` : name;
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
-      if (!(await createWorkspaceDirectory(targetPath, workingDirectory))) {
-        await showAlert({ title: "创建失败", message: `无法创建文件夹：${path}。目标可能已存在或不可写。` });
-        return;
-      }
+      await createWorkspaceDirectory(targetPath, workingDirectory);
       onRefresh();
-    } finally {
-      onClose();
+    } catch (error) {
+      await showAlert({ title: "创建失败", message: error instanceof Error ? error.message : String(error) });
     }
   };
 
@@ -125,7 +101,7 @@ export const FileContextMenu = ({
       confirmLabel: "Delete",
       danger: true,
     });
-    if (!ok) { onClose(); return; }
+    if (!ok) return;
     try {
       if (isDesktop()) {
         let result = await desktop()?.fs.deletePath(menu.path, menu.isDir, false);
@@ -140,14 +116,12 @@ export const FileContextMenu = ({
           result = await desktop()?.fs.deletePath(menu.path, menu.isDir, true);
         }
         if (!result || !("deleted" in result) || !result.deleted) throw new Error(`无法删除：${menu.path}`);
-      } else if (!(await deleteWorkspacePath(menu.path, workingDirectory, menu.isDir))) {
-        throw new Error(`无法删除：${menu.path}`);
+      } else {
+        await deleteWorkspacePath(menu.path, workingDirectory, menu.isDir);
       }
       onRefresh();
     } catch (error) {
       await showAlert({ title: "删除失败", message: error instanceof Error ? error.message : `无法删除：${menu.path}` });
-    } finally {
-      onClose();
     }
   };
 
@@ -158,11 +132,10 @@ export const FileContextMenu = ({
       message: "新名称：",
       defaultValue: menu.path.split(/[/\\]/).pop() ?? "",
     });
-    if (!newName) { onClose(); return; }
+    if (!newName) return;
     if (/[/\\]/.test(newName) || newName === ".." || newName.startsWith("../") || newName.startsWith("..\\")) {
       await showAlert({ title: "名称无效", message: "文件名不能包含路径分隔符或遍历模式。" });
-      onClose();
-      return;
+        return;
     }
     // Renaming the workspace root itself keeps the root path (web mode
     // resolves relative paths against the workspace); use the shared
@@ -172,18 +145,17 @@ export const FileContextMenu = ({
     const newPath = isRoot
       ? menu.path
       : `${parent && parent !== "." ? `${parent}/` : ""}${newName}`;
-    if (!(await renameWorkspacePath(menu.path, newPath, workingDirectory))) {
-      await showAlert({ title: "重命名失败", message: `无法将 ${menu.path} 重命名为 ${newPath}。目标可能已存在或不可写。` });
-      onClose();
-      return;
+    try {
+      await renameWorkspacePath(menu.path, newPath, workingDirectory);
+      useAppStore.getState().renameEditorPath(menu.path, newPath, workingDirectory);
+      onRefresh();
+    } catch (error) {
+      await showAlert({ title: "重命名失败", message: error instanceof Error ? error.message : String(error) });
     }
-    onRefresh();
-    onClose();
   };
 
   const revealInExplorer = () => {
     revealPath(menu.path);
-    onClose();
   };
 
   const items = [
@@ -202,47 +174,10 @@ export const FileContextMenu = ({
   ];
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        left: menu.x,
-        top: menu.y,
-        background: "var(--surface-raised)",
-        border: "1px solid var(--border-subtle)",
-        borderRadius: "var(--radius-sm, 6px)",
-        boxShadow: "var(--shadow-md)",
-        padding: 4,
-        zIndex: "var(--z-context-menu)",
-        minWidth: 184,
-      }}
-    >
-      {items.map((item) => (
-        <button
-          key={item.label}
-          type="button"
-          className={item.danger ? "btn-ghost-danger" : "btn-ghost"}
-          onClick={item.action}
-          style={{
-            minHeight: 30,
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            width: "100%",
-            textAlign: "left",
-            border: 0,
-            padding: "0 8px",
-            fontSize: "var(--text-xs)",
-            color: item.danger ? "var(--state-danger)" : "var(--text-secondary)",
-            cursor: "pointer",
-            borderRadius: "var(--radius-sm, 4px)",
-          }}
-        >
-          <span aria-hidden="true" style={{ width: 16, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-            {item.icon}
-          </span>
-          <span>{item.label}</span>
-        </button>
-      ))}
-    </div>
+    <ContextMenu
+      position={{ x: menu.x, y: menu.y }}
+      items={items.map(({ action, ...item }) => ({ ...item, onClick: action }))}
+      onClose={onClose}
+    />
   );
 };

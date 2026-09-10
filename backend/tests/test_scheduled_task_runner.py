@@ -25,6 +25,8 @@ class _Repository:
             workspace_root=kwargs["workspace_root"],
             worktree_path="",
             git_isolated=False,
+            context_snapshot={},
+            transcript=[],
         )
         self.conversation = conversation
         self.created.append(kwargs)

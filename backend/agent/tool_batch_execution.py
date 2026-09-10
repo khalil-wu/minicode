@@ -16,6 +16,7 @@ from typing import Any
 
 from backend.atomic_io import canonical_path_mapping_key
 from backend.agent.context import ContextBuilder
+from backend.agent.loop_preflight import await_preflight
 from backend.agent.control_tools import CONTROL_TOOL_NAMES, ControlToolRouter
 from backend.agent.final_tool_request import (
     FinalExecutableToolRequest,
@@ -232,6 +233,7 @@ async def _finalize_tool_result(
     status: str | None = None,
     diff: dict[str, Any] | None = None,
     tool_registry: ToolRegistry,
+    append_context_result: Callable[..., None] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Persist and emit one terminal result for every tool exit path."""
     request_digest = _final_tool_request_digest(tc) or canonical_tool_request_digest(
@@ -241,7 +243,6 @@ async def _finalize_tool_result(
     if result.request_digest != request_digest:
         result = replace(result, request_digest=request_digest)
     if not result.is_error:
-        _refresh_read_file_hashes_after_write(tc, diff, tool_ctx)
         _track_created_file_edits(tc, diff, tool_ctx)
     removed_records = _reconcile_removed_created_file_edits(tool_ctx)
     if removed_records:
@@ -301,9 +302,8 @@ async def _finalize_tool_result(
         turn_id=turn_id,
         tool_ctx=tool_ctx,
         tool_registry=tool_registry,
+        append_context_result=append_context_result,
     )
-    for event in events:
-        yield event
     if events:
         await _emit_tool_completed_runtime_span(
             tc,
@@ -311,6 +311,8 @@ async def _finalize_tool_result(
             events[-1],
             iteration_id=iteration_id,
         )
+    for event in events:
+        yield event
 
 
 async def _reject_tool_call(
@@ -387,46 +389,6 @@ def _track_created_file_edits(
             "resolved_path": str(resolved),
             "display_path": display_path,
         }
-
-
-def _refresh_read_file_hashes_after_write(
-    tc: ToolCallEvent,
-    diff: dict[str, Any] | None,
-    tool_ctx: ToolExecutionContext,
-) -> None:
-    """Advance optimistic edit guards after a successful in-turn write.
-
-    Read-time hashes intentionally protect against external changes, but they
-    must be replaced after the agent itself writes a file. Otherwise a second
-    edit in the same turn is rejected with its own previous hash and the model
-    can spend the rest of the turn repeating stale edits.
-    """
-    metadata = tool_ctx.metadata if isinstance(tool_ctx.metadata, dict) else {}
-    hashes = metadata.get("_read_file_hashes")
-    if not isinstance(hashes, dict):
-        return
-    raw_paths: list[str] = []
-    if tc.name in {"edit_file", "write_file"}:
-        raw_path = str(tc.arguments.get("file_path") or "").strip()
-        if raw_path:
-            raw_paths.append(raw_path)
-    elif tc.name == "apply_patch" and isinstance(diff, dict):
-        for item in diff.get("files") or []:
-            if isinstance(item, dict):
-                for key in ("path", "old_path"):
-                    raw_path = str(item.get(key) or "").strip()
-                    if raw_path:
-                        raw_paths.append(raw_path)
-    for raw_path in raw_paths:
-        path = _resolve_workspace_path_for_diff(raw_path, tool_ctx.workspace_root)
-        try:
-            content = path.read_text(encoding="utf-8")
-            path_key = canonical_path_mapping_key(hashes, path)
-            hashes.pop(path_key, None)
-            hashes[path_key] = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        except (OSError, UnicodeDecodeError):
-            # A deleted/renamed path must not retain the old hash.
-            hashes.pop(canonical_path_mapping_key(hashes, path), None)
 
 
 def _reconcile_removed_created_file_edits(
@@ -829,7 +791,7 @@ async def execute_tool_batch(
             permission_denied_retry = False
             if hook_mgr:
                 try:
-                    denied_hook = await hook_mgr.run_permission_denied(
+                    denied_hook = await await_preflight(hook_mgr.run_permission_denied(
                         tc.name,
                         tc.arguments,
                         reason=msg,
@@ -837,7 +799,7 @@ async def execute_tool_batch(
                         tool_call_id=tc.id,
                         session_id=tool_ctx.session_id,
                         permission_mode=tool_ctx.permission.mode,
-                    )
+                    ), deadline=tool_ctx.deadline_monotonic, cancel_event=tool_ctx.cancel_event)
                     permission_denied_retry = denied_hook.retry
                 except Exception as exc:
                     logger.warning("permission_denied hook failed: %s", exc)
@@ -992,7 +954,21 @@ async def _flush_queue(
             pending: dict[asyncio.Task[ToolResult], ToolCallEvent] = {}
             results_by_id: dict[str, ToolResult] = {}
             next_executable_index = 0
-            next_emit_index = 0
+            pending_history: dict[str, tuple[str, ToolResult, dict[str, Any]]] = {}
+            next_history_index = 0
+
+            def _append_ordered_context_result(call_id: str, name: str, result: ToolResult, **scope: Any) -> None:
+                # Codex records tool futures in request order while handlers
+                # publish completion independently. Keep that same separation.
+                nonlocal next_history_index
+                pending_history[call_id] = (name, result, scope)
+                while next_history_index < len(batch):
+                    history_id = batch[next_history_index].id
+                    if history_id not in pending_history:
+                        break
+                    history_name, history_result, history_scope = pending_history.pop(history_id)
+                    ctx.append_tool_result(history_id, history_name, history_result, **history_scope)
+                    next_history_index += 1
 
             def _record_batch_result(tc: ToolCallEvent, result: ToolResult) -> None:
                 results_by_id[tc.id] = result
@@ -1046,20 +1022,11 @@ async def _flush_queue(
                     pending[asyncio.create_task(_run_parallel_tool(tc))] = tc
                     next_executable_index += 1
 
-            def _pop_ready_ordered_results() -> list[tuple[ToolCallEvent, ToolResult]]:
-                nonlocal next_emit_index
-                ready: list[tuple[ToolCallEvent, ToolResult]] = []
-                while next_emit_index < len(batch):
-                    tc = batch[next_emit_index]
-                    result = results_by_id.pop(tc.id, None)
-                    if result is None:
-                        break
-                    ready.append((tc, result))
-                    next_emit_index += 1
-                return ready
-
-            async def _emit_ordered_ready_results() -> AsyncIterator[AgentEvent]:
-                for ready_tc, ready_result in _pop_ready_ordered_results():
+            async def _emit_ready_results() -> AsyncIterator[AgentEvent]:
+                for ready_tc in batch:
+                    if ready_tc.id not in results_by_id:
+                        continue
+                    ready_result = results_by_id.pop(ready_tc.id)
                     if not _tool_output_was_streamed(tool_ctx, ready_tc.id):
                         if (
                             _tool_streams_output(ready_tc.name, tool_registry)
@@ -1092,6 +1059,7 @@ async def _flush_queue(
                         turn_id=turn_id,
                         tool_ctx=tool_ctx,
                         tool_registry=tool_registry,
+                        append_context_result=_append_ordered_context_result,
                     ):
                         yield event
 
@@ -1115,7 +1083,6 @@ async def _flush_queue(
                     if not done:
                         batch_timed_out = True
                         break
-                    should_cancel_siblings = False
 
                     for task in done:
                         tc = pending.pop(task)
@@ -1134,75 +1101,13 @@ async def _flush_queue(
                         except Exception as exc:
                             result = _execution_exception_result(exc)
                         _record_batch_result(tc, result)
-                        if result.is_error and (
-                            _tool_streams_output(tc.name, tool_registry)
-                            or _tool_mutates(tc.name, tool_registry, tc.arguments)
-                        ):
-                            should_cancel_siblings = True
-                    async for event in _emit_ordered_ready_results():
+                    async for event in _emit_ready_results():
                         yield event
-
-                    if should_cancel_siblings:
-                        remaining = list(pending.items())
-                        for task, _tc in remaining:
-                            task.cancel()
-                        # Use gather for parallel cancellation — consistent with
-                        # the finally block. Sequential await delays sibling cleanup
-                        # behind the slowest-to-cancel task (e.g. subprocess teardown).
-                        sibling_cleanup = await cancel_and_drain_receipt(
-                            (task for task, _ in remaining),
-                            timeout=0.5,
-                            label="tool batch siblings",
-                            owner=tool_ctx.pending_cleanup_tasks,
-                        )
-                        for task, tc in remaining:
-                            _bind_parallel_cleanup_receipt(
-                                tc,
-                                tool_registry=tool_registry,
-                                tool_ctx=tool_ctx,
-                                reason="parallel_sibling_cancelled",
-                                requested=True,
-                                task=task,
-                                aggregate=sibling_cleanup,
-                            )
-                            _harvest_batch_result(
-                                task,
-                                tc,
-                                _parallel_fallback_result(
-                                    tc,
-                                    status="cancelled",
-                                    content="Cancelled: parallel tool call errored.",
-                                    tool_registry=tool_registry,
-                                    tool_ctx=tool_ctx,
-                                    reason="parallel_sibling_cancelled",
-                                    requested=True,
-                                ),
-                            )
-                            pending.pop(task, None)
-                        for tc in batch[next_executable_index:]:
-                            _record_batch_result(
-                                tc,
-                                _parallel_fallback_result(
-                                    tc,
-                                    status="cancelled",
-                                    content="Not executed because a parallel sibling failed.",
-                                    tool_registry=tool_registry,
-                                    tool_ctx=tool_ctx,
-                                    reason="parallel_sibling_cancelled",
-                                    requested=False,
-                                ),
-                            )
-                        next_executable_index = len(batch)
-                        async for event in _emit_ordered_ready_results():
-                            yield event
-                        break
 
                     await _start_ready_tasks()
 
                 if batch_timed_out:
                     unfinished = list(pending.items())
-                    for task, _tc in unfinished:
-                        task.cancel()
                     batch_cleanup = await cancel_and_drain_receipt(
                         (task for task, _ in unfinished),
                         timeout=0.5,
@@ -1247,7 +1152,7 @@ async def _flush_queue(
                             ),
                         )
                     next_executable_index = len(batch)
-                    async for event in _emit_ordered_ready_results():
+                    async for event in _emit_ready_results():
                         yield event
 
             finally:
@@ -1259,8 +1164,6 @@ async def _flush_queue(
                 # may not run before the frame is gone — orphaned subprocess /
                 # file handles and "Task was destroyed but it is pending!".
                 if pending:
-                    for task in pending:
-                        task.cancel()
                     batch_cleanup = await cancel_and_drain_receipt(
                         pending,
                         timeout=0.5,
@@ -1278,22 +1181,15 @@ async def _flush_queue(
                             aggregate=batch_cleanup,
                         )
 
-            while next_emit_index < len(batch):
-                tc = batch[next_emit_index]
-                results_by_id.setdefault(
-                    tc.id,
-                    _parallel_fallback_result(
-                        tc,
-                        status="cancelled",
-                        content="Parallel tool call was cancelled before completion.",
-                        tool_registry=tool_registry,
-                        tool_ctx=tool_ctx,
-                        reason="parallel_batch_cleanup",
-                        requested=True,
-                    ),
-                )
-                async for event in _emit_ordered_ready_results():
-                    yield event
+                # An interrupt can leave earlier calls without a result. Keep
+                # every completed observation; normal history reconciliation
+                # supplies the missing interrupted-call records on continuation.
+                for history_call in batch:
+                    saved = pending_history.pop(history_call.id, None)
+                    if saved is not None:
+                        name, result, scope = saved
+                        ctx.append_tool_result(history_call.id, name, result, **scope)
+
         else:
             for tc in batch:
                 await _emit_tool_runtime_span(
@@ -1589,7 +1485,7 @@ async def execute_serial(
         )
         if hook_mgr and not permission_allowed_by_hook and tc.name != "exit_plan_mode":
             try:
-                permission_hook = await hook_mgr.run_permission_request(
+                permission_hook = await await_preflight(hook_mgr.run_permission_request(
                     tc.name,
                     approval_args,
                     reason="tool requires user approval",
@@ -1597,7 +1493,7 @@ async def execute_serial(
                     tool_call_id=tc.id,
                     session_id=tool_ctx.session_id,
                     permission_mode=tool_ctx.permission.mode,
-                )
+                ), deadline=tool_ctx.deadline_monotonic, cancel_event=tool_ctx.cancel_event)
                 _remember_hook_model_context(tc, permission_hook)
                 if (
                     permission_hook.blocked

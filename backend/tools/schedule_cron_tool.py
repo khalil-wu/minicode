@@ -19,6 +19,7 @@ class ScheduleCronTool(BaseTool):
     activity_kind = "genericTool"
     display_label = "Schedule task"
     mutates_workspace = False
+    mutates_external_state = True
     read_only = False
     permission = PermissionLevel.CONFIRM
     description = (
@@ -104,7 +105,9 @@ class ScheduleCronListTool(BaseTool):
             from backend.tasks.scheduler import get_global_scheduler
             scheduler = get_global_scheduler()
             workspace_root = str(getattr(context, "workspace_root", "") or "") if context else ""
-            rows = scheduler.list_tasks(workspace_root=workspace_root or None)
+            if not workspace_root:
+                return self._error_result("Open a workspace before listing recurring tasks")
+            rows = scheduler.list_tasks(workspace_root=workspace_root)
         except Exception as exc:
             return self._error_result(f"Failed to list scheduled tasks: {exc}")
 
@@ -136,6 +139,7 @@ class ScheduleCronDeleteTool(BaseTool):
     activity_kind = "genericTool"
     display_label = "Delete scheduled task"
     mutates_workspace = False
+    mutates_external_state = True
     read_only = False
     permission = PermissionLevel.CONFIRM
     description = (
@@ -168,7 +172,9 @@ class ScheduleCronDeleteTool(BaseTool):
             from backend.tasks.scheduler import get_global_scheduler
             scheduler = get_global_scheduler()
             workspace_root = str(getattr(context, "workspace_root", "") or "") if context else ""
-            removed = scheduler.remove_task(job_id, workspace_root=workspace_root or None)
+            if not workspace_root:
+                return self._error_result("Open a workspace before deleting recurring tasks")
+            removed = scheduler.remove_task(job_id, workspace_root=workspace_root)
         except Exception as exc:
             return self._error_result(f"Failed to delete job '{job_id}': {exc}")
 

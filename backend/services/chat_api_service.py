@@ -19,6 +19,7 @@ from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmissio
 from backend.agent.runtime import default_runtime
 from backend.agent.run_context import RunContext
 from backend.agent.state import AgentState
+from backend.agent.context import ContextBuilder
 from backend.artifact.store import ArtifactStore
 from backend.config import load_config
 from backend.documents.service import ingest_uploaded_document
@@ -133,6 +134,7 @@ async def run_owned_rest_chat(
     conversation_id: str = "",
     run_id: str = "",
     query_claim: ConversationQueryClaim,
+    conversation_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if conversation_id:
         active_claim = conversation_query_guards().active_claim(conversation_id)
@@ -242,6 +244,15 @@ async def run_owned_rest_chat(
         ),
     )
     state.conversation_id = conversation_id
+    context_builder = None
+    if conversation_snapshot is not None:
+        context_builder = ContextBuilder(
+            token_budget=config.token_budget,
+            agent_settings=agent_settings,
+            llm=llm,
+            workspace_root=workspace_root,
+        )
+        context_builder.load_snapshot(conversation_snapshot)
     engine = query_engine or QueryEngine()
     stream = engine.submit(QuerySubmission(
         user_message=message,
@@ -252,6 +263,7 @@ async def run_owned_rest_chat(
             permission_checker=permission_checker,
             agent_settings=agent_settings,
             token_budget=config.token_budget,
+            context_builder=context_builder,
         ),
         state=state,
         runtime=runtime,
@@ -299,6 +311,7 @@ async def run_owned_rest_chat(
             ToolCallRecord.from_internal(tool_call).model_dump()
             for tool_call in state.tool_calls
         ],
+        **({"context_snapshot": context_builder.export_snapshot()} if context_builder is not None else {}),
     }
 
 

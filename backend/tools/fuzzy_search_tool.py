@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.workspace.fuzzy_search import get_global_fuzzy_search
+from backend.tools.search_support import search_path_permission
 
 if TYPE_CHECKING:
     from backend.permissions.context import ToolExecutionContext
@@ -66,8 +67,8 @@ class FuzzySearchTool(BaseTool):
         )
 
     def _resolve_workspace_root(self, context: ToolExecutionContext | None = None) -> Path | None:
-        if context and getattr(context, "workspace_root", None):
-            return Path(context.workspace_root).resolve()
+        if context is not None:
+            return Path(context.workspace_root).resolve() if context.workspace_root is not None else None
         return self.workspace_root.resolve() if self.workspace_root is not None else None
 
     def get_schema(self) -> ToolSchema:
@@ -120,6 +121,7 @@ class FuzzySearchTool(BaseTool):
             query=query,
             max_results=max_results,
             include_tests=include_tests,
+            is_allowed=search_path_permission(context),
         )
 
         if not matches:

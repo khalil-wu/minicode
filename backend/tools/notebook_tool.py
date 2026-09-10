@@ -12,11 +12,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from backend.atomic_io import canonical_path_mapping_key, file_mutation_locks
+from backend.atomic_io import canonical_path_mapping_key, file_mutation_locks, run_blocking_io
 from backend.permissions.context import ToolExecutionContext
 from backend.security.sensitive_files import is_protected_write_path
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
-from backend.tools.file_tools_common import _atomic_write_text, _validate_expected_hash, content_hash
+from backend.tools.file_tools_common import _atomic_write_text, _validate_expected_hash, content_hash, record_file_hash
 from backend.tools.path_resolution import _is_bypass_mode, _resolve_path
 from backend.workspace.file_state_cache import get_global_file_cache
 
@@ -85,11 +85,14 @@ class NotebookEditTool(BaseTool):
                     },
                     "source": {"type": "string", "description": "Deprecated alias for new_source."},
                 },
-                "required": ["notebook_path", "new_source"],
+                "required": ["notebook_path"],
             },
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        return await run_blocking_io(self._execute, args, context)
+
+    def _execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         raw_path = str(args.get("notebook_path") or "").strip()
         if not raw_path:
             return self._error_result("notebook_path is required")
@@ -193,12 +196,17 @@ class NotebookEditTool(BaseTool):
                         return self._error_result(f"cell_id out of range (0..{len(cells) - 1})")
                     target = cells[idx]
                     target["source"] = str(new_source).splitlines(keepends=True)
-                    if target.get("cell_type") == "code":
+                    cell_type = str(args.get("cell_type") or target.get("cell_type") or "code").strip().lower()
+                    if cell_type not in {"code", "markdown", "raw"}:
+                        return self._error_result(f"Invalid cell_type '{cell_type}'")
+                    target["cell_type"] = cell_type
+                    if cell_type == "code":
                         target["execution_count"] = None
                         target["outputs"] = []
-                    cell_type = str(args.get("cell_type") or "").strip().lower()
-                    if cell_type in {"code", "markdown"}:
-                        target["cell_type"] = cell_type
+                        target.pop("attachments", None)
+                    else:
+                        target.pop("execution_count", None)
+                        target.pop("outputs", None)
                     # Reuse the existing id so a later call can re-address this cell.
                     action = f"Replaced cell {target.get('id')}"
 
@@ -213,6 +221,7 @@ class NotebookEditTool(BaseTool):
                 if not ok:
                     return self._error_result(message)
                 _atomic_write_text(path, new_text)
+                record_file_hash(context, path, content_hash(new_text))
 
                 # Keep cache publication inside the queue; the event/result can
                 # be emitted after release because it does not affect the file.

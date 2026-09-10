@@ -216,6 +216,8 @@ def create_workspace_router() -> APIRouter:
     ) -> dict:
         """返回指定文件的 git diff"""
         root = await asyncio.to_thread(_resolve_git_root, path, workspace_root)
+        if file and not is_path_within((root / file).resolve(), root):
+            raise HTTPException(status_code=400, detail="Git file is outside workspace root.")
         return await asyncio.to_thread(workspace_git_diff_payload, root, file)
 
     @router.get("/git/worktree", response_model=WorkspaceGitWorktreeResponse)

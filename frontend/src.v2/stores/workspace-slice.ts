@@ -16,6 +16,7 @@ import {
   loadInitialLayout,
   preferredRightSidebarWidth,
   normalizeEditorPath,
+  uniqueMessageId,
 } from "./shared-helpers";
 import { isWindowsLikeWorkspacePath, normalizeWorkspacePath } from "../lib/workspace-path";
 
@@ -55,6 +56,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
     browserAnnotations: [],
     activeTerminalSessionId: null,
     editorOpenRequests: [],
+    activeEditorOpenRequestId: null,
     activeEditorPath: null,
     setLeftSidebarWidth: (w) => {
       const v = w <= 0 ? 0 : clamp(LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH, w);
@@ -304,6 +306,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
       }
       set((s) => {
         const normalizedPath = normalizeEditorOpenPath(path, s.workingDirectory);
+        const requestId = uniqueMessageId("open");
         const editorLabel = label ?? normalizedPath.split(/[/\\]/).pop() ?? normalizedPath;
         const editorSlot = s.panelSlots.find((p) => p.kind === "editor");
         const baseSlots = s.panelSlots.filter((p) => p.kind === "chat" || p.kind === "editor");
@@ -326,24 +329,34 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
           editorOpenRequests: [
             ...s.editorOpenRequests,
             {
-              id: `open-${Date.now().toString(36)}-${s.editorOpenRequests.length}`,
+              id: requestId,
               path: normalizedPath,
+              ...(target?.exact || /[/\\]/.test(path) ? { exact: true } : {}),
               ...(line ? { line } : {}),
               ...(column ? { column } : {}),
             },
           ],
+          activeEditorOpenRequestId: requestId,
           activeEditorPath: normalizedPath,
           appMode: "code",
         };
       });
     },
-    consumeEditorOpenRequest: (path) =>
+    consumeEditorOpenRequest: (id) =>
       set((s) => ({
-        editorOpenRequests: s.editorOpenRequests.filter((request) =>
-          request.id !== path && request.path !== path,
-        ),
+        editorOpenRequests: s.editorOpenRequests.filter((request) => request.id !== id),
+        activeEditorPath: s.activeEditorOpenRequestId === id ? s.activeTabPath : s.activeEditorPath,
+        activeEditorOpenRequestId: s.activeEditorOpenRequestId === id ? null : s.activeEditorOpenRequestId,
       })),
-    toggleSideChat: () => set((s) => ({ sideChatOpen: !s.sideChatOpen })),
+    toggleSideChat: () => {
+      const state = get();
+      if (state.sideChatOpen && state.rightPanelOpen && state.rightStackTab === "sidechat") {
+        set({ sideChatOpen: false });
+      } else {
+        state.setRightStackTab("sidechat");
+      }
+    },
+    closeSideChat: () => set({ sideChatOpen: false }),
     openSideChatWithSelection: (text, source) => {
       const selected = String(text || "").trim().slice(0, 12_000);
       if (!selected) return;
@@ -361,6 +374,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         }
         return { sideChatOpen: true, sideChatPendingContext: context };
       });
+      get().setRightStackTab("sidechat");
     },
     addBackgroundTask: (task) =>
       set((s) => {

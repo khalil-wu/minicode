@@ -135,12 +135,12 @@ def grant_owner_scope(
     target_conversation_id: str,
     target_workspace_root: str | Path | None = None,
 ) -> tuple[OwnerScope, ...]:
-    """Grant a clone/fork/merge the source scope's cwd unless one is explicit."""
+    """Grant a fork or workspace migration the explicitly selected owner root."""
 
     current = tuple(scopes)
     source = str(source_conversation_id or "").strip()
     target = str(target_conversation_id or "").strip()
-    if not source or not target or source == target:
+    if not source or not target:
         return current
     source_scopes = [scope for scope in current if scope.conversation_id == source]
     if not source_scopes:
@@ -149,7 +149,9 @@ def grant_owner_scope(
     additions = [
         OwnerScope(
             conversation_id=target,
-            workspace_root=explicit_workspace or scope.workspace_root,
+            workspace_root=(
+                explicit_workspace if target_workspace_root is not None else scope.workspace_root
+            ),
         )
         for scope in source_scopes
     ]

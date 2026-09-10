@@ -235,8 +235,6 @@ class AgentExecutionProfile:
 
 AGENT_HARD_DENIED_TOOLS = frozenset(
     {
-        "task_stop",
-        "task_status",
         "team_create",
         "team_list",
         "team_delete",

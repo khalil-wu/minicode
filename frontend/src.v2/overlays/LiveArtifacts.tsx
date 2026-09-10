@@ -56,7 +56,7 @@ export const LiveArtifacts = () => {
   const messages = useAppStore((s) => s.messages);
   const conversationId = useAppStore((s) => s.conversationId);
   const dialogRef = useFocusTrap(liveArtifactsOpen);
-  useEscapeKey(toggleLiveArtifacts, liveArtifactsOpen);
+  useEscapeKey(toggleLiveArtifacts, liveArtifactsOpen, dialogRef);
 
   const artifacts = useMemo<ArtifactEntry[]>(() => {
     return collectLiveArtifacts(messages, conversationId?.trim() || undefined);

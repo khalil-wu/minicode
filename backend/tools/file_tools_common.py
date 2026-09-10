@@ -16,7 +16,7 @@ from typing import Any
 from backend.agent.turn_diff_tracker import TurnDiffTracker
 from backend.diff.unified import count_unified_diff_changes as _count_unified_diff_changes, iter_unified_diff
 from backend.permissions.context import ToolExecutionContext
-from backend.atomic_io import atomic_write_text, canonical_file_path_key, normalize_text_newlines
+from backend.atomic_io import atomic_write_text, canonical_file_path_key, canonical_path_mapping_key, normalize_text_newlines
 from backend.tools.base import (
     MAX_TOOL_RESULT_BYTES,
     MAX_TOOL_RESULT_CHARS,
@@ -344,6 +344,17 @@ async def _emit_write_diff(
 def content_hash(content: str) -> str:
     # The tool read/write contract uses the same universal newlines as read_file.
     return hashlib.sha256(normalize_text_newlines(content).encode("utf-8")).hexdigest()
+
+
+def record_file_hash(context: ToolExecutionContext | None, path: Path, value: str | None) -> None:
+    """Advance the existing read state from content this operation observed."""
+    if context is None:
+        return
+    hashes = context.metadata.setdefault("_read_file_hashes", {})
+    key = canonical_path_mapping_key(hashes, path)
+    hashes.pop(key, None)
+    if value is not None:
+        hashes[key] = value
 
 
 def _atomic_write_text(path: Path, content: str) -> None:

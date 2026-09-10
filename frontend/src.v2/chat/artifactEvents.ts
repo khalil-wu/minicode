@@ -9,6 +9,7 @@ import type {
 import { addInspectorPayload } from "./inspectorEntries";
 import { matchesPreviewRequestId } from "./previewRequestScope";
 import { normalizeArtifactContentState } from "../lib/artifact-projection";
+import { updateMessagesForConversation } from "../stores/shared-helpers";
 
 /**
  * Resolve an event to exactly one assistant message in its owner cache.
@@ -43,12 +44,9 @@ export const projectArtifactPreviewEvent = (
   useAppStore.setState((st) => {
     const targetId = owner.trim();
     if (!targetId) return st;
-    const isActive = targetId === st.conversationId;
-    const sourceMessages = !isActive
-      ? st.conversationMessages[targetId] ?? []
-      : st.messages;
+    return updateMessagesForConversation(st, targetId, (sourceMessages) => {
     const idx = assistantMessageIndex(sourceMessages, ev.message_id);
-    if (idx < 0) return st;
+    if (idx < 0) return null;
 
     const next = sourceMessages.slice();
     const artifacts = next[idx].artifacts ?? [];
@@ -72,21 +70,8 @@ export const projectArtifactPreviewEvent = (
     next[idx] = { ...next[idx], artifacts: nextArtifacts };
     projected = true;
 
-    if (!isActive) {
-      return {
-        conversationMessages: {
-          ...st.conversationMessages,
-          [targetId]: next,
-        },
-      };
-    }
-    return {
-      messages: next,
-      conversationMessages: {
-        ...st.conversationMessages,
-        [targetId]: next,
-      },
-    };
+    return next;
+    });
   });
   return projected;
 };
@@ -200,42 +185,21 @@ export const handleArtifactEvent = (e: ServerEvent, conversationId?: string): bo
         addUnprojectedCitationInspector(ev, undefined, "missing_conversation_owner");
         return true;
       }
-      const isActive = owner === s.conversationId;
-      const sourceMessages = !isActive
-        ? s.conversationMessages[owner] ?? []
-        : s.messages;
+      const sourceMessages = s.getVisibleMessages(owner);
       const targetIndex = assistantMessageIndex(sourceMessages, ev.message_id);
       if (targetIndex < 0) {
         addUnprojectedCitationInspector(ev, owner, "assistant_message_not_found");
         return true;
       }
-      useAppStore.setState((st) => {
-        const targetId = owner;
-        const activeTarget = targetId === st.conversationId;
-        const currentMessages = targetId && !activeTarget
-          ? st.conversationMessages[targetId] ?? []
-          : st.messages;
+      useAppStore.setState((st) => updateMessagesForConversation(st, owner, (currentMessages) => {
         const next = currentMessages.slice();
         const existing = next[targetIndex].citations ?? [];
         next[targetIndex] = {
           ...next[targetIndex],
           citations: [...existing, { source: ev.source, range: ev.range, label: ev.label, url: ev.url, title: ev.title }],
         };
-        if (targetId && !activeTarget) {
-          return {
-            conversationMessages: {
-              ...st.conversationMessages,
-              [targetId]: next,
-            },
-          };
-        }
-        return {
-          messages: next,
-          conversationMessages: st.conversationId
-            ? { ...st.conversationMessages, [st.conversationId]: next }
-            : st.conversationMessages,
-        };
-      });
+        return next;
+      }));
       return true;
     }
     case "inspector.update": {

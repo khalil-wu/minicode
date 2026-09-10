@@ -1226,6 +1226,23 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         : undefined;
       const targetId = conversationId || s.conversationId || undefined;
       const isActiveTarget = !targetId || targetId === s.conversationId;
+      if (messageId && usage) {
+        const previous = (isActiveTarget ? s.messages : s.sideChats[targetId!]?.messages ?? s.conversationMessages[targetId!] ?? [])
+          .find((message) => message.id === messageId && message.role === "assistant");
+        if (previous?.terminalStatus && !previous.isStreaming && !previous.isThinkingStreaming) {
+          return updateMessagesForConversation(s, conversationId, (messages) => messages.map((message) => message.id === messageId
+            ? {
+                ...message,
+                usage,
+                terminalStatus,
+                terminationReason: terminationReason || message.terminationReason,
+                durationMs: durationMs ?? message.durationMs,
+                failureMessage: terminalStatus === "failed" ? normalizedFailureMessage || message.failureMessage : undefined,
+                failureRecoverable: terminalStatus === "failed" ? normalizedFailureRecoverable ?? message.failureRecoverable : undefined,
+              }
+            : message));
+        }
+      }
       let matchedStreamingMessage = false;
       let sawOtherLiveAssistant = false;
       const result = updateMessagesForConversation(
@@ -1369,7 +1386,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     set((s) => {
       const targetId = conversationId || s.conversationId;
       const sourceMessages = targetId && targetId !== s.conversationId
-        ? s.conversationMessages[targetId] ?? []
+        ? s.sideChats[targetId]?.messages ?? s.conversationMessages[targetId] ?? []
         : s.messages;
       const targetMessageId = messageId?.trim();
       const targetIndex = targetMessageId
@@ -1414,9 +1431,16 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         ];
       }
 
+      if (targetId && s.sideChats[targetId]) {
+        return {
+          sideChats: {
+            ...s.sideChats,
+            [targetId]: { ...s.sideChats[targetId], messages: nextMessages, isStreaming: true },
+          },
+        };
+      }
       if (targetId && targetId !== s.conversationId) {
         return {
-          isPaused: false,
           conversationMessages: { ...s.conversationMessages, [targetId]: nextMessages },
           conversationStreaming: { ...s.conversationStreaming, [targetId]: true },
         };

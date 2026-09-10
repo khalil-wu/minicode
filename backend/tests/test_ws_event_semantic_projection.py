@@ -1218,7 +1218,7 @@ def test_send_event_projects_before_slow_notification_hook_completes(
         hook_started = asyncio.Event()
         release_hook = asyncio.Event()
 
-        async def slow_hook(_event: AgentEvent, _payload: dict[str, Any]) -> None:
+        async def slow_hook(_event: AgentEvent, _payload: dict[str, Any], _hook_manager) -> None:
             hook_started.set()
             await release_hook.wait()
 
@@ -1323,6 +1323,8 @@ def test_done_transport_defers_canonical_snake_case_provider_raw(
 
 
 def test_replay_persistence_repairs_a_failed_sequence_from_the_staged_prefix() -> None:
+    from collections import deque
+
     class Store:
         def __init__(self) -> None:
             self.rewrites: list[list[dict[str, Any]]] = []
@@ -1341,15 +1343,13 @@ def test_replay_persistence_repairs_a_failed_sequence_from_the_staged_prefix() -
         owner.session_id = "session-replay-repair"
         owner._persistence_failed_seqs = {1}
         owner._persistence_errors = []
-        await EventOutbox._persist_event(
-            owner,
+        owner._events = [
+            {"type": "agent_message.delta", "seq": 1},
             {"type": "done", "seq": 2},
-            None,
-            [
-                {"type": "agent_message.delta", "seq": 1},
-                {"type": "done", "seq": 2},
-            ],
-        )
+        ]
+        owner._pending_persistence = deque()
+        await EventOutbox._persist_event(owner, owner._events[-1], None)
+        assert not owner._persistence_failed_seqs
         return store
 
     store = asyncio.run(scenario())

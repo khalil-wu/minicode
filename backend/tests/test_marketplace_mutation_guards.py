@@ -9,7 +9,7 @@ import pytest
 from backend.skills.marketplace import install_marketplace_skill, remove_user_skill
 
 
-def test_marketplace_install_is_create_only_under_concurrency(tmp_path: Path) -> None:
+def test_marketplace_install_is_create_only_under_concurrency(tmp_path: Path, monkeypatch) -> None:
     skills_dir = tmp_path / "skills"
     content = "---\nname: review\ndescription: Review code.\n---\nUse the review workflow.\n"
     barrier = threading.Barrier(6)
@@ -17,11 +17,17 @@ def test_marketplace_install_is_create_only_under_concurrency(tmp_path: Path) ->
     failures: list[type[BaseException]] = []
     result_lock = threading.Lock()
 
+    def materialize(_source, destination, *, validate, **_kwargs):
+        destination.mkdir(parents=True, exist_ok=False)
+        (destination / "SKILL.md").write_text(content, encoding="utf-8")
+        validate(destination)
+
+    monkeypatch.setattr("backend.skills.marketplace.materialize_source", materialize)
+
     async def install() -> dict:
         return await install_marketplace_skill(
             "review",
             skills_dir,
-            fetch_text=lambda _url: content,
         )
 
     def worker() -> None:

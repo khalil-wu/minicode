@@ -122,6 +122,7 @@ class PreviewLaunchProcess:
 BroadcastFn = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 
 _RUNNING: dict[str, PreviewLaunchProcess] = {}
+_START_LOCK = asyncio.Lock()
 
 
 def _active_preview_processes() -> list[PreviewLaunchProcess]:
@@ -572,91 +573,92 @@ async def _start_preview_config(
     preview_id = hashlib.sha256(
         f"{session}\0{conversation}\0{Path(config.cwd).resolve()}\0{config.name}".encode("utf-8")
     ).hexdigest()
-    existing = _RUNNING.get(preview_id)
-    if existing is not None:
-        if existing.process.returncode is None and existing.status in {"starting", "ready"}:
-            return existing
-        await _stop_preview_processes([existing])
-    if config.auto_port and not config.port:
-        port = _allocate_loopback_port()
-        config = replace(
-            config,
-            port=port,
-            url=config.url or f"http://127.0.0.1:{port}",
-        )
-    env_overrides: dict[str, str] = {}
-    if config.port:
-        env_overrides["PORT"] = str(config.port)
-    sandbox_root = _safe_workspace_root(workspace_root or config.cwd)
-    runtime_readable_roots = _preview_runtime_readable_roots(
-        include_code_root=config.source == "static-html"
-    )
-    if sandbox_policy is None:
-        # Desktop preview commands are explicit user control-plane operations.
-        policy = SandboxPolicy(
-            workspace_root=sandbox_root,
-            writable_roots=(sandbox_root,),
-            readable_roots=runtime_readable_roots,
-            allow_network=True,
-            env_overrides=env_overrides,
-        )
-    else:
-        if sandbox_policy.policy_limitations:
-            raise RuntimeError(
-                "Preview launch is blocked because the managed network policy "
-                "requires enforcement that is unavailable on this host: "
-                + "; ".join(sandbox_policy.policy_limitations)
+    async with _START_LOCK:
+        existing = _RUNNING.get(preview_id)
+        if existing is not None:
+            if existing.process.returncode is None and existing.status in {"starting", "ready"}:
+                return existing
+            await _stop_preview_processes([existing])
+        if config.auto_port and not config.port:
+            port = _allocate_loopback_port()
+            config = replace(
+                config,
+                port=port,
+                url=config.url or f"http://127.0.0.1:{port}",
             )
-        # Starting preview_server is a CONFIRM tool action. Represent that
-        # approval as an additional network capability while preserving every
-        # filesystem deny, writable-root and fail-closed setting from the turn.
-        resolved_policy = sandbox_policy.resolve()
-        runtime_read_entries = tuple(
-            FileSystemSandboxEntry(
-                FileSystemPath.path(root),
-                FileSystemAccessMode.READ,
+        env_overrides: dict[str, str] = {}
+        if config.port:
+            env_overrides["PORT"] = str(config.port)
+        sandbox_root = _safe_workspace_root(workspace_root or config.cwd)
+        runtime_readable_roots = _preview_runtime_readable_roots(
+            include_code_root=config.source == "static-html"
+        )
+        if sandbox_policy is None:
+            # Desktop preview commands are explicit user control-plane operations.
+            policy = SandboxPolicy(
+                workspace_root=sandbox_root,
+                writable_roots=(sandbox_root,),
+                readable_roots=runtime_readable_roots,
+                allow_network=True,
+                env_overrides=env_overrides,
             )
-            for root in runtime_readable_roots
-            if resolved_policy.resolve_access(root) is FileSystemAccessMode.DENY
-        )
-        policy = sandbox_policy.with_additional_permissions(
-            AdditionalPermissionProfile(
-                file_system=(
-                    FileSystemPermissions(entries=runtime_read_entries)
-                    if runtime_read_entries
-                    else None
-                ),
-                network=NetworkPermissions(enabled=True),
+        else:
+            if sandbox_policy.policy_limitations:
+                raise RuntimeError(
+                    "Preview launch is blocked because the managed network policy "
+                    "requires enforcement that is unavailable on this host: "
+                    + "; ".join(sandbox_policy.policy_limitations)
+                )
+            # Starting preview_server is a CONFIRM tool action. Represent that
+            # approval as an additional network capability while preserving every
+            # filesystem deny, writable-root and fail-closed setting from the turn.
+            resolved_policy = sandbox_policy.resolve()
+            runtime_read_entries = tuple(
+                FileSystemSandboxEntry(
+                    FileSystemPath.path(root),
+                    FileSystemAccessMode.READ,
+                )
+                for root in runtime_readable_roots
+                if resolved_policy.resolve_access(root) is FileSystemAccessMode.DENY
             )
+            policy = sandbox_policy.with_additional_permissions(
+                AdditionalPermissionProfile(
+                    file_system=(
+                        FileSystemPermissions(entries=runtime_read_entries)
+                        if runtime_read_entries
+                        else None
+                    ),
+                    network=NetworkPermissions(enabled=True),
+                )
+            )
+            policy = replace(
+                policy,
+                env_overrides={**policy.env_overrides, **env_overrides},
+                timeout=None,
+            )
+        sandbox_runner = SandboxRunner(policy)
+        exit_event = asyncio.Event()
+        process = await sandbox_runner.spawn_shell_interactive(
+            config.command,
+            cwd=config.cwd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            on_exit=exit_event.set,
         )
-        policy = replace(
-            policy,
-            env_overrides={**policy.env_overrides, **env_overrides},
-            timeout=None,
+        launched = PreviewLaunchProcess(
+            id=preview_id,
+            config=config,
+            process=process,
+            session_id=session,
+            conversation_id=conversation,
+            workspace_root=str(sandbox_root),
+            _sandbox_runner=sandbox_runner,
+            _exit_event=exit_event,
         )
-    sandbox_runner = SandboxRunner(policy)
-    exit_event = asyncio.Event()
-    process = await sandbox_runner.spawn_shell_interactive(
-        config.command,
-        cwd=config.cwd,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        on_exit=exit_event.set,
-    )
-    launched = PreviewLaunchProcess(
-        id=preview_id,
-        config=config,
-        process=process,
-        session_id=session,
-        conversation_id=conversation,
-        workspace_root=str(sandbox_root),
-        _sandbox_runner=sandbox_runner,
-        _exit_event=exit_event,
-    )
-    _RUNNING[preview_id] = launched
-    launched._monitor_task = asyncio.create_task(_monitor_process(launched, broadcast))
-    return launched
+        _RUNNING[preview_id] = launched
+        launched._monitor_task = asyncio.create_task(_monitor_process(launched, broadcast))
+        return launched
 
 
 def _allocate_loopback_port() -> int:

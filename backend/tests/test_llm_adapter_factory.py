@@ -231,7 +231,7 @@ def test_explicit_wire_factory_rejects_unknown_protocol() -> None:
 def test_factory_preserves_configured_headers_from_settings_projection(monkeypatch) -> None:
     monkeypatch.setattr(
         "backend.services.llm_adapter_factory.get_openai_settings",
-        lambda: {
+        lambda _snapshot: {
             "api_key": "",
             "base_url": "https://relay.example/v1",
             "model": "relay-model",
@@ -248,7 +248,7 @@ def test_factory_preserves_configured_headers_from_settings_projection(monkeypat
 
 
 def test_factory_does_not_translate_provider_construction_errors_to_auth_errors(monkeypatch) -> None:
-    def broken_settings():
+    def broken_settings(_snapshot):
         raise ValueError("explicit provider configuration is invalid")
 
     monkeypatch.setattr(
@@ -278,29 +278,24 @@ def test_model_runtime_factory_requires_explicit_model_selection() -> None:
 
 
 def test_session_factory_builds_only_the_explicit_provider(monkeypatch) -> None:
-    selected = object()
-    calls: list[tuple[str, str | None]] = []
+    from backend.config import AppConfig
 
-    def build(provider: str, model_override: str | None = None, **_kwargs):
-        calls.append((provider, model_override))
+    selected = object()
+    calls: list[LLMSettings] = []
+
+    def build(settings, **_kwargs):
+        calls.append(settings)
         return selected
 
-    monkeypatch.setattr(
-        "backend.services.llm_adapter_factory.build_provider_adapter",
-        build,
-    )
-    monkeypatch.setattr(
-        "backend.services.llm_adapter_factory.get_llm_provider",
-        lambda: "openai",
-    )
-    stale_config = SimpleNamespace(
-        agent=SimpleNamespace(fallback_providers=("anthropic", "custom")),
-    )
+    monkeypatch.setattr("backend.services.llm_adapter_factory.build_wire_adapter", build)
+    monkeypatch.setattr("backend.services.llm_adapter_factory.get_llm_provider", lambda: "anthropic")
+    config = AppConfig(llm=LLMSettings(provider="openai", model="session-model", api_key="session-key"))
 
-    adapter = create_session_llm(stale_config, model_override="gpt-test")
+    adapter = create_session_llm(config, model_override="gpt-test")
 
     assert adapter is selected
-    assert calls == [("openai", "gpt-test")]
+    assert calls == [replace(config.llm, model="gpt-test")]
+    assert config.llm.model == "session-model"
 
 
 def test_unknown_provider_values_fail_closed_at_each_config_boundary() -> None:

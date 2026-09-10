@@ -18,4 +18,11 @@ describe("workspace media classification", () => {
     expect(isPdfPath("docs/report.PDF")).toBe(true);
     expect(isPreviewableMediaPath("docs/report.PDF?inline=1")).toBe(true);
   });
+
+  it("preserves # and percent characters in literal workspace filenames", () => {
+    expect(isImagePath("assets/plot#1.png")).toBe(true);
+    expect(isPdfPath("C:\\workspace\\report#final.pdf")).toBe(true);
+    expect(isImagePath("assets/plot%23version#2.webp")).toBe(true);
+    expect(mediaTypeForPath("https://example.test/image.png#report.pdf")).toBe("image/png");
+  });
 });

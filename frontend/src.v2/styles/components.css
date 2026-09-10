@@ -576,9 +576,6 @@ body:has(.settings-workspace.settings-center) .toast-container {
     right: calc(min(480px, calc(100vw - 16px)) + 20px);
   }
 
-  body:has(.mc-side-chat-surface) .toast-container {
-    right: calc(min(420px, calc(100vw - 32px)) + 28px);
-  }
 }
 
 .toast-card {
@@ -670,8 +667,7 @@ body:has(.settings-workspace.settings-center) .toast-container {
   }
 
   body:has(.settings-workspace.settings-center) .toast-container,
-  body:has(.mc-narrow-drawer-surface[data-side="right"]) .toast-container,
-  body:has(.mc-side-chat-surface) .toast-container {
+  body:has(.mc-narrow-drawer-surface[data-side="right"]) .toast-container {
     top: auto;
     right: 10px;
     bottom: 10px;

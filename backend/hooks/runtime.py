@@ -151,24 +151,23 @@ async def run_config_change_hook(*, source: str, file_path: str = "") -> Any | N
         return None
 
 
-async def run_cwd_changed_hook(*, old_cwd: str, new_cwd: str) -> None:
+async def run_cwd_changed_hook(*, old_cwd: str, new_cwd: str, hook_manager: Any | None) -> None:
     """Notify CwdChanged hooks after the session workspace root changes."""
     old_value = str(old_cwd or "").strip()
     new_value = str(new_cwd or "").strip()
     if old_value == new_value:
         return
     try:
-        from backend.hooks import get_hook_manager
         from backend.hooks.manager import HookEvent
 
-        hook_mgr = get_hook_manager()
+        hook_mgr = hook_manager
         if hook_mgr and hook_mgr.has_hooks(HookEvent.CWD_CHANGED):
             await hook_mgr.run_cwd_changed(old_cwd=old_value, new_cwd=new_value)
     except Exception:
         logger.debug("CwdChanged hook failed", exc_info=True)
 
 
-async def run_notification_hook_for_event(*, event_type: str, payload: dict[str, Any]) -> Any | None:
+async def run_notification_hook_for_event(*, event_type: str, payload: dict[str, Any], hook_manager: Any | None) -> Any | None:
     """Notify Notification hooks for canonical user-visible event types."""
     clean_type = str(event_type or "").strip()
     # Map internal transport events to MiniCode notification matcher values.
@@ -218,9 +217,7 @@ async def run_notification_hook_for_event(*, event_type: str, payload: dict[str,
         or canonical_type
     ).strip()
     try:
-        from backend.hooks import get_hook_manager
-
-        hook_mgr = get_hook_manager()
+        hook_mgr = hook_manager
         if not hook_mgr:
             return None
         return await hook_mgr.run_notification(

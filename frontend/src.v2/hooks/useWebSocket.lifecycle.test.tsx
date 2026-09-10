@@ -160,6 +160,19 @@ describe("useWebSocketConnection socket ownership", () => {
     expect(useAppStore.getState().isConnected).toBe(false);
   });
 
+  it("sends every explicitly identified request instead of coalescing away its result", async () => {
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.emit("open"));
+    getWebSocket()!.send({ type: "skills.list", client_command_id: "first-awaiting-request" });
+    getWebSocket()!.send({ type: "skills.list", client_command_id: "second-awaiting-request" });
+    await flushQueuedCommands();
+    const ids = sentCommands(socket).map((command) => command.client_command_id);
+    expect(ids).toContain("first-awaiting-request");
+    expect(ids).toContain("second-awaiting-request");
+  });
+
   it("closes a half-open socket when ping receives no inbound traffic", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));

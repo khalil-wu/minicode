@@ -14,7 +14,7 @@ import {
   Search,
   ServerOff,
   SlidersHorizontal,
-  Sparkles,
+  BookOpenText,
   SquareTerminal,
   UserRoundCog,
 } from "lucide-react";
@@ -158,7 +158,7 @@ export const SettingsCenter = () => {
     { id: "shortcuts" as const, group: "个人", label: "快捷键", description: "查看当前可用的键盘操作。", keywords: "命令面板 终端 侧栏 发送 换行", icon: <Keyboard /> },
     { id: "provider" as const, group: "个人", label: "模型", description: "配置提供商、接口、认证与默认模型。", keywords: "API 密钥 Base URL 推理 供应商", icon: <Cpu /> },
     { id: "plugins" as const, group: "集成", label: "插件", description: "安装和管理包含多类能力的插件包。", keywords: "导入 Zip 验证 打包 Hook App", icon: <Puzzle /> },
-    { id: "skills" as const, group: "集成", label: "技能", description: "查看任务工作流，并选择用于下一条消息。", keywords: "SKILL.md 工作流 市场 安装", icon: <Sparkles /> },
+    { id: "skills" as const, group: "集成", label: "技能", description: "查看任务工作流，并选择用于下一条消息。", keywords: "SKILL.md 工作流 市场 安装", icon: <BookOpenText /> },
     { id: "connectors" as const, group: "集成", label: "MCP", description: "安装和管理外部工具服务、连接与认证状态。", keywords: "stdio HTTP 服务 工具 市场", icon: <Cable /> },
     { id: "browser" as const, group: "集成", label: "浏览器", description: "管理内置浏览器页面、下载与站点权限。", keywords: "控制台 网络 下载 数据 网站", icon: <Globe2 /> },
     { id: "scheduler" as const, group: "集成", label: "已安排", description: "管理自动运行的任务与最近记录。", keywords: "计划 Cron 时区 Worktree 自动", icon: <CalendarClock /> },

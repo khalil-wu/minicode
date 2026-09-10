@@ -178,7 +178,7 @@ def _collect_packable_plugin_files(plugin_dir: Path) -> tuple[list[tuple[Path, s
         kept_dirs: list[str] = []
         for dirname in dirnames:
             rel = _relative_plugin_path(root_path / dirname, plugin_dir)
-            if dirname in _PLUGIN_EXCLUDED_DIRS or dirname.startswith(".") and dirname != PLUGIN_MANIFEST_DIRECTORY:
+            if dirname in _PLUGIN_EXCLUDED_DIRS:
                 excluded.append(rel)
                 continue
             kept_dirs.append(dirname)
@@ -192,17 +192,16 @@ def _collect_packable_plugin_files(plugin_dir: Path) -> tuple[list[tuple[Path, s
                 continue
             try:
                 size = file_path.stat().st_size
-            except OSError:
-                excluded.append(rel)
-                continue
+            except OSError as exc:
+                raise PluginSettingsError(f"Cannot package plugin file {rel}: {exc}") from exc
             if size > _MAX_PLUGIN_PACKAGE_FILE_BYTES:
-                excluded.append(rel)
-                continue
+                raise PluginSettingsError(f"Plugin file exceeds the package file limit: {rel}")
             if total_bytes + size > _MAX_PLUGIN_PACKAGE_BYTES:
-                excluded.append(rel)
-                continue
+                raise PluginSettingsError("Plugin exceeds the total package size limit")
             files.append((file_path, rel, size))
             total_bytes += size
+            if len(files) > _MAX_PLUGIN_ARCHIVE_ENTRIES:
+                raise PluginSettingsError("Plugin exceeds the package file count limit")
     files.sort(key=lambda item: item[1].lower())
     return files, sorted(excluded)
 
@@ -391,9 +390,6 @@ _PLUGIN_EXCLUDED_DIRS = {
     ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
-    "node_modules",
-    "dist",
-    "build",
 }
 
 _PLUGIN_EXCLUDED_FILES = {".DS_Store", "Thumbs.db"}

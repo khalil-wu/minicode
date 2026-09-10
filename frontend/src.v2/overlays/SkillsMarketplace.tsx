@@ -1,391 +1,190 @@
-import {
-  ArrowLeft,
-  Check,
-  FolderOpen,
-  RefreshCw,
-  Search,
-  Sparkles,
-  Trash2,
-} from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, BookOpenText, Check, ChevronDown, FolderOpen, Globe2, MessageSquarePlus, MoreHorizontal, RefreshCw, Search, Settings, Trash2 } from "../lib/icons";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useAppStore } from "../stores";
-import type { SkillInfo } from "../stores/types";
+import type { MarketplaceSkill, SkillInfo } from "../stores/types";
 import { sendClientCommand } from "../protocol/ws-outbox";
-import { pushToast } from "./ToastContainer";
-import {
-  apiBase,
-  authHeaders,
-  fetchWithTimeout,
-  LONG_HTTP_TIMEOUT_MS,
-} from "../protocol/api";
-import { useFocusTrap } from "../hooks/useFocusTrap";
+import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout, LONG_HTTP_TIMEOUT_MS } from "../protocol/api";
 import { BrandIcon } from "../components/BrandIcon";
-import { showConfirm } from "./DialogService";
+import { ContextMenu, type ContextMenuItem } from "../components/ContextMenu";
+import { isDesktop, pickDirectory } from "../desktop/runtime";
 import { openSettings } from "../lib/settings-navigation";
-import { pickDirectory } from "../desktop/runtime";
+import { selectSkillForComposer } from "../lib/select-skill-for-composer";
+import { showAlert, showConfirm, showPrompt } from "./DialogService";
+import { PluginsTab } from "./PluginsTab";
+import { pushToast } from "./ToastContainer";
 import "./SkillsMarketplace.css";
 
-type Scope = "builtin" | "personal";
-type MarketplaceSourceStatus = Record<string, { ok?: boolean; error?: string }>;
-
-// Mirrors the backend's source_level vocabulary
-// (backend/skills/loader.py: managed / plugin / user / workspace / builtin).
-const sourceLabel = (source?: string) => ({
-  managed: "受管",
-  plugin: "插件",
-  user: "个人",
-  workspace: "工作区",
-  builtin: "内置",
-}[source ?? ""] ?? source ?? "本地");
-
-// `DELETE /api/skills/{name}` is served by `remove_user_skill`, which only
-// deletes inside the user skills directory (backend/skills/marketplace.py), i.e.
-// the `user` level. Every other source has to be managed where it comes from, so
-// the button explains that source instead of claiming everything is 内置.
-const removalBlockedReason = (source?: string): string => ({
-  builtin: "内置技能不能卸载",
-  managed: "受管技能由管理员策略提供，不能在此卸载",
-  plugin: "插件提供的技能请在插件中管理",
-  workspace: "工作区技能属于项目文件，请在项目中删除",
-}[source ?? ""] ?? "该来源的技能不能在此卸载");
-
-const marketplaceLoadWarning = (sourceStatus: MarketplaceSourceStatus | undefined): string => {
-  if (!sourceStatus) return "";
-  const failed = Object.entries(sourceStatus).filter(([source, status]) => source === "openai_skills" && status?.ok === false);
-  if (failed.length === 0) return "";
-  return failed.map(([source, status]) => {
-    const label = source === "openai_skills" ? "OpenAI 技能目录" : source;
-    return `${label} 暂不可用${status.error ? `：${status.error}` : ""}`;
-  }).join("；");
-};
+const sourceLabels: Record<string, string> = { builtin: "系统", managed: "受管", plugin: "插件", user: "个人", workspace: "工作区" };
+type MenuState = { kind: "add" | "skill"; position: { x: number; y: number }; items: ContextMenuItem[] };
 
 export const SkillsMarketplace = () => {
-  const skillsMarketplaceOpen = useAppStore((s) => s.skillsMarketplaceOpen);
-  const skillsMarketplaceReturnTarget = useAppStore((s) => s.skillsMarketplaceReturnTarget);
-  const toggleSkillsMarketplace = useAppStore((s) => s.toggleSkillsMarketplace);
+  const open = useAppStore((s) => s.skillsMarketplaceOpen);
+  const tab = useAppStore((s) => s.skillsMarketplaceTab);
+  const returnTarget = useAppStore((s) => s.skillsMarketplaceReturnTarget);
+  const [toolbarHost, setToolbarHost] = useState<HTMLDivElement | null>(null);
+  const pageRef = useRef<HTMLElement>(null);
+  const close = useCallback(() => {
+    useAppStore.getState().toggleSkillsMarketplace();
+    if (returnTarget === "settings") openSettings("skills");
+  }, [returnTarget]);
+  useEffect(() => {
+    if (!open) return;
+    const trigger = document.activeElement as HTMLElement | null;
+    const page = pageRef.current;
+    page?.focus();
+    return () => {
+      if (page?.contains(document.activeElement) || document.activeElement === document.body) trigger?.focus();
+    };
+  }, [open]);
+  const selectTab = (next: "plugins" | "skills") => useAppStore.setState({ skillsMarketplaceTab: next });
+  return <main ref={pageRef} className="skills-workspace" aria-label="插件与技能" tabIndex={-1} hidden={!open}
+    onKeyDown={(event) => {
+      if (event.key !== "Escape" || event.nativeEvent.isComposing) return;
+      event.preventDefault(); event.stopPropagation(); close();
+    }}>
+    <header className="skills-workspace-toolbar">
+      <button type="button" className="skills-icon-button" onClick={close} aria-label={returnTarget === "settings" ? "返回技能设置" : "返回应用"}><ArrowLeft /></button>
+      <div className="skills-product-tabs" role="tablist" aria-label="扩展" onKeyDown={(event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const next = event.key === "Home" ? "plugins" : event.key === "End" ? "skills" : tab === "plugins" ? "skills" : "plugins";
+        selectTab(next);
+        event.currentTarget.querySelector<HTMLButtonElement>(`#extensions-tab-${next}`)?.focus();
+      }}>
+        {(["plugins", "skills"] as const).map((item) => <button key={item} type="button" role="tab" id={`extensions-tab-${item}`} aria-controls={`extensions-panel-${item}`} aria-selected={tab === item} tabIndex={tab === item ? 0 : -1} onClick={() => selectTab(item)}>{item === "plugins" ? "插件" : "技能"}</button>)}
+      </div>
+      <div ref={setToolbarHost} className="skills-toolbar-actions" />
+    </header>
+    <div className="skills-workspace-scroll" hidden={tab !== "plugins"} role="tabpanel" id="extensions-panel-plugins" aria-labelledby="extensions-tab-plugins">
+      <div className="skills-workspace-content"><PluginsTab catalog toolbarHost={toolbarHost} active={open && tab === "plugins"} /></div>
+    </div>
+    <div className="skills-workspace-scroll" hidden={tab !== "skills"} role="tabpanel" id="extensions-panel-skills" aria-labelledby="extensions-tab-skills">
+        <SkillsCatalog toolbarHost={toolbarHost} active={open && tab === "skills"} />
+    </div>
+  </main>;
+};
+
+const SkillsCatalog = ({ toolbarHost, active }: { toolbarHost: HTMLElement | null; active: boolean }) => {
   const availableSkills = useAppStore((s) => s.availableSkills);
-  const [scope, setScope] = useState<Scope>("builtin");
+  const marketplaceSkills = useAppStore((s) => s.marketplaceSkills);
+  const [scope, setScope] = useState("builtin");
   const [query, setQuery] = useState("");
-  const [removing, setRemoving] = useState<Set<string>>(new Set());
-  const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [expanded, setExpanded] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [loadWarning, setLoadWarning] = useState("");
-  const loadEpochRef = useRef(0);
+  const [operation, setOperation] = useState("");
+  const pendingRef = useRef(false);
   const loadAbortRef = useRef<AbortController | null>(null);
-  const operationControllersRef = useRef(new Map<string, AbortController>());
-  const pendingOperationsRef = useRef(new Set<string>());
-  const pageRef = useFocusTrap(skillsMarketplaceOpen);
-
-  const closeMarketplace = useCallback(() => {
-    const returnToSettings = skillsMarketplaceReturnTarget === "settings";
-    toggleSkillsMarketplace();
-    if (returnToSettings) openSettings("skills");
-  }, [skillsMarketplaceReturnTarget, toggleSkillsMarketplace]);
-
-  const loadMarketplace = useCallback(async (forceRefresh = false, announce = false) => {
+  const [menu, setMenu] = useState<MenuState | null>(null);
+  const loadMarketplace = useCallback(async (force = false) => {
     loadAbortRef.current?.abort();
     const controller = new AbortController();
     loadAbortRef.current = controller;
-    const epoch = ++loadEpochRef.current;
-    setLoadState("loading");
-    setLoadError("");
-    setLoadWarning("");
+    setLoading(true); setLoadError("");
     try {
-      const refreshQuery = forceRefresh ? "?refresh=true" : "";
-      const marketplaceRes = await fetchWithTimeout(
-        `${apiBase()}/api/extensions/marketplace${refreshQuery}`,
-        {
-          cache: "no-store",
-          headers: authHeaders(),
-          signal: controller.signal,
-        },
-        { timeoutMessage: "技能目录加载超时，请重试。" },
-      );
-      if (!marketplaceRes.ok) throw new Error(`市场请求失败（${marketplaceRes.status}）`);
-      const marketplacePayload = await marketplaceRes.json();
-      if (epoch !== loadEpochRef.current) return;
-      const skills = Array.isArray(marketplacePayload.skills) ? marketplacePayload.skills : [];
-      useAppStore.getState().setMarketplaceSkills(skills.map((skill: Record<string, unknown>) => ({
-        name: String(skill.name ?? ""),
-        title: String(skill.title ?? skill.name ?? ""),
-        description: String(skill.description ?? ""),
-        triggers: Array.isArray(skill.triggers) ? skill.triggers.map(String) : [],
-        installed: Boolean(skill.installed),
-        source: String(skill.source ?? ""),
-        path: String(skill.path ?? ""),
-        iconUrl: String(skill.iconUrl ?? ""),
-        websiteUrl: String(skill.websiteUrl ?? ""),
-      })).filter((skill: { name: string }) => skill.name));
-      setLoadWarning(marketplaceLoadWarning(marketplacePayload.source_status as MarketplaceSourceStatus | undefined));
-      setLoadState("ready");
-      if (announce) pushToast("技能目录已刷新", "success");
-    } catch (error) {
+      const response = await fetchWithTimeout(`${apiBase()}/api/extensions/marketplace${force ? "?refresh=true" : ""}`, {
+        cache: "no-store", headers: authHeaders(), signal: controller.signal,
+      }, { timeoutMessage: "技能目录加载超时，请重试。" });
+      if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), `目录请求失败（${response.status}）`));
+      const payload = await response.json();
       if (controller.signal.aborted) return;
-      if (epoch !== loadEpochRef.current) return;
-      const message = `能力数据加载失败：${error instanceof Error ? error.message : String(error)}`;
-      setLoadError(message);
-      setLoadState("error");
-      pushToast(message, "warning");
+      useAppStore.getState().setMarketplaceSkills((payload.skills ?? []).map((skill: MarketplaceSkill) => ({ ...skill, triggers: skill.triggers ?? [] })));
+      const status = payload.source_status?.openai_skills;
+      if (status?.ok === false) setLoadError(`OpenAI 技能目录暂不可用${status.error ? `：${status.error}` : ""}`);
+      else if (status?.source === "disabled") setLoadError("公开技能目录已由此环境停用，可继续导入和使用本地技能。");
+    } catch (error) {
+      if (!controller.signal.aborted) setLoadError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, []);
-
-  const refreshAll = useCallback((forceRefresh = false, announce = false) => {
-    void loadMarketplace(forceRefresh, announce);
+  const refresh = useCallback((force = false) => {
+    if (scope === "public") void loadMarketplace(force);
     sendClientCommand({ type: "skills.list" }, { silent: true });
-  }, [loadMarketplace]);
+  }, [loadMarketplace, scope]);
+  useEffect(() => { if (active) refresh(); }, [active, refresh]);
+  useEffect(() => () => loadAbortRef.current?.abort(), []);
+  useEffect(() => { if (!active) setMenu(null); }, [active]);
 
-  useEffect(() => {
-    if (!skillsMarketplaceOpen) return;
-    refreshAll(false);
-    return () => {
-      loadEpochRef.current += 1;
-      loadAbortRef.current?.abort();
-      loadAbortRef.current = null;
-      for (const controller of operationControllersRef.current.values()) {
-        controller.abort();
-      }
-      operationControllersRef.current.clear();
-      pendingOperationsRef.current.clear();
-    };
-  }, [refreshAll, skillsMarketplaceOpen]);
-
-  useEffect(() => {
-    if (!skillsMarketplaceOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeMarketplace();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeMarketplace, skillsMarketplaceOpen]);
-
-  const q = query.trim().toLowerCase();
-  const installedFiltered = useMemo(() => availableSkills.filter((skill) => (
-    skill.source_level !== "builtin" && (!q || `${skill.name} ${skill.display_name ?? ""} ${skill.description}`.toLowerCase().includes(q))
-  )), [availableSkills, q]);
-  const builtinFiltered = useMemo(() => availableSkills.filter((skill) => (
-    skill.source_level === "builtin" && (!q || `${skill.name} ${skill.display_name ?? ""} ${skill.description}`.toLowerCase().includes(q))
-  )), [availableSkills, q]);
-
-  if (!skillsMarketplaceOpen) return null;
-
-  const removeSkill = async (name: string) => {
-    const confirmed = await showConfirm({
-      title: "卸载技能",
-      message: `确定卸载 ${name}？本地安装的技能文件会被移除。`,
-      confirmLabel: "卸载",
-      danger: true,
-    });
-    if (!confirmed) return;
-    const operationKey = `remove:${name}`;
-    if (pendingOperationsRef.current.has(operationKey)) return;
-    pendingOperationsRef.current.add(operationKey);
-    const controller = new AbortController();
-    operationControllersRef.current.set(operationKey, controller);
-    setRemoving((previous) => new Set(previous).add(name));
+  const mutate = async (kind: "install" | "remove" | "import", name = "") => {
+    if (pendingRef.current) return;
+    pendingRef.current = true;
+    setOperation(`${kind}:${name}`);
     try {
-      const response = await fetchWithTimeout(
-        `${apiBase()}/api/skills/${encodeURIComponent(name)}`,
-        {
-          method: "DELETE",
-          headers: authHeaders(),
-          signal: controller.signal,
-        },
-        {
-          timeoutMs: LONG_HTTP_TIMEOUT_MS,
-          timeoutMessage: `卸载技能 ${name} 超时，请重试。`,
-        },
-      );
-      if (!response.ok) throw new Error(await response.text());
-      pushToast(`已移除技能：${name}`, "success");
-      await loadMarketplace(true, false);
+      let sourcePath: string | null = null;
+      if (kind === "remove" && !await showConfirm({ title: "卸载技能", message: `确定卸载 ${name}？本地技能文件会被移除。`, confirmLabel: "卸载", danger: true })) return;
+      if (kind === "import") {
+        sourcePath = isDesktop() ? await pickDirectory() : await showPrompt({ title: "导入本地技能", message: "输入后端所在电脑上的技能文件夹路径。", placeholder: "包含 SKILL.md 的文件夹", confirmLabel: "导入" });
+        if (!sourcePath?.trim()) return;
+      }
+      const response = await fetchWithTimeout(`${apiBase()}/api/skills/${kind === "remove" ? encodeURIComponent(name) : kind}`, {
+        method: kind === "remove" ? "DELETE" : "POST", headers: authHeaders({ "content-type": "application/json" }),
+        ...(kind !== "remove" ? { body: JSON.stringify(kind === "install" ? { skill_name: name } : { source_path: sourcePath?.trim() }) } : {}),
+      }, { timeoutMs: LONG_HTTP_TIMEOUT_MS, timeoutMessage: "技能操作超时，请刷新查看安装状态。" });
+      if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), "技能操作失败"));
+      useAppStore.getState().setMarketplaceSkills(useAppStore.getState().marketplaceSkills.map((skill) => skill.name === name ? { ...skill, installed: kind === "install" } : skill));
+      pushToast(kind === "remove" ? `已卸载技能：${name}` : kind === "import" ? "已导入本地技能" : `已安装技能：${name}`, "success");
+      refresh(true);
     } catch (error) {
-      if (controller.signal.aborted) return;
-      pushToast(`技能移除失败：${error instanceof Error ? error.message : String(error)}`, "error");
+      pushToast(error instanceof Error ? error.message : String(error), "error");
     } finally {
-      pendingOperationsRef.current.delete(operationKey);
-      operationControllersRef.current.delete(operationKey);
-      setRemoving((previous) => {
-        const next = new Set(previous);
-        next.delete(name);
-        return next;
-      });
-      if (!controller.signal.aborted) sendClientCommand({ type: "skills.list" }, { silent: true });
+      pendingRef.current = false; setOperation("");
     }
   };
-
-  const importSkill = async () => {
-    const sourcePath = await pickDirectory();
-    if (!sourcePath) return;
-    try {
-      const response = await fetchWithTimeout(`${apiBase()}/api/skills/import`, {
-        method: "POST",
-        headers: authHeaders({ "content-type": "application/json" }),
-        body: JSON.stringify({ source_path: sourcePath }),
-      }, { timeoutMs: LONG_HTTP_TIMEOUT_MS, timeoutMessage: "导入技能超时，请重试。" });
-      if (!response.ok) throw new Error(await response.text());
-      pushToast("已导入本地技能", "success");
-      refreshAll(true, false);
-    } catch (error) {
-      pushToast(`技能导入失败：${error instanceof Error ? error.message : String(error)}`, "error");
-    }
+  const q = query.trim().toLocaleLowerCase();
+  const matches = (text: string) => !q || text.toLocaleLowerCase().includes(q);
+  const installed = availableSkills.filter((skill) => matches(`${skill.name} ${skill.display_name ?? ""} ${skill.description}`));
+  const scoped = installed.filter((skill) => skill.source_level === scope);
+  const catalog = marketplaceSkills.filter((skill) => matches(`${skill.name} ${skill.title} ${skill.description}`));
+  const installedNames = new Set(availableSkills.map((skill) => skill.name));
+  const scopes = Object.entries(sourceLabels).filter(([key]) => key === "builtin" || key === "user" || key === scope || availableSkills.some((skill) => skill.source_level === key));
+  const showSkillDetails = (skill: SkillInfo) => void showAlert({ title: skill.display_name || skill.name, message: `${skill.description}\n\n来源：${sourceLabels[skill.source_level ?? ""] ?? skill.source_level ?? "本地"}${skill.path ? `\n${skill.path}` : ""}${skill.user_invocable === false ? "\n此技能由模型按需调用。" : ""}` });
+  const skillMenu = (skill: SkillInfo, target: HTMLButtonElement) => {
+    const rect = target.getBoundingClientRect();
+    setMenu({ kind: "skill", position: { x: rect.right - 200, y: rect.bottom + 4 }, items: [
+      { label: "用于下一条消息", disabled: skill.user_invocable === false, icon: <MessageSquarePlus />, onClick: () => selectSkillForComposer(skill) },
+      { label: "查看技能详情", onClick: () => showSkillDetails(skill) },
+      ...(skill.source_level === "user" ? [{ label: "卸载技能", danger: true, disabled: Boolean(operation), icon: <Trash2 />, onClick: () => void mutate("remove", skill.name) }] : []),
+      ...(skill.source_level === "plugin" ? [{ label: "管理所属插件", onClick: () => useAppStore.setState({ skillsMarketplaceTab: "plugins" }) }] : []),
+    ] });
   };
-
-  const installedItems = availableSkills;
-  const resultCount = scope === "builtin" ? builtinFiltered.length : installedFiltered.length;
-  const loadingMarketplace = loadState === "loading";
-  const failedMarketplace = loadState === "error";
-  const catalogSourceCount = availableSkills.length;
-  // A refresh must not blank already usable backend state. Keep cached rows
-  // interactive while the HTTP catalog and websocket status refresh in the
-  // background; reserve the blocking loader for a true first load.
-  const blockingMarketplaceLoad = loadingMarketplace && catalogSourceCount === 0;
-
-  return (
-    <main ref={pageRef} className="skills-workspace" role="dialog" aria-modal="true" aria-label="技能" tabIndex={-1}>
-      <header className="skills-workspace-toolbar">
-        <button type="button" className="skills-icon-button skills-back" onClick={closeMarketplace} aria-label={skillsMarketplaceReturnTarget === "settings" ? "返回技能设置" : "返回应用"} title={skillsMarketplaceReturnTarget === "settings" ? "返回技能设置" : "返回应用"}>
-          <ArrowLeft />
-        </button>
-        <strong className="skills-workspace-title">技能</strong>
-        <div className="skills-toolbar-actions">
-          <button type="button" className="skills-icon-button" onClick={() => void importSkill()} aria-label="导入本地技能" title="导入本地技能"><FolderOpen /></button>
-          <button type="button" className="skills-icon-button" onClick={() => refreshAll(true, true)} disabled={loadingMarketplace} aria-label="刷新" title="刷新"><RefreshCw className={loadingMarketplace ? "settings-spin" : undefined} /></button>
-        </div>
-      </header>
-
-      <div className="skills-workspace-scroll">
-        <div className="skills-workspace-content">
-          <header className="skills-page-heading">
-            <h1>技能</h1>
-            <p>按需加载 SKILL.md 中的专门知识与工作流。</p>
-          </header>
-
-          <label className="skills-search">
-            <Search aria-hidden="true" />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索技能" aria-label="搜索技能" />
-            {query && <span>{resultCount} 项</span>}
-          </label>
-
-          <section className="skills-installed-summary" aria-label="已安装摘要">
-            <div className="skills-section-title-row">
-              <h2>已安装</h2>
-            </div>
-            {installedItems.length > 0 ? (
-              <div className="skills-icon-strip">
-                {installedItems.slice(0, 8).map((item, index) => (
-              <button key={item.name} type="button" className={`skills-logo skills-logo-${index % 5}`} title={item.name} onClick={() => setScope(item.source_level === "builtin" ? "builtin" : "personal")}>
-                    <BrandIcon
-                      value={`${item.name} ${item.display_name || ""}`}
-                      iconUrl={item.icon}
-                      fallback="skill"
-                      size={20}
-                    />
-                  </button>
-                ))}
-                {installedItems.length > 8 && <span className="skills-installed-more">+{installedItems.length - 8}</span>}
-              </div>
-            ) : (
-              <p className="skills-installed-empty">还没有已安装的技能</p>
-            )}
-          </section>
-
-          <div className="skills-catalog-toolbar">
-            <div className="skills-scope-tabs" role="tablist" aria-label="来源">
-              <button type="button" role="tab" aria-selected={scope === "builtin"} onClick={() => setScope("builtin")}>内置</button>
-              <button type="button" role="tab" aria-selected={scope === "personal"} onClick={() => setScope("personal")}>本地</button>
-            </div>
-          </div>
-
-          {loadWarning && !failedMarketplace && <div className="skills-warning" role="status">{loadWarning}，当前显示可用的本地精选内容。</div>}
-          {blockingMarketplaceLoad && <EmptyState title="正在加载" hint="正在同步技能和安装状态。" />}
-          {failedMarketplace && (
-            <div className="skills-error" role="alert">
-              <span>{loadError}</span>
-              <button type="button" onClick={() => refreshAll(true)}>重试</button>
-            </div>
-          )}
-          {!blockingMarketplaceLoad && !failedMarketplace && scope === "builtin" && (
-            <CatalogSection title="MiniCode 内置">
-              {builtinFiltered.length > 0 ? builtinFiltered.map((skill, index) => <InstalledRow key={skill.name} skill={skill} index={index} removing={false} onRemove={() => undefined} />) : <EmptyState title="暂无内置技能" hint="内置技能随 MiniCode 一起提供。" />}
-            </CatalogSection>
-          )}
-          {!blockingMarketplaceLoad && !failedMarketplace && scope === "personal" && (
-            <CatalogSection title="已安装">
-              {installedFiltered.length > 0
-                ? installedFiltered.map((skill, index) => <InstalledRow key={skill.name} skill={skill} index={index} removing={removing.has(skill.name)} onRemove={() => void removeSkill(skill.name)} />)
-                : <EmptyState title={availableSkills.length === 0 ? "尚未导入技能" : "没有匹配的技能"} hint="点击右上角文件夹图标导入本地 SKILL.md。" />}
-            </CatalogSection>
-          )}
-        </div>
-      </div>
-    </main>
-  );
+  const renderInstalled = (skill: SkillInfo) => <article className="skills-catalog-row" key={`${skill.source_level}:${skill.path ?? skill.name}`}>
+    <SkillLogo value={skill.display_name || skill.name} iconUrl={skill.icon_large || skill.icon} />
+    <button type="button" className="skills-item-copy skills-item-open" onClick={() => showSkillDetails(skill)} aria-label={`查看技能详情 ${skill.name}`}><span className="skills-item-title"><strong>{skill.display_name || skill.name}</strong>{skill.active && <span>本轮已加载</span>}</span><span className="skills-item-description" title={skill.description}>{skill.short_description || skill.description}</span></button>
+    <div className="skills-row-end"><Check className="skills-installed-check" aria-label="已安装" /><button type="button" className="skills-icon-button" onClick={(event) => skillMenu(skill, event.currentTarget)} aria-label={`管理技能 ${skill.name}`} aria-haspopup="menu"><MoreHorizontal /></button></div>
+  </article>;
+  return <div className="skills-workspace-content">
+    {active && toolbarHost && createPortal(<>
+      <button type="button" className="skills-icon-button" disabled={loading} onClick={() => refresh(true)} aria-label="刷新技能" title="刷新技能"><RefreshCw className={loading ? "settings-spin" : undefined} /></button>
+      <button type="button" className="skills-icon-button" onClick={() => openSettings("skills")} aria-label="技能设置" title="技能设置"><Settings /></button>
+      <button type="button" className="skills-create-button" disabled={Boolean(operation)} aria-haspopup="menu" aria-expanded={menu?.kind === "add"} onClick={(event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        setMenu({ kind: "add", position: { x: rect.right - 200, y: rect.bottom + 4 }, items: [{ label: "导入本地技能", icon: <FolderOpen />, onClick: () => void mutate("import") }, { label: "浏览公开技能", icon: <Globe2 />, onClick: () => setScope("public") }] });
+      }}>添加 <ChevronDown /></button>
+    </>, toolbarHost)}
+    <header className="skills-page-heading"><h1>技能</h1><p>通过任务专用技能扩展 MiniCode</p></header>
+    <label className="skills-search"><Search aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索技能" aria-label="搜索技能" /></label>
+    <section className="skills-catalog-section" aria-label="已安装技能"><h2>已安装</h2><div className="skills-catalog-grid">{installed.slice(0, expanded ? undefined : 6).map(renderInstalled)}</div>
+      {installed.length === 0 && <EmptyState title={q ? "没有匹配的技能" : "尚未安装技能"} hint="从公开目录安装，或添加本地技能文件夹。" />}
+      {installed.length > 6 && <button type="button" className="skills-show-more" onClick={() => setExpanded(!expanded)}>{expanded ? "收起" : `查看另外 ${installed.length - 6} 项`}</button>}
+    </section>
+    <div className="skills-catalog-toolbar"><div className="skills-scope-tabs" role="group" aria-label="技能来源">
+      {scopes.map(([key, label]) => <button key={key} type="button" aria-pressed={scope === key} onClick={() => setScope(key)}>{label}</button>)}
+      <button type="button" aria-pressed={scope === "public"} onClick={() => setScope("public")}>公开</button>
+    </div></div>
+    {scope === "public" ? <section className="skills-catalog-section" aria-label="公开技能"><h2>OpenAI 技能目录</h2>
+      {loadError && <div className="skills-error" role="alert"><span>{loadError}</span><button type="button" disabled={loading} onClick={() => refresh(true)}>重试</button></div>}
+      <div className="skills-catalog-grid">{catalog.map((skill) => <article className="skills-catalog-row" key={skill.name}>
+        <SkillLogo value={skill.title} iconUrl={skill.iconUrl} />
+        <div className="skills-item-copy"><div className="skills-item-title"><strong>{skill.title}</strong></div><p title={skill.description}>{skill.description}</p></div>
+        <button type="button" className="skills-text-button" disabled={Boolean(operation) || skill.installed || installedNames.has(skill.name)} onClick={() => void mutate("install", skill.name)} aria-label={`安装技能 ${skill.name}`}>{operation === `install:${skill.name}` ? "安装中…" : skill.installed || installedNames.has(skill.name) ? "已安装" : "安装"}</button>
+      </article>)}</div>
+      {catalog.length === 0 && <EmptyState title={loading ? "正在加载目录" : "没有可显示的技能"} hint={q ? "尝试其他搜索词。" : "目录状态不会影响已安装技能的使用。"} />}
+    </section> : <section className="skills-catalog-section" aria-label={`${sourceLabels[scope]}技能`}><div className="skills-catalog-grid">{scoped.map(renderInstalled)}</div>{scoped.length === 0 && <EmptyState title="没有匹配的技能" hint="选择其他来源或添加技能。" />}</section>}
+    {active && menu && <ContextMenu items={menu.items} position={menu.position} onClose={() => setMenu(null)} />}
+  </div>;
 };
 
-const CatalogSection = ({ title, children }: { title: string; children: React.ReactNode }) => (
-  <section className="skills-catalog-section">
-    <h2>{title}</h2>
-    <div className="skills-catalog-grid">{children}</div>
-  </section>
-);
-
-const ItemLogo = ({
-  index,
-  kind,
-  value,
-  iconUrl,
-  websiteUrl,
-}: {
-  index: number;
-  kind: "plugin" | "skill";
-  value: string;
-  iconUrl?: string;
-  websiteUrl?: string;
-}) => (
-  <span className={`skills-logo skills-logo-${index % 5}`} aria-hidden="true">
-    <BrandIcon
-      value={value}
-      fallback={kind === "plugin" ? "plugin" : "skill"}
-      size={22}
-      iconUrl={iconUrl}
-      websiteUrl={websiteUrl}
-    />
-  </span>
-);
-
-const InstalledRow = ({ skill, removing, onRemove, index }: { skill: SkillInfo; removing: boolean; onRemove: () => void; index: number }) => {
-  const canRemove = skill.source_level === "user";
-  const blockedReason = canRemove ? "" : removalBlockedReason(skill.source_level);
-  const activate = () => {
-    useAppStore.getState().addSelectedSkill({ name: skill.name, path: skill.path, description: skill.description, sourceLevel: skill.source_level });
-  };
-  return (
-    <article className="skills-catalog-row">
-      <ItemLogo index={index} kind="skill" value={skill.display_name || skill.name} iconUrl={skill.icon} />
-      <div className="skills-item-copy">
-        <div className="skills-item-title">
-          <strong>{skill.display_name || skill.name}</strong>
-          {skill.active && <span className="skills-state-label"><Check />已启用</span>}
-          {skill.source_level && <span>{sourceLabel(skill.source_level)}</span>}
-        </div>
-        <p>{skill.description || "暂无说明"}</p>
-      </div>
-      <div className="skills-item-actions">
-        <button type="button" className="skills-text-button" onClick={activate}>使用</button>
-        <button type="button" className="skills-icon-button" onClick={onRemove} disabled={!canRemove || removing} aria-label={canRemove ? `卸载技能 ${skill.name}` : `${skill.name}：${blockedReason}`} title={canRemove ? "卸载" : blockedReason}>{removing ? <RefreshCw className="settings-spin" /> : <Trash2 />}</button>
-      </div>
-    </article>
-  );
-};
-
-
-const EmptyState = ({ title, hint }: { title: string; hint: string }) => (
-  <div className="skills-empty-state">
-    <Sparkles aria-hidden="true" />
-    <strong>{title}</strong>
-    <span>{hint}</span>
-  </div>
-);
+const SkillLogo = ({ value, iconUrl }: { value: string; iconUrl?: string }) => <span className="skills-logo" aria-hidden="true"><BrandIcon value={value} iconUrl={iconUrl} inferBrand={false} fallback="skill" size={32} /></span>;
+const EmptyState = ({ title, hint }: { title: string; hint: string }) => <div className="skills-empty-state"><BookOpenText aria-hidden="true" /><strong>{title}</strong><span>{hint}</span></div>;

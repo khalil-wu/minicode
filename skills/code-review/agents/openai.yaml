@@ -1,0 +1,6 @@
+interface:
+  display_name: "Code Review"
+  short_description: "定位代码缺陷、回归风险与验证缺口"
+  icon_small: "./assets/code-review.svg"
+  icon_large: "./assets/code-review.svg"
+  brand_color: "#a855f7"

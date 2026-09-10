@@ -11,6 +11,7 @@ from backend.agent.context import ContextBuilder
 from backend.agent.run_context import RunContext
 from backend.agent.runtime import AgentRuntime
 from backend.agent.state import AgentState
+from backend.agent.agent_identity import coordination_agent_id
 from backend.tools.base import truncate_tool_result
 from backend.permissions.checker import normalize_permission_mode_token
 
@@ -376,12 +377,7 @@ def _mailbox_deliverable(metadata: dict[str, Any], run_context: RunContext) -> b
 def subagent_mailbox_participant_id(metadata: dict[str, Any]) -> str:
     if str(metadata.get("agent_mode") or "").strip().lower() != "subagent":
         return "parent" if str(metadata.get("run_id") or "").strip() else ""
-    return str(
-        metadata.get("run_id")
-        or metadata.get("agent_id")
-        or metadata.get("task_id")
-        or ""
-    ).strip()
+    return coordination_agent_id(metadata)
 
 
 def format_subagent_mailbox_injection(messages: list[Any]) -> str:
@@ -639,12 +635,16 @@ async def inject_parent_notifications(
         return 0
     agent_mode = str(metadata.get("agent_mode") or "").strip().lower()
     agent_role = str(metadata.get("agent_role") or metadata.get("role") or "main").strip().lower()
-    if agent_mode == "subagent" or agent_role in {"subagent", "side_query", "background"}:
+    if agent_role == "side_query":
         return 0
     if runtime is None:
         return 0
 
     parent_run_id = str(parent_run_id or "").strip()
+    if agent_mode == "subagent":
+        parent_run_id = coordination_agent_id(metadata)
+        if not parent_run_id:
+            return 0
     conversation_id = str(conversation_id or "").strip()
     if not parent_run_id and not conversation_id:
         return 0

@@ -1,6 +1,7 @@
 import math
 import time
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,6 +35,7 @@ def _estimate_cost_usd(
     output_tokens: int,
     cache_creation_input_tokens: int,
     cache_read_input_tokens: int,
+    model_cost: Mapping[str, Any] | None = None,
 ) -> float | None:
     """cc getModelCosts local fallback when the provider sends no cost.
 
@@ -42,7 +44,17 @@ def _estimate_cost_usd(
     made every OpenAI/DeepSeek/gateway turn look like it cost nothing.
     """
     name = str(model_id or "").lower()
-    tier = next((rule for key, rule in _COST_MODEL_RULES if key in name), None)
+    tier = None
+    if model_cost and all(key in model_cost for key in ("input", "output", "cacheRead", "cacheWrite")):
+        prompt_tokens = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+        overrides = [
+            item for item in model_cost.get("tiers", ())
+            if prompt_tokens > item["inputTokensAbove"]
+        ]
+        rates = {**model_cost, **max(overrides, key=lambda item: item["inputTokensAbove"], default={})}
+        tier = {"input": rates["input"], "output": rates["output"], "cache_read": rates["cacheRead"], "cache_write": rates["cacheWrite"]}
+    if tier is None:
+        tier = next((rule for key, rule in _COST_MODEL_RULES if key in name), None)
     if tier is None:
         return None
     return (
@@ -53,7 +65,7 @@ def _estimate_cost_usd(
     )
 
 
-def estimate_usage_cost_usd(model_id: str, usage: Any) -> float | None:
+def estimate_usage_cost_usd(model_id: str, usage: Any, *, model_cost: Mapping[str, Any] | None = None) -> float | None:
     """Price one UsageInfo with the local table, or None if unpriceable.
 
     The turn-budget boundary needs the same table the session tracker uses, but
@@ -62,7 +74,7 @@ def estimate_usage_cost_usd(model_id: str, usage: Any) -> float | None:
     """
     return _estimate_cost_usd(
         model_id,
-        input_tokens=_nonnegative_int(getattr(usage, "input_tokens", 0)),
+        input_tokens=usage.normalized_ordinary_input_tokens,
         output_tokens=_nonnegative_int(getattr(usage, "output_tokens", 0)),
         cache_creation_input_tokens=_nonnegative_int(
             getattr(usage, "cache_creation_input_tokens", 0)
@@ -70,6 +82,7 @@ def estimate_usage_cost_usd(model_id: str, usage: Any) -> float | None:
         cache_read_input_tokens=_nonnegative_int(
             getattr(usage, "cache_read_input_tokens", 0)
         ),
+        model_cost=model_cost,
     )
 
 
@@ -145,6 +158,8 @@ class CostTracker:
         cost_usd: float | None = None,
         ordinary_input_tokens: int | None = None,
         prompt_cache_total_tokens: int | None = None,
+        model_cost: Mapping[str, Any] | None = None,
+        usage_reported: bool = True,
     ) -> float | None:
         """
         Record token usage and elapsed time.
@@ -193,8 +208,10 @@ class CostTracker:
             if prompt_cache_total_tokens is not None
             else derived_prompt_cache_total
         )
-        cost: float | None = _nonnegative_finite_float(cost_usd) or None
-        if cost is None:
+        from backend.llm.base import _normalize_usage_cost
+
+        cost = _normalize_usage_cost(cost_usd)
+        if cost is None and usage_reported:
             # cc computes cost locally from the model price table when the
             # provider does not report one. An unpriced model yields None.
             cost = _estimate_cost_usd(
@@ -203,11 +220,12 @@ class CostTracker:
                 output_tokens=output_tokens,
                 cache_creation_input_tokens=cache_creation_input_tokens,
                 cache_read_input_tokens=cache_read_input_tokens,
+                model_cost=model_cost,
             )
 
         self._add_usage(
             self.state,
-            input_tokens=input_tokens,
+            input_tokens=prompt_cache_total,
             ordinary_input_tokens=base_input,
             output_tokens=output_tokens,
             cache_creation_input_tokens=cache_creation_input_tokens,
@@ -221,7 +239,7 @@ class CostTracker:
         if scoped_session_id:
             self._add_usage(
                 self._session_states[scoped_session_id],
-                input_tokens=input_tokens,
+                input_tokens=prompt_cache_total,
                 ordinary_input_tokens=base_input,
                 output_tokens=output_tokens,
                 cache_creation_input_tokens=cache_creation_input_tokens,
@@ -233,6 +251,45 @@ class CostTracker:
             )
 
         return cost
+
+    def record_usage_info(
+        self,
+        usage: Any,
+        *,
+        model_id: str,
+        provider: str = "",
+        session_id: str = "",
+        elapsed_sec: float = 0.0,
+        model_cost: Mapping[str, Any] | None = None,
+        usage_reported: bool = True,
+    ) -> str:
+        """Price one normalized request and return its trace provenance."""
+        reported_cost = usage.cost_usd
+        usage.cost_usd = self.record_usage(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_creation_input_tokens=usage.cache_creation_input_tokens,
+            cache_read_input_tokens=usage.cache_read_input_tokens,
+            reasoning_output_tokens=usage.reasoning_output_tokens,
+            ordinary_input_tokens=usage.normalized_ordinary_input_tokens,
+            prompt_cache_total_tokens=usage.normalized_prompt_cache_total_tokens,
+            cost_usd=reported_cost,
+            model_id=model_id,
+            provider=provider,
+            session_id=session_id,
+            elapsed_sec=elapsed_sec,
+            model_cost=model_cost,
+            usage_reported=usage_reported,
+        )
+        if reported_cost is not None:
+            return "provider"
+        if usage.cost_usd is None:
+            return "unknown"
+        return (
+            "model_definition"
+            if model_cost and all(key in model_cost for key in ("input", "output", "cacheRead", "cacheWrite"))
+            else "model_catalog"
+        )
 
     @staticmethod
     def _add_usage(state: CostTrackerState, **values: Any) -> None:

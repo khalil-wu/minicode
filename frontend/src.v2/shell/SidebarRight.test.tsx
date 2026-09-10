@@ -8,6 +8,7 @@ const {
   sendClientCommandMock,
   sendClientCommandAwaitResultMock,
   fetchAttachmentPreviewMock,
+  deleteConversationMock,
 } = vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
     configurable: true,
@@ -28,6 +29,7 @@ const {
     sendClientCommandMock: vi.fn(() => true),
     sendClientCommandAwaitResultMock: vi.fn(() => Promise.resolve({ status: "ok" })),
     fetchAttachmentPreviewMock: vi.fn(),
+    deleteConversationMock: vi.fn(async () => true),
   };
 });
 
@@ -75,6 +77,7 @@ vi.mock("../protocol/ws-outbox", () => ({
   commandResultSucceeded: () => true,
   sendClientCommand: sendClientCommandMock,
   sendClientCommandAwaitResult: sendClientCommandAwaitResultMock,
+  sendConversationDeleteCommand: deleteConversationMock,
 }));
 
 import { useAppStore } from "../stores";
@@ -120,8 +123,11 @@ const resetSidebarState = () => {
     previewServers: [],
     previewLaunchProcesses: [],
     diffReview: null,
+    gitChanges: { workingTree: [], staged: [], untracked: [], loading: false },
     quickOpenVisible: false,
     sideChatOpen: false,
+    sideChats: {},
+    sideChatPendingContext: null,
     terminalSessions: [],
     terminalSnapshots: {},
     activeTerminalSessionId: null,
@@ -189,7 +195,7 @@ describe("SidebarRight activity", () => {
     render(<SidebarRight />);
 
     fireEvent.click(screen.getByRole("button", { name: "添加面板" }));
-    const inspectorButton = screen.getByRole("button", { name: "运行详情" });
+    const inspectorButton = screen.getByRole("menuitem", { name: "运行详情" });
     expect(inspectorButton).toBeTruthy();
 
     fireEvent.click(inspectorButton);
@@ -1053,7 +1059,7 @@ describe("SidebarRight activity", () => {
     expect(useAppStore.getState().rightStackTab).toBe("diff");
   });
 
-  it("keeps global file, chat, and terminal actions out of the right-panel launcher", () => {
+  it("opens the anchored panel menu without replacing the current panel", () => {
     useAppStore.setState({
       rightStackTab: "diff",
       rightStackTabLocked: true,
@@ -1063,14 +1069,14 @@ describe("SidebarRight activity", () => {
     render(<SidebarRight />);
 
     fireEvent.click(screen.getByRole("button", { name: "添加面板" }));
-    expect(screen.getByRole("navigation", { name: "面板选择" })).toBeTruthy();
-    expect(screen.queryByRole("menu")).toBeNull();
-    expect(screen.queryByRole("button", { name: "文件" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "侧边对话" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "终端" })).toBeNull();
-    expect(screen.getByRole("button", { name: "上下文" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "预览" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "产物" })).toBeTruthy();
+    expect(screen.getByRole("menu")).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /文件/ })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /侧边聊天/ })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /终端/ })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "上下文" })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "预览" })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "产物" })).toBeTruthy();
+    expect(screen.getByRole("tabpanel", { name: "打开审阅" })).toBeTruthy();
     expect(useAppStore.getState().quickOpenVisible).toBe(false);
     expect(useAppStore.getState().rightStackTab).toBe("diff");
   });
@@ -1089,6 +1095,39 @@ describe("SidebarRight activity", () => {
     expect(sidebar?.dataset.open).toBe("true");
   });
 
+  it("retains side-chat input across menus, tab switches and panel hiding", async () => {
+    deleteConversationMock.mockClear();
+    useAppStore.setState({ rightStackTab: "tasks", isConnected: true });
+    render(<SidebarRight />);
+    act(() => useAppStore.getState().toggleSideChat());
+    const input = await screen.findByRole("textbox", { name: "侧边对话消息" });
+    fireEvent.change(input, { target: { value: "keep this draft" } });
+    await waitFor(() => expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("tab", { name: "打开上下文" }));
+    fireEvent.click(screen.getByRole("button", { name: "添加面板" }));
+    expect(input.isConnected).toBe(true);
+    expect((input as HTMLTextAreaElement).value).toBe("keep this draft");
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    fireEvent.click(screen.getByRole("tab", { name: "打开侧边聊天" }));
+    fireEvent.click(screen.getByRole("button", { name: "关闭右侧栏" }));
+    expect(input.isConnected).toBe(true);
+    expect(deleteConversationMock).not.toHaveBeenCalled();
+    act(() => useAppStore.getState().toggleSideChat());
+    expect(screen.getByRole("textbox", { name: "侧边对话消息" })).toBe(input);
+    fireEvent.click(screen.getByRole("button", { name: "关闭侧边聊天标签页" }));
+    await waitFor(() => expect(deleteConversationMock).toHaveBeenCalledTimes(1));
+    expect(useAppStore.getState().sideChats).toEqual({});
+  });
+
+  it("lets the final tab close and restores a context panel when reopened", () => {
+    useAppStore.setState({ rightStackTab: "tasks" });
+    render(<SidebarRight />);
+    fireEvent.click(screen.getByRole("button", { name: "关闭上下文标签页" }));
+    expect(useAppStore.getState().rightPanelOpen).toBe(false);
+    act(() => useAppStore.getState().toggleRightPanel());
+    expect(screen.getByRole("tab", { name: "打开上下文" })).toBeTruthy();
+  });
+
   it("opens Browser Control from the in-panel launcher", async () => {
     useAppStore.setState({
       rightStackTab: "tasks",
@@ -1098,7 +1137,7 @@ describe("SidebarRight activity", () => {
     render(<SidebarRight />);
 
     fireEvent.click(screen.getByRole("button", { name: "添加面板" }));
-    fireEvent.click(screen.getByRole("button", { name: "浏览器" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "浏览器" }));
 
     expect(useAppStore.getState().rightStackTab).toBe("browser");
     expect(await screen.findByText("Browser Control panel")).toBeTruthy();
@@ -1132,7 +1171,7 @@ describe("SidebarRight activity", () => {
 
     for (const label of ["子智能体", "产物", "运行详情", "浏览器"]) {
       fireEvent.click(screen.getByRole("button", { name: "添加面板" }));
-      fireEvent.click(screen.getByRole("button", { name: label, exact: true }));
+      fireEvent.click(screen.getByRole("menuitem", { name: label, exact: true }));
     }
 
     const browserTab = screen.getByRole("tab", { name: "打开浏览器" });

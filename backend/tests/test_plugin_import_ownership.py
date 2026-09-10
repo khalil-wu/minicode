@@ -11,6 +11,7 @@ import backend.config as config
 import backend.services.plugin_settings_service as plugin_service
 from backend.plugins.layout import plugin_install_root
 from backend.plugins.policy import ManagedPluginPolicy
+from backend.plugins.store import PluginStore
 
 
 def _package(root: Path, name: str) -> Path:
@@ -112,9 +113,9 @@ def test_overlapping_package_imports_own_staging_and_cleanup(
         if first_outcome == "complete":
             expected_names.append("alpha-fixture")
         else:
-            assert not (plugin_install_root() / "alpha-fixture").exists()
+            assert not PluginStore().version_path("local", "alpha-fixture", "1.0.0").exists()
         for name in expected_names:
-            destination = plugin_install_root() / name
+            destination = PluginStore().version_path("local", name, "1.0.0")
             manifest = json.loads((destination / ".minicode-plugin" / "plugin.json").read_text())
             assert manifest["name"] == name
             assert (destination / "marker.txt").read_text() == name

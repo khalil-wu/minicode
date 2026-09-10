@@ -98,18 +98,6 @@ export const CommandPalette = () => {
     }
   }, [commandPaletteOpen]);
 
-  useEffect(() => {
-    if (!commandPaletteOpen) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      if (hasPendingUserAction()) return;
-      event.preventDefault();
-      toggleCommandPalette();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [commandPaletteOpen, toggleCommandPalette]);
-
   if (!commandPaletteOpen) return null;
 
   const focusedPane = panelSlots.find((slot) => slot.focused) ?? panelSlots[0];
@@ -457,6 +445,12 @@ export const CommandPalette = () => {
         aria-label="命令面板"
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key !== "Escape" || e.nativeEvent.isComposing) return;
+          e.preventDefault();
+          e.stopPropagation();
+          closePaletteIfIdle();
+        }}
         style={{
           width: "min(560px, 100%)",
           background: "var(--surface-raised)",
@@ -479,6 +473,7 @@ export const CommandPalette = () => {
           value={query}
           onChange={(e) => { setQuery(e.target.value); setActiveIdx(0); }}
           onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
             if (e.key === "ArrowDown") {
               e.preventDefault();
               setActiveIdx((i) => filtered.length ? (i + 1) % filtered.length : 0);

@@ -219,9 +219,10 @@ class ConfigRequirements:
             effective["feature_flags"] = flags
         return effective
 
-    def ensure_permission_mode(self, mode: str) -> None:
+    def ensure_permission_mode(self, mode: str, *, sandbox_mode: str = "") -> None:
         normalized = str(mode or "").strip().lower().replace("-", "_")
-        approval_policy, sandbox_mode = permission_mode_requirements(normalized)
+        approval_policy, _sandbox = permission_mode_requirements(normalized)
+        sandbox_mode = self.sandbox_mode_for_permission_mode(normalized, sandbox_mode=sandbox_mode)
         allowed_approval = self.raw.get("allowed_approval_policies")
         # codex enforces allowed_approval_policies for EVERY requested policy
         # (config requirements raise, not silently converge); bypass is not
@@ -252,13 +253,18 @@ class ConfigRequirements:
             return requested
         return str(allowed[0])
 
-    def sandbox_mode_for_permission_mode(self, mode: str) -> str:
+    def sandbox_mode_for_permission_mode(self, mode: str, *, sandbox_mode: str = "") -> str:
+        # An external sandbox is an explicit host-owned boundary (Codex's
+        # ExternalSandbox), independent of the tool approval mode. Ordinary
+        # UI mode changes must still derive their filesystem policy afresh.
+        if sandbox_mode == "external-sandbox":
+            return sandbox_mode
         _approval, sandbox = permission_mode_requirements(mode)
         return sandbox
 
-    def resolve_permission_mode(self, mode: str) -> tuple[str, RequirementViolation | None]:
+    def resolve_permission_mode(self, mode: str, *, sandbox_mode: str = "") -> tuple[str, RequirementViolation | None]:
         try:
-            self.ensure_permission_mode(mode)
+            self.ensure_permission_mode(mode, sandbox_mode=sandbox_mode)
             return mode, None
         except RequirementViolation as violation:
             # Managed policy can reject a requested mode, but it must never

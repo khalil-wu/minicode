@@ -44,7 +44,7 @@ export const handleDiffEvent = (e: ServerEvent): boolean => {
       const messageId = String(ev.message_id || "").trim();
       const messages = conversationId === s.conversationId
         ? s.messages
-        : s.conversationMessages[conversationId] ?? [];
+        : s.sideChats[conversationId]?.messages ?? s.conversationMessages[conversationId] ?? [];
       const matchingTurn = messages.some((message) =>
         message.role === "assistant"
         && message.turnId === turnId

@@ -139,7 +139,7 @@ def test_prompt_cache_write_tokens_are_reported_separately():
 
 
 def test_text_still_streams_and_terminates_without_usage_chunk():
-    # No trailing usage chunk: must still finish cleanly with zero usage.
+    # No trailing usage chunk: finish cleanly without inventing reported usage.
     lines = [
         _sse({"choices": [{"delta": {"content": "hi"}, "finish_reason": None}]}),
         _sse({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
@@ -154,7 +154,7 @@ def test_text_still_streams_and_terminates_without_usage_chunk():
     assert text == "hi"
     done = [e for e in events if e.type == StreamEventType.DONE]
     assert len(done) == 1
-    assert done[0].usage.input_tokens == 0
+    assert done[0].usage is None
 
 
 def test_finish_reason_is_terminal_when_gateway_omits_done_sentinel():
@@ -214,7 +214,7 @@ def test_invalid_provider_usage_counters_do_not_pollute_accounting():
     assert done.usage.output_tokens == 0
     assert done.usage.cache_read_input_tokens == 0
     assert done.usage.reasoning_output_tokens == 0
-    assert done.usage.cost_usd == 0.0
+    assert done.usage.cost_usd is None
 
 
 def test_chat_tool_calls_fail_closed_when_finish_reason_says_stop():

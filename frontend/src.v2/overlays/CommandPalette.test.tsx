@@ -82,7 +82,7 @@ describe("CommandPalette pending user action guard", () => {
     });
     render(<CommandPalette />);
 
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" });
 
     expect(useAppStore.getState().commandPaletteOpen).toBe(false);
   });
@@ -100,7 +100,7 @@ describe("CommandPalette pending user action guard", () => {
 
     render(<CommandPalette />);
 
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" });
 
     expect(useAppStore.getState().commandPaletteOpen).toBe(false);
   });

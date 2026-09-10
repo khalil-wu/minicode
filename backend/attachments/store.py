@@ -428,7 +428,7 @@ class AttachmentStore:
 
         source = str(source_conversation_id or "").strip()
         target = str(target_conversation_id or "").strip()
-        if not source or not target or source == target:
+        if not source or not target:
             return 0
         shared = 0
         candidate_paths = [path for path in self._base_dir.glob("*.json") if path != self._index_path]

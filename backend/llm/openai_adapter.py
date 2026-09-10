@@ -103,6 +103,7 @@ from backend.llm.openai_streaming import (
 )
 from backend.llm.sse import SSEMalformedBudget, iter_sse_data
 from backend.llm.openai_usage import (
+    usage_info_from_openai,
     _get_cached_prompt_tokens,
     _get_cache_creation_prompt_tokens,
     _get_chat_prompt_tokens,
@@ -386,6 +387,7 @@ def _chat_reasoning_effort(
     settings: LLMSettings,
     *,
     model: str | None = None,
+    disable_reasoning: bool = False,
 ) -> str:
     """Return Pi's OpenAI-compatible Chat reasoning-effort parameter.
 
@@ -397,6 +399,8 @@ def _chat_reasoning_effort(
     levels = _declared_reasoning_effort_levels_for_model(settings, wire_model)
     if not levels:
         return ""
+    if disable_reasoning:
+        return "none" if "none" in levels else ""
     requested = str(settings.reasoning_effort or "").strip().lower()
     if not requested:
         requested = (
@@ -1391,6 +1395,8 @@ def _responses_tool_calls_from_provider_items(
 
             arguments = repair_tool_json(arguments_text) or {"_raw": arguments_text}
             arguments_repaired = True
+        if not isinstance(arguments, dict):
+            raise ValueError("provider_error_type=protocol: Responses function arguments must be an object")
         tool_calls.append(
             ToolCallEvent(
                 id=call_id,
@@ -2711,11 +2717,6 @@ class OpenAIAdapter(LLMAdapter):
             ),
         )
         yield StreamEvent(
-            type=StreamEventType.TEXT_CHUNK,
-            content="图像已经为你生成好了。",
-            phase="final_answer",
-        )
-        yield StreamEvent(
             type=StreamEventType.DONE,
             finish_reason="stop",
             raw={
@@ -2996,7 +2997,7 @@ class OpenAIAdapter(LLMAdapter):
         response_tool_start_count = 0
         response_output_item_metadata: dict[str, dict[str, Any]] = {}
         response_message_phases: dict[str, str] = {}
-        usage = UsageInfo()
+        usage: UsageInfo | None = None
         provider_timeline: list[dict[str, Any]] = []
         summary_payload = wire_request_payload or kwargs
         raw_done: dict[str, Any] = {
@@ -3576,6 +3577,15 @@ class OpenAIAdapter(LLMAdapter):
         try:
             async for event in stream:
                 event_type = str(getattr(event, "type", "") or "")
+                response_usage = _get_attr_or_item(_get_attr_or_item(event, "response", None), "usage", None)
+                if response_usage is not None:
+                    usage = usage_info_from_openai(response_usage)
+                    raw_done["usage"] = _raw_usage_metadata(response_usage)
+                    yield StreamEvent(
+                        type=StreamEventType.USAGE,
+                        usage=usage,
+                        raw={"provider": "openai_responses", "model": raw_done["model"], "usage": raw_done["usage"]},
+                    )
                 if event_type not in _OPENAI_RESPONSE_STREAM_EVENT_TYPES:
                     yield StreamEvent(
                         type=StreamEventType.ERROR,
@@ -3695,6 +3705,9 @@ class OpenAIAdapter(LLMAdapter):
                             else None,
                             phase=message_phase,
                         )
+                    message_phase = message_phase or _response_message_phase_for_event(
+                        event, response_message_phases
+                    )
                     merge_citations(_extract_url_citations(event))
                     item_id = str(_get_attr_or_item(event, "item_id", "") or "")
                     content_index = _get_attr_or_item(event, "content_index", None)
@@ -4277,21 +4290,6 @@ class OpenAIAdapter(LLMAdapter):
                             image_media_type="image/png",
                         )
                     usage_obj = getattr(response_obj, "usage", None)
-                    if usage_obj:
-                        usage = UsageInfo(
-                            input_tokens=_get_usage_field(usage_obj, "input_tokens"),
-                            output_tokens=_get_usage_field(usage_obj, "output_tokens"),
-                            cache_read_input_tokens=_get_cached_prompt_tokens(
-                                usage_obj
-                            ),
-                            cache_creation_input_tokens=_get_cache_creation_prompt_tokens(
-                                usage_obj
-                            ),
-                            reasoning_output_tokens=_get_reasoning_output_tokens(
-                                usage_obj
-                            ),
-                            cost_usd=_get_usage_cost_usd(usage_obj),
-                        )
                     output_items = _extract_response_output_items(response_obj)
                     response_id = str(
                         _get_attr_or_item(response_obj, "id", "") or ""
@@ -4308,7 +4306,7 @@ class OpenAIAdapter(LLMAdapter):
                     raw_done.update(
                         {
                             "provider": "openai_responses",
-                            "model": kwargs["model"],
+                            "model": raw_done["model"],
                             "event_type": event_type,
                             "finish_reason": finish_reason,
                             "usage": _raw_usage_metadata(usage_obj),
@@ -4341,6 +4339,7 @@ class OpenAIAdapter(LLMAdapter):
                     ):
                         full_text += recovered_event.content
                         yield recovered_event
+                    break
                 elif event_type == "response.incomplete":
                     response_obj = getattr(event, "response", None)
                     unsupported_items = _unsupported_response_output_item_types(
@@ -4379,25 +4378,6 @@ class OpenAIAdapter(LLMAdapter):
                     if finish_reason.strip().lower() in _RESPONSES_MAX_OUTPUT_REASONS:
                         saw_terminal_response_event = True
                         usage_obj = _get_attr_or_item(response_obj, "usage", None)
-                        if usage_obj:
-                            usage = UsageInfo(
-                                input_tokens=_get_usage_field(
-                                    usage_obj, "input_tokens"
-                                ),
-                                output_tokens=_get_usage_field(
-                                    usage_obj, "output_tokens"
-                                ),
-                                cache_read_input_tokens=_get_cached_prompt_tokens(
-                                    usage_obj
-                                ),
-                                cache_creation_input_tokens=_get_cache_creation_prompt_tokens(
-                                    usage_obj
-                                ),
-                                reasoning_output_tokens=_get_reasoning_output_tokens(
-                                    usage_obj
-                                ),
-                                cost_usd=_get_usage_cost_usd(usage_obj),
-                            )
                         completed_response_provider_items = (
                             _responses_provider_items_from_response(response_obj)
                         )
@@ -4410,7 +4390,7 @@ class OpenAIAdapter(LLMAdapter):
                         raw_done.update(
                             {
                                 "provider": "openai_responses",
-                                "model": kwargs["model"],
+                                "model": raw_done["model"],
                                 "event_type": event_type,
                                 "finish_reason": finish_reason,
                                 "usage": _raw_usage_metadata(usage_obj),
@@ -4426,11 +4406,11 @@ class OpenAIAdapter(LLMAdapter):
                             yield recovered_event
                         for recovered_event in terminal_response_text_events(
                             response_obj,
-                            recovered_from="response.incomplete",
+                        recovered_from="response.incomplete",
                         ):
                             full_text += recovered_event.content
                             yield recovered_event
-                        continue
+                        break
                     yield StreamEvent(
                         type=StreamEventType.ERROR,
                         content=(
@@ -4438,7 +4418,7 @@ class OpenAIAdapter(LLMAdapter):
                         ),
                         raw={
                             "provider": "openai_responses",
-                            "model": kwargs["model"],
+                            "model": raw_done["model"],
                             "event_type": event_type,
                             "finish_reason": finish_reason,
                             "output_items": output_items,
@@ -4759,64 +4739,69 @@ class OpenAIAdapter(LLMAdapter):
             )
             return message
 
-        async for event in stream:
-            event_type = str(_get_attr_or_item(event, "type", "") or "")
-            if event_type == "response.output_text.delta":
-                delta = _get_attr_or_item(event, "delta", "")
-                if isinstance(delta, str) and delta:
-                    delta_parts.append(delta)
-            elif event_type == "response.output_text.done":
-                done_text = _get_attr_or_item(event, "text", "")
-                if isinstance(done_text, str) and done_text:
-                    done_parts.append(done_text)
-                add_citations(event)
-            elif event_type == "response.completed":
-                response_obj = _get_attr_or_item(event, "response", None)
-                completed_usage = _get_attr_or_item(response_obj, "usage", None)
-                direct_text = _get_attr_or_item(response_obj, "output_text", "")
-                if isinstance(direct_text, str) and direct_text:
-                    completed_text = direct_text
-                output = _get_attr_or_item(response_obj, "output", []) or []
-                if isinstance(output, list):
-                    if not completed_text:
-                        completed_text = "".join(
-                            _responses_message_text_from_item(item)
-                            for item in output
-                            if str(_get_attr_or_item(item, "type", "") or "")
-                            == "message"
-                        )
-                    for item in output:
-                        if str(_get_attr_or_item(item, "type", "") or "") != "message":
-                            continue
-                        for content in _get_attr_or_item(item, "content", []) or []:
-                            add_citations(content)
-                saw_completed = True
-                break
-            elif event_type == "response.incomplete":
-                response_obj = _get_attr_or_item(event, "response", None)
-                reason = _response_finish_reason(response_obj) or "unknown"
-                raise RuntimeError(f"Incomplete response returned, reason: {reason}")
-            elif event_type == "response.failed":
-                raise RuntimeError(
-                    f"Responses API response failed: {error_message(event, 'unknown error')}"
-                )
-            elif event_type in {"error", "response.error"}:
-                raise RuntimeError(
-                    f"Responses API error: {error_message(event, 'unknown error')}"
-                )
+        try:
+            async for event in stream:
+                event_type = str(_get_attr_or_item(event, "type", "") or "")
+                incoming_usage = _get_attr_or_item(_get_attr_or_item(event, "response", None), "usage", None)
+                if incoming_usage is not None:
+                    completed_usage = incoming_usage
+                if event_type == "response.output_text.delta":
+                    delta = _get_attr_or_item(event, "delta", "")
+                    if isinstance(delta, str) and delta:
+                        delta_parts.append(delta)
+                elif event_type == "response.output_text.done":
+                    done_text = _get_attr_or_item(event, "text", "")
+                    if isinstance(done_text, str) and done_text:
+                        done_parts.append(done_text)
+                    add_citations(event)
+                elif event_type == "response.completed":
+                    response_obj = _get_attr_or_item(event, "response", None)
+                    direct_text = _get_attr_or_item(response_obj, "output_text", "")
+                    if isinstance(direct_text, str) and direct_text:
+                        completed_text = direct_text
+                    output = _get_attr_or_item(response_obj, "output", []) or []
+                    if isinstance(output, list):
+                        if not completed_text:
+                            completed_text = "".join(
+                                _responses_message_text_from_item(item)
+                                for item in output
+                                if str(_get_attr_or_item(item, "type", "") or "")
+                                == "message"
+                            )
+                        for item in output:
+                            if str(_get_attr_or_item(item, "type", "") or "") != "message":
+                                continue
+                            for content in _get_attr_or_item(item, "content", []) or []:
+                                add_citations(content)
+                    saw_completed = True
+                    break
+                elif event_type == "response.incomplete":
+                    response_obj = _get_attr_or_item(event, "response", None)
+                    reason = _response_finish_reason(response_obj) or "unknown"
+                    raise RuntimeError(f"Incomplete response returned, reason: {reason}")
+                elif event_type == "response.failed":
+                    raise RuntimeError(
+                        f"Responses API response failed: {error_message(event, 'unknown error')}"
+                    )
+                elif event_type in {"error", "response.error"}:
+                    raise RuntimeError(
+                        f"Responses API error: {error_message(event, 'unknown error')}"
+                    )
 
-        if not saw_completed:
-            raise RuntimeError("Responses API stream closed before response.completed")
+            if not saw_completed:
+                raise RuntimeError("Responses API stream closed before response.completed")
 
-        # Side calls (compaction/recovery/web/memory) contribute to the same
-        # turn/global usage accounting as the main stream.
-        self.record_non_stream_usage(
-            completed_usage,
-            provider=str(self._settings.provider or "openai"),
-            model_id=model,
-            input_includes_cache_read=True,
-            context=context,
-        )
+            # Side calls (compaction/recovery/web/memory) contribute to the same
+            # turn/global usage accounting as the main stream.
+        finally:
+            self.record_non_stream_usage(
+                completed_usage,
+                provider=str(self._settings.provider or "openai"),
+                model_id=model,
+                input_includes_cache_read=True,
+                context=context,
+                model_cost=getattr(self, '_request_model_costs', {}).get(model),
+            )
 
         text = (completed_text or "".join(delta_parts) or "".join(done_parts)).strip()
         if citations:
@@ -5013,7 +4998,7 @@ class OpenAIAdapter(LLMAdapter):
 
         full_text = ""
         accumulator = _ToolCallAccumulator()
-        usage = UsageInfo()
+        usage: UsageInfo | None = None
         provider_timeline: list[dict[str, Any]] = []
         raw_done: dict[str, Any] = {
             "provider": "openai_chat_completions",
@@ -5059,6 +5044,7 @@ class OpenAIAdapter(LLMAdapter):
             request_params=sent_payload,
         )
         raw_done["request_summary"] = request_summary
+        raw_done["model"] = request_summary["model"]
         async with _openai_http_stream(
             self._http_client,
             "POST",
@@ -5101,6 +5087,19 @@ class OpenAIAdapter(LLMAdapter):
                     continue
                 malformed_budget.accept()
 
+                usage_obj = chunk.get("usage")
+                raw_text_delta = _raw_text_delta_metadata(
+                    "openai_chat_completions", usage_obj=usage_obj,
+                )
+                if usage_obj is not None:
+                    usage = usage_info_from_openai(usage_obj)
+                    raw_done["usage"] = _raw_usage_metadata(usage_obj)
+                    _append_provider_timeline(provider_timeline, "chat.usage", usage_present=True)
+                    yield StreamEvent(
+                        type=StreamEventType.USAGE,
+                        usage=usage,
+                        raw={"provider": "openai_chat_completions", "model": raw_done["model"], "usage": raw_done["usage"]},
+                    )
                 error_payload = chunk.get("error")
                 if error_payload is not None:
                     # Classify like the Responses path does. Emitting a bare
@@ -5120,27 +5119,6 @@ class OpenAIAdapter(LLMAdapter):
                         raw=error_raw,
                     )
                     return
-
-                usage_obj = chunk.get("usage")
-                raw_text_delta = _raw_text_delta_metadata(
-                    "openai_chat_completions",
-                    usage_obj=usage_obj,
-                )
-                if usage_obj:
-                    usage = UsageInfo(
-                        input_tokens=_get_chat_prompt_tokens(usage_obj),
-                        output_tokens=_get_usage_field(usage_obj, "completion_tokens"),
-                        cache_read_input_tokens=_get_cached_prompt_tokens(usage_obj),
-                        cache_creation_input_tokens=_get_cache_creation_prompt_tokens(
-                            usage_obj
-                        ),
-                        reasoning_output_tokens=_get_reasoning_output_tokens(usage_obj),
-                        cost_usd=_get_usage_cost_usd(usage_obj),
-                    )
-                    raw_done["usage"] = _raw_usage_metadata(usage_obj)
-                    _append_provider_timeline(
-                        provider_timeline, "chat.usage", usage_present=True
-                    )
 
                 choices = chunk.get("choices") or []
                 if not choices:
@@ -5547,6 +5525,7 @@ class OpenAIAdapter(LLMAdapter):
         reasoning_effort = _chat_reasoning_effort(
             self._settings,
             model=model,
+            disable_reasoning=side_options is not None and side_options.disable_reasoning,
         )
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
@@ -5609,32 +5588,42 @@ class OpenAIAdapter(LLMAdapter):
             else self._settings.model
         )
         text_parts: list[str] = []
-        usage = UsageInfo()
+        usage: UsageInfo | None = None
+        reported_raw_usage: dict[str, Any] | None = None
         saw_done = False
-        async for event in self._stream_chat_completions(
-            messages,
-            metadata=context.request_metadata() if context is not None else None,
-            context=context,
-            max_tokens=max_tokens,
-        ):
-            if event.type == StreamEventType.TEXT_CHUNK and event.content:
-                text_parts.append(event.content)
-            elif event.type == StreamEventType.DONE:
-                usage = event.usage
-                saw_done = True
-            elif event.type == StreamEventType.ERROR:
-                raise RuntimeError(event.content or "Chat completion stream failed")
+        try:
+            async for event in self._stream_chat_completions(
+                messages,
+                metadata=context.request_metadata() if context is not None else None,
+                context=context,
+                max_tokens=max_tokens,
+            ):
+                if event.usage is not None:
+                    usage = event.usage
+                    if "usage" in event.raw:
+                        reported_raw_usage = event.raw["usage"]
+                    model = str(event.raw.get("model") or model)
+                if event.type == StreamEventType.TEXT_CHUNK and event.content:
+                    text_parts.append(event.content)
+                elif event.type == StreamEventType.DONE:
+                    usage = event.usage or usage
+                    saw_done = True
+                elif event.type == StreamEventType.ERROR:
+                    raise RuntimeError(event.content or "Chat completion stream failed")
 
-        if not saw_done:
-            raise RuntimeError("Chat completion stream ended before DONE")
+            if not saw_done:
+                raise RuntimeError("Chat completion stream ended before DONE")
+        finally:
+            self.record_non_stream_usage(
+                usage,
+                provider=str(self._settings.provider or "openai"),
+                model_id=model,
+                input_includes_cache_read=True,
+                context=context,
+                raw_usage=reported_raw_usage,
+                model_cost=getattr(self, '_request_model_costs', {}).get(model),
+            )
 
-        self.record_non_stream_usage(
-            usage,
-            provider=str(self._settings.provider or "openai"),
-            model_id=model,
-            input_includes_cache_read=True,
-            context=context,
-        )
         text = "".join(text_parts).strip()
         if text:
             return text

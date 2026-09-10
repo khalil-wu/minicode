@@ -28,6 +28,7 @@ export const useKeyboardShortcuts = () => {
   const sidebarWidthRef = useRef(280);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       const mod = e.metaKey || e.ctrlKey;
       const s = useAppStore.getState();
       const createConversationInCurrentMode = () => {

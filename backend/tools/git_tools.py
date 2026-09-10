@@ -194,29 +194,30 @@ class GitDiffTool(BaseTool):
         if root is None:
             return self._error_result("Git diff requires an open workspace.")
 
-        cmd = ["git", "diff", f"--unified={context_lines}"]
+        cmd = ["git", "diff", "--relative", "--no-ext-diff", "--no-textconv", f"--unified={context_lines}"]
         if staged:
             cmd.append("--staged")
 
         try:
             if file_path:
-                if _is_denied_path(context, str(file_path)):
+                if not (root / file_path).is_dir() and _is_denied_path(context, str(file_path)):
                     return self._error_result(
                         f"路径 '{file_path}' 属于受保护的敏感路径，git_diff 不会输出其内容。"
                     )
                 # "--" terminates option parsing so a path like "--output=..." is
                 # treated as a pathspec, not a git flag (which could write files).
-                cmd.extend(["--", file_path])
+                cmd.extend(["--", f":(literal){file_path}"])
             else:
                 # A bare diff would print denylisted contents verbatim. Ask the
                 # permission checker about each concretely changed path and
                 # exclude only those, so a denylist entry that is re-allowed by a
                 # negation rule (".env.example") is not silently hidden.
-                denied_or_result = await self._denied_changed_paths(root, staged, context)
-                if isinstance(denied_or_result, ToolResult):
-                    return denied_or_result
                 cmd.append("--")
-                cmd.extend(f":(exclude,literal){path}" for path in denied_or_result)
+
+            denied_or_result = await self._denied_changed_paths(root, staged, context, file_path=file_path)
+            if isinstance(denied_or_result, ToolResult):
+                return denied_or_result
+            cmd.extend(f":(exclude,literal){path}" for path in denied_or_result)
 
             proc = await spawn_exec(
                 *cmd,
@@ -252,6 +253,7 @@ class GitDiffTool(BaseTool):
         root: Path,
         staged: bool,
         context: Any,
+        file_path: str | None = None,
     ) -> list[str] | ToolResult:
         """Return changed paths the permission checker refuses, or a ToolResult.
 
@@ -260,9 +262,13 @@ class GitDiffTool(BaseTool):
         checker the single authority on whether a path is readable.
         """
 
-        cmd = ["git", "diff", "--name-only"]
+        # List both sides of a rename. A name-only rename record otherwise
+        # contains only the destination and could disclose denied source lines.
+        cmd = ["git", "diff", "--relative", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z"]
         if staged:
             cmd.append("--staged")
+        if file_path:
+            cmd.extend(["--", f":(literal){file_path}"])
         proc = await spawn_exec(
             *cmd,
             cwd=str(root),
@@ -277,8 +283,7 @@ class GitDiffTool(BaseTool):
             return self._error_result(f"Git 命令失败: {error_msg}")
 
         denied: list[str] = []
-        for line in decode_process_output(stdout).splitlines():
-            candidate = line.strip()
+        for candidate in decode_process_output(stdout).split("\0"):
             if candidate and _is_denied_path(context, candidate) and candidate not in denied:
                 denied.append(candidate)
         return denied

@@ -8,19 +8,21 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from backend.atomic_io import canonical_file_path_key, canonical_path_mapping_key
 from backend.agent.context import ContextBuilder
+from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.lifecycle_observer import resolve_lifecycle_runtime
 from backend.agent.final_tool_request import (
     FinalExecutableToolRequest,
     canonical_tool_request_digest,
 )
 from backend.tools.contracts import EvidenceRecord
+from backend.tools.base import execution_exception_result as _execution_exception_result
 from backend.agent.message import AgentEvent
 from backend.agent.runtime_spans import runtime_span_from_tool_context
 from backend.agent.tool_execution_guardrails import (
@@ -83,11 +85,6 @@ def argument_has_value(args: Mapping[str, Any] | Any, field: str) -> bool:
         return False
     if field not in args or args.get(field) is None:
         return False
-    value = args[field]
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, (list, tuple, dict, set)):
-        return bool(value)
     return True
 
 
@@ -353,6 +350,7 @@ def _execution_arguments_for_tool(
 
     execution_args = deepcopy(dict(tc.arguments or {}))
     if tc.name in {"write_file", "edit_file", "notebook_edit"}:
+        execution_args.pop("expected_hash", None)
         raw_path = str(
             tc.arguments.get("file_path") or tc.arguments.get("notebook_path") or ""
         ).strip()
@@ -366,6 +364,8 @@ def _execution_arguments_for_tool(
                 str(resolved),
                 read_time_hashes=_read_time_hashes(tool_ctx),
             )
+    elif tc.name == "apply_patch":
+        execution_args.pop("_expected_hashes", None)
     return execution_args
 
 
@@ -737,9 +737,9 @@ def stale_subagent_context_guard_reason(tool_ctx: ToolExecutionContext | None) -
         return (
             "Subagent runtime identity is unavailable; refusing an unfenced tool call."
         )
-    subagent_id = str(
-        metadata.get("run_id") or getattr(tool_ctx, "task_id", "") or ""
-    ).strip()
+    from backend.agent.agent_identity import coordination_agent_id
+
+    subagent_id = coordination_agent_id(metadata) or str(getattr(tool_ctx, "task_id", "") or "").strip()
     try:
         mailbox_epoch = int(metadata.get("mailbox_epoch"))
     except (TypeError, ValueError):
@@ -872,25 +872,6 @@ def prepare_tool_call_sequence(
     # validates the resulting object; ordinary tools remain model-authored.
     deduped = _dedupe_tool_call_ids(prepared)
     return deduped
-
-
-def _execution_exception_result(
-    exc: BaseException, *, label: str = "Tool execution"
-) -> ToolResult:
-    """Surface the exception message to the model."""
-    message = str(exc).strip()
-    detail = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
-    return ToolResult(
-        content=f"{label} failed ({detail}).",
-        is_error=True,
-        status="failed",
-        error_kind="execution_error",
-        user_summary="工具执行失败。",
-        developer_detail=str(exc),
-        recoverable=True,
-        projection="error",
-        model_observation="The tool execution failed. Check the arguments or try another approach.",
-    )
 
 
 def invalid_tool_call_guard_reason(
@@ -1315,6 +1296,34 @@ async def _apply_pre_tool_hook(
     tc: ToolCallEvent,
     tool_ctx: ToolExecutionContext,
 ) -> ToolResult | None:
+    # Without callbacks this path only normalizes arguments and marks admission.
+    # Keep it inline so a no-op cannot consume the tool's execution time slice.
+    if (
+        tool_ctx.deadline_monotonic is None
+        and tool_ctx.cancel_event is None
+        and _tool_hook_manager(tool_ctx) is None
+        and _tool_lifecycle_runtime(tool_ctx) is None
+    ):
+        return await _apply_pre_tool_hook_owned(tc, tool_ctx)
+    try:
+        return await await_preflight(
+            _apply_pre_tool_hook_owned(tc, tool_ctx),
+            deadline=tool_ctx.deadline_monotonic,
+            cancel_event=tool_ctx.cancel_event,
+        )
+    except PhaseDeadlineExceeded:
+        return ToolResult(
+            content=f"Turn deadline reached before '{tc.name}' was executed.",
+            is_error=True,
+            status="timeout",
+            display_summary="Tool admission timed out",
+        )
+
+
+async def _apply_pre_tool_hook_owned(
+    tc: ToolCallEvent,
+    tool_ctx: ToolExecutionContext,
+) -> ToolResult | None:
     tc.arguments = dict(tc.arguments or {})
     hook_mgr = _tool_hook_manager(tool_ctx)
     if hook_mgr is not None and tc.name != "exit_plan_mode":
@@ -1547,7 +1556,13 @@ async def run_tool_with_timeout(
     if deadline is not None:
         remaining = float(deadline) - time.monotonic()
         if remaining <= 0:
-            timeout = 0.0
+            return ToolResult(
+                content=f"Tool '{tc.name}' was not started because the turn deadline had already expired.",
+                is_error=True,
+                status="timeout",
+                duration_ms=0,
+                limitation="turn_deadline",
+            )
         elif timeout is None:
             timeout = remaining
         else:
@@ -1631,28 +1646,18 @@ async def run_tool_with_timeout(
         else:
             tool_ctx.cleanup_tasks_by_call.pop(tc.id, None)
         raise
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as exc:
+        if timeout_cleanup_receipt is None:
+            # The concrete task raised TimeoutError itself. No watchdog fired
+            # and no task was abandoned; preserve that error instead of
+            # formatting an absent timeout or inventing pending cleanup.
+            tool_ctx.cleanup_tasks_by_call.pop(tc.id, None)
+            return _execution_exception_result(exc)
         elapsed = int((time.perf_counter() - t0) * 1000)
-        cleanup_evidence = (
-            timeout_cleanup_receipt.to_evidence(
-                resource_kind="tool",
-                resource_id=tc.id,
-                reason="timeout",
-            )
-            if timeout_cleanup_receipt is not None
-            else {
-                # Defensive branch: no drain receipt exists, so cleanup cannot
-                # be proven complete. Publish unproven evidence (never a fake
-                # completed=True) and keep the abandoned task under observation.
-                "resource_kind": "tool",
-                "resource_id": tc.id,
-                "reason": "tool_reported_timeout",
-                "requested": False,
-                "acknowledged": False,
-                "completed": False,
-                "timed_out": True,
-                "pending": 1,
-            }
+        cleanup_evidence = timeout_cleanup_receipt.to_evidence(
+            resource_kind="tool",
+            resource_id=tc.id,
+            reason="timeout",
         )
         nested_receipt = execution_tool_ctx.metadata.get("_registry_cleanup_receipt")
         if isinstance(nested_receipt, dict) and nested_receipt.get("pending"):
@@ -1695,7 +1700,7 @@ async def run_tool_with_timeout(
             tool_ctx.cleanup_tasks_by_call.pop(tc.id, None)
         return ToolResult(
             content=(
-                f"Tool '{tc.name}' timed out after {timeout:.0f}s. "
+                f"Tool '{tc.name}' timed out after {timeout:g}s. "
                 "The operation did not finish and no complete result is available. "
                 "Do not retry the identical call until cleanup is confirmed; break the operation into smaller steps or try a different approach."
             ),
@@ -1950,6 +1955,7 @@ def store_result(
     turn_id: str = "",
     tool_ctx: ToolExecutionContext | None = None,
     tool_registry: ToolRegistry | None = None,
+    append_context_result: Callable[..., None] | None = None,
 ) -> AgentEvent:
     from backend.tools.base import MAX_TOOL_RESULT_CHARS, truncate_tool_result
 
@@ -2032,7 +2038,7 @@ def store_result(
                     + "\n\n".join(context_parts)
                 ),
             )
-    ctx.append_tool_result(
+    (append_context_result or ctx.append_tool_result)(
         tc.id,
         tc.name,
         context_result,
@@ -2134,6 +2140,7 @@ def store_result_events(
     turn_id: str = "",
     tool_ctx: ToolExecutionContext | None = None,
     tool_registry: ToolRegistry | None = None,
+    append_context_result: Callable[..., None] | None = None,
 ) -> list[AgentEvent]:
     event = store_result(
         tc,
@@ -2146,6 +2153,7 @@ def store_result_events(
         turn_id=turn_id,
         tool_ctx=tool_ctx,
         tool_registry=tool_registry,
+        append_context_result=append_context_result,
     )
     image_events: list[AgentEvent] = []
     if result.result_kind == "image_generation" and not result.is_error:

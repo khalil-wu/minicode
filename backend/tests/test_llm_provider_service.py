@@ -453,6 +453,9 @@ def test_official_anthropic_empty_base_url_still_posts_to_official_messages(monk
     request: dict[str, object] = {}
 
     class _Response:
+        def json(self):
+            return {"content": [{"type": "text", "text": "OK"}]}
+
         def raise_for_status(self) -> None:
             return None
 
@@ -490,6 +493,9 @@ def test_openai_chat_generation_probe_does_not_use_one_token(monkeypatch) -> Non
     request: dict[str, object] = {}
 
     class _Response:
+        def json(self):
+            return {"choices": [{"message": {"role": "assistant", "content": "OK"}}]}
+
         def raise_for_status(self) -> None:
             return None
 

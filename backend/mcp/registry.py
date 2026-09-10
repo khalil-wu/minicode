@@ -9,6 +9,7 @@ agent can call them like built-in tools. Tool names follow:
 from __future__ import annotations
 
 import logging
+import json
 import re
 from typing import Any
 
@@ -73,6 +74,7 @@ class MCPToolProxy(BaseTool):
             if manager is not None
             else 0
         )
+        self._server_contract = manager.get_server_contract(server_name) if manager is not None else None
 
         self.name = (
             f"mcp__{normalize_name_for_mcp(server_name)}__"
@@ -179,6 +181,8 @@ class MCPToolProxy(BaseTool):
         """
         if self._manager is None:
             return True
+        if self._manager.get_server_contract(self._server_name) != self._server_contract:
+            return False
         current_revision = int(getattr(self._manager, "registry_version", 0) or 0)
         if current_revision == self._catalog_revision:
             return True
@@ -331,6 +335,10 @@ class MCPToolProxy(BaseTool):
                 })
 
         content_parts = [part for part in (result.text.strip(), *resource_text) if part]
+        if result.structured_content is not None:
+            structured_text = json.dumps(result.structured_content, ensure_ascii=False)
+            if structured_text not in content_parts:
+                content_parts.append(structured_text)
         if output_files:
             content_parts.extend(
                 f"[resource artifact: {item['uri']} -> {item['artifact_id']}]"
@@ -347,6 +355,7 @@ class MCPToolProxy(BaseTool):
             images=images,
             output_files=output_files,
             status="success",
+            runtime_metadata={"mcp": {"structuredContent": result.structured_content, "_meta": result.meta}},
         )
 
 
@@ -366,6 +375,26 @@ class MCPToolRegistry:
         self._wire_name_owner: dict[str, str] = {}
         # Cache for tool lists: server_name -> (version, tools_list)
         self._tool_list_cache: dict[str, tuple[int, list]] = {}
+        self._version = mcp_manager.registry_version if mcp_manager is not None else 0
+        tool_registry.mcp_tool_registry = self
+
+    def fork(self, tool_registry: ToolRegistry) -> "MCPToolRegistry":
+        clone = MCPToolRegistry(tool_registry, self._artifact_store, self._mcp_manager)
+        clone._server_tools = {name: list(tools) for name, tools in self._server_tools.items()}
+        clone._wire_name_owner = dict(self._wire_name_owner)
+        clone._version = self._version
+        return clone
+
+    def sync(self) -> None:
+        manager = self._mcp_manager
+        if manager is None or self._version == manager.registry_version:
+            return
+        tools_by_server = manager.get_all_tools()
+        for server_name in list(self._server_tools):
+            self.unregister_server_tools(server_name)
+        for server_name, tools in tools_by_server.items():
+            self.register_server_tools(server_name, tools, manager.get_client(server_name))
+        self._version = manager.registry_version
 
     def register_server_tools(
         self,

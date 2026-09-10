@@ -32,21 +32,34 @@ def _get_usage_field(usage_obj: Any, name: str, default: int = 0) -> int:
     return _strict_usage_int(value, default)
 
 
-def _get_usage_cost_usd(usage_obj: Any) -> float:
+def _get_usage_cost_usd(usage_obj: Any) -> float | None:
     """Read an explicit provider/gateway cost without inventing model prices."""
     if usage_obj is None:
-        return 0.0
+        return None
     for name in ("cost_usd", "total_cost_usd", "cost", "total_cost"):
         value = usage_obj.get(name) if isinstance(usage_obj, dict) else getattr(usage_obj, name, None)
-        if isinstance(value, bool):
+        if value is None or isinstance(value, bool):
             continue
         try:
-            parsed = float(value or 0.0)
+            parsed = float(value)
         except (TypeError, ValueError, OverflowError):
             continue
-        if math.isfinite(parsed) and parsed > 0:
+        if math.isfinite(parsed) and parsed >= 0:
             return parsed
-    return 0.0
+    return None
+
+
+def usage_info_from_openai(usage_obj: Any):
+    from backend.llm.base import UsageInfo
+
+    return UsageInfo(
+        input_tokens=_get_chat_prompt_tokens(usage_obj),
+        output_tokens=_first_usage_field(usage_obj, "output_tokens", "completion_tokens"),
+        cache_creation_input_tokens=_get_cache_creation_prompt_tokens(usage_obj),
+        cache_read_input_tokens=_get_cached_prompt_tokens(usage_obj),
+        reasoning_output_tokens=_get_reasoning_output_tokens(usage_obj),
+        cost_usd=_get_usage_cost_usd(usage_obj),
+    )
 
 
 def _first_usage_field(usage_obj: Any, *names: str) -> int:
@@ -151,6 +164,9 @@ def _raw_usage_metadata(usage_obj: Any) -> dict[str, Any]:
     reasoning = _get_reasoning_output_tokens(usage_obj)
     if reasoning:
         raw["reasoning_output_tokens"] = reasoning
+    cost = _get_usage_cost_usd(usage_obj)
+    if cost is not None:
+        raw["cost_usd"] = cost
     return raw
 
 

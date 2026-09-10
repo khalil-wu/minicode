@@ -1338,7 +1338,9 @@ class MCPServerManager:
             raise RuntimeError(
                 f"MCP server '{name}' is still shutting down and cannot log out"
             )
-        self._token_store.for_server(state.config.url or "", state.config.oauth_client_id).clear(name)
+        store = self._token_store.for_server(state.config.url or "", state.config.oauth_client_id)
+        await asyncio.to_thread(store.clear, name)
+        self._resource_subscriptions.pop(name, None)
         state.auth_status = (
             MCPAuthStatus.NOT_LOGGED_IN
             if state.config.oauth_client_id
@@ -1380,6 +1382,12 @@ class MCPServerManager:
     def get_server_config(self, server_name: str) -> MCPServerConfig | None:
         state = self._servers.get(server_name)
         return state.config if state is not None else None
+
+    def get_server_contract(self, server_name: str) -> tuple[Any, ...] | None:
+        state = self._servers.get(server_name)
+        if state is None or state.client is None:
+            return None
+        return (_mcp_server_identity(state.config), state.client.instructions)
 
     def iter_connected_clients(self) -> list[tuple[str, Any]]:
         """Return connected MCP clients using the manager's authoritative state."""
@@ -1558,6 +1566,16 @@ class MCPServerManager:
                 state.operation_failures.pop("resource_restore", None)
             state.operation_failures.pop("tool_catalog", None)
             await self._notify_status(name, ServerStatus.CONNECTED)
+        except asyncio.CancelledError:
+            closed = await client.close()
+            state.client = None if closed else client
+            state.tools = []
+            state.status = ServerStatus.OFFLINE if closed else ServerStatus.ERROR
+            state.last_error = "" if closed else "MCP initialization cancelled; cleanup is pending"
+            if not closed:
+                self._schedule_cleanup_reaper(name, state, client)
+            await self._notify_status(name, state.status)
+            raise
         except Exception as exc:
             cleanup_error: BaseException | None = None
             cleanup_pending = False
@@ -1632,6 +1650,8 @@ class MCPServerManager:
             state.status = ServerStatus.OFFLINE
             state.tools = []
             state.operation_failures.pop("cleanup", None)
+        if _mcp_server_identity(state.config) != _mcp_server_identity(config):
+            self._resource_subscriptions.pop(config.name, None)
         state.config = config
         stored_auth_status = self._stored_auth_status(config)
         if (
@@ -1714,6 +1734,10 @@ class MCPServerManager:
         state = self._servers.get(name)
         if state is None or state.client is not client:
             return
+        # A notification ends the old schema's authority immediately. Publish
+        # the replacement only after the server has returned its complete list.
+        state.tools = []
+        self._registry_version += 1
         self._pending_tool_refreshes[name] = client
         active = self._tool_refresh_tasks.get(name)
         if active is not None and not active.done():
@@ -2079,6 +2103,15 @@ def _same_runtime_config(left: MCPServerConfig, right: MCPServerConfig) -> bool:
         and left.tool_approval_modes == right.tool_approval_modes
         and left.enabled == right.enabled
         and left.disabled_reason == right.disabled_reason
+    )
+
+
+def _mcp_server_identity(config: MCPServerConfig) -> tuple[Any, ...]:
+    return (
+        config.transport, config.command, tuple(config.args), config.cwd,
+        tuple(sorted(config.env.items())), config.url,
+        tuple(sorted(config.headers.items())), config.headers_helper,
+        config.oauth_client_id, config.source, config.project_workspace,
     )
 
 

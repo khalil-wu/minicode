@@ -1,4 +1,5 @@
-import { Sparkles, X } from "lucide-react";
+import { X } from "../lib/icons";
+import { BrandIcon } from "../components/BrandIcon";
 import { useEffect, useRef } from "react";
 import { buildPastedTextFile, shouldAttachPastedText } from "./pastedText";
 import { useAppStore } from "../stores";
@@ -14,7 +15,7 @@ interface Props {
   commandMode?: boolean;
   commandLabel?: string | null;
   onClearCommand?: () => void;
-  skillTokens?: { name: string; description?: string }[];
+  skillTokens?: { name: string; displayName?: string; description?: string; icon?: string }[];
   onRemoveSkill?: (name: string) => void;
   onRemoveLastSkill?: () => void;
   placeholder?: string;
@@ -27,16 +28,12 @@ interface Props {
   onEscape?: () => boolean;
 }
 
-const MIN_HEIGHT = 44;
-const MAX_HEIGHT = 260;
-
 export const ComposerTextarea = ({
   value,
   onChange,
   onSubmit,
   menuOpen,
   onDropFiles,
-  compact = false,
   minimal = false,
   commandMode = false,
   commandLabel,
@@ -51,13 +48,6 @@ export const ComposerTextarea = ({
 }: Props) => {
   const sendShortcut = useAppStore((state) => state.sendShortcut);
   const ref = useRef<HTMLTextAreaElement>(null);
-  const lastValRef = useRef(value);
-  const baseHeight = minimal ? 40 : MIN_HEIGHT;
-  const lastHeightRef = useRef(baseHeight);
-
-  useEffect(() => {
-    ref.current?.focus();
-  }, []);
 
   // Allow external triggers (e.g. message edit/recall) to focus the textarea
   useEffect(() => {
@@ -65,36 +55,6 @@ export const ComposerTextarea = ({
     window.addEventListener("composer:focus", handleFocus);
     return () => window.removeEventListener("composer:focus", handleFocus);
   }, []);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-
-    const prevVal = lastValRef.current;
-    lastValRef.current = value;
-
-    if (!value) {
-      el.style.height = `${baseHeight}px`;
-      lastHeightRef.current = baseHeight;
-      return;
-    }
-
-    if (value.length >= prevVal.length) {
-      const sh = el.scrollHeight;
-      const nextHeight = Math.min(MAX_HEIGHT, Math.max(baseHeight, sh));
-      if (nextHeight !== lastHeightRef.current) {
-        el.style.height = `${nextHeight}px`;
-        lastHeightRef.current = nextHeight;
-      }
-    } else {
-      el.style.height = "auto";
-      const nextHeight = Math.min(MAX_HEIGHT, Math.max(baseHeight, el.scrollHeight));
-      if (nextHeight !== lastHeightRef.current) {
-        el.style.height = `${nextHeight}px`;
-        lastHeightRef.current = nextHeight;
-      }
-    }
-  }, [value]);
 
   const handlePaste = (e: React.ClipboardEvent) => {
     const items = e.clipboardData.items;
@@ -145,6 +105,7 @@ export const ComposerTextarea = ({
       onPaste={handlePaste}
       onDrop={handleDrop}
       onKeyDown={(e) => {
+        if (e.nativeEvent.isComposing || e.keyCode === 229) return;
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "r") {
           e.preventDefault();
           e.stopPropagation();
@@ -160,7 +121,6 @@ export const ComposerTextarea = ({
         // (cc: Escape is a global interrupt). Only acts when the turn is live;
         // otherwise fall through so normal Escape handling still applies.
         if (e.key === "Escape" && onEscape) {
-          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
           if (onEscape()) {
             e.preventDefault();
             return;
@@ -170,7 +130,6 @@ export const ComposerTextarea = ({
         // when the caret is on the first/last line so arrows still navigate
         // multi-line text; skipped during IME composition.
         if ((e.key === "ArrowUp" || e.key === "ArrowDown") && onRecallHistory) {
-          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
           const el = e.currentTarget;
           const caret = el.selectionStart ?? 0;
           const collapsed = caret === (el.selectionEnd ?? caret);
@@ -187,7 +146,7 @@ export const ComposerTextarea = ({
             }
           }
         }
-        if ((e.key === "Backspace" || e.key === "Delete") && !value) {
+        if (e.key === "Backspace" && e.currentTarget.selectionStart === 0 && e.currentTarget.selectionEnd === 0) {
           if (skillTokens.length > 0) {
             e.preventDefault();
             onRemoveLastSkill?.();
@@ -206,7 +165,6 @@ export const ComposerTextarea = ({
           // Ignore Enter while an IME composition is active (CJK input commits
           // with Enter); otherwise the half-composed text is sent. Mirrors the
           // Keep IME composition from being mistaken for a submit shortcut.
-          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
           e.preventDefault();
           onSubmit();
         }
@@ -215,10 +173,9 @@ export const ComposerTextarea = ({
       autoFocus
       className="composer-textarea bg-transparent border-0 outline-0 resize-none overflow-y-auto tracking-normal transition-colors duration-[140ms]"
       style={{
-        width: "100%",
-        flex: hasContextPrefix ? "0 0 auto" : undefined,
-        minHeight: baseHeight,
-        maxHeight: MAX_HEIGHT,
+        width: "auto",
+        minWidth: 0,
+        flex: "1 1 140px",
         color: "var(--text-primary)",
         // Use one CJK-capable face for both Latin and Chinese glyphs. Switching
         // from Manrope to a fallback font only after the first Chinese
@@ -228,18 +185,14 @@ export const ComposerTextarea = ({
         lineHeight: "var(--leading-relaxed)",
         fontWeight: "var(--fw-regular)",
         letterSpacing: 0,
-        padding: commandLabel || skillTokens.length > 0
-          ? (compact ? "7px 12px 6px" : "6px 14px 8px")
-          : minimal ? "9px 16px" : "8px 12px 6px",
+        padding: 0,
       }}
     />
   );
 
-  if (!hasContextPrefix) return textarea;
-
   return (
-    <div className="composer-textarea-frame" style={textareaFrameStyle} data-command-mode={commandMode ? "true" : "false"}>
-      <div className="composer-context-prefix-row" style={prefixRowStyle}>
+    <div className="composer-textarea-frame" data-command-mode={commandMode ? "true" : "false"} data-minimal={minimal}>
+      {hasContextPrefix && <div className="composer-context-prefix-row">
         {commandLabel && (
           <button
             type="button"
@@ -255,38 +208,24 @@ export const ComposerTextarea = ({
           </button>
         )}
         {skillTokens.map((skill) => (
-          <button
+          <span
             key={skill.name}
-            type="button"
-            title={skill.description || skill.name}
-            onClick={() => onRemoveSkill?.(skill.name)}
-            className="composer-prefix-token"
-            style={skillPrefixStyle}
+            className="composer-skill-token"
           >
-            <Sparkles size={14} />
-            <span style={prefixNameStyle}>{skill.name}</span>
-            <X size={14} className="shrink-0 opacity-[0.62]" />
-          </button>
+            <BrandIcon value={skill.displayName || skill.name} iconUrl={skill.icon} inferBrand={false} fallback="skill" size={16} />
+            <span className="composer-skill-name" title={skill.description || skill.displayName || skill.name}>{skill.displayName || skill.name}</span>
+            <button type="button" className="composer-skill-remove"
+              title={`移除技能 ${skill.displayName || skill.name}`}
+              aria-label={`移除技能 ${skill.displayName || skill.name}`}
+              onClick={() => { onRemoveSkill?.(skill.name); ref.current?.focus(); }}>
+              <X size={13} aria-hidden="true" />
+            </button>
+          </span>
         ))}
-      </div>
+      </div>}
       {textarea}
     </div>
   );
-};
-
-const textareaFrameStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 0,
-  minWidth: 0,
-};
-
-const prefixRowStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  flexWrap: "wrap",
-  gap: 6,
-  minHeight: 28,
-  padding: "6px 10px 0",
 };
 
 const prefixBaseStyle: React.CSSProperties = {
@@ -306,13 +245,6 @@ const commandPrefixStyle: React.CSSProperties = {
   ...prefixBaseStyle,
   border: "1px solid color-mix(in oklch, var(--accent-primary) 28%, var(--border-subtle))",
   background: "color-mix(in oklch, var(--accent-primary) 7%, var(--surface-page))",
-  color: "var(--accent-primary)",
-};
-
-const skillPrefixStyle: React.CSSProperties = {
-  ...prefixBaseStyle,
-  border: "1px solid color-mix(in oklch, var(--accent-primary) 24%, var(--border-subtle))",
-  background: "transparent",
   color: "var(--accent-primary)",
 };
 

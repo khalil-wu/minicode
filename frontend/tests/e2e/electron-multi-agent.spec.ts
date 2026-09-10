@@ -647,7 +647,7 @@ async function openAgentsPanel(window: Awaited<ReturnType<Awaited<ReturnType<typ
   }
   await expect(window.getByRole("tablist", { name: "右侧栏面板" })).toBeVisible();
   await addPanelButton.click();
-  await window.getByRole("button", { name: /^(?:Show Agents|子智能体)$/ }).click();
+  await window.getByRole("menuitem", { name: "子智能体", exact: true }).click();
   await expect(agentsTab).toBeVisible();
 }
 

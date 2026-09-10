@@ -43,6 +43,8 @@ describe("SideChatPanel server lifecycle", () => {
       sideChatPendingContext: null,
       isConnected: false,
       permissionMode: "confirm",
+      workingDirectory: "C:/workspace/primary",
+      sendShortcut: "enter",
     });
   });
 
@@ -108,5 +110,25 @@ describe("SideChatPanel server lifecycle", () => {
     view.unmount();
     await act(async () => resolveCreate(successfulCreate));
     await waitFor(() => expect(mocks.deleteConversation).toHaveBeenCalledTimes(1));
+  });
+
+  it("binds the temporary thread to its original workspace and permission mode", async () => {
+    render(<SideChatPanel />);
+    act(() => useAppStore.setState({ workingDirectory: "C:/workspace/other", permissionMode: "bypass", isConnected: true }));
+    await waitFor(() => expect(mocks.awaitResult).toHaveBeenCalledTimes(1));
+    expect(mocks.awaitResult.mock.calls[0][0]).toMatchObject({ workspace_root: "C:/workspace/primary", permission_mode: "confirm" });
+  });
+
+  it("respects IME composition and the shared send shortcut", async () => {
+    useAppStore.setState({ isConnected: true, sendShortcut: "mod-enter" });
+    render(<SideChatPanel />);
+    const input = screen.getByRole("textbox", { name: "侧边对话消息" });
+    fireEvent.change(input, { target: { value: "测试输入" } });
+    await waitFor(() => expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true, isComposing: true });
+    expect(mocks.sendChatMessage).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    expect(mocks.sendChatMessage).toHaveBeenCalledTimes(1);
   });
 });

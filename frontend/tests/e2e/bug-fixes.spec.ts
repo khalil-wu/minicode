@@ -1073,8 +1073,8 @@ test.describe("Message context and compact assistant process UI", () => {
     await expect(page.getByText("Reading request and workspace context").first()).toBeVisible();
     await expect(page.getByText("Scanning BrowserPanel structure").first()).toBeVisible();
     await expect(page.getByText("frontend/src.v2/panels/BrowserPanel.tsx").first()).toBeVisible();
-    await page.getByRole("button", { name: "关闭右侧面板" }).click();
-    await expect(page.getByRole("dialog", { name: "右侧面板" })).toHaveCount(0);
+    await page.getByRole("button", { name: "关闭右侧栏", exact: true }).first().click();
+    await expect(page.getByRole("tablist", { name: "右侧栏面板" })).toBeHidden();
     await page.getByRole("button", { name: "思考" }).click();
     await expect(page.getByText(/I will inspect the selected panel/).first()).toBeVisible();
     await page.getByRole("button", { name: "打开右侧栏" }).click();
@@ -1210,7 +1210,7 @@ test.describe("Message context and compact assistant process UI", () => {
     });
 
     await expect(page.getByText("Plan complete. I checked BrowserPanel").first()).toBeVisible();
-    await page.getByRole("button", { name: "关闭右侧面板" }).click();
+    await page.getByRole("button", { name: "关闭右侧栏", exact: true }).first().click();
     await page.getByRole("button", { name: "展开处理步骤" }).click();
     await page.getByRole("button", { name: "展开活动详情" }).click();
     await expect(page.getByText(/Read BrowserPanel\.tsx and found CDP target selection/).first()).toBeVisible();
@@ -1518,6 +1518,13 @@ test.describe("Conversation session cache", () => {
   });
 
   test("switching conversations follows the conversation workspace immediately", async ({ page }) => {
+    await page.route("**/api/workspace/git/worktree?**", (route) => route.fulfill({
+      json: {
+        is_worktree: false,
+        current_path: new URL(route.request().url()).searchParams.get("workspace_root"),
+        current_branch: "mario",
+      },
+    }));
     await page.evaluate(() => {
       const store = (window as any).__zustandStore;
       store.setState({
@@ -1555,7 +1562,7 @@ test.describe("Conversation session cache", () => {
       .toBe("C:\\Desktop\\mario");
     await expect
       .poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().workspaceGit))
-      .toBeNull();
+      .toMatchObject({ currentPath: "C:\\Desktop\\mario", branch: "mario" });
   });
 
   test("creating a new session does not erase the previous session cache", async ({ page }) => {

@@ -103,9 +103,10 @@ async def check_websocket_connection():
             print_success("WebSocket 连接成功")
 
             # 测试 ping/pong
-            start = time.time()
-            await ws.ping()
-            latency = (time.time() - start) * 1000
+            start = time.perf_counter()
+            pong = await ws.ping()
+            await pong
+            latency = (time.perf_counter() - start) * 1000
 
             if latency < 50:
                 print_success(f"WebSocket 延迟: {latency:.2f}ms (优秀)")

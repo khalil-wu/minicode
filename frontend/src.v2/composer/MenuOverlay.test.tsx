@@ -57,6 +57,17 @@ describe("MenuOverlay mentions", () => {
     vi.unstubAllGlobals();
   });
 
+  it("lets IME confirm text and leaves another dialog's Enter key alone", () => {
+    const select = vi.fn();
+    useAppStore.setState({ slashCommands: [{ name: "help", command: "help", label: "/help", type: "local", description: "Help" }] });
+    render(<><div className="composer-container"><textarea aria-label="Draft" /><MenuOverlay open kind="slash" filter="/help" onSelect={select} /></div><input aria-label="Dialog input" /></>);
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Draft" }), { key: "Enter", isComposing: true });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Dialog input" }), { key: "Enter" });
+    expect(select).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Draft" }), { key: "Enter" });
+    expect(select).toHaveBeenCalledWith("/help");
+  });
+
   it("keeps files available when plugins fail and supports retrying the plugin request", async () => {
     useAppStore.setState({ workingDirectory: "C:\\workspace" });
     fsListTree.mockResolvedValue([{ name: "app.ts", path: "app.ts", isDirectory: false }]);

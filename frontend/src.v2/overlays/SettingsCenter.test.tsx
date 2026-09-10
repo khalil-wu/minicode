@@ -1915,7 +1915,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
   it("shows local plugins and toggles plugin enablement from settings", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      if (url.includes("/api/plugins") && (!init?.method || init.method === "GET")) {
+      if (url.endsWith("/api/plugins/marketplaces")) return new Response(JSON.stringify({ marketplaces: [] }), { status: 200 });
+      if (url.endsWith("/api/plugins") && (!init?.method || init.method === "GET")) {
         return new Response(JSON.stringify({
           plugins: [
             {
@@ -2024,7 +2025,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
           },
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
-      if (url.includes("/api/plugins") && (!init?.method || init.method === "GET")) {
+      if (url.endsWith("/api/plugins/marketplaces")) return new Response(JSON.stringify({ marketplaces: [] }), { status: 200 });
+      if (url.endsWith("/api/plugins") && (!init?.method || init.method === "GET")) {
         return new Response(JSON.stringify({ plugins: [] }), { status: 200, headers: { "content-type": "application/json" } });
       }
       throw new Error(`Unexpected fetch: ${url}`);
@@ -2068,7 +2070,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
           ],
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
-      if (url.includes("/api/plugins") && (!init?.method || init.method === "GET")) {
+      if (url.endsWith("/api/plugins/marketplaces")) return new Response(JSON.stringify({ marketplaces: [] }), { status: 200 });
+      if (url.endsWith("/api/plugins") && (!init?.method || init.method === "GET")) {
         return new Response(JSON.stringify({ plugins: [] }), { status: 200, headers: { "content-type": "application/json" } });
       }
       throw new Error(`Unexpected fetch: ${url}`);
@@ -2134,7 +2137,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
           },
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
-      if (url.includes("/api/plugins") && (!init?.method || init.method === "GET")) {
+      if (url.endsWith("/api/plugins/marketplaces")) return new Response(JSON.stringify({ marketplaces: [] }), { status: 200 });
+      if (url.endsWith("/api/plugins") && (!init?.method || init.method === "GET")) {
         return new Response(JSON.stringify({ plugins: [] }), { status: 200, headers: { "content-type": "application/json" } });
       }
       throw new Error(`Unexpected fetch: ${url}`);

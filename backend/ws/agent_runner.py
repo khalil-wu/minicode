@@ -1157,6 +1157,9 @@ async def _commit_automatic_compaction(
             saved_snapshot,
             getattr(latest, "context_snapshot", None),
         )
+        from backend.ws.compaction_coordinator import rebase_turn_admissions_after_compaction
+
+        rebase_turn_admissions_after_compaction(latest.context_snapshot, saved_snapshot)
         commit = getattr(repository, "commit_compaction", None)
         if not callable(commit):
             raise RuntimeError("conversation repository has no canonical compaction commit")
@@ -2088,7 +2091,12 @@ class SessionAgentRunnerMixin:
                     # leave stale adapters as the replacement chain.  Build the
                     # candidate registry off to the side and publish it only
                     # after the new runner is fully bound.
-                    tool_registry = self._build_conversation_tool_registry(owner_id)
+                    tool_registry = self._build_conversation_tool_registry(
+                        owner_id,
+                        workspace_root=workspace_root,
+                        config=load_config(cwd=workspace_root),
+                        mcp_manager=self._mcp_manager_for_workspace(workspace_root),
+                    )
             candidate_model_runtime = capability.model_runtime
             candidate_model_registry = capability.model_registry
             result = capability.result
@@ -4076,7 +4084,7 @@ class SessionAgentRunnerMixin:
                 or (selected_provider if preserve_provider_override else configured_provider)
             )
             if run_model_runtime is not None:
-                run_model_runtime.refresh()
+                run_model_runtime.refresh(settings_snapshot=run_settings)
                 refresh_oauth = getattr(
                     run_model_runtime,
                     "refresh_oauth_credentials",
@@ -4763,8 +4771,6 @@ class SessionAgentRunnerMixin:
 
         run_metadata["commit_turn_admission"] = _commit_turn_admission
 
-        from backend.llm.cost_tracker import CostTracker
-        tracker = CostTracker.get_instance()
         start_time = time.monotonic()
 
         # Attach workspace context to agent state so ContextBuilder can inject it
@@ -5348,59 +5354,6 @@ class SessionAgentRunnerMixin:
                         run_failure_recoverable = bool(event.data["failure_recoverable"])
                     if not durable_reason:
                         query_terminal_reason = str(event.data.get("reason") or "").strip()
-                    provider_raw = event.data.get("provider_raw")
-                    request_summary = provider_raw.get("request_summary") if isinstance(provider_raw, dict) else None
-                    usage_provider = str(
-                        (request_summary.get("wire_api") if isinstance(request_summary, dict) else "")
-                        or (provider_raw.get("provider") if isinstance(provider_raw, dict) else "")
-                        or run_provider
-                    )
-                    active_usage_llm = _active_run_llm()
-                    from backend.llm.capabilities import capabilities_for_adapter
-
-                    active_capabilities = capabilities_for_adapter(active_usage_llm)
-                    usage_provider = str(
-                        (request_summary.get("wire_api") if isinstance(request_summary, dict) else "")
-                        or (provider_raw.get("provider") if isinstance(provider_raw, dict) else "")
-                        or active_capabilities.provider
-                        or usage_provider
-                    )
-                    tracker.record_usage(
-                        input_tokens=usage_payload.get("input_tokens", 0),
-                        output_tokens=usage_payload.get("output_tokens", 0),
-                        cache_creation_input_tokens=usage_payload.get("cache_creation_input_tokens", 0),
-                        cache_read_input_tokens=usage_payload.get("cache_read_input_tokens", 0),
-                        ordinary_input_tokens=(
-                            usage_payload.get("ordinary_input_tokens")
-                            if "ordinary_input_tokens" in usage_payload
-                            else None
-                        ),
-                        prompt_cache_total_tokens=(
-                            usage_payload.get("prompt_cache_total_tokens")
-                            if "prompt_cache_total_tokens" in usage_payload
-                            else None
-                        ),
-                        reasoning_output_tokens=usage_payload.get("reasoning_output_tokens", 0),
-                        elapsed_sec=time.monotonic() - start_time,
-                        model_id=(
-                            getattr(active_capabilities, "model", "")
-                            or getattr(active_usage_llm, "_model", None)
-                            or getattr(
-                                getattr(active_usage_llm, "_settings", None),
-                                "model",
-                                None,
-                            )
-                        ),
-                        provider=usage_provider,
-                        session_id=self.session_id,
-                        input_includes_cache_read=bool(
-                            usage_payload.get("input_includes_cache_read", True)
-                        ),
-                        input_includes_cache_write=bool(
-                            usage_payload.get("input_includes_cache_write", True)
-                        ),
-                        cost_usd=float(usage_payload.get("cost_usd") or 0.0),
-                    )
                 elif event.type == "error":
                     run_failed_message = turn_state.record_error(event.data)
                     if isinstance(event.data.get("recoverable"), bool):
@@ -5610,7 +5563,8 @@ class SessionAgentRunnerMixin:
             assistant_message: dict[str, Any] | None = None
             new_summary: str | None = None
             if terminal_projection_owned and (
-                assistant_content
+                not parent_notification_only
+                or assistant_content
                 or assistant_blocks
                 or assistant_tool_calls
                 or assistant_artifacts

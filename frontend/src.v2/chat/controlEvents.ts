@@ -6,6 +6,40 @@ import type {
 } from "../protocol/events";
 import type { DiffReviewState, PendingAskUserOption, PendingDiffReview } from "../stores/types";
 import { diffFilePathsEqual } from "./diffReviewState";
+import { dirtyEditorFiles } from "../stores/shared-helpers";
+import { embeddedBrowserCloseConversation, embeddedBrowserList, isDesktop, ptyKillConversation, ptyList } from "../desktop/runtime";
+import { sendPromptResponseCommand } from "../protocol/ws-outbox";
+import { pushToast } from "../overlays/ToastContainer";
+
+const respondToResourceCleanup = async (event: ControlRequestEvent): Promise<void> => {
+  if (event.request.subtype !== "conversation_resources_cleanup") return;
+  let response: Record<string, unknown>;
+  try {
+    if (!isDesktop()) throw new Error("桌面资源连接已断开，任务已保留。");
+    const dirty = dirtyEditorFiles(useAppStore.getState(), event.request.workspace_root);
+    if (dirty.length) throw new Error(`请先保存未保存的文件，再删除任务：${dirty.join("、")}`);
+    await Promise.all([
+      ptyKillConversation(event.conversation_id),
+      embeddedBrowserCloseConversation(event.conversation_id),
+    ]);
+    const [terminals, browsers] = await Promise.all([
+      ptyList(event.conversation_id),
+      embeddedBrowserList(event.conversation_id),
+    ]);
+    if (terminals.some((terminal) => terminal.isAlive !== false) || browsers?.length) {
+      throw new Error("本地终端或浏览器尚未关闭，任务已保留。");
+    }
+    response = { action: "approve" };
+  } catch (error) {
+    response = { action: "reject", guidance: error instanceof Error ? error.message : String(error) };
+  }
+  await sendPromptResponseCommand({
+    type: "control_response",
+    request_id: event.request_id,
+    conversation_id: event.conversation_id,
+    response: { subtype: "success", response },
+  });
+};
 
 const eventConversationId = (e: ServerEvent): string | undefined => {
   const conversationId = (e as unknown as { conversation_id?: unknown }).conversation_id;
@@ -223,6 +257,12 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
       const requestId = ev.request_id;
       const conversationId = eventConversationId(e);
       if (!conversationId) return true;
+      if (request.subtype === "conversation_resources_cleanup") {
+        void respondToResourceCleanup(ev).catch((error: unknown) => {
+          pushToast(error instanceof Error ? error.message : "无法回传任务资源清理结果。", "error", 5000);
+        });
+        return true;
+      }
       if (request.subtype === "can_use_tool") {
         applyApprovalRequest({
           requestId,

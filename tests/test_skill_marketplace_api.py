@@ -160,11 +160,21 @@ def test_marketplace_defaults_to_minicode_private_skill_dir() -> None:
     assert marketplace.USER_SKILLS_DIR == marketplace.get_minicode_config_home_dir() / "skills"
 
 
-def test_marketplace_network_catalog_is_disabled_by_default(monkeypatch) -> None:
-    monkeypatch.delenv("MINICODE_ENABLE_NETWORK_MARKETPLACE", raising=False)
+def test_marketplace_network_catalog_respects_explicit_offline_mode(monkeypatch) -> None:
+    monkeypatch.setenv("MINICODE_ENABLE_NETWORK_MARKETPLACE", "0")
     payload = asyncio.run(list_extensions_marketplace(force_refresh=True))
     assert payload["skills"] == []
     assert payload["source_status"]["openai_skills"]["source"] == "disabled"
+
+
+def test_marketplace_public_catalog_is_available_without_hidden_opt_in(monkeypatch) -> None:
+    monkeypatch.delenv("MINICODE_ENABLE_NETWORK_MARKETPLACE", raising=False)
+    def catalog_response(url):
+        return [{"name": "review", "type": "dir"}] if "api.github.com" in url else {"servers": []}
+    monkeypatch.setattr("backend.skills.marketplace._default_fetch_json", catalog_response)
+    payload = asyncio.run(list_extensions_marketplace(force_refresh=True))
+    assert [skill["name"] for skill in payload["skills"]] == ["review"]
+    assert payload["source_status"]["openai_skills"]["ok"] is True
 
 
 def test_import_local_skill_copies_only_real_skill_tree(tmp_path) -> None:
@@ -399,16 +409,48 @@ def test_marketplace_reports_named_timeout_without_fabricating_connectors() -> N
     assert payload["mcp"] == []
 
 
-def test_install_marketplace_skill_downloads_openai_skill_file(monkeypatch, tmp_path) -> None:
-    async def fake_text(url: str) -> str:
-        assert url.endswith("/gh-fix-ci/SKILL.md")
-        return "---\nname: gh-fix-ci\ndescription: Fix CI failures.\n---\n# Fix CI\n"
+def test_install_marketplace_skill_preserves_complete_bundle(monkeypatch, tmp_path) -> None:
+    import zipfile
+    from backend.plugins.materializer import materialize_source
 
-    result = asyncio.run(install_marketplace_skill("gh-fix-ci", skills_dir=tmp_path, fetch_text=fake_text))
+    bundle = tmp_path / "skill.zip"
+    files = {
+        "SKILL.md": "---\nname: gh-fix-ci\ndescription: Fix CI failures.\n---\n# Fix CI\n",
+        "scripts/check.py": "print('check')\n",
+        "references/checks.md": "Reference content\n",
+        "assets/icon.svg": "<svg/>\n",
+        "agents/openai.yaml": "interface:\n  display_name: Fix CI\n",
+    }
+    with zipfile.ZipFile(bundle, "w") as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+
+    def staged_bundle(source, destination, **kwargs):
+        assert source == {"source": "github", "repo": "openai/skills", "ref": "main", "path": "skills/.curated/gh-fix-ci"}
+        return materialize_source({"source": "file", "path": str(bundle)}, destination, **kwargs)
+
+    monkeypatch.setattr("backend.skills.marketplace.materialize_source", staged_bundle)
+    result = asyncio.run(install_marketplace_skill("gh-fix-ci", skills_dir=tmp_path))
 
     assert result["installed"] is True
     assert result["skill"]["source"] == "openai"
     assert (tmp_path / "gh-fix-ci" / "SKILL.md").read_text(encoding="utf-8").startswith("---\nname: gh-fix-ci")
+    for name, content in files.items():
+        assert (tmp_path / "gh-fix-ci" / name).read_text(encoding="utf-8") == content
+
+
+def test_marketplace_skill_validation_precedes_activation(monkeypatch, tmp_path) -> None:
+    import zipfile
+    import pytest
+    from backend.plugins.materializer import materialize_source
+
+    bundle = tmp_path / "invalid.zip"
+    with zipfile.ZipFile(bundle, "w") as archive:
+        archive.writestr("scripts/tool.py", "pass\n")
+    monkeypatch.setattr("backend.skills.marketplace.materialize_source", lambda _source, destination, **kwargs: materialize_source({"source": "file", "path": str(bundle)}, destination, **kwargs))
+    with pytest.raises(FileNotFoundError):
+        asyncio.run(install_marketplace_skill("missing-manifest", skills_dir=tmp_path / "skills"))
+    assert not (tmp_path / "skills" / "missing-manifest").exists()
 
 
 def test_extensions_marketplace_api_exposes_unified_payload(monkeypatch) -> None:

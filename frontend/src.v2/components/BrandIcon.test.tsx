@@ -49,9 +49,23 @@ describe("BrandIcon", () => {
     expect(container.querySelector('[data-brand="generic"] svg')).toBeTruthy();
   });
 
-  it("prefers bundled official icons over remote website icons", () => {
+  it("prefers the declared extension icon over name-based brand inference", () => {
     const { container } = render(<BrandIcon value="GitHub" iconUrl="https://example.com/icon.svg" />);
+    expect(container.querySelector('img[src="https://example.com/icon.svg"]')).toBeTruthy();
+    fireEvent.error(container.querySelector("img")!);
     expect(container.querySelector('[data-brand="github"] svg')).toBeTruthy();
-    expect(container.querySelector('img[src="https://example.com/icon.svg"]')).toBeNull();
+  });
+
+  it("does not mistake a skill name for its publisher", () => {
+    const { container } = render(<BrandIcon value="GitHub review" inferBrand={false} fallback="skill" />);
+    expect(container.querySelector('[data-brand="generic"]')).toBeTruthy();
+  });
+
+  it("accepts a same-origin bundled asset and switches to a replacement icon", () => {
+    const { container, rerender } = render(<BrandIcon value="OpenAI Docs" iconUrl="/api/skills/asset?variant=small" />);
+    expect(container.querySelector("img")?.getAttribute("src")).toContain("/api/skills/asset?variant=small");
+    fireEvent.error(container.querySelector("img")!);
+    rerender(<BrandIcon value="OpenAI Docs" iconUrl="/api/skills/asset?variant=large" />);
+    expect(container.querySelector("img")?.getAttribute("src")).toContain("variant=large");
   });
 });

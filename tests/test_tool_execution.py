@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
+import time
+
+import pytest
 
 from backend.agent.tool_batch_execution import (
     _finalize_tool_result,
@@ -16,6 +20,7 @@ from backend.agent.tool_execution import (
     missing_required_tool_argument_names,
     normalize_tool_call_event,
     prepare_tool_call_sequence,
+    run_tool_with_timeout,
 )
 from backend.agent.tool_stream_tracker import (
     StreamingToolTracker,
@@ -47,6 +52,130 @@ class _BatchTool(BaseTool):
 
     async def execute(self, args, context=None) -> ToolResult:
         return ToolResult(content="ok")
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_turn_deadline_is_checked_before_entering_a_mutating_tool(tmp_path, expired):
+    class Mutation(_BatchTool):
+        mutates_workspace = True
+        calls = 0
+        async def execute(self, args, context=None):
+            self.calls += 1
+            return ToolResult(content="mutation completed")
+
+    tool = Mutation("deadline_mutation", read_only=False)
+    registry = ToolRegistry()
+    registry.register(tool)
+    context = ToolExecutionContext(permission=PermissionContext(mode="auto"), workspace_root=tmp_path,
+        deadline_monotonic=time.monotonic() + (-1 if expired else 5))
+    result = asyncio.run(run_tool_with_timeout(ToolCallEvent(id="deadline", name=tool.name, arguments={}), registry, context))
+    assert tool.calls == (0 if expired else 1)
+    assert result.is_error is expired
+    if expired:
+        assert result.status == "timeout"
+        assert "was not started" in result.content
+        assert result.duration_ms == 0
+    assert context.cleanup_tasks_by_call == {}
+    assert not context.pending_cleanup_tasks
+
+
+@pytest.mark.parametrize("declared_timeout", [None, 5.0])
+def test_tool_origin_timeout_preserves_the_error_without_fabricating_watchdog_cleanup(tmp_path, monkeypatch, declared_timeout):
+    async def fail_preparation(*args, **kwargs):
+        raise TimeoutError("snapshot backend timed out")
+    monkeypatch.setattr("backend.agent.tool_execution.run_tool", fail_preparation)
+    tool = _BatchTool("prepare_timeout", read_only=True)
+    tool.timeout_seconds = declared_timeout
+    registry = ToolRegistry()
+    registry.register(tool)
+    context = ToolExecutionContext(permission=PermissionContext(), workspace_root=tmp_path)
+    result = asyncio.run(run_tool_with_timeout(ToolCallEvent(id="prepare", name=tool.name, arguments={}), registry, context))
+    assert result.is_error and result.status == "failed"
+    assert "snapshot backend timed out" in result.to_context_string()
+    assert not result.cleanup_receipt
+    assert not context.pending_cleanup_tasks
+    assert context.cleanup_tasks_by_call == {}
+
+
+@pytest.mark.parametrize("error", [ValueError("missing required option: project_id"), TimeoutError("remote tool request timed out")])
+def test_tool_exceptions_keep_the_actual_cause_in_model_history(tmp_path, error):
+    class Failing(_BatchTool):
+        async def execute(self, args, context=None):
+            raise error
+    tool = Failing("failing_tool", read_only=True)
+    registry = ToolRegistry()
+    registry.register(tool)
+    result = asyncio.run(registry.execute(tool.name, {}))
+    context = ContextBuilder(TokenBudget())
+    context.append_assistant_tool_calls([ToolCallEvent(id="failure", name=tool.name, arguments={})])
+    context.append_tool_result("failure", tool.name, result, workspace_root=tmp_path)
+    assert result.is_error and result.status == "failed"
+    assert str(error) in context._history[-1].content
+    assert type(error).__name__ in context._history[-1].content
+
+
+@pytest.mark.parametrize("interrupt_after_fast", [False, True])
+def test_parallel_results_publish_promptly_and_preserve_completed_history_on_interrupt(tmp_path, interrupt_after_fast):
+    async def scenario():
+        release_slow = asyncio.Event()
+        slow_cancelled = False
+        completed_spans = []
+
+        class GatedRead(_BatchTool):
+            async def execute(self, args, context=None):
+                nonlocal slow_cancelled
+                if args["slow"]:
+                    try:
+                        await release_slow.wait()
+                    except asyncio.CancelledError:
+                        slow_cancelled = True
+                        raise
+                return ToolResult(content="slow evidence" if args["slow"] else "fast evidence")
+
+        async def record_event(event_type, data):
+            if event_type == "runtime.span" and data["event"] == "tool.completed":
+                completed_spans.append(data["tool_call_id"])
+
+        registry = ToolRegistry()
+        registry.register(GatedRead("gated_read", read_only=True))
+        calls = [ToolCallEvent(id=name, name="gated_read", arguments={"slow": name == "slow"}) for name in ("slow", "fast")]
+        context = ContextBuilder(TokenBudget())
+        context.append_assistant_tool_calls(calls)
+        state = AgentState(user_message="Read two independent sources")
+        tool_context = ToolExecutionContext(permission=PermissionContext(), workspace_root=tmp_path, emit_event=record_event)
+        observed = []
+
+        async def collect():
+            async with aclosing(flush_queue(calls, ctx=context, state=state, tool_registry=registry,
+                tool_ctx=tool_context, iteration_id="iter:1")) as stream:
+                async for event in stream:
+                    if event.type != "tool_result":
+                        continue
+                    observed.append(event.data["id"])
+                    if event.data["id"] == "fast":
+                        assert not release_slow.is_set()
+                        assert completed_spans == ["fast"]
+                        if interrupt_after_fast:
+                            break
+                        release_slow.set()
+
+        await asyncio.wait_for(collect(), timeout=3)
+        assert observed == (["fast"] if interrupt_after_fast else ["fast", "slow"])
+        assert completed_spans == observed
+        history = [message for message in context._history if message.role == "tool"]
+        assert [message.tool_call_id for message in history] == (["fast"] if interrupt_after_fast else ["slow", "fast"])
+        assert any("fast evidence" in message.content for message in history)
+        assert slow_cancelled is interrupt_after_fast
+        if interrupt_after_fast:
+            from backend.agent.history_store import repair_tool_messages
+            repaired, inserted, dropped = repair_tool_messages(context._history)
+            assert (inserted, dropped) == (1, 0)
+            by_id = {message.tool_call_id: message for message in repaired if message.role == "tool"}
+            assert "fast evidence" in by_id["fast"].content
+            assert "execution outcome is unknown" in by_id["slow"].content
+            assert "Do not retry" not in by_id["slow"].content
+
+    asyncio.run(scenario())
 
 
 class _MutatingBatchTool(_BatchTool):

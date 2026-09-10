@@ -142,19 +142,14 @@ def sandbox_capability_for_context(
             "deny_read": bool(capability.deny_read_isolated),
             "protected_paths": bool(capability.protected_paths_isolated),
         }
-        # Report what the command path actually does when the backend is
-        # missing, not a fixed "reject". A required sandbox stops the turn at
-        # preflight; otherwise commands run under the permission policy without
-        # OS isolation, and only a managed no-fallback policy rejects them.
+        # An unavailable backend rejects this command; a separately authorized
+        # escalation constructs another policy before execution.
         if capability.available:
             fail_closed = False
             unavailable_action = "enforce_policy"
         elif policy.preflight_required:
             fail_closed = True
             unavailable_action = "reject_turn"
-        elif policy.allow_unsandboxed_commands:
-            fail_closed = False
-            unavailable_action = "run_unsandboxed"
         else:
             fail_closed = True
             unavailable_action = "reject_command"

@@ -24,12 +24,15 @@ def billable_tokens_from_usage(usage: Any) -> int:
     input_tokens = max(0, int(get("input_tokens", 0) or 0))
     cache_read = max(0, int(get("cache_read_input_tokens", 0) or 0))
     output_tokens = max(0, int(get("output_tokens", 0) or 0))
-    includes_cache = bool(get("input_includes_cache_read", True))
-    billable_input = (
-        max(0, input_tokens - cache_read)
-        if includes_cache
-        else input_tokens
-    )
+    cache_write = max(0, int(get("cache_creation_input_tokens", 0) or 0))
+    ordinary = get("ordinary_input_tokens", None)
+    if ordinary is None:
+        ordinary = input_tokens
+        if get("input_includes_cache_read", True):
+            ordinary -= cache_read
+        if get("input_includes_cache_write", True):
+            ordinary -= cache_write
+    billable_input = max(0, int(ordinary)) + cache_write
     return billable_input + output_tokens
 
 

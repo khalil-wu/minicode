@@ -299,6 +299,12 @@ def _render_agent_markdown(agent: AgentDefinition) -> str:
         frontmatter["model"] = agent.model
     if agent.effort:
         frontmatter["effort"] = agent.effort
+    if agent.permission_mode:
+        frontmatter["permission_mode"] = agent.permission_mode
+    if agent.background is not None:
+        frontmatter["background"] = agent.background
+    if agent.has_output_schema:
+        frontmatter["has_output_schema"] = True
     metadata = yaml.safe_dump(
         frontmatter,
         allow_unicode=True,
@@ -333,6 +339,7 @@ def save_custom_agent(
 
     target_path: Path
     target_source: EditableAgentSource = source
+    existing: AgentDefinition | None = None
     if source_path is not None and str(source_path).strip():
         requested_path = Path(source_path).expanduser().resolve()
         existing = next(
@@ -369,6 +376,9 @@ def save_custom_agent(
         source=target_source,
         filename=target_path.stem,
         base_dir=target_path.parent,
+        permission_mode=existing.permission_mode if existing is not None else "",
+        background=existing.background if existing is not None else None,
+        has_output_schema=existing.has_output_schema if existing is not None else False,
     )
     rendered = _render_agent_markdown(agent)
     if source_path is None or not str(source_path).strip():

@@ -105,7 +105,10 @@ def test_whitespace_only_reasoning_delta_is_consumed_without_runtime_failure() -
 
     updates = asyncio.run(collect())
 
-    assert updates == [ProviderProjectionResult(True)]
+    assert len(updates) == 2
+    assert updates[0].type == "thinking_delta"
+    assert updates[0].data["content"] == " \n\t"
+    assert updates[1] == ProviderProjectionResult(True)
 
 
 def test_provider_reasoning_projection_preserves_raw_and_summary_types() -> None:
@@ -576,10 +579,6 @@ def test_provider_stream_settlement_marks_eof_without_done_as_failed() -> None:
         def record_provider_usage_total(self, _usage):
             pass
 
-    class Chain:
-        def record_usage(self, **_kwargs):
-            pass
-
     kernel = Kernel()
 
     async def collect():
@@ -605,7 +604,6 @@ def test_provider_stream_settlement_marks_eof_without_done_as_failed() -> None:
                 ),
                 usage=UsageInfo(),
                 turn_usage=UsageInfo(),
-                chain=Chain(),
             )
         ]
 
@@ -644,6 +642,9 @@ def test_provider_error_uses_structured_429_and_retry_after_metadata_without_tur
                 f"provider stream retries must not consume the turn budget: {reason}"
             )
 
+        def bounded_provider_timeout(self, requested):
+            return requested, False
+
     async def degrade_and_finish(**_kwargs):
         if False:
             yield None
@@ -673,10 +674,7 @@ def test_provider_error_uses_structured_429_and_retry_after_metadata_without_tur
                 context_builder=SimpleNamespace(),
                 turn_kernel=turn_kernel,
                 provider_attempt=object(),
-                stream_state=SimpleNamespace(
-                    incomplete_tool_stream=False,
-                    saw_partial_tool_call=False,
-                ),
+                stream_state=StreamAttemptState(),
                 stream_text=SimpleNamespace(full_text=""),
                 pending_tool_calls=[],
                 usage=UsageInfo(),
@@ -749,6 +747,9 @@ def test_provider_error_retries_structured_525_instead_of_finishing(
         def consume_retry(self, _reason: str):
             return None
 
+        def bounded_provider_timeout(self, requested):
+            return requested, False
+
     async def degrade_and_finish(**_kwargs):
         raise AssertionError("transient 525 must not finish without retrying")
         yield
@@ -775,10 +776,7 @@ def test_provider_error_retries_structured_525_instead_of_finishing(
                 context_builder=SimpleNamespace(),
                 turn_kernel=TurnKernel(),
                 provider_attempt=object(),
-                stream_state=SimpleNamespace(
-                    incomplete_tool_stream=False,
-                    saw_partial_tool_call=False,
-                ),
+                stream_state=StreamAttemptState(),
                 stream_text=SimpleNamespace(full_text=""),
                 pending_tool_calls=[],
                 usage=UsageInfo(),
@@ -851,10 +849,7 @@ def test_provider_protocol_conversion_failure_is_fatal_and_never_enters_retry_bu
                 context_builder=SimpleNamespace(),
                 turn_kernel=kernel,
                 provider_attempt=object(),
-                stream_state=SimpleNamespace(
-                    incomplete_tool_stream=False,
-                    saw_partial_tool_call=False,
-                ),
+                stream_state=StreamAttemptState(),
                 stream_text=SimpleNamespace(
                     full_text="",
                     pending_recovery_text=lambda _scrubber: "",
@@ -906,6 +901,9 @@ def test_provider_retry_uses_stream_budget_instead_of_turn_recovery_budget() -> 
             self.closed.append(kwargs)
 
     class BudgetRuntime:
+        def bounded_provider_timeout(self, requested):
+            return requested, False
+
         def consume_retry(self, reason: str):
             raise AssertionError(
                 f"provider stream retries must not consume the turn budget: {reason}"
@@ -934,10 +932,7 @@ def test_provider_retry_uses_stream_budget_instead_of_turn_recovery_budget() -> 
                 context_builder=SimpleNamespace(),
                 turn_kernel=kernel,
                 provider_attempt=object(),
-                stream_state=SimpleNamespace(
-                    incomplete_tool_stream=False,
-                    saw_partial_tool_call=False,
-                ),
+                stream_state=StreamAttemptState(),
                 stream_text=SimpleNamespace(full_text=""),
                 pending_tool_calls=[],
                 usage=UsageInfo(),

@@ -56,6 +56,7 @@ describe("SidebarLeft session status", () => {
     vi.mocked(sendClientCommandAwaitResult).mockClear();
     vi.mocked(openWorkspaceFolder).mockClear();
     useAppStore.setState({
+      skillsMarketplaceOpen: false,
       appMode: "cowork",
       themeMode: "dark",
       leftSidebarWidth: 280,
@@ -83,6 +84,14 @@ describe("SidebarLeft session status", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("keeps an already open extensions page open when its navigation item is clicked", () => {
+    useAppStore.setState({ skillsMarketplaceOpen: true, skillsMarketplaceTab: "skills" });
+    render(<SidebarLeft />);
+    fireEvent.click(screen.getByRole("button", { name: "插件", exact: true }));
+    expect(useAppStore.getState().skillsMarketplaceOpen).toBe(true);
+    expect(useAppStore.getState().skillsMarketplaceTab).toBe("plugins");
   });
 
   it("hides empty recent-session chrome", () => {
@@ -344,7 +353,7 @@ describe("SidebarLeft session status", () => {
     useAppStore.setState({
       appMode: "cowork",
       workingDirectory: "C:\\Desktop\\MiniCode",
-      editorTabs: [{ path: "README.md", content: "", original: "", loading: false, error: null }],
+      editorTabs: [{ id: "editor-fixture-1", path: "README.md", content: "", original: "", loading: false, error: null }],
       activeTabPath: "README.md",
       activeEditorPath: "README.md",
       panelSlots: [

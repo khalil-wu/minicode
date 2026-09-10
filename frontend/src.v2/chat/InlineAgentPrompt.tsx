@@ -68,7 +68,7 @@ export const InlineAgentPrompt = () => {
 
   return (
     <div className="inline-agent-prompt" style={shellStyle} aria-label="Agent 正在等待输入">
-      {visibleDiffReview && <DiffApprovalCard request={visibleDiffReview} />}
+      {visibleDiffReview && <DiffApprovalCard key={visibleDiffReview.requestId} request={visibleDiffReview} />}
       {visiblePlanApproval && <PlanApprovalCard request={visiblePlanApproval} />}
       {visibleGenericApproval && <ToolApprovalCard request={visibleGenericApproval} queue={queuedGenericApprovals} />}
       {visibleAskUser && (visibleAskUser.planReview

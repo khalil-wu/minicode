@@ -15,7 +15,7 @@ from backend.plugins.identity import (
     parse_plugin_id,
     parse_plugin_id_strict,
 )
-from backend.plugins.layout import PLUGIN_MANIFEST_DIRECTORY, plugin_manifest_path
+from backend.plugins.layout import PLUGIN_MANIFEST_DIRECTORY, plugin_install_root, plugin_manifest_path
 
 def plugin_name_from_directory(plugin_dir: Path) -> str:
     plugin_dir = Path(plugin_dir)
@@ -129,6 +129,17 @@ def _plugin_marketplace_for_manifest(
                 and is_valid_identifier(projected.name, projected.marketplace)
             ):
                 return projected.marketplace
+        if len(parts) == 1 and root.resolve() == plugin_install_root().resolve():
+            # Older imports replaced '@' with '-', losing the market identity.
+            # Recover only a projection backed by the validated canonical store;
+            # an arbitrary directory/manifest cannot claim a marketplace.
+            from backend.plugins.store import PluginStore
+
+            manifest_name = str((raw_manifest or {}).get("name") or "").strip()
+            for record in PluginStore(root.parent / "store").list():
+                legacy_folder = f"{record.name}-{record.marketplace}".strip(".-")[:80]
+                if record.active and record.name == manifest_name and parts[0] == legacy_folder:
+                    return record.marketplace
         if len(parts) >= 3 and parts[-1] and _looks_like_versioned_store(resolved):
             return str(parts[-3])
         if len(parts) >= 4 and parts[0].casefold() == "cache":
@@ -243,11 +254,11 @@ def _merge_manifest_metadata(entry: dict[str, Any], manifest_path: Path) -> None
             entry["defaultPrompt"] = [default_prompt.strip()]
         elif isinstance(default_prompt, list):
             entry["defaultPrompt"] = [str(item).strip() for item in default_prompt if str(item).strip()]
-    if not entry.get("iconVariant"):
-        for field, variant in (("logo", "logo"), ("composerIcon", "composer"), ("logoDark", "logo-dark")):
-            if _resolve_manifest_asset(manifest_path, interface.get(field)) is not None:
-                entry["iconVariant"] = variant
-                break
+    variants = [variant for field, variant in (("logo", "logo"), ("composerIcon", "composer"), ("logoDark", "logo-dark"))
+                if _resolve_manifest_asset(manifest_path, interface.get(field)) is not None]
+    entry["iconVariants"] = variants
+    if not entry.get("iconVariant") and variants:
+        entry["iconVariant"] = variants[0]
 
 def _resolve_manifest_asset(manifest_path: Path, value: Any) -> Path | None:
     if not isinstance(value, str) or not value.strip():

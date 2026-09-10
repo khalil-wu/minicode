@@ -245,9 +245,9 @@ def _coerce_specifier(value: str) -> str:
             parsed = Version(base) if Version is not None else None
             if parsed is None:
                 return text
-            if parsed.major > 0:
+            if parsed.major > 0 or len(parsed.release) == 1:
                 upper = f"<{parsed.major + 1}.0.0"
-            elif parsed.minor > 0:
+            elif parsed.minor > 0 or len(parsed.release) == 2:
                 upper = f"<0.{parsed.minor + 1}.0"
             else:
                 upper = f"<0.0.{parsed.micro + 1}"
@@ -260,7 +260,12 @@ def _coerce_specifier(value: str) -> str:
             parsed = Version(base) if Version is not None else None
             if parsed is None:
                 return text
-            return f">={parsed},<{parsed.major}.{parsed.minor + 1}.0"
+            upper = (
+                f"<{parsed.major + 1}.0.0"
+                if len(parsed.release) == 1
+                else f"<{parsed.major}.{parsed.minor + 1}.0"
+            )
+            return f">={parsed},{upper}"
         except Exception:
             return text
     # Bare versions are exact matches in plugin settings.

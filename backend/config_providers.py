@@ -195,8 +195,8 @@ def _next_image_settings(
     normalized_base_url = _normalize_openai_base_url(base_url) if base_url else ""
     image_key_provided = "image_api_key" in updates
     image_key = str(updates.get("image_api_key") or "").strip()
-    if image_key_provided and _is_api_key_replacement(image_key):
-        _set_runtime_image_api_key(provider, image_key, normalized_base_url)
+    if image_key_provided and _is_api_key_replacement(image_key) and not normalized_base_url:
+        raise SettingsError("An independent image API key requires an image base URL.")
     return {
         "image_mode": mode,
         # Secrets live only in the endpoint-scoped vault.
@@ -247,6 +247,8 @@ def _upsert_llm_history(
         "model_metadata": _coerce_model_metadata(section.get("model_metadata")),
         "wire_api": wire_api,
         "proxy_mode": _normalize_proxy_mode(section.get("proxy_mode")),
+        "headers": dict(section.get("default_headers", section.get("headers", {}))),
+        "auth_header": bool(section.get("auth_header", False)),
         "reasoning_effort": str(section.get("reasoning_effort") or "").strip().lower(),
         "responses_reasoning_summary": str(section.get("responses_reasoning_summary") or "off").strip(),
         "max_tokens": max(0, _coerce_int(section.get("max_tokens", 0), 0)),
@@ -328,11 +330,7 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
     raw_openai = payload.get("openai", {})
     openai_updates = raw_openai if isinstance(raw_openai, dict) else {}
-    openai_api_key_provided = "api_key" in openai_updates
-    openai_api_key = str(openai_updates.get("api_key", "")).strip()
     openai_base_url = str(openai_updates.get("base_url", current_openai["base_url"])).strip()
-    if openai_api_key_provided and _is_api_key_replacement(openai_api_key):
-        _set_runtime_api_key("openai", openai_api_key, openai_base_url)
     openai_model = str(openai_updates.get("model", current_openai["model"])).strip()
     openai_capabilities_match = (
         (openai_model or current_openai["model"]) == current_openai["model"]
@@ -412,7 +410,7 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
         "model_labels": _coerce_model_labels(
             openai_updates.get("model_labels", current_openai.get("model_labels", {}))
         ),
-        "reasoning_effort": openai_reasoning_effort or current_openai["reasoning_effort"],
+        "reasoning_effort": openai_reasoning_effort,
         "responses_reasoning_summary": (
             openai_responses_reasoning_summary
             or current_openai["responses_reasoning_summary"]
@@ -445,11 +443,7 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
     raw_anthropic = payload.get("anthropic", {})
     anthropic_updates = raw_anthropic if isinstance(raw_anthropic, dict) else {}
-    anthropic_api_key_provided = "api_key" in anthropic_updates
-    anthropic_api_key = str(anthropic_updates.get("api_key", "")).strip()
     anthropic_base_url = str(anthropic_updates.get("base_url", current_anthropic["base_url"])).strip()
-    if anthropic_api_key_provided and _is_api_key_replacement(anthropic_api_key):
-        _set_runtime_api_key("anthropic", anthropic_api_key, anthropic_base_url)
     anthropic_model = str(anthropic_updates.get("model", current_anthropic["model"])).strip()
     next_anthropic_model = anthropic_model or current_anthropic["model"]
     anthropic_capabilities_match = (
@@ -511,11 +505,7 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
     raw_custom = payload.get("custom", {})
     custom_updates = raw_custom if isinstance(raw_custom, dict) else {}
-    custom_api_key_provided = "api_key" in custom_updates
-    custom_api_key = str(custom_updates.get("api_key", "")).strip()
     custom_base_url = str(custom_updates.get("base_url", current_custom["base_url"])).strip()
-    if custom_api_key_provided and _is_api_key_replacement(custom_api_key):
-        _set_runtime_api_key("custom", custom_api_key, custom_base_url)
     custom_model = str(custom_updates.get("model", current_custom["model"])).strip()
     custom_wire_api = normalize_custom_wire_api(
         custom_base_url,
@@ -666,6 +656,9 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             next_llm.pop(section_provider, None)
     settings_data["llm"] = next_llm
+    # Parse the whole candidate before publishing credentials or settings.
+    # In particular, an invalid header must never poison the next startup.
+    get_llm_settings_payload(settings_data)
     upserted_providers: set[str] = set()
     for section_provider, updates, section in (
         ("openai", openai_updates, next_openai),
@@ -673,6 +666,12 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
         ("custom", custom_updates, next_custom),
     ):
         if updates:
+            api_key = str(updates.get("api_key") or "").strip()
+            if _is_api_key_replacement(api_key):
+                _set_runtime_api_key(section_provider, api_key, str(section["base_url"]))
+            image_key = str(updates.get("image_api_key") or "").strip()
+            if _is_api_key_replacement(image_key):
+                _set_runtime_image_api_key(section_provider, image_key, str(section["image_base_url"]))
             _upsert_llm_history(settings_data, section_provider, section)
             upserted_providers.add(section_provider)
     active_section = {

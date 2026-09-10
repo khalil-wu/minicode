@@ -50,9 +50,12 @@ def _permission_settings() -> PermissionSettings:
             "grep_files",
             "glob_files",
             "read_artifact",
+            "write_file",
+            "edit_file",
+            "apply_patch",
         ],
         require_confirm=[],
-        require_diff_review=["write_file", "edit_file", "apply_patch"],
+        require_diff_review=[],
         always_deny=[],
         path_allowlist=["."],
         path_denylist=[

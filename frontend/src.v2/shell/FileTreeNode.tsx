@@ -1,5 +1,5 @@
 import { memo, useMemo, type MouseEvent as ReactMouseEvent } from "react";
-import { ChevronDown, ChevronRight, LoaderCircle } from "lucide-react";
+import { ChevronRight, LoaderCircle } from "../lib/icons";
 import type { WorkspaceTreeNode } from "../protocol/workspace";
 import { useAppStore } from "../stores";
 import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
@@ -69,7 +69,7 @@ export const TreeNode = memo(({
 
   const openFile = () => {
     if (!node.is_dir) {
-      useAppStore.getState().openEditorFile(node.path, node.name);
+      useAppStore.getState().openEditorFile(node.path, node.name, { exact: true });
       onNavigate?.();
     }
   };
@@ -127,7 +127,7 @@ export const TreeNode = memo(({
       >
         <span className="file-tree-chevron" style={treeChevronStyle} aria-hidden="true">
           {node.is_dir ? (
-            expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />
+            <ChevronRight size={14} style={{ transform: expanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform var(--transition-fast)" }} />
           ) : (
             <span style={{ width: 14 }} />
           )}

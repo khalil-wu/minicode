@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 from typing import Any
+from uuid import uuid4
 
 from backend.services.workspace_service import sanitized_git_env
 from backend.workspace.worktree import isolated_worktree_root
@@ -144,7 +145,8 @@ def build_handoff_preflight(
 
 def stash_workspace_changes(root: Path, *, label: str) -> tuple[bool, str]:
     """Move tracked and untracked work aside for a handoff, retaining recovery."""
-    ok, output = _git(root, "stash", "push", "--include-untracked", "--message", label)
+    marker = f"{label}-{uuid4().hex}"
+    ok, output = _git(root, "stash", "push", "--include-untracked", "--message", marker)
     if not ok:
         return False, output or "Failed to stash local changes"
     # ``git stash push`` exits successfully when the checkout is already
@@ -152,12 +154,21 @@ def stash_workspace_changes(root: Path, *, label: str) -> tuple[bool, str]:
     # choosing the stash path does not block an otherwise valid handoff.
     if "No local changes" in output:
         return True, ""
-    ok, ref = _git(root, "stash", "list", "-1", "--format=%gd")
-    return (bool(ok and ref), ref or output)
+    ok, entries = _git(root, "stash", "list", "--format=%H%x00%gs")
+    if not ok:
+        return False, entries
+    for entry in entries.splitlines():
+        revision, _, subject = entry.partition("\x00")
+        if subject.endswith(f": {marker}"):
+            return True, revision
+    return False, "The handoff stash could not be identified."
 
 
 def restore_workspace_stash(root: Path, stash_ref: str) -> tuple[bool, str]:
-    return _git(root, "stash", "pop", stash_ref)
+    # An immutable object id survives unrelated stashes in every worktree.
+    # Retain the recovery entry: deleting a moving stash index can delete
+    # another Git client's work between reflog lookup and removal.
+    return _git(root, "stash", "apply", "--index", stash_ref)
 
 
 def switch_main_checkout(base_root: Path, branch: str) -> tuple[bool, str]:

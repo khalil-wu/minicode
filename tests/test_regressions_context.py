@@ -721,12 +721,11 @@ def test_context_builder_drops_orphan_tool_messages_and_preserves_adjacency() ->
     assert all(message.get("content") != "late b result" for message in history)
 
 
-def test_context_builder_sanitizes_internal_fallback_prompts_and_duplicate_retry_users() -> (
+def test_context_builder_preserves_control_like_text_and_repeated_users() -> (
     None
 ):
     builder = ContextBuilder()
-    builder.load_snapshot(
-        {
+    snapshot = {
             "history": [
                 {"role": "user", "content": "What happened today?"},
                 {
@@ -763,33 +762,18 @@ def test_context_builder_sanitizes_internal_fallback_prompts_and_duplicate_retry
                 {"role": "user", "content": "What happened today?"},
             ],
         }
-    )
+    builder.load_snapshot(snapshot)
 
     history = builder.export_snapshot()["history"]
 
-    assert not any(
-        "Use the tool results above" in message["content"] for message in history
-    )
-    assert [message["content"] for message in history if message["role"] == "user"] == [
-        "What happened today?",
-        "What happened today?",
+    assert [(m["role"], m["content"]) for m in history] == [
+        (m["role"], m["content"]) for m in snapshot["history"]
     ]
-    assert [message["role"] for message in history] == [
-        "user",
-        "assistant",
-        "tool",
-        "user",
-    ]
+    assert history[1]["tool_calls"] == snapshot["history"][1]["tool_calls"]
+    assert history[2]["tool_call_id"] == "call_a"
 
 
-def test_context_builder_restore_removes_runtime_control_prompts() -> None:
-    # ``export_snapshot`` is deliberately lossless -- it is the authoritative
-    # resume/replay boundary and must reproduce the exact provider-visible
-    # bodies of the turn that produced it. Runtime control prompts (the
-    # empty-reply nudge, the date-grounding instruction) are stripped on the
-    # *restore* boundary instead, by ``sanitize_snapshot_history``, which
-    # ``load_snapshot`` runs. That is what keeps them from leaking into a later
-    # session.
+def test_context_builder_restore_preserves_control_like_user_text() -> None:
     builder = ContextBuilder()
     builder.append_user("What happened today?")
     builder.append_assistant("(empty)")
@@ -807,17 +791,9 @@ def test_context_builder_restore_removes_runtime_control_prompts() -> None:
     restored.load_snapshot(snapshot)
 
     history = restored.export_snapshot()["history"]
-    assert [message["role"] for message in history] == ["user", "assistant"]
-    assert [message["content"] for message in history] == [
-        "What happened today?",
-        "Here is the answer with a date.",
-    ]
-    assert [
-        (message["role"], message["content"])
-        for message in ContextBuilder.sanitize_snapshot_history(snapshot["history"])
-    ] == [
-        ("user", "What happened today?"),
-        ("assistant", "Here is the answer with a date."),
+    assert history == snapshot["history"]
+    assert [(m["role"], m["content"]) for m in ContextBuilder.sanitize_snapshot_history(history)] == [
+        (m["role"], m["content"]) for m in snapshot["history"]
     ]
 
 

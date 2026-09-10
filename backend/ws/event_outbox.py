@@ -78,7 +78,7 @@ class EventOutbox:
         self._send_lock = asyncio.Lock()
         self._persist_tail: asyncio.Task[None] | None = None
         self._pending_persistence: deque[
-            tuple[dict[str, Any], list[dict[str, Any]] | None, list[dict[str, Any]]]
+            tuple[dict[str, Any], list[dict[str, Any]] | None]
         ] = deque()
         self._persistence_errors: list[dict[str, Any]] = []
         self._persistence_failed_seqs: set[int] = set()
@@ -272,14 +272,9 @@ class EventOutbox:
             enveloped = self._envelope(payload) if envelope else dict(payload)
             if self._is_replayable(enveloped):
                 replay_payload, rewrite_events = self._stage(enveloped)
-                persist_snapshot = (
-                    rewrite_events
-                    if rewrite_events is not None
-                    else [dict(event) for event in self._events]
-                )
                 if rewrite_events is not None:
                     self._pending_persistence.clear()
-                self._pending_persistence.append((replay_payload, rewrite_events, persist_snapshot))
+                self._pending_persistence.append((replay_payload, rewrite_events))
                 if self._persist_tail is None or self._persist_tail.done():
                     self._persist_tail = asyncio.create_task(self._persist_pending())
             if not self._can_send(generation):
@@ -347,24 +342,22 @@ class EventOutbox:
 
     async def _persist_pending(self) -> None:
         while self._pending_persistence:
-            replay_payload, rewrite_events, persist_snapshot = self._pending_persistence.popleft()
-            await self._persist_event(replay_payload, rewrite_events, persist_snapshot)
+            replay_payload, rewrite_events = self._pending_persistence.popleft()
+            await self._persist_event(replay_payload, rewrite_events)
 
     async def _persist_event(
         self,
         replay_payload: dict[str, Any],
         rewrite_events: list[dict[str, Any]] | None,
-        persist_snapshot: list[dict[str, Any]],
     ) -> None:
-        repair_prefix = bool(self._persistence_failed_seqs) and any(
-            event["seq"] in self._persistence_failed_seqs
-            for event in persist_snapshot
-        )
+        if self._persistence_failed_seqs and rewrite_events is None:
+            # Only a failed publication needs a complete repair window. It
+            # covers queued events too, so publish that window once in order.
+            rewrite_events = [dict(event) for event in self._events]
+            self._pending_persistence.clear()
         try:
-            if rewrite_events is not None or repair_prefix:
-                repaired_events = (
-                    rewrite_events if rewrite_events is not None else persist_snapshot
-                )
+            if rewrite_events is not None:
+                repaired_events = rewrite_events
                 await asyncio.to_thread(self._store.rewrite, repaired_events)
                 self._persistence_failed_seqs.difference_update(
                     seq

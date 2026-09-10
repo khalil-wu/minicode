@@ -28,10 +28,11 @@ async def recover_empty_answer(
     turn_usage: Any,
     finish_reason: str = "",
     provider_raw_done: dict[str, Any] | None = None,
+    has_non_text_result: bool = False,
 ) -> AnswerRecoveryResult:
     """Reject an empty provider answer without fabricating assistant text."""
 
-    if stream_text.final_candidate_text.strip():
+    if stream_text.final_candidate_text.strip() or has_non_text_result:
         return AnswerRecoveryResult("accept")
 
     # A provider refusal is an empty reply with a specific cause: the model

@@ -1,6 +1,6 @@
 import type { ClientCommand, CommandResultEvent } from "./events";
 import { pushToast } from "../overlays/ToastContainer";
-import { embeddedBrowserCloseConversation, isDesktop, ptyKillConversation } from "../desktop/runtime";
+import { isDesktop } from "../desktop/runtime";
 
 type Sender = (command: ClientCommand) => boolean;
 type SendClientCommandOptions = { silent?: boolean };
@@ -11,7 +11,6 @@ export type AwaitCommandResultOptions = {
 
 export const DEFAULT_COMMAND_RESULT_TIMEOUT_MS = 60_000;
 export const LONG_COMMAND_RESULT_TIMEOUT_MS = 10 * 60_000;
-const LOCAL_CONVERSATION_CLEANUP_TIMEOUT_MS = 2_500;
 
 let sender: Sender | null = null;
 const pendingCommandResults = new Map<string, {
@@ -60,7 +59,7 @@ export const sendConversationDeleteCommand = async (
   command: Extract<ClientCommand, { type: "conversation.delete" }>,
 ): Promise<boolean> => {
   const resultPromise = sendClientCommandAwaitResult(
-    command,
+    { ...command, client_resource_cleanup: isDesktop() },
     "conversation.delete",
     // Isolated-worktree deletion may include a recoverable snapshot and
     // several bounded git operations.  Give that authoritative backend fence
@@ -68,9 +67,6 @@ export const sendConversationDeleteCommand = async (
     // generic 60-second command timeout.
     { silent: true, timeoutMs: LONG_COMMAND_RESULT_TIMEOUT_MS },
   );
-  if (isDesktop()) {
-    void cleanupDesktopConversationResources(command.conversation_id);
-  }
   try {
     const result = await resultPromise;
     if (commandResultSucceeded(result)) return true;
@@ -85,41 +81,6 @@ export const sendConversationDeleteCommand = async (
     return false;
   }
 };
-
-const cleanupDesktopConversationResources = async (conversationId: string): Promise<void> => {
-  const operations: Array<[string, () => Promise<unknown>]> = [
-    ["终端", () => Promise.resolve(ptyKillConversation(conversationId))],
-  ];
-  if (typeof embeddedBrowserCloseConversation === "function") {
-    operations.push(["内嵌浏览器", () => Promise.resolve(embeddedBrowserCloseConversation(conversationId))]);
-  }
-  await Promise.all(operations.map(async ([label, operation]) => {
-    try {
-      await withLocalCleanupDeadline(operation(), label);
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      pushToast(`${label}清理未完成，但会话删除已继续：${detail}`, "warning", 5000);
-    }
-  }));
-};
-
-const withLocalCleanupDeadline = <T>(promise: Promise<T>, label: string): Promise<T> => (
-  new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`${label}清理超过 ${LOCAL_CONVERSATION_CLEANUP_TIMEOUT_MS / 1000} 秒`));
-    }, LOCAL_CONVERSATION_CLEANUP_TIMEOUT_MS);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    );
-  })
-);
 
 export const sendClientCommandAwaitResult = (
   command: ClientCommand,

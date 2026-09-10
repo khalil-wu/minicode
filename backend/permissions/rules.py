@@ -27,13 +27,15 @@ class PermissionRuleMatcher:
         self,
         file_path: str | Path,
         operation: Literal["read", "write", "execute"],
+        *,
+        allow_workspace_escape: bool = False,
     ) -> tuple[bool, str]:
         raw_path = str(file_path)
         if self._contains_path_traversal(raw_path):
             return False, "Path contains traversal markers"
 
         path = Path(file_path).resolve()
-        if not self._is_within_workspace(path):
+        if not allow_workspace_escape and not self._is_within_workspace(path):
             return (
                 False,
                 f"Path is outside workspace: {path} (workspace: {self.workspace_root})",
@@ -104,6 +106,8 @@ class PermissionRuleMatcher:
             return None
 
     def _matches_denied_paths(self, path: Path) -> bool:
+        if not self.denied_paths:
+            return False
         rel_path = self._relative_posix(path)
         if rel_path is None:
             return True  # unclassifiable -> deny
@@ -128,8 +132,12 @@ class SandboxValidator:
         file_path: str | Path,
         operation: Literal["read", "write", "execute"],
         content: str | None = None,
+        *,
+        allow_workspace_escape: bool = False,
     ) -> tuple[bool, str]:
-        allowed, reason = self.matcher.check_file_access(file_path, operation)
+        allowed, reason = self.matcher.check_file_access(
+            file_path, operation, allow_workspace_escape=allow_workspace_escape,
+        )
         if not allowed:
             return False, reason
 

@@ -1447,7 +1447,8 @@ class AgentRuntime:
         if task.done():
             self.release_subagent_task(subagent_id, expected_task=task)
             return "done"
-        task.cancel()
+        if not task.cancelling():
+            task.cancel()
         self.write_metric("subagent_task_cancel_requested", {"subagent_id": subagent_id})
         self._record_agent_activity(
             "cancel_requested",
@@ -2612,7 +2613,7 @@ class AgentRuntime:
     ) -> ParentNotification | None:
         record = self._subagents.get(subagent_id)
         parent_run_id = str(getattr(record, "parent_run_id", "") or "").strip()
-        conversation_id = ""
+        conversation_id = self._conversation_id_for_agent(parent_run_id)
         session_id = ""
         if parent_run_id:
             parent_run = self._runs.get(parent_run_id)
@@ -2676,7 +2677,12 @@ class AgentRuntime:
             parent_run_id=parent_run_id,
             conversation_id=conversation_id,
         )
-        return [item.to_dict() for item in outbox.list_notifications(status=status)]
+        return [
+            item.to_dict() for item in outbox.list_notifications(status=status)
+            if not parent_run_id
+            or item.parent_run_id == parent_run_id
+            or (self.get_subagent(parent_run_id) is None and self.get_subagent(item.parent_run_id) is None)
+        ]
 
     def ack_parent_notification(
         self,

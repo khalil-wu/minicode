@@ -131,6 +131,25 @@ class ToolResult:
         return "\n".join(parts)
 
 
+def execution_exception_result(
+    exc: BaseException, *, label: str = "Tool execution"
+) -> ToolResult:
+    """Return the actual failure through the shared model/UI result contract."""
+    message = str(exc).strip()
+    detail = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+    return ToolResult(
+        content=f"{label} failed ({detail}).",
+        is_error=True,
+        status="failed",
+        error_kind="execution_error",
+        user_summary="工具执行失败。",
+        developer_detail=str(exc),
+        recoverable=True,
+        projection="error",
+        model_observation="The tool execution failed. Check the arguments or try another approach.",
+    )
+
+
 def artifact_owner_workspace_root(context: Any | None) -> str:
     """Return the workspace scope that owns artifacts emitted by a tool call.
 

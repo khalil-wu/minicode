@@ -20,7 +20,7 @@ from backend.async_cleanup import (
     cancel_and_drain,
     cancel_and_drain_receipt,
 )
-from backend.tools.base import BaseTool, PermissionLevel, ToolResult, validate_tool_input
+from backend.tools.base import BaseTool, PermissionLevel, ToolResult, execution_exception_result, validate_tool_input
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ class CapabilityRegistry:
         self._schema_cache: dict[str, list[dict[str, Any]]] = {}
         self._validated_policies: set[tuple[str, int]] = set()
         self._version = 0
+        self.mcp_tool_registry: Any | None = None
 
     def register(
         self,
@@ -129,6 +130,8 @@ class CapabilityRegistry:
         clone._schema_cache = deepcopy(self._schema_cache)
         clone._validated_policies = set(self._validated_policies)
         clone._version = self._version
+        if self.mcp_tool_registry is not None:
+            self.mcp_tool_registry.fork(clone)
         return clone
 
     def _resolve_toolset_policy(self, toolset_policy: 'ToolsetPolicy | None') -> Any:
@@ -686,14 +689,7 @@ class CapabilityRegistry:
             _publish_registry_cleanup_receipt(context, name, receipt, reason="cancelled")
             raise
         except Exception as exc:
-            return ToolResult(
-                content=(
-                    f"Tool '{name}' execution failed ({type(exc).__name__}).\n"
-                    "Check the arguments or try a different approach."
-                ),
-                is_error=True,
-                developer_detail=str(exc),
-            )
+            return execution_exception_result(exc, label=f"Tool '{name}' execution")
         finally:
             if cancel_wait_task is not None and not cancel_wait_task.done():
                 cancel_wait_task.cancel()

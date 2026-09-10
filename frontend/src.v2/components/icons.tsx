@@ -1,11 +1,15 @@
 import {
   CheckCircle2,
   Circle,
-  CircleAlert,
   CircleDashed,
-  Clock3,
+  CirclePause,
+  CircleSlash2,
+  CircleX,
   LoaderCircle,
-} from "lucide-react";
+  ShieldAlert,
+  ShieldQuestion,
+  TimerOff,
+} from "../lib/icons";
 
 export type StatusIconStatus =
   | "pending"
@@ -57,11 +61,13 @@ export function StatusIcon({
   }
   if (status === "success") return <CheckCircle2 {...props} />;
   if (status === "done") return <CheckCircle2 {...props} />;
-  if (status === "failed" || status === "timeout") return <CircleAlert {...props} />;
-  if (status === "pending_approval") return <Clock3 {...props} />;
-  if (status === "blocked" || status === "partial" || status === "cancelled" || status === "interrupted") {
-    return <CircleDashed {...props} />;
-  }
+  if (status === "failed") return <CircleX {...props} />;
+  if (status === "timeout") return <TimerOff {...props} />;
+  if (status === "pending_approval") return <ShieldQuestion {...props} />;
+  if (status === "blocked") return <ShieldAlert {...props} />;
+  if (status === "partial") return <CircleDashed {...props} />;
+  if (status === "cancelled") return <CircleSlash2 {...props} />;
+  if (status === "interrupted") return <CirclePause {...props} />;
   return <Circle {...props} />;
 }
 

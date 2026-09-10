@@ -194,10 +194,9 @@ def discover_hook_snapshot(
             env=env,
         )
 
-    # Deduplicate executable declarations by handler payload and ``if``
-    # condition. Settings scopes are one namespace (the last merged
-    # scope wins), while plugin roots stay isolated so two plugins shipping the
-    # same command do not accidentally suppress one another.
+    # Only identical declarations share an entry. Matchers and execution
+    # options are part of the existing normalized hash; managed declarations
+    # cannot be replaced by a lower-trust settings scope.
     entries = _deduplicate_entries(entries)
 
     return HookSnapshot(
@@ -457,15 +456,9 @@ def _deduplicate_entries(entries: list[HookDefinition]) -> list[HookDefinition]:
         namespace = (
             f"plugin:{entry.plugin_id or entry.plugin_root}"
             if entry.source == HookSource.PLUGIN
-            else "settings"
+            else "managed_settings" if entry.is_managed else "settings"
         )
-        if entry.handler_type == "command":
-            payload = f"{entry.shell or 'bash'}\0{entry.command}"
-        elif entry.handler_type in {"prompt", "agent"}:
-            payload = entry.prompt
-        else:
-            payload = entry.url
-        key = (namespace, entry.event, entry.handler_type, f"{payload}\0{entry.condition}")
+        key = (namespace, entry.event, entry.handler_type, entry.current_hash)
         last_by_key[key] = entry
     selected = [*passthrough, *last_by_key.values()]
     selected.sort(key=lambda entry: entry.display_order)

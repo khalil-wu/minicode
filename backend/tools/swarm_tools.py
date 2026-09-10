@@ -8,6 +8,7 @@ from uuid import uuid4
 from typing import Any
 
 from backend.agent.runtime import AgentRuntime, SwarmTaskStatus
+from backend.agent.agent_identity import coordination_agent_id
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.agent_control_plane import AgentControlPlane
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
@@ -54,10 +55,9 @@ def _actor_id(context: ToolExecutionContext | None, explicit: Any = None) -> str
         return candidate
     if context is not None:
         metadata = context.metadata if isinstance(context.metadata, dict) else {}
-        for key in ("run_id", "agent_id", "parent_run_id"):
-            value = str(metadata.get(key) or "").strip()
-            if value:
-                return value
+        actor = coordination_agent_id(metadata)
+        if actor:
+            return actor
         if context.task_id:
             return context.task_id
     return "main"
@@ -779,6 +779,41 @@ class TaskGetTool(_AgentCoordinationTool):
         return ToolResult(content="\n".join(lines), result_kind="subagent")
 
 
+async def _task_completion_error(existing: Any, context: ToolExecutionContext | None) -> ToolResult | None:
+    metadata = (
+        context.metadata
+        if context is not None and isinstance(context.metadata, dict)
+        else {}
+    )
+    teammate_name = str(
+        metadata.get("teammate_name")
+        or metadata.get("name")
+        or _actor_id(context)
+    ).strip()
+    hook_result = await _run_task_completed_hook(
+        (
+            context.run_context.hook_manager
+            if context is not None and context.run_context is not None
+            else None
+        ),
+        task_id=existing.task_id,
+        subject=existing.title,
+        description=existing.description,
+        teammate_name=teammate_name,
+        team_name=existing.team_name,
+    )
+    blocked, message = _hook_veto(hook_result)
+    if blocked:
+        return ToolResult(
+            content=message,
+            is_error=True,
+            status="blocked",
+            display_summary=f"Task completion blocked: {existing.title}",
+            result_kind="subagent",
+        )
+    return None
+
+
 class TaskUpdateTool(_AgentCoordinationTool):
     name = "task_update"
     description = "Update a shared swarm task's status, assignee, priority, title, or description."
@@ -836,37 +871,9 @@ class TaskUpdateTool(_AgentCoordinationTool):
         if existing is None:
             return self._error_result(f"Shared swarm task not found: {task_id}")
         if patch.get("status") == "completed" and existing.status != "completed":
-            metadata = (
-                context.metadata
-                if context is not None and isinstance(context.metadata, dict)
-                else {}
-            )
-            teammate_name = str(
-                metadata.get("teammate_name")
-                or metadata.get("name")
-                or _actor_id(context)
-            ).strip()
-            hook_result = await _run_task_completed_hook(
-                (
-                    context.run_context.hook_manager
-                    if context is not None and context.run_context is not None
-                    else None
-                ),
-                task_id=existing.task_id,
-                subject=existing.title,
-                description=existing.description,
-                teammate_name=teammate_name,
-                team_name=existing.team_name,
-            )
-            blocked, message = _hook_veto(hook_result)
-            if blocked:
-                return ToolResult(
-                    content=message,
-                    is_error=True,
-                    status="blocked",
-                    display_summary=f"Task completion blocked: {existing.title}",
-                    result_kind="subagent",
-                )
+            completion_error = await _task_completion_error(existing, context)
+            if completion_error is not None:
+                return completion_error
         task = await _runtime_call(
             runtime,
             "update_swarm_task",
@@ -938,6 +945,10 @@ class TaskOutputTool(_AgentCoordinationTool):
         if task is None:
             return self._error_result(f"Shared swarm task not found: {task_id}")
         raw_status = str(args.get("status") or "").strip()
+        if raw_status == "completed" and task.status != "completed":
+            completion_error = await _task_completion_error(task, context)
+            if completion_error is not None:
+                return completion_error
         if raw_status:
             task = (
                 await _runtime_call(

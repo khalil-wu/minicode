@@ -204,35 +204,21 @@ def _anthropic_content_delta_protocol_code(
     return ""
 
 
-def _detached_anthropic_value(value: Any, *, depth: int = 0) -> Any:
+def _detached_anthropic_value(value: Any) -> Any:
     """Detach a provider value into JSON-compatible provider state."""
 
-    if depth > 10:
-        return None
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, Mapping):
         return {
-            str(key): detached
+            str(key): _detached_anthropic_value(child)
             for key, child in value.items()
-            if str(key).strip()
-            and (detached := _detached_anthropic_value(child, depth=depth + 1))
-            is not None
         }
     if isinstance(value, (list, tuple)):
-        return [
-            detached
-            for child in value
-            if (detached := _detached_anthropic_value(child, depth=depth + 1))
-            is not None
-        ]
+        return [_detached_anthropic_value(child) for child in value]
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
-        try:
-            dumped = model_dump(mode="json", exclude_none=True)
-        except TypeError:
-            dumped = model_dump(exclude_none=True)
-        return _detached_anthropic_value(dumped, depth=depth + 1)
+        return _detached_anthropic_value(model_dump(mode="json", exclude_unset=True))
     attributes = getattr(value, "__dict__", None)
     if isinstance(attributes, dict):
         return _detached_anthropic_value(
@@ -241,9 +227,8 @@ def _detached_anthropic_value(value: Any, *, depth: int = 0) -> Any:
                 for key, child in attributes.items()
                 if not str(key).startswith("_")
             },
-            depth=depth + 1,
         )
-    return None
+    raise TypeError(f"Unsupported Anthropic continuation value: {type(value).__name__}")
 
 
 def _detached_anthropic_content_block(value: Any) -> dict[str, Any] | None:
@@ -1009,7 +994,7 @@ def _anthropic_usage_metadata(usage_obj: Any) -> dict[str, Any]:
         if counters:
             metadata[container_name] = counters
     cost_usd = _get_usage_cost_usd(usage_obj)
-    if cost_usd > 0:
+    if cost_usd is not None:
         metadata["cost_usd"] = cost_usd
     return metadata
 
@@ -1346,4 +1331,3 @@ def _anthropic_safe_request_summary_from_payload(
         metadata=metadata,
         kwargs=payload,
     )
-

@@ -336,6 +336,9 @@ async def _close_stdin(
         if input_data:
             stdin.write(input_data)
             await stdin.drain()
+    except (BrokenPipeError, ConnectionResetError):
+        # Match Process.communicate: a child may stop reading before exiting.
+        pass
     finally:
         with suppress(Exception):
             stdin.close()

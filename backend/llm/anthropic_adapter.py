@@ -586,6 +586,7 @@ class AnthropicAdapter(LLMAdapter):
         current_tool_initial_input: dict[str, Any] | None = None
         _delta_bytes_since_emit = 0
         usage = UsageInfo()
+        usage_reported = False
         provider_usage_metadata: dict[str, Any] = {}
         stop_reason = ""
         saw_message_start = False
@@ -725,7 +726,8 @@ class AnthropicAdapter(LLMAdapter):
                                 if isinstance(message, dict)
                                 else {}
                             )
-                            if isinstance(usage_obj, dict):
+                            if isinstance(usage_obj, dict) and usage_obj:
+                                usage_reported = True
                                 provider_usage_metadata.update(
                                     _anthropic_usage_metadata(usage_obj)
                                 )
@@ -749,6 +751,11 @@ class AnthropicAdapter(LLMAdapter):
                                     input_includes_cache_read=False,
                                     input_includes_cache_write=False,
                                     cost_usd=_get_usage_cost_usd(usage_obj),
+                                )
+                                yield StreamEvent(
+                                    type=StreamEventType.USAGE,
+                                    usage=usage,
+                                    raw={"provider": self._provider_id, "model": request_summary["model"], "usage": dict(provider_usage_metadata)},
                                 )
                             stop_reason = (
                                 str(message.get("stop_reason") or "")
@@ -1257,6 +1264,7 @@ class AnthropicAdapter(LLMAdapter):
                                 isinstance(usage_obj, dict)
                                 and usage_obj.get("output_tokens") is not None
                             ):
+                                usage_reported = True
                                 provider_usage_metadata.update(
                                     _anthropic_usage_metadata(usage_obj)
                                 )
@@ -1264,7 +1272,7 @@ class AnthropicAdapter(LLMAdapter):
                                     input_tokens=_anthropic_usage_value_or_existing(
                                         usage_obj,
                                         "input_tokens",
-                                        usage.input_tokens,
+                                        usage.normalized_ordinary_input_tokens,
                                     ),
                                     output_tokens=_anthropic_usage_value_or_existing(
                                         usage_obj,
@@ -1294,10 +1302,16 @@ class AnthropicAdapter(LLMAdapter):
                                     ),
                                     input_includes_cache_read=False,
                                     input_includes_cache_write=False,
-                                    cost_usd=max(
-                                        usage.cost_usd,
-                                        _get_usage_cost_usd(usage_obj),
+                                    cost_usd=(
+                                        reported_cost
+                                        if (reported_cost := _get_usage_cost_usd(usage_obj)) is not None
+                                        else usage.cost_usd
                                     ),
+                                )
+                                yield StreamEvent(
+                                    type=StreamEventType.USAGE,
+                                    usage=usage,
+                                    raw={"provider": self._provider_id, "model": request_summary["model"], "usage": dict(provider_usage_metadata)},
                                 )
                         elif event_type == "message_stop":
                             if current_content_kind:
@@ -1317,6 +1331,7 @@ class AnthropicAdapter(LLMAdapter):
                                 )
                                 return
                             saw_message_stop = True
+                            break
                         else:
                             yield _anthropic_stream_protocol_error(
                                 "unknown_stream_event",
@@ -1373,20 +1388,19 @@ class AnthropicAdapter(LLMAdapter):
             )
         if stop_reason == "max_tokens":
             logger.warning("Claude 响应因 max_tokens 截断")
-        usage_metadata = dict(provider_usage_metadata)
-        usage_metadata.update(
-            {
-                "input_tokens": usage.input_tokens,
+        usage_metadata = {
+                "input_tokens": usage.normalized_ordinary_input_tokens,
                 "output_tokens": usage.output_tokens,
                 "cache_creation_input_tokens": usage.cache_creation_input_tokens,
                 "cache_read_input_tokens": usage.cache_read_input_tokens,
                 "cache_deleted_input_tokens": usage.cache_deleted_input_tokens,
-            }
-        )
+                **provider_usage_metadata,
+        }
         done_raw: dict[str, Any] = {
             "provider": self._provider_id,
+            "model": request_summary["model"],
             "stop_reason": stop_reason,
-            "usage": usage_metadata,
+            **({"usage": usage_metadata} if usage_reported else {}),
             "request_summary": request_summary or {},
             "search_sources": [
                 {"title": title, "url": url}
@@ -1401,7 +1415,7 @@ class AnthropicAdapter(LLMAdapter):
             done_raw["container"] = container_metadata
         yield StreamEvent(
             type=StreamEventType.DONE,
-            usage=usage,
+            usage=usage if usage_reported else None,
             finish_reason=stop_reason,
             raw=done_raw,
             provider_items=_anthropic_provider_message_item(
@@ -1454,44 +1468,62 @@ class AnthropicAdapter(LLMAdapter):
         )
         text_parts: list[str] = []
         search_sources: list[tuple[str, str]] = []
-        usage = UsageInfo()
+        usage: UsageInfo | None = None
+        reported_raw_usage: dict[str, Any] | None = None
         saw_done = False
-        async for event in self._stream_chat_with_context(
-            messages,
-            metadata=context.request_metadata() if context is not None else None,
-            context=context,
-            max_tokens=max_tokens,
-        ):
-            if event.type == StreamEventType.TEXT_CHUNK and event.content:
-                text_parts.append(event.content)
-            elif event.type == StreamEventType.DONE:
-                usage = event.usage
-                saw_done = True
-                raw_sources = event.raw.get("search_sources")
-                if isinstance(raw_sources, list):
-                    for source in raw_sources:
-                        if not isinstance(source, Mapping):
-                            continue
-                        title = str(source.get("title") or "").strip()
-                        url = str(source.get("url") or "").strip()
-                        if url and (title, url) not in search_sources:
-                            search_sources.append((title, url))
-            elif event.type == StreamEventType.ERROR:
-                failure = RuntimeError(event.content or "Claude stream failed")
-                for key in (
-                    "status_code",
-                    "retry_after_seconds",
-                    "provider_error_type",
-                    "provider_error_code",
-                    "provider_error_schema_type",
-                ):
-                    value = event.raw.get(key)
-                    if value is not None:
-                        setattr(failure, key, value)
-                raise failure
+        try:
+            async for event in self._stream_chat_with_context(
+                messages,
+                metadata=context.request_metadata() if context is not None else None,
+                context=context,
+                max_tokens=max_tokens,
+            ):
+                if event.usage is not None:
+                    usage = event.usage
+                    if "usage" in event.raw:
+                        reported_raw_usage = event.raw["usage"]
+                    model = str(event.raw.get("model") or model)
+                if event.type == StreamEventType.TEXT_CHUNK and event.content:
+                    text_parts.append(event.content)
+                elif event.type == StreamEventType.DONE:
+                    usage = event.usage or usage
+                    saw_done = True
+                    raw_sources = event.raw.get("search_sources")
+                    if isinstance(raw_sources, list):
+                        for source in raw_sources:
+                            if not isinstance(source, Mapping):
+                                continue
+                            title = str(source.get("title") or "").strip()
+                            url = str(source.get("url") or "").strip()
+                            if url and (title, url) not in search_sources:
+                                search_sources.append((title, url))
+                elif event.type == StreamEventType.ERROR:
+                    failure = RuntimeError(event.content or "Claude stream failed")
+                    for key in (
+                        "status_code",
+                        "retry_after_seconds",
+                        "provider_error_type",
+                        "provider_error_code",
+                        "provider_error_schema_type",
+                    ):
+                        value = event.raw.get(key)
+                        if value is not None:
+                            setattr(failure, key, value)
+                    raise failure
 
-        if not saw_done:
-            raise RuntimeError("Claude stream ended before message_stop")
+            if not saw_done:
+                raise RuntimeError("Claude stream ended before message_stop")
+        finally:
+            self.record_non_stream_usage(
+                usage,
+                provider=self._provider_id,
+                model_id=model,
+                input_includes_cache_read=False,
+                input_includes_cache_write=False,
+                context=context,
+                raw_usage=reported_raw_usage,
+                model_cost=getattr(self, '_request_model_costs', {}).get(model),
+            )
 
         text = "".join(text_parts).strip()
         if search_sources:
@@ -1500,14 +1532,7 @@ class AnthropicAdapter(LLMAdapter):
                 f"- {title or url}: {url}" for title, url in search_sources
             )
             text = f"{text}\n\n{chr(10).join(source_lines)}".strip()
-        self.record_non_stream_usage(
-            usage,
-            provider=self._provider_id,
-            model_id=model,
-            input_includes_cache_read=False,
-            input_includes_cache_write=False,
-            context=context,
-        )
+
         if not text:
             raise RuntimeError("Claude 返回空内容")
 

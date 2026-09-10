@@ -36,7 +36,7 @@ def _config(**updates) -> AppConfig:
 def test_builtin_anthropic_provider_uses_messages_transport(monkeypatch) -> None:
     monkeypatch.setattr(
         "backend.services.llm_adapter_factory.get_anthropic_settings",
-        lambda: {
+        lambda _settings_snapshot=None: {
             "api_key": "test-key",
             "base_url": "https://api.anthropic.com/v1",
             "model": "claude-opus-5",

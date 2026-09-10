@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowUp, MessageCirclePlus, Square } from "lucide-react";
 import { useAppStore } from "../stores";
+import type { ProgressContentBlock } from "../stores/types";
 import { sendChatMessage } from "../chat/sendChatMessage";
-import { MarkdownRenderer } from "../chat/messages/MarkdownRenderer";
+import { AssistantMarkdownCell } from "../chat/cells/AssistantMarkdownCell";
 import { ToolCallCard } from "../chat/tool-calls/ToolCallCard";
-import { StreamingCursor } from "../chat/messages/StreamingCursor";
 import { getToolCallsFromMessage } from "../lib/content-blocks";
 import { toBackendPermissionMode } from "../protocol/permissions";
 import {
@@ -20,14 +21,16 @@ import { releasePreviewScope } from "../chat/previewRequestScope";
 const newSideChatId = (): string =>
   `side-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
-export const SideChatPanel = () => {
+export const SideChatPanel = ({ active = true }: { active?: boolean }) => {
   const sideChats = useAppStore((s) => s.sideChats);
   const ensureSideChat = useAppStore((s) => s.ensureSideChat);
   const removeSideChat = useAppStore((s) => s.removeSideChat);
   const setDraft = useAppStore((s) => s.setSideChatDraft);
   const startMessage = useAppStore((s) => s.startSideChatMessage);
   const isConnected = useAppStore((s) => s.isConnected);
-  const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const workingDirectory = useRef(useAppStore.getState().workingDirectory).current;
+  const permissionMode = useRef(useAppStore.getState().permissionMode).current;
+  const sendShortcut = useAppStore((s) => s.sendShortcut);
 
   const idRef = useRef<string>("");
   if (!idRef.current) {
@@ -75,7 +78,8 @@ export const SideChatPanel = () => {
           conversation_id: id,
           title: "侧边对话",
           conversation_type: "side_chat",
-          permission_mode: toBackendPermissionMode(useAppStore.getState().permissionMode),
+          workspace_root: workingDirectory || undefined,
+          permission_mode: toBackendPermissionMode(permissionMode),
         }, "conversation.create");
         if (!commandResultSucceeded(result)) {
           if (mountedRef.current) pushToast(result.message || "无法创建侧边对话。", "error", 4000);
@@ -94,7 +98,7 @@ export const SideChatPanel = () => {
       }
     };
     createInFlightRef.current = create();
-  }, [id, isConnected]);
+  }, [id, isConnected, workingDirectory, permissionMode]);
 
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -103,8 +107,8 @@ export const SideChatPanel = () => {
   }, [thread?.messages.length, thread?.messages.at(-1)?.content]);
 
   useEffect(() => {
-    inputRef.current?.focus();
-  }, [thread?.selectedContext?.text]);
+    if (active) inputRef.current?.focus();
+  }, [active, thread?.selectedContext?.text]);
 
   const submit = () => {
     const content = (thread?.draft ?? "").trim();
@@ -141,8 +145,8 @@ export const SideChatPanel = () => {
   if (!thread) return null;
 
   return (
-    <div className="flex flex-col flex-1 min-h-0">
-      <div
+    <div className="side-chat-panel flex flex-col flex-1 min-h-0">
+      {thread.messages.length > 0 && <div
         className="px-2.5 py-1.5 flex items-center gap-2"
         style={{
           borderBottom: "1px solid var(--border-subtle)",
@@ -161,7 +165,7 @@ export const SideChatPanel = () => {
         >
           {thread.isStreaming ? "生成中..." : "空闲"}
         </span>
-      </div>
+      </div>}
 
       <div
         ref={listRef}
@@ -169,13 +173,15 @@ export const SideChatPanel = () => {
       >
         {thread.messages.length === 0 ? (
           <div
-            className="text-center p-5"
+            className="side-chat-empty"
             style={{
               color: "var(--text-muted)",
               fontSize: "var(--text-sm)",
             }}
           >
-            侧边对话与主会话相互独立。
+            <MessageCirclePlus size={32} strokeWidth={1.5} aria-hidden="true" />
+            <h2>侧边聊天</h2>
+            <p>临时聊天。关闭此标签后会清除，主任务保持不变。</p>
             {thread.selectedContext && (
               <div
                 className="mt-2.5 p-2.5 text-left whitespace-pre-wrap max-h-40 overflow-auto"
@@ -190,21 +196,6 @@ export const SideChatPanel = () => {
               >
                 {thread.selectedContext.source && <div className="mb-1">{thread.selectedContext.source}</div>}
                 {thread.selectedContext.text}
-              </div>
-            )}
-            {thread.inheritedContext && (
-              <div
-                className="mt-2.5 p-2.5 text-left whitespace-pre-wrap max-h-30 overflow-auto"
-                style={{
-                  border: "1px solid var(--border-subtle)",
-                  borderRadius: "var(--radius-sm, 6px)",
-                  background: "var(--surface-page)",
-                  color: "var(--text-muted)",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: "var(--text-xs)",
-                }}
-              >
-                {thread.inheritedContext}
               </div>
             )}
           </div>
@@ -238,7 +229,7 @@ export const SideChatPanel = () => {
                     ))}
                   </div>
                 )}
-                {(m.content || m.isStreaming) && (
+                {(m.content || m.isStreaming || m.artifacts.length || m.replyAttachments?.length || m.blocks?.some((block) => block.type === "progress" && block.stage === "image_generation")) && (
                   <div
                     style={{
                       color: "var(--text-primary)",
@@ -246,8 +237,27 @@ export const SideChatPanel = () => {
                       lineHeight: "var(--leading-normal)",
                     }}
                   >
-                    {m.content && <MarkdownRenderer content={m.content} />}
-                    {m.isStreaming && <StreamingCursor />}
+                    <AssistantMarkdownCell
+                      isTranscriptMode
+                      workspaceRoot={workingDirectory}
+                      conversationId={id}
+                      cell={{
+                        kind: "assistant_markdown",
+                        id: m.id,
+                        messageId: m.id,
+                        markdownSource: m.content,
+                        phase: "final",
+                        copyable: true,
+                        isStreaming: m.isStreaming,
+                        citations: m.citations,
+                        artifacts: m.artifacts,
+                        attachments: m.replyAttachments,
+                        imageProgress: m.blocks?.filter((block): block is ProgressContentBlock => block.type === "progress" && block.stage === "image_generation"),
+                        failureMessage: m.failureMessage,
+                        failureRecoverable: m.failureRecoverable,
+                        createdAt: m.timestamp,
+                      }}
+                    />
                   </div>
                 )}
               </div>
@@ -257,67 +267,37 @@ export const SideChatPanel = () => {
       </div>
 
       <div
-        className="p-2.5 flex flex-col gap-1.5"
-        style={{
-          borderTop: "1px solid var(--border-subtle)",
-          background: "var(--surface-page)",
-        }}
+        className="side-chat-compose"
       >
         <textarea
           ref={inputRef}
           value={thread.draft}
           onChange={(e) => setDraft(id, e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+            const send = sendShortcut === "enter"
+              ? e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey
+              : e.key === "Enter" && (e.ctrlKey || e.metaKey);
+            if (send) {
               e.preventDefault();
               submit();
             }
           }}
-          placeholder="输入侧边对话消息..."
+          placeholder="随心输入"
           aria-label="侧边对话消息"
           rows={2}
-          className="px-2 py-1.5 resize-none outline-none"
-          style={{
-            background: "var(--surface-base)",
-            border: "1px solid var(--border-subtle)",
-            borderRadius: "var(--radius-sm, 6px)",
-            color: "var(--text-primary)",
-            fontFamily: "var(--font-ui)",
-            fontSize: "var(--text-sm)",
-          }}
+          className="side-chat-input"
         />
-        <div className="flex justify-end gap-1.5">
-          {thread.isStreaming && (
-            <button
-              type="button"
-              onClick={stop}
-              className="border-0 px-2.5 py-1 cursor-pointer font-semibold"
-              style={{
-                background: "var(--state-danger)",
-                color: "var(--text-primary)",
-                borderRadius: "var(--radius-sm, 6px)",
-                fontSize: "var(--text-xs)",
-              }}
-            >
-              停止
-            </button>
-          )}
+        <div className="side-chat-compose-actions">
           <button
             type="button"
-            onClick={submit}
-            disabled={sendDisabled}
-            className="border-0 px-3 py-1 font-semibold"
-            style={{
-              background: sendDisabled
-                ? "var(--surface-soft)"
-                : "var(--accent-primary)",
-              color: sendDisabled ? "var(--text-muted)" : "var(--text-primary)",
-              borderRadius: "var(--radius-sm, 6px)",
-              cursor: sendDisabled ? "not-allowed" : "pointer",
-              fontSize: "var(--text-xs)",
-            }}
+            onClick={thread.isStreaming ? stop : submit}
+            disabled={!thread.isStreaming && sendDisabled}
+            aria-label={thread.isStreaming ? "停止" : "发送"}
+            title={thread.isStreaming ? "停止" : "发送"}
+            className="side-chat-submit"
           >
-            发送
+            {thread.isStreaming ? <Square size={12} fill="currentColor" /> : <ArrowUp size={18} />}
           </button>
         </div>
       </div>

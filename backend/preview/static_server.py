@@ -7,6 +7,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from backend.media_types import media_type_for_path
 
 
 class PreviewRequestHandler(SimpleHTTPRequestHandler):
@@ -47,7 +48,7 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
         if target is None:
             self.send_error(404, "Preview resource not found")
             return None
-        content_type = self.guess_type(str(target))
+        content_type = media_type_for_path(target)
         try:
             handle = target.open("rb")
         except OSError:

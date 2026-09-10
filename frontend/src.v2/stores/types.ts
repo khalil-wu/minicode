@@ -28,7 +28,7 @@ export type ViewMode = "normal" | "verbose" | "summary";
 export type AppMode = "chat" | "code" | "cowork";
 export type SessionFilter = "all" | "running" | "waiting" | "idle" | "archived";
 export type SessionGroupBy = "none" | "project" | "branch";
-export type RightStackTab = "preview" | "browser" | "terminal" | "tasks" | "diff" | "plan" | "subagents" | "artifacts" | "inspector" | "diagnostics";
+export type RightStackTab = "preview" | "browser" | "terminal" | "sidechat" | "tasks" | "diff" | "plan" | "subagents" | "artifacts" | "inspector" | "diagnostics";
 export type EffortLevel =
   | "none"
   | "minimal"
@@ -420,6 +420,7 @@ export interface UISlice {
   envVars: { name: string; description: string; scope: string }[];
   gitChanges: GitChangesState;
   skillsMarketplaceOpen: boolean;
+  skillsMarketplaceTab: "plugins" | "skills";
   skillsMarketplaceReturnTarget: "app" | "settings";
   liveArtifactsOpen: boolean;
   agentEditorOpen: boolean;
@@ -447,7 +448,7 @@ export interface UISlice {
   toggleAutomations: () => void;
   toggleShortcutsHelp: () => void;
   toggleQuickOpen: () => void;
-  toggleSkillsMarketplace: (returnTarget?: "app" | "settings") => void;
+  toggleSkillsMarketplace: (returnTarget?: "app" | "settings", tab?: "plugins" | "skills") => void;
   toggleLiveArtifacts: () => void;
   toggleAgentEditor: () => void;
   setCurrentModel: (m: string) => void;
@@ -556,6 +557,7 @@ export interface TerminalSnapshotInfo {
 export interface EditorOpenRequest {
   id: string;
   path: string;
+  exact?: boolean;
   line?: number;
   column?: number;
 }
@@ -657,6 +659,7 @@ export interface WorkspaceSlice {
   browserAnnotations: BrowserAnnotation[];
   activeTerminalSessionId: string | null;
   editorOpenRequests: EditorOpenRequest[];
+  activeEditorOpenRequestId: string | null;
   activeEditorPath: string | null;
   setLeftSidebarWidth: (w: number) => void;
   setRightSidebarWidth: (w: number) => void;
@@ -679,9 +682,10 @@ export interface WorkspaceSlice {
   upsertTerminalSnapshot: (snapshot: TerminalSnapshotInfo) => void;
   removeTerminalSession: (id: string) => void;
   setActiveTerminalSession: (id: string | null) => void;
-  openEditorFile: (path: string, label?: string, target?: { line?: number; column?: number }) => void;
-  consumeEditorOpenRequest: (path: string) => void;
+  openEditorFile: (path: string, label?: string, target?: { line?: number; column?: number; exact?: boolean }) => void;
+  consumeEditorOpenRequest: (id: string) => void;
   toggleSideChat: () => void;
+  closeSideChat: () => void;
   openSideChatWithSelection: (text: string, source?: string) => void;
   addBackgroundTask: (task: BackgroundTaskEntry) => void;
   addBrowserAnnotation: (annotation: BrowserAnnotation) => void;
@@ -1828,6 +1832,7 @@ export interface InspectorSlice {
 // ── Editor Slice ─────────────────────────────────────────────────
 
 export interface EditorTab {
+  id: string;
   path: string;
   content: string;
   original: string;
@@ -1844,10 +1849,11 @@ export interface EditorTab {
 export interface EditorSlice {
   editorTabs: EditorTab[];
   activeTabPath: string | null;
-  openEditorTab: (path: string) => void;
+  openEditorTab: (path: string, options?: { activate?: boolean }) => void;
   closeEditorTab: (path: string) => void;
   closeOtherEditorTabs: (path: string) => void;
   closeAllEditorTabs: () => void;
+  renameEditorPath: (path: string, newPath: string, workspaceRoot: string) => void;
   setActiveTab: (path: string) => void;
   updateTabContent: (path: string, content: string) => void;
   markTabLoaded: (
@@ -1857,8 +1863,8 @@ export interface EditorSlice {
     contentHash?: string,
     meta?: Pick<EditorTab, "largeFile" | "loadWarning" | "sizeBytes" | "readOnly">,
   ) => void;
-  markTabSaved: (path: string, savedContent: string, contentHash?: string, sizeBytes?: number) => void;
-  markTabExternalChanged: (path: string) => void;
+  markTabSaved: (path: string, savedContent: string, contentHash?: string, sizeBytes?: number, workspaceRoot?: string) => void;
+  markTabExternalChanged: (path: string, options?: { workspaceRoot?: string; changed?: boolean }) => void;
   insertIntoActiveEditor: (text: string) => boolean;
 }
 

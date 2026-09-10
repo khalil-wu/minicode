@@ -27,6 +27,9 @@ export const PromptHistoryOverlay = ({ open, items, placement = "above", onSelec
   useEffect(() => {
     if (!open) return;
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      const owner = inputRef.current?.closest(".prompt-history-overlay");
+      if (owner && !owner.contains(event.target as Node)) return;
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();

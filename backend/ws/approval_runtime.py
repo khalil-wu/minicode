@@ -6,6 +6,7 @@ import hashlib
 import logging
 import math
 import time
+from collections.abc import Awaitable
 from typing import Any
 
 from backend.agent.message import AgentEvent
@@ -405,7 +406,7 @@ class SessionApprovalRuntimeMixin:
 
         if subtype == "error":
             guidance = str(response.get("error") or "control response rejected").strip()
-            return request_id, {"action": "reject", "guidance": guidance}
+            payload = {"action": "reject", "guidance": guidance}
 
         action_raw = payload.get("action")
         if isinstance(action_raw, bool):
@@ -444,38 +445,31 @@ class SessionApprovalRuntimeMixin:
         request = request if isinstance(request, dict) else {}
         tool_name = str(request.get("tool_name") or "").strip()
         args = request.get("input") or {}
-        if tool_name != "exit_plan_mode" and tool_name and self._is_session_approved(tool_name, args, payload=payload):
-            logger.debug("Session-approved: %s %s", tool_name, tool_call_id)
-            return {
-                "action": "approve",
-                "session_approved": True,
-                "request_digest": self._pending_request_digest(payload),
-            }
-
-        queued_response = self.turn_wait_state.pending_approval_responses.pop(tool_call_id, None)
-        if queued_response is not None:
-            return queued_response
-
-        future: asyncio.Future = asyncio.get_running_loop().create_future()
-        self.turn_wait_state.register_waiter(
-            tool_call_id,
-            future,
-            kind=(
-                "elicitation"
-                if str(request.get("subtype") or "").strip() == "elicitation"
-                else "approval"
-            ),
-        )
-        # The request payload is emitted before this waiter registers, so a
-        # fast client response can land in the hand-off queue between the
-        # entry check above and the registration here. Re-check once after
-        # registering; otherwise the queued response is never consumed.
-        queued_after_register = self.turn_wait_state.pending_approval_responses.pop(tool_call_id, None)
-        if queued_after_register is not None:
-            future.set_result(queued_after_register)
         try:
-            timeout_seconds = self._approval_timeout_seconds()
-            result = await asyncio.wait_for(future, timeout=timeout_seconds)
+            if tool_name != "exit_plan_mode" and tool_name and self._is_session_approved(tool_name, args, payload=payload):
+                logger.debug("Session-approved: %s %s", tool_name, tool_call_id)
+                return {
+                    "action": "approve",
+                    "session_approved": True,
+                    "request_digest": self._pending_request_digest(payload),
+                }
+
+            queued_response = self.turn_wait_state.pending_approval_responses.pop(tool_call_id, None)
+            if queued_response is None:
+                future: asyncio.Future = asyncio.get_running_loop().create_future()
+                self.turn_wait_state.register_waiter(
+                    tool_call_id,
+                    future,
+                    kind=(
+                        "elicitation"
+                        if str(request.get("subtype") or "").strip() == "elicitation"
+                        else "approval"
+                    ),
+                )
+                timeout_seconds = self._approval_timeout_seconds()
+                result = await asyncio.wait_for(future, timeout=timeout_seconds)
+            else:
+                result = queued_response
             # Remember approval for session if user opted in
             if isinstance(result, dict) and result.get("action") == "approve":
                 if result.get("remember_for_session") and tool_name and tool_name != "exit_plan_mode":
@@ -509,12 +503,12 @@ class SessionApprovalRuntimeMixin:
             self.turn_wait_state.pending_approval_responses.pop(tool_call_id, None)
             self.approval_diff_cache.pop(tool_call_id, None)
 
-    async def _cancel_pending_approvals(
+    def _cancel_pending_approvals(
         self,
         *,
         reason: str = "run_cancelled",
         conversation_id: str | None = None,
-    ) -> list[str]:
+    ) -> Awaitable[list[str]]:
         pending_payloads = self.turn_wait_state.pending_approval_payloads
         target_conversation_id = str(conversation_id or "").strip()
         if target_conversation_id:
@@ -526,7 +520,14 @@ class SessionApprovalRuntimeMixin:
             request_ids = list(dict.fromkeys([
             *self.turn_wait_state.waiter_ids(),
             ]))
+        # Capture owners and settle concrete waiters before yielding. A new
+        # run may register its approvals while the old run's notice is sent.
+        grouped: dict[str, list[str]] = {}
         for request_id in request_ids:
+            owner = target_conversation_id or str(
+                pending_payloads.get(request_id, {}).get("conversation_id") or ""
+            ).strip()
+            grouped.setdefault(owner, []).append(request_id)
             future = self.turn_wait_state.pending_approvals.get(request_id)
             if future is None:
                 future = self.turn_wait_state.pending_user_input.get(request_id)
@@ -536,27 +537,21 @@ class SessionApprovalRuntimeMixin:
                 future = self.turn_wait_state.provider_oauth_pending.get(request_id)
             if future and not future.done():
                 future.cancel()
-        try:
-            if request_ids:
-                # The pending payload is the authoritative request ->
-                # conversation owner map.  Emit while that map still exists;
-                # clearing it first turns valid owned cancellations into
-                # "unowned" events and leaves the frontend prompt stuck.
+            self.turn_wait_state.remove_waiter(request_id)
+            pending_payloads.pop(request_id, None)
+            self.turn_wait_state.pending_approval_responses.pop(request_id, None)
+            self.approval_diff_cache.pop(request_id, None)
+
+        async def notify_cancelled() -> list[str]:
+            for owner, owned_request_ids in grouped.items():
                 await self.emit_approval_cancelled_once(
-                    request_ids,
+                    owned_request_ids,
                     reason=reason,
-                    conversation_id=target_conversation_id,
+                    conversation_id=owner,
                 )
-        finally:
-            # Cancellation is terminal even if the socket disappears while
-            # the notification is being sent.  Always release waiters and all
-            # associated payload/diff state.
-            for request_id in request_ids:
-                self.turn_wait_state.remove_waiter(request_id)
-                self.turn_wait_state.pending_approval_payloads.pop(request_id, None)
-                self.turn_wait_state.pending_approval_responses.pop(request_id, None)
-                self.approval_diff_cache.pop(request_id, None)
-        return request_ids
+            return request_ids
+
+        return notify_cancelled()
 
     async def _reject_pending_approvals(
         self,
@@ -687,12 +682,8 @@ class SessionApprovalRuntimeMixin:
                     "projection_omitted": True,
                     "kind": "node_budget",
                 }
-            if depth > APPROVAL_ARGUMENT_MAX_DEPTH:
-                return {
-                    "projection_omitted": True,
-                    "kind": "depth",
-                    "depth": depth,
-                }
+            if depth >= APPROVAL_ARGUMENT_MAX_DEPTH and isinstance(value, (dict, list)):
+                return "[Nested value omitted from approval projection]"
             if isinstance(value, str):
                 if len(value) <= APPROVAL_INLINE_ARG_STRING_LIMIT:
                     return value

@@ -41,4 +41,20 @@ describe("side-chat selected context", () => {
       source: "README.md",
     });
   });
+
+  it("resumes the existing side-chat message without unpausing the main conversation", () => {
+    useAppStore.setState({
+      conversationId: "main", isPaused: true, conversationMessages: {},
+      sideChats: { side: { id: "side", draft: "", isStreaming: false, messages: [
+        { id: "side-answer", role: "assistant", content: "partial", blocks: [], artifacts: [], timestamp: 1 },
+      ] } },
+    });
+    useAppStore.getState().resumeStreaming("side", [], "side-answer", "side-turn");
+    const state = useAppStore.getState();
+    expect(state.isPaused).toBe(true);
+    expect(state.sideChats.side.isStreaming).toBe(true);
+    expect(state.sideChats.side.messages).toHaveLength(1);
+    expect(state.sideChats.side.messages[0]).toMatchObject({ id: "side-answer", isStreaming: true, turnId: "side-turn" });
+    expect(state.conversationMessages.side).toBeUndefined();
+  });
 });

@@ -10,6 +10,7 @@ from typing import Any
 from backend.agent.first_byte_waiter import (
     ProviderStreamFailure,
 )
+from backend.agent.loop_preflight import PhaseDeadlineExceeded
 from backend.agent.loop_runtime_helpers import (
     epoch_ms,
 )
@@ -41,6 +42,7 @@ from backend.agent.provider_stream_failures import (
     handle_provider_stream_exception,
 )
 from backend.agent.provider_attempt import provider_progress_id
+from backend.agent.provider_protocol import add_usage
 from backend.agent.provider_stream_transport import (
     ProviderTransportFailureResult,
     handle_provider_transport_failure,
@@ -51,6 +53,7 @@ from backend.agent.stream_sanitizer import ThinkingStreamSanitizer
 from backend.agent.terminal_projection import TurnTerminalProjection
 from backend.agent.tool_stream_tracker import StreamingToolTracker
 from backend.llm.base import (
+    StreamEventType,
     UsageInfo,
     safe_stream_chat_with_request_metadata,
 )
@@ -140,6 +143,37 @@ async def stream_provider_response(
     provider_attempt = None
     stream_iter: Any | None = None
 
+    def settle_attempt_usage(raw: dict[str, Any] | None = None) -> None:
+        """Settle the latest cumulative usage once before any retry or terminal."""
+        if provider_attempt is None or provider_attempt.usage_settled:
+            return
+        from backend.llm.capabilities import capabilities_for_adapter
+        from backend.llm.cost_tracker import CostTracker
+
+        request_raw = raw if raw is not None else provider_raw_done
+        summary = request_raw.get("request_summary") or {}
+        capabilities = capabilities_for_adapter(llm)
+        model_id = str(summary.get("model") or request_raw.get("model") or capabilities.model or "")
+        request_usage = stream_state.usage
+        price_source = CostTracker.get_instance().record_usage_info(
+            request_usage,
+            model_id=model_id,
+            provider=str(request_raw.get("provider") or capabilities.provider),
+            session_id=budget_runtime.cost_session_id,
+            elapsed_sec=max(0.0, (epoch_ms() - provider_attempt.started_at) / 1000),
+            model_cost=getattr(llm, "_request_model_costs", {}).get(model_id),
+            usage_reported=provider_attempt.usage_reported,
+        )
+        provider_attempt.usage_settled = True
+        request_raw["price_source"] = price_source
+        request_raw.setdefault("model", model_id)
+        if "usage" in provider_raw_done:
+            request_raw.setdefault("usage", provider_raw_done["usage"])
+        provider_raw_done["price_source"] = price_source
+        add_usage(turn_usage, request_usage)
+        budget_runtime.record_provider_usage_total(turn_usage)
+        chain.record_usage(input_tokens=request_usage.input_tokens, output_tokens=request_usage.output_tokens)
+
     async def _close_stream() -> None:
         nonlocal stream_iter
         stream = stream_iter
@@ -183,7 +217,12 @@ async def stream_provider_response(
                             wait_result = wait_update
                         else:
                             yield wait_update
+                except PhaseDeadlineExceeded:
+                    # This is the turn's exhausted budget, not a transient
+                    # provider timeout. The outer boundary owns its terminal.
+                    raise
                 except (asyncio.TimeoutError, ProviderStreamFailure) as failure:
+                    settle_attempt_usage()
                     transport_result = None
                     async for transport_update in handle_provider_transport_failure(
                         failure,
@@ -248,6 +287,14 @@ async def stream_provider_response(
                 event = wait_result.event
                 if event is None:
                     raise RuntimeError("provider wait produced an empty event")
+                if event.usage is not None:
+                    usage = event.usage
+                    stream_state.usage = usage
+                    provider_attempt.usage_reported = True
+                if event.type == StreamEventType.USAGE:
+                    provider_raw_done.update(event.raw)
+                if event.type in {StreamEventType.DONE, StreamEventType.ERROR}:
+                    settle_attempt_usage(event.raw)
                 first_event = False
                 dispatch_result = None
                 async for dispatch_update in dispatch_provider_event(
@@ -375,6 +422,7 @@ async def stream_provider_response(
             break
 
     except asyncio.CancelledError as exc:
+        settle_attempt_usage()
         exception_result = None
         async for exception_update in handle_provider_stream_exception(
             exc,
@@ -404,6 +452,7 @@ async def stream_provider_response(
             )
         raise
     except Exception as exc:
+        settle_attempt_usage()
         exception_result = None
         async for exception_update in handle_provider_stream_exception(
             exc,
@@ -430,6 +479,11 @@ async def stream_provider_response(
         if exception_result is None:
             raise RuntimeError("provider exception handler returned without a result")
         retry_budget_boundary = exception_result.retry_budget_boundary
+    finally:
+        # A consumer can close this generator at a yielded UI event. That
+        # raises GeneratorExit, bypassing both exception handlers above.
+        settle_attempt_usage()
+        await _close_stream()
 
     settlement = None
     async for settlement_update in settle_provider_stream(
@@ -450,7 +504,6 @@ async def stream_provider_response(
         context_builder=context_builder,
         usage=usage,
         turn_usage=turn_usage,
-        chain=chain,
     ):
         if isinstance(settlement_update, ProviderStreamSettlement):
             settlement = settlement_update

@@ -9,6 +9,7 @@ import { useAppStore } from "../stores";
 import { Section } from "./settingsShared";
 import { pushToast } from "./ToastContainer";
 import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
+import { selectSkillForComposer } from "../lib/select-skill-for-composer";
 
 // Mirrors the backend's source_level vocabulary
 // (backend/skills/loader.py: managed / plugin / user / workspace / builtin).
@@ -24,7 +25,6 @@ export const SkillsTab = ({ onReturnToApp }: { onReturnToApp: () => void }) => {
   const availableSkills = useAppStore((state) => state.availableSkills);
   const selectedSkills = useAppStore((state) => state.selectedSkills);
   const workingDirectory = useAppStore((state) => state.workingDirectory);
-  const addSelectedSkill = useAppStore((state) => state.addSelectedSkill);
   const toggleSkillsMarketplace = useAppStore((state) => state.toggleSkillsMarketplace);
   const [refreshing, setRefreshing] = useState(false);
   const skillKey = (path: string | undefined, name: string): string => path
@@ -78,7 +78,7 @@ export const SkillsTab = ({ onReturnToApp }: { onReturnToApp: () => void }) => {
             return (
               <article className="settings-skill-row" key={key}>
                 <span className="settings-skill-icon" aria-hidden="true">
-                  <BrandIcon value={skill.display_name || skill.name} fallback="skill" size={20} iconUrl={skill.icon} />
+                  <BrandIcon value={skill.display_name || skill.name} inferBrand={false} fallback="skill" size={20} iconUrl={skill.icon_large || skill.icon} />
                 </span>
                 <div className="settings-skill-copy">
                   <div>
@@ -93,13 +93,8 @@ export const SkillsTab = ({ onReturnToApp }: { onReturnToApp: () => void }) => {
                   className="settings-action-button"
                   disabled={selected}
                   onClick={() => {
-                    addSelectedSkill({
-                      name: skill.name,
-                      path: skill.path,
-                      description: skill.description,
-                      sourceLevel: skill.source_level,
-                    });
                     onReturnToApp();
+                    selectSkillForComposer(skill);
                   }}
                 >
                   {selected ? <><Check />已选</> : "使用"}

@@ -1,6 +1,7 @@
 import type { AppStore } from "../stores/types";
 import { useAppStore } from "../stores";
 import { desktop, type UpdateActivitySnapshot } from "./runtime";
+import { dirtyEditorFiles } from "../stores/shared-helpers";
 
 const sortedUnique = (values: Array<string | null | undefined>): string[] => (
   [...new Set(values.map((value) => value?.trim() || "").filter(Boolean))].sort()
@@ -70,11 +71,7 @@ export const buildUpdateActivitySnapshot = (state: AppStore): UpdateActivitySnap
         .filter((attachment) => attachment.status === "uploading")
         .map((attachment) => attachment.id),
     ),
-    dirtyEditors: sortedUnique(
-      state.editorTabs
-        .filter((tab) => !tab.readOnly && tab.content !== tab.original)
-        .map((tab) => tab.path),
-    ),
+    dirtyEditors: sortedUnique(dirtyEditorFiles(state)),
     backgroundTasks: sortedUnique(
       [
         ...state.backgroundTasks
@@ -111,6 +108,7 @@ const selectUpdateActivityInputs = (state: AppStore) => ({
   attachments: state.attachments,
   conversationWorkbenchStates: state.conversationWorkbenchStates,
   editorTabs: state.editorTabs,
+  workingDirectory: state.workingDirectory,
   backgroundTasks: state.backgroundTasks,
 });
 

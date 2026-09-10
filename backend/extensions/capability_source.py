@@ -182,7 +182,10 @@ class ExtensionCapabilitySource:
             seen_paths.add(key)
             paths.append(path)
 
-        model_runtime = ModelRuntime(on_change=self.on_model_change)
+        model_runtime = ModelRuntime(
+            on_change=self.on_model_change,
+            settings_snapshot=config_stack.effective_config(),
+        )
         model_registry = ModelRegistry(model_runtime)
         try:
             result = await loader.load(

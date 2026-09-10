@@ -59,6 +59,26 @@ def test_requirements_compose_tables_and_union_deny_read_high_precedence_first()
     assert requirements.source_for("features").kind == "composite"
 
 
+def test_explicit_external_sandbox_obeys_managed_modes_without_changing_ui_mode_derivation():
+    requirements = compose_requirements([])
+    assert requirements.sandbox_mode_for_permission_mode("auto", sandbox_mode="external-sandbox") == "external-sandbox"
+    assert requirements.sandbox_mode_for_permission_mode("plan", sandbox_mode="workspace-write") == "read-only"
+
+    source = RequirementSource("system_requirements_toml", location="system.toml")
+    restricted = compose_requirements([RequirementsLayerEntry(source, {
+        "allowed_sandbox_modes": ["read-only", "workspace-write"],
+    })])
+    _, violation = restricted.resolve_permission_mode("auto", sandbox_mode="external-sandbox")
+    assert violation is not None
+    assert violation.field == "sandbox_mode"
+    assert violation.candidate == "external-sandbox"
+
+    external = compose_requirements([RequirementsLayerEntry(source, {
+        "allowed_sandbox_modes": ["read-only", "external-sandbox"],
+    })])
+    assert external.resolve_permission_mode("auto", sandbox_mode="external-sandbox") == ("auto", None)
+
+
 def test_default_requirements_path_is_owned_by_minicode(monkeypatch) -> None:
     monkeypatch.delenv("MINICODE_REQUIREMENTS_FILE", raising=False)
     monkeypatch.setattr("backend.config_requirements.sys.platform", "win32")

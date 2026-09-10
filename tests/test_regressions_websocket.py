@@ -2316,9 +2316,12 @@ def test_conversation_delete_releases_owned_resources_before_worktree_and_record
             order.append("stop-scheduled")
             return 1
 
-    async def cleanup(_session, conversation, *, force: bool = False):
+    async def cleanup(_session, conversation, *, force: bool = False, check_only: bool = False):
         assert conversation is target
         assert force is False
+        if check_only:
+            order.append("check-worktree")
+            return {"ready": True, "removed": False, "conversation_id": target.id}
         order.append("snapshot-and-remove-worktree")
         return {"removed": True, "conversation_id": target.id}
 
@@ -2359,6 +2362,7 @@ def test_conversation_delete_releases_owned_resources_before_worktree_and_record
         "stop-background",
         "stop-terminals",
         "stop-preview",
+        "check-worktree",
         "release-workspace",
         "snapshot-and-remove-worktree",
         "delete-record",

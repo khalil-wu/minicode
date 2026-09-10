@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Literal, Mapping
 
 from backend.agent.runtime import AgentRuntime
+from backend.agent.agent_identity import coordination_agent_id
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.subagent_context import resolve_agent_execution_profile
 from backend.tools.subagent_runtime import require_runtime_from_context
@@ -155,8 +156,7 @@ class AgentControlPlane:
         metadata = context.metadata if context and isinstance(context.metadata, dict) else {}
         self.metadata = metadata
         raw_actor_id = str(
-            metadata.get("run_id")
-            or metadata.get("agent_id")
+            coordination_agent_id(metadata)
             or (getattr(context, "task_id", "") if context is not None else "")
             or (getattr(context, "session_id", "") if context is not None else "")
         ).strip()

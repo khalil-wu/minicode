@@ -535,7 +535,7 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
         fileFontSize: Number.parseFloat(file.fontSize),
       };
     });
-    expect(outcomeStyle.borderWidth).toBe("0px");
+    expect(outcomeStyle.borderWidth).toBe("1px");
     expect(outcomeStyle.boxShadow).toBe("none");
     expect(outcomeStyle.titleFontSize).toBeGreaterThanOrEqual(16);
     expect(outcomeStyle.fileFontSize).toBeGreaterThanOrEqual(16);

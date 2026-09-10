@@ -1167,8 +1167,7 @@ def test_write_tools_emit_file_changed_without_waiting_for_watcher(
 ) -> None:
     from backend.agent.tool_execution import run_tool
     from backend.llm.base import ToolCallEvent
-    from backend.tools.file_tools import EditFileTool, WriteFileTool
-    from backend.tools.file_tools_common import content_hash
+    from backend.tools.file_tools import EditFileTool, ReadFileTool, WriteFileTool
     from backend.tools.registry import ToolRegistry
 
     events: list[tuple[str, dict[str, object]]] = []
@@ -1179,12 +1178,14 @@ def test_write_tools_emit_file_changed_without_waiting_for_watcher(
     registry = ToolRegistry()
     registry.register(WriteFileTool())
     registry.register(EditFileTool())
+    registry.register(ReadFileTool(ArtifactStore(storage_dir=tmp_path / "artifacts")))
     context = ToolExecutionContext(
         permission=PermissionContext(mode="bypass", source="test"),
         workspace_root=tmp_path,
         emit_event=emit_event,
         checkpoint_manager=CheckpointManager(CheckpointStore(tmp_path / "checkpoints")),
         conversation_id="conv-file-events",
+        metadata={"_read_file_hashes": {}},
     )
 
     write_result = asyncio.run(
@@ -1216,6 +1217,11 @@ def test_write_tools_emit_file_changed_without_waiting_for_watcher(
         )
     ]
 
+    read_result = asyncio.run(run_tool(
+        ToolCallEvent(id="read_1", name="read_file", arguments={"file_path": "src/new.txt"}),
+        registry, context,
+    ))
+    assert not read_result.is_error
     events.clear()
     edit_result = asyncio.run(
         run_tool(
@@ -1226,7 +1232,6 @@ def test_write_tools_emit_file_changed_without_waiting_for_watcher(
                     "file_path": "src/new.txt",
                     "old_string": "hello",
                     "new_string": "updated",
-                    "expected_hash": content_hash("hello\n"),
                 },
             ),
             registry,

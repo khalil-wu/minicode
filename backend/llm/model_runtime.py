@@ -15,6 +15,7 @@ import math
 import os
 import threading
 import time
+from copy import deepcopy
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -102,6 +103,7 @@ class ModelRuntime:
         models_store: Any | None = None,
         models_path: str | Path | None = None,
         provider_configs: Mapping[str, Any] | None = None,
+        settings_snapshot: Mapping[str, Any] | None = None,
     ) -> None:
         self._extension_providers: dict[str, dict[str, Any]] = {}
         self._refreshed_extension_models: dict[str, tuple[Any, ...]] = {}
@@ -131,6 +133,7 @@ class ModelRuntime:
 
             models_store = ProviderModelsStorage()
         self._models_store = models_store
+        self._settings_snapshot = deepcopy(dict(settings_snapshot)) if settings_snapshot is not None else None
         self._base_providers = self._load_base_providers()
         self._models_path = (
             Path(models_path).expanduser().resolve(strict=False)
@@ -221,12 +224,11 @@ class ModelRuntime:
     _auth_method = staticmethod(_oauth_method)
     _base_model = staticmethod(_base_model)
 
-    @classmethod
-    def _load_base_providers(cls) -> dict[str, dict[str, Any]]:
+    def _load_base_providers(self) -> dict[str, dict[str, Any]]:
         return _load_base_providers(
-            openai=get_openai_settings(),
-            anthropic=get_anthropic_settings(),
-            custom=get_custom_settings(),
+            openai=get_openai_settings(self._settings_snapshot),
+            anthropic=get_anthropic_settings(self._settings_snapshot),
+            custom=get_custom_settings(self._settings_snapshot),
         )
 
     def _provider_lock(self, provider_id: str, *, oauth: bool) -> asyncio.Lock:
@@ -800,7 +802,8 @@ class ModelRuntime:
             updated = _call_with_optional_signal(refresh, provider_credentials, signal)
             if inspect.isawaitable(updated):
                 updated = await updated
-            self._assert_provider_generation(clean_id, provider_generation)
+            # The credential rotation has already happened at the provider.
+            # Save it under the credential lock before fencing runtime caches.
             payload = _normalize_oauth_credentials(clean_id, updated)
             refreshed = True
             return payload
@@ -1223,7 +1226,12 @@ class ModelRuntime:
                         source=f"Provider {provider_id}, model {model_id} override",
                     )
 
-    def refresh(self, *, publish_snapshot: bool = True) -> None:
+    def refresh(
+        self,
+        *,
+        publish_snapshot: bool = True,
+        settings_snapshot: Mapping[str, Any] | None = None,
+    ) -> None:
         """Reload settings/models configuration for this runtime generation.
 
         Ordinary callers publish the callback-free availability projection
@@ -1235,6 +1243,8 @@ class ModelRuntime:
         """
 
         self.assert_active()
+        if settings_snapshot is not None:
+            self._settings_snapshot = deepcopy(dict(settings_snapshot))
         refreshed = self._load_base_providers()
         model_configs = (
             self._model_configs
@@ -1875,7 +1885,7 @@ class ModelRuntime:
             cost=(
                 dict(raw_cost)
                 if isinstance(raw_cost, Mapping)
-                else {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+                else {}
             ),
             context_window=context_window,
             context_window_source="models_json",

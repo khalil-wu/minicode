@@ -111,17 +111,13 @@ export const writeWorkspaceFile = async (
   path: string,
   content: string,
   workspaceRoot: string,
-): Promise<boolean> => {
-  try {
-    const r = await fetchWithTimeout(ws("/file", workspaceRoot), {
-      method: "PUT",
-      headers: authHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ path, content }),
-    });
-    return r.ok;
-  } catch {
-    return false;
-  }
+): Promise<void> => {
+  const r = await fetchWithTimeout(ws("/file", workspaceRoot), {
+    method: "PUT",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({ path, content }),
+  });
+  if (!r.ok) throw new Error(await errorMessageFromWorkspaceResponse(r));
 };
 
 const conflictPayload = async (response: Response): Promise<WorkspaceCompareWriteResult> => {
@@ -164,56 +160,44 @@ export const compareWriteWorkspaceFile = async (
     if (r.status === 409) {
       return conflictPayload(r);
     }
-    return { ok: false, conflict: false, message: `Save failed (${r.status})` };
-  } catch {
-    return { ok: false, conflict: false, message: "Save failed: connection is offline." };
+    return { ok: false, conflict: false, message: await errorMessageFromWorkspaceResponse(r) };
+  } catch (error) {
+    return { ok: false, conflict: false, message: error instanceof Error ? error.message : String(error) };
   }
 };
 
-export const createWorkspaceDirectory = async (path: string, workspaceRoot: string): Promise<boolean> => {
-  try {
-    const r = await fetchWithTimeout(ws("/directory", workspaceRoot), {
-      method: "POST",
-      headers: authHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ path }),
-    });
-    return r.ok;
-  } catch {
-    return false;
-  }
+export const createWorkspaceDirectory = async (path: string, workspaceRoot: string): Promise<void> => {
+  const r = await fetchWithTimeout(ws("/directory", workspaceRoot), {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({ path }),
+  });
+  if (!r.ok) throw new Error(await errorMessageFromWorkspaceResponse(r));
 };
 
 export const renameWorkspacePath = async (
   path: string,
   newPath: string,
   workspaceRoot: string,
-): Promise<boolean> => {
-  try {
-    const r = await fetchWithTimeout(ws("/rename", workspaceRoot), {
-      method: "POST",
-      headers: authHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify({ path, new_path: newPath }),
-    });
-    return r.ok;
-  } catch {
-    return false;
-  }
+): Promise<void> => {
+  const r = await fetchWithTimeout(ws("/rename", workspaceRoot), {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({ path, new_path: newPath }),
+  });
+  if (!r.ok) throw new Error(await errorMessageFromWorkspaceResponse(r));
 };
 
 export const deleteWorkspacePath = async (
   path: string,
   workspaceRoot: string,
   recursive = false,
-): Promise<boolean> => {
-  try {
-    const r = await fetchWithTimeout(
-      ws("/path", workspaceRoot, { path, recursive }),
-      { method: "DELETE", headers: authHeaders() },
-    );
-    return r.ok;
-  } catch {
-    return false;
-  }
+): Promise<void> => {
+  const r = await fetchWithTimeout(
+    ws("/path", workspaceRoot, { path, recursive }),
+    { method: "DELETE", headers: authHeaders() },
+  );
+  if (!r.ok) throw new Error(await errorMessageFromWorkspaceResponse(r));
 };
 
 export const listWorkspaceTree = async (

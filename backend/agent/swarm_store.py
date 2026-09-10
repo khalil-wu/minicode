@@ -6,7 +6,7 @@ import json
 import logging
 import sqlite3
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from hashlib import sha256
 from pathlib import Path
 from backend.agent.runtime_records import _string_list, epoch_ms
@@ -484,7 +484,7 @@ class FileSwarmStore:
             return cursor.rowcount == 1
 
     def list_runtime_leases(self) -> list[dict[str, Any]]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = connection.execute(
                 "SELECT * FROM runtime_leases ORDER BY runtime_instance_id"
             ).fetchall()
@@ -552,7 +552,7 @@ class FileSwarmStore:
         return record if cursor.rowcount == 1 else None
 
     def get_agent_run(self, run_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             row = connection.execute(
                 "SELECT payload_json FROM agent_runs WHERE run_id = ?",
                 (run_id.strip(),),
@@ -574,7 +574,7 @@ class FileSwarmStore:
             clauses.append("status = ?")
             values.append(status)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = connection.execute(
                 f"""
                 SELECT payload_json FROM agent_runs
@@ -654,7 +654,7 @@ class FileSwarmStore:
             clauses.append("status = ?")
             values.append(status)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = connection.execute(
                 f"""
                 SELECT payload_json FROM subagent_runs
@@ -669,7 +669,7 @@ class FileSwarmStore:
         clean_id = str(subagent_id or "").strip()
         if not clean_id:
             return None
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             row = connection.execute(
                 "SELECT payload_json FROM subagent_runs WHERE subagent_id = ?",
                 (clean_id,),
@@ -733,7 +733,7 @@ class FileSwarmStore:
         return record if cursor.rowcount == 1 else None
 
     def get_subagent_result(self, subagent_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             row = connection.execute(
                 "SELECT payload_json FROM subagent_results WHERE subagent_id = ?",
                 (subagent_id,),
@@ -761,7 +761,7 @@ class FileSwarmStore:
             return cursor.rowcount > 0
 
     def get_legacy_migration_report(self) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             row = connection.execute(
                 "SELECT value FROM metadata WHERE key = ?",
                 (MIGRATION_REPORT_KEY,),
@@ -1184,7 +1184,7 @@ class FileSwarmStore:
             values.append(correlation_id)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         bounded_limit = max(1, min(limit, 1000 if message_kind else 100))
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = connection.execute(
                 f"""
                 SELECT payload_json FROM messages
@@ -1443,12 +1443,13 @@ class FileSwarmStore:
         with self._write() as connection:
             task = self._new_task(payload, self._next_seq(connection, conversation_id))
             self._insert_task(connection, task)
+            referenced = self._get_task(connection, task["task_id"], conversation_id=conversation_id)
             self._replace_dependencies(
                 connection,
                 task["task_id"],
                 conversation_id=task["conversation_id"],
-                blocks=task["blocks"],
-                blocked_by=task["blocked_by"],
+                blocks=sorted(set(task["blocks"]) | set(referenced["blocks"])),
+                blocked_by=sorted(set(task["blocked_by"]) | set(referenced["blocked_by"])),
             )
             return self._get_task(connection, task["task_id"]) or dict(task)
 
@@ -1513,7 +1514,7 @@ class FileSwarmStore:
         *,
         conversation_id: str = "",
     ) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             return self._get_task(
                 connection,
                 task_id,
@@ -1610,7 +1611,7 @@ class FileSwarmStore:
             clauses.append("seq > ?")
             values.append(since_seq)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = connection.execute(
                 f"""
                 SELECT task_id FROM tasks
@@ -1906,7 +1907,7 @@ class FileSwarmStore:
             clauses.append("seq > ?")
             values.append(since_seq)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = connection.execute(
                 f"""
                 SELECT payload_json FROM teams
@@ -2124,7 +2125,7 @@ class FileSwarmStore:
         owner = str(conversation_id or "").strip()
         if not owner:
             return {"run_ids": [], "task_ids": [], "subagent_ids": []}
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             run_ids = [
                 str(row["run_id"])
                 for row in connection.execute(

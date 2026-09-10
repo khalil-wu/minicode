@@ -76,11 +76,19 @@ export const isTimeSensitiveCommand = (cmd: ClientCommand): boolean =>
   || cmd.type === "interrupt";
 
 export const coalescingKeyForClientCommand = (cmd: ClientCommand): string => {
+  // An explicit id belongs to an awaiting caller or durable replay. Replacing
+  // it with a fresh request would leave that caller without its result.
+  if (cmd.client_command_id) return "";
   const typed = cmd as ClientCommand & {
     session_id?: unknown;
     source?: unknown;
     url?: unknown;
+    conversation_id?: string;
+    owner_conversation_id?: string;
+    workspace_root?: string;
   };
+  const owner = typed.owner_conversation_id || typed.conversation_id || "";
+  const scope = owner || typed.workspace_root ? `:${JSON.stringify([owner, typed.workspace_root || ""])}` : "";
   switch (cmd.type) {
     case "commands.list":
     case "conversation.list":
@@ -93,14 +101,14 @@ export const coalescingKeyForClientCommand = (cmd: ClientCommand): string => {
     case "session.usage.inspect":
     case "skills.list":
     case "skills.marketplace.list":
-      return cmd.type;
+      return `${cmd.type}${scope}`;
     case "runtime.capabilities.inspect":
-      return `${cmd.type}:${String(typed.source || "")}`;
+      return `${cmd.type}:${String(typed.source || "")}${scope}`;
     case "conversation.switch":
       return cmd.type;
     case "preview.navigate":
     case "preview.verify":
-      return `${cmd.type}:${String(typed.url || "")}`;
+      return `${cmd.type}:${String(typed.url || "")}${scope}`;
     case "terminal.resize":
       return `${cmd.type}:${String(typed.session_id || "")}`;
     default:
@@ -741,9 +749,12 @@ export const useWebSocketConnection = () => {
       const now = Date.now();
       const pending = queue.current;
       queue.current = [];
-      for (const queued of pending) {
+      for (const [index, queued] of pending.entries()) {
         if (!shouldReplayQueuedCommand(queued, now)) continue;
-        sendOrCoalesceCommand(queued.cmd);
+        if (!sendOrCoalesceCommand(queued.cmd)) {
+          queue.current.unshift(...pending.slice(index));
+          break;
+        }
       }
     };
 
@@ -758,8 +769,9 @@ export const useWebSocketConnection = () => {
         if (command.type === type) clearPendingClientCommandAck(clientCommandId);
       }
       queue.current = queue.current.filter((queued) => queued.cmd.type !== type);
-      const key = coalescingKeyForClientCommand({ type } as ClientCommand);
-      if (key) coalescedCommands.delete(key);
+      for (const [key, command] of coalescedCommands) {
+        if (command.type === type) coalescedCommands.delete(key);
+      }
     };
 
     const connect = () => {

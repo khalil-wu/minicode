@@ -42,6 +42,8 @@ class _ResourceClient(MCPClient):
 
 
 class _ResourceManager:
+    registry_version = 0
+
     def __init__(self) -> None:
         self.client = _ResourceClient()
 

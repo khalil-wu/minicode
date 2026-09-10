@@ -157,6 +157,17 @@ async def _run_scheduled_task_owned(
             conversation = updated
             execution_root = Path(creation.workspace_root).resolve()
     now = datetime.now(UTC).isoformat()
+    snapshot = dict(conversation.context_snapshot or {})
+    if not snapshot.get("history") and conversation.transcript:
+        # Older detached runs persisted only display messages. Migrate their
+        # actual text once; activity rows are not a substitute for tool results.
+        snapshot["history"] = [
+            {"role": item["role"], "content": item["content"]}
+            for item in conversation.transcript
+            if item.get("role") in {"user", "assistant"}
+            and isinstance(item.get("content"), str)
+            and item["content"]
+        ]
     repository.append_transcript_message(
         conversation.id,
         {
@@ -182,6 +193,7 @@ async def _run_scheduled_task_owned(
         conversation_id=conversation.id,
         run_id=str(getattr(run, "id", "")),
         query_claim=query_claim,
+        conversation_snapshot=snapshot,
     )
     if not conversation_query_guards().owns(query_claim):
         return {
@@ -224,6 +236,7 @@ async def _run_scheduled_task_owned(
         },
     )
     snapshot_patch = {
+        **result.get("context_snapshot", {}),
         "scheduled_task": {
             "task_id": str(getattr(task, "id", "")),
             "run_id": str(getattr(run, "id", "")),

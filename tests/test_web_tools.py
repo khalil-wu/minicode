@@ -350,8 +350,9 @@ def test_web_fetch_schema_description_guides_github_and_citations(
     assert schema["function"]["parameters"]["required"] == ["url", "prompt"]
 
 
-def test_web_fetch_uses_bounded_small_model_policy_and_reuses_url_cache(
-    tmp_path: Path,
+@pytest.mark.parametrize("small_model", ["configured-small", ""])
+def test_web_fetch_uses_configured_model_policy_and_reuses_url_cache(
+    tmp_path: Path, small_model: str,
 ) -> None:
     from backend.artifact.store import ArtifactStore
     from backend.tools.web_tools import WebFetchTool
@@ -359,6 +360,9 @@ def test_web_fetch_uses_bounded_small_model_policy_and_reuses_url_cache(
     class FakeLLM:
         def __init__(self) -> None:
             self.calls: list[tuple[list, object]] = []
+
+        def configured_small_fast_model_id(self):
+            return small_model
 
         async def side_query(self, messages, *, options, turn_context=None):
             del turn_context
@@ -398,7 +402,7 @@ def test_web_fetch_uses_bounded_small_model_policy_and_reuses_url_cache(
     options = llm.calls[0][1]
     assert options.operation == "web_fetch_apply"
     assert options.max_tokens is None
-    assert options.use_small_fast_model is True
+    assert options.use_small_fast_model is bool(small_model)
     assert options.disable_reasoning is True
     assert options.enable_prompt_cache is False
 
@@ -410,6 +414,9 @@ def test_web_fetch_prompt_failure_bubbles_up_without_returning_raw_page(
     from backend.tools.web_tools import WebFetchTool
 
     class FailingLLM:
+        def configured_small_fast_model_id(self):
+            return "configured-small"
+
         async def side_query(self, messages, *, options, turn_context=None):
             del messages, options, turn_context
             raise ConnectionError("incomplete chunked read")

@@ -1173,8 +1173,9 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
     }
     case "subagent.done": {
       const result = subagentResultPayload(e);
-      const resultContent = maybeString(result?.content);
-      const resultError = maybeString(result?.error);
+      const resultContent = maybeString(result?.content) || maybeString(result?.summary);
+      const eventError = maybeString((e as unknown as Record<string, unknown>).error);
+      const resultError = maybeString(result?.error) || eventError;
       const durationMs = maybeNumber(result?.duration_ms) ?? maybeNumber(e.duration_ms);
       const toolCallCount = maybeNumber(result?.tool_call_count) ?? maybeNumber(e.tool_call_count);
       const resultStatus = maybeString(result?.status);
@@ -1183,7 +1184,6 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const terminationInitiator = maybeString((e as unknown as Record<string, unknown>).initiator);
       const checkpointId = maybeString((e as unknown as Record<string, unknown>).checkpoint_id);
       const timedOut = Boolean(e.timed_out);
-      const eventError = maybeString((e as unknown as Record<string, unknown>).error);
       const failed = Boolean(eventError || resultError || eventStatus === "failed" || eventStatus === "error");
       const uiStatus = eventStatus === "partial" || timedOut
         ? "partial"

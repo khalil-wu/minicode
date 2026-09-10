@@ -47,6 +47,9 @@ class PersistedTaskState:
     cleanup_reason: str = ""
     cleanup_requested_at: float | None = None
     cleanup_completed_at: float | None = None
+    container_engine: str = ""
+    container_ref: str = ""
+    container_cidfile: str = ""
 
 
 @dataclass(frozen=True)
@@ -92,6 +95,9 @@ def save_task(
     cleanup_reason: str = "",
     cleanup_requested_at: float | None = None,
     cleanup_completed_at: float | None = None,
+    container_engine: str = "",
+    container_ref: str = "",
+    container_cidfile: str = "",
 ) -> Path:
     """Save task state to disk."""
     clean_task_id = validate_storage_id(task_id, field_name="task_id")
@@ -123,6 +129,9 @@ def save_task(
         cleanup_reason=str(cleanup_reason or ""),
         cleanup_requested_at=cleanup_requested_at,
         cleanup_completed_at=cleanup_completed_at,
+        container_engine=container_engine,
+        container_ref=container_ref,
+        container_cidfile=container_cidfile,
     )
     tasks_dir = get_tasks_dir(session_id, base_dir)
     task_path = tasks_dir / f"{clean_task_id}.json"
@@ -277,6 +286,13 @@ def cleanup_orphaned_tasks(session_id: str, base_dir: Path | None = None) -> lis
                 cleanup_completed = _terminate_owned_process(task)
                 if not cleanup_completed:
                     cleanup_reason = "owned_process_survived_reaper"
+            if task.container_ref:
+                from backend.sandbox.runner import cleanup_owned_container
+
+                container_removed = cleanup_owned_container(task.container_engine, task.container_ref, task.container_cidfile)
+                cleanup_completed = cleanup_completed and container_removed
+                if not container_removed:
+                    cleanup_reason = "container_cleanup_pending"
             save_task(
                 session_id=session_id,
                 task_id=task.task_id,
@@ -298,6 +314,9 @@ def cleanup_orphaned_tasks(session_id: str, base_dir: Path | None = None) -> lis
                 cleanup_reason=cleanup_reason,
                 cleanup_requested_at=cleanup_requested_at,
                 cleanup_completed_at=(time.time() if cleanup_completed else None),
+                container_engine=task.container_engine,
+                container_ref=task.container_ref,
+                container_cidfile=task.container_cidfile,
             )
             recovered = load_task(session_id, task.task_id, base_dir)
             if recovered is None:
@@ -367,6 +386,11 @@ def reconcile_owned_tasks(
             continue
 
         cleanup_completed = _terminate_owned_process(task) if child_alive else True
+        if task.container_ref:
+            from backend.sandbox.runner import cleanup_owned_container
+
+            container_removed = cleanup_owned_container(task.container_engine, task.container_ref, task.container_cidfile)
+            cleanup_completed = cleanup_completed and container_removed
         cleanup_reason = (
             "agent_owner_exited"
             if cleanup_completed
@@ -394,6 +418,9 @@ def reconcile_owned_tasks(
                 cleanup_reason=cleanup_reason,
                 cleanup_requested_at=task.cleanup_requested_at or time.time(),
                 cleanup_completed_at=time.time() if cleanup_completed else None,
+                container_engine=task.container_engine,
+                container_ref=task.container_ref,
+                container_cidfile=task.container_cidfile,
             )
         except Exception as exc:
             errors.append(f"{task.task_id}: {exc}")

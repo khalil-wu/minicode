@@ -1443,7 +1443,6 @@ def test_openai_adapter_routes_gpt_image_model_to_images_api() -> None:
         StreamEventType.PROVIDER_ACTIVITY,
         StreamEventType.IMAGE_CHUNK,
         StreamEventType.PROVIDER_ACTIVITY,
-        StreamEventType.TEXT_CHUNK,
         StreamEventType.DONE,
     ]
     activities = [
@@ -1460,7 +1459,8 @@ def test_openai_adapter_routes_gpt_image_model_to_images_api() -> None:
         event.content for event in events if event.type == StreamEventType.TEXT_CHUNK
     )
     assert "好的，我来生成这张图片" in text
-    assert "图像已经为你生成好了" in text
+    assert activities[-1].count == 1
+    assert activities[-1].message == "图像生成完成"
     assert events[-1].finish_reason == "stop"
 
     try:

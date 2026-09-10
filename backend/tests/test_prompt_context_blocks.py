@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import datetime as RealDateTime, timezone
 from pathlib import Path
 
@@ -100,11 +99,7 @@ def test_context_builder_adds_runtime_blocks_as_leading_instructions() -> None:
     assert "<environment_context>" in user
     assert r"<cwd>C:\repo &amp; &lt;unsafe&gt;</cwd>" in user
     assert r"<root>C:\repo &amp; &lt;unsafe&gt;</root>" in user
-    expected_shell = (
-        "powershell (Windows host, bypass execution)"
-        if os.name == "nt"
-        else "powershell"
-    )
+    expected_shell = "powershell"
     assert f"<shell>{expected_shell}</shell>" in user
     assert "<current_date>2026-06-28</current_date>" in user
     assert "<timezone>Asia/Shanghai</timezone>" in user
@@ -265,7 +260,7 @@ def test_context_builder_freezes_old_user_runtime_bytes_and_updates_latest_turn(
     assert "<current_date>2026-07-02</current_date>" in user_messages[-1]
 
 
-def test_context_builder_migrates_pre_provenance_snapshot_runtime_wrapper() -> None:
+def test_context_builder_preserves_unprovenanced_runtime_like_text() -> None:
     legacy_runtime = (
         "<environment_context>\n"
         "  <cwd>C:\\legacy</cwd>\n"
@@ -291,7 +286,7 @@ def test_context_builder_migrates_pre_provenance_snapshot_runtime_wrapper() -> N
     )
 
     restored = ctx.export_snapshot()["history"]
-    assert restored[0]["runtime_context"] == legacy_runtime
+    assert restored[0]["runtime_context"] == ""
 
     second_state = AgentState(user_message="second")
     second_state.prompt_context = {"environment": {"cwd": r"C:\repo"}}

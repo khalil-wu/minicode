@@ -570,13 +570,24 @@ class RunCommandTool(BaseTool):
         stream_cb = getattr(context, "stream_callback", None) if context else None
 
         shell_command = _host_shell_command(command, cwd=cwd)
-        result = await runner.run(
-            command,
-            cwd=cwd,
-            cancel_event=cancel_event,
-            stream_callback=stream_cb,
-            host_command=shell_command,
-            preserve_full_output=True,
+        try:
+            result = await runner.run(
+                command,
+                cwd=cwd,
+                cancel_event=cancel_event,
+                stream_callback=stream_cb,
+                host_command=shell_command,
+                preserve_full_output=True,
+            )
+        except Exception as exc:
+            if getattr(exc, "cleanup_pending", False):
+                exc.cleanup_receipt = await self._retain_cleanup(
+                    runner, command, cwd, context, str(exc.cleanup_reason),
+                )
+            raise
+        cleanup_receipt = (
+            await self._retain_cleanup(runner, command, cwd, context, result.cleanup_reason)
+            if result.cleanup_pending else {}
         )
 
         stdout = read_captured_output(result.stdout_path, result.stdout)
@@ -594,10 +605,12 @@ class RunCommandTool(BaseTool):
                 if policy.allow_unsandboxed_commands
                 else " Managed policy forbids unsandboxed fallback."
             )
-            return self._error_result(
+            tool_result = self._error_result(
                 "The workspace sandbox is unavailable on this host, so the command was not run."
                 f"{retry_hint}"
             )
+            tool_result.cleanup_receipt = cleanup_receipt
+            return tool_result
 
         exit_code = result.exit_code
 
@@ -668,6 +681,12 @@ class RunCommandTool(BaseTool):
         if portability_hint:
             status = f"{status}\n\n{portability_hint}"
 
+        if cleanup_receipt:
+            recovery_id = cleanup_receipt["resource_id"]
+            status += f"\nResource cleanup is still pending. Recovery command ID: {recovery_id}."
+            if not cleanup_receipt.get("manual_recovery_required"):
+                status += f" Use monitor(action='cancel', command_id='{recovery_id}') to retry cleanup."
+
         truncation = truncate_text_tail(output)
         if not truncation.truncated:
             cleanup_captured_output(*captured_paths)
@@ -675,6 +694,7 @@ class RunCommandTool(BaseTool):
                 content=f"{status}\n\n{output}" if output else status,
                 is_error=is_failed_exit,
                 status=result_status,
+                cleanup_receipt=cleanup_receipt,
             )
 
         artifact_id = ""
@@ -731,4 +751,30 @@ class RunCommandTool(BaseTool):
             artifact_preview=truncation.content,
             is_error=is_failed_exit,
             status=result_status,
+            cleanup_receipt=cleanup_receipt,
         )
+
+    async def _retain_cleanup(self, runner, command, cwd, context, reason) -> dict[str, Any]:
+        manager = self._resolve_background_manager(context)
+        owner = str(getattr(context, "conversation_id", "") or "")
+        process = runner.process
+        receipt = {
+            "resource_kind": "command",
+            "resource_id": str(process.pid) if process is not None else runner._container_name,
+            "reason": reason,
+            "requested": True,
+            "acknowledged": True,
+            "completed": False,
+            "pending": 1,
+        }
+        if manager is not None and owner:
+            metadata = getattr(context, "metadata", None) or {}
+            retained = await manager.retain_foreground_cleanup(
+                runner=runner, command=command, cwd=cwd or "",
+                conversation_id=owner, task_id=str(getattr(context, "task_id", "") or ""),
+                parent_run_id=str(metadata.get("run_id") or ""), reason=reason,
+            )
+            receipt["resource_id"] = retained.command_id
+        else:
+            receipt["manual_recovery_required"] = True
+        return receipt

@@ -29,13 +29,13 @@ const nodeText = (node: ReactNode): string => Children.toArray(node)
   .join("")
   .trim();
 
-const optionsFromChildren = (children: ReactNode, group?: string): SelectOption[] => {
+const optionsFromChildren = (children: ReactNode, group?: string, groupDisabled = false): SelectOption[] => {
   const options: SelectOption[] = [];
   Children.forEach(children, (child) => {
     if (!isValidElement(child)) return;
     if (child.type === "optgroup") {
-      const props = child.props as { label?: string; children?: ReactNode };
-      options.push(...optionsFromChildren(props.children, String(props.label || "").trim() || undefined));
+      const props = child.props as { label?: string; disabled?: boolean; children?: ReactNode };
+      options.push(...optionsFromChildren(props.children, String(props.label || "").trim() || undefined, Boolean(props.disabled)));
       return;
     }
     if (child.type !== "option") return;
@@ -43,7 +43,7 @@ const optionsFromChildren = (children: ReactNode, group?: string): SelectOption[
     options.push({
       value: String(option.props.value ?? ""),
       label: nodeText(option.props.children) || String(option.props.value ?? ""),
-      disabled: Boolean(option.props.disabled),
+      disabled: groupDisabled || Boolean(option.props.disabled),
       group,
     });
   });
@@ -69,8 +69,12 @@ export const SelectMenu = ({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuId = useId();
   const options = useMemo(() => optionsFromChildren(children), [children]);
-  const selected = options.find((option) => option.value === value) ?? options[0];
+  const selected = options.find((option) => option.value === value);
   const enabledOptions = options.filter((option) => !option.disabled);
+
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -89,7 +93,7 @@ export const SelectMenu = ({
   useEffect(() => {
     if (!open) return;
     queueMicrotask(() => {
-      const active = rootRef.current?.querySelector<HTMLButtonElement>('[role="option"][aria-selected="true"]');
+      const active = rootRef.current?.querySelector<HTMLButtonElement>('[role="option"][aria-selected="true"]:not(:disabled)');
       const first = rootRef.current?.querySelector<HTMLButtonElement>('[role="option"]:not(:disabled)');
       (active ?? first)?.focus();
     });
@@ -114,6 +118,7 @@ export const SelectMenu = ({
   const handleTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Enter" || event.key === " ") {
       event.preventDefault();
+      event.stopPropagation();
       openMenu();
     }
   };
@@ -121,17 +126,20 @@ export const SelectMenu = ({
   const handleOptionKeyDown = (event: KeyboardEvent<HTMLButtonElement>, option: SelectOption) => {
     if (event.key === "Escape") {
       event.preventDefault();
+      event.stopPropagation();
       setOpen(false);
       queueMicrotask(() => triggerRef.current?.focus());
       return;
     }
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
+      event.stopPropagation();
       selectValue(option.value);
       return;
     }
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
+    event.stopPropagation();
     const current = enabledOptions.findIndex((item) => item.value === option.value);
     const nextIndex = event.key === "Home"
       ? 0
@@ -146,9 +154,12 @@ export const SelectMenu = ({
 
   let previousGroup = "";
   return (
-    <div ref={rootRef} className={`mc-select-menu ${className}`.trim()} style={style} data-open={open ? "true" : "false"}>
+    <div ref={rootRef} className={`mc-select-menu ${className}`.trim()} style={style} data-open={open ? "true" : "false"}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+      }}
+    >
       <select
-        id={id}
         aria-label={ariaLabel}
         aria-describedby={ariaDescribedBy}
         aria-hidden="true"
@@ -161,6 +172,7 @@ export const SelectMenu = ({
         {children}
       </select>
       <button
+        id={id}
         ref={triggerRef}
         type="button"
         className="mc-select-trigger"
@@ -196,6 +208,7 @@ export const SelectMenu = ({
                 <button
                   type="button"
                   role="option"
+                  tabIndex={-1}
                   aria-selected={active}
                   data-value={option.value}
                   className="mc-select-option"

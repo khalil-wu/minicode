@@ -98,6 +98,12 @@ const Backdrop = ({ children, label, onDismiss }: { children: React.ReactNode; l
         tabIndex={-1}
         className="mc-dialog-panel"
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key !== "Escape") return;
+          e.preventDefault();
+          e.stopPropagation();
+          onDismiss();
+        }}
         style={panelStyle}
       >
         {children}
@@ -114,14 +120,6 @@ const ConfirmDialog = ({
   danger,
   onResult,
 }: ConfirmOptions & { onResult: (ok: boolean) => void }) => {
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onResult(false);
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [onResult]);
-
   return (
     <Backdrop label={title || "确认操作"} onDismiss={() => onResult(false)}>
       {title && <div style={titleStyle}>{title}</div>}
@@ -150,14 +148,6 @@ const AlertDialog = ({
   confirmLabel = "确定",
   onClose,
 }: AlertOptions & { onClose: () => void }) => {
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape" || e.key === "Enter") onClose();
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [onClose]);
-
   return (
     <Backdrop label={title || "提示"} onDismiss={onClose}>
       {title && <div style={titleStyle}>{title}</div>}
@@ -201,8 +191,11 @@ const PromptDialog = ({
         placeholder={placeholder}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter") submit();
-          if (e.key === "Escape") onResult(null);
+          if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            e.stopPropagation();
+            submit();
+          }
         }}
         style={inputStyle}
       />

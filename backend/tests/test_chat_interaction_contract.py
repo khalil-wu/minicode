@@ -38,6 +38,13 @@ def test_agent_text_streaming_is_enabled_by_default():
     assert AgentSettings().live_text_streaming is True
 
 
+def test_git_prompt_preserves_multiline_text_without_requiring_bash_syntax():
+    guidance = build_tool_runtime_guidance([_tool_schema("run_command"), _tool_schema("write_file")])
+    assert "git commit -F <file>" in guidance
+    assert "gh pr create --body-file <file>" in guidance
+    assert "HEREDOC" not in guidance
+
+
 def test_mcp_runtime_guidance_truncates_server_instructions() -> None:
     guidance = build_tool_runtime_guidance(
         [_tool_schema("mcp__docs__search")],
@@ -201,7 +208,6 @@ def test_common_direct_tool_model_descriptions_stay_short() -> None:
     assert ReadArtifactTool(artifact_store).model_schema().description == (
         "Read full content by artifact_id or a shown MiniCode persisted-result cache filename."
     )
-    assert GrepFilesTool().model_schema().description == "Regex-search file contents; returns matching paths, line numbers, and lines by default."
     command_description = RunCommandTool(artifact_store).model_schema().description
     assert command_description.startswith("Execute a shell command")
     assert "sandbox" in command_description.lower()

@@ -1,180 +1,138 @@
 /* @vitest-environment jsdom */
-
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { SkillsMarketplace } from "./SkillsMarketplace";
+import { sendClientCommand } from "../protocol/ws-outbox";
+import { pushToast } from "./ToastContainer";
+import { showAlert } from "./DialogService";
 
-vi.hoisted(() => {
-  Object.defineProperty(globalThis, "matchMedia", {
-    writable: true,
-    value: vi.fn().mockImplementation(() => ({
-      matches: false,
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-    })),
-  });
-});
-
-const { websocketSend } = vi.hoisted(() => ({
-  websocketSend: vi.fn(),
-}));
-
-vi.mock("../hooks/useWebSocket", () => ({
-  getWebSocket: () => ({ send: websocketSend }),
-}));
-
-vi.mock("../protocol/ws-outbox", () => ({
-  sendClientCommand: websocketSend,
-}));
-
+vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", { writable: true, value: vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })) }));
+vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn() }));
 vi.mock("../protocol/api", () => ({
-  apiBase: () => "http://test.local",
-  authHeaders: (headers?: HeadersInit) => headers ?? {},
-  LONG_HTTP_TIMEOUT_MS: 300_000,
-  fetchWithTimeout: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init),
+  apiBase: () => "http://test.local", authHeaders: (headers?: HeadersInit) => headers ?? {},
+  LONG_HTTP_TIMEOUT_MS: 300_000, fetchWithTimeout: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init),
+  errorMessageFromResponseText: (text: string, fallback: string) => text || fallback,
+  pluginAssetResourceUrlWithToken: () => "",
 }));
+vi.mock("../desktop/runtime", () => ({ isDesktop: () => false, pickDirectory: vi.fn() }));
+vi.mock("./ToastContainer", () => ({ pushToast: vi.fn() }));
+vi.mock("./DialogService", () => ({ showAlert: vi.fn(), showConfirm: vi.fn(async () => true), showPrompt: vi.fn(async () => "C:/skills/local") }));
 
-vi.mock("./ToastContainer", () => ({
-  pushToast: vi.fn(),
-}));
+const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
+const catalog = { skills: [{ name: "remote-review", title: "Remote Review", description: "Review repositories", installed: false }], source_status: { openai_skills: { ok: true } } };
 
-describe("SkillsMarketplace workspace", () => {
+describe("Plugins and skills workspace", () => {
   beforeEach(() => {
-    useAppStore.setState({
-      skillsMarketplaceOpen: true,
-      skillsMarketplaceReturnTarget: "app",
-      settingsOpen: false,
-      availableSkills: [{
-        name: "docs",
-        display_name: "文档处理",
-        description: "处理文档",
-        source_level: "user",
-        active: false,
-      }, {
-        name: "code-review",
-        display_name: "代码审查",
-        description: "检查代码问题",
-        source_level: "builtin",
-        active: false,
-      }],
-      marketplaceSkills: [],
-      selectedSkills: [],
-    });
-    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.includes("/api/skills/install") && init?.method === "POST") {
-        return Promise.resolve(new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }));
-      }
-      return Promise.resolve(new Response(JSON.stringify({
-        skills: [],
-        source_status: { openai_skills: { ok: true } },
-      }), { status: 200, headers: { "content-type": "application/json" } }));
+    useAppStore.setState({ skillsMarketplaceOpen: true, skillsMarketplaceTab: "skills", skillsMarketplaceReturnTarget: "app", settingsOpen: false,
+      availableSkills: [{ name: "docs", display_name: "文档处理", description: "处理文档", source_level: "user", path: "C:/skills/docs/SKILL.md" },
+        { name: "internal", display_name: "内部技能", description: "模型调用", source_level: "builtin", user_invocable: false }],
+      marketplaceSkills: [], selectedSkills: [] });
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      if (String(input).includes("/api/plugins/marketplaces")) return Promise.resolve(json({ marketplaces: [] }));
+      if (String(input).endsWith("/api/plugins")) return Promise.resolve(json({ plugins: [] }));
+      return Promise.resolve(json(catalog));
     }));
   });
+  afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
-  afterEach(() => {
-    cleanup();
-    vi.clearAllMocks();
-    vi.unstubAllGlobals();
-    useAppStore.setState({ skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app", settingsOpen: false });
-  });
-
-  it("shows builtin and local skills in the full-page catalog", async () => {
+  it("renders the sidebar-compatible page and authentic local source filters", async () => {
     render(<SkillsMarketplace />);
-
-    expect(screen.getByRole("dialog", { name: "技能" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "技能", level: 1 })).toBeTruthy();
-    expect(await screen.findByText("代码审查")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("tab", { name: "本地" }));
-    expect(screen.getByText("文档处理")).toBeTruthy();
+    expect(screen.getByRole("main", { name: "插件与技能" })).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(within(screen.getByRole("region", { name: "已安装技能" })).getByText("文档处理")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "个人", exact: true }));
+    expect(within(screen.getByRole("region", { name: "个人技能" })).getByText("文档处理")).toBeTruthy();
   });
-
-  it("offers a local skill import action instead of a network marketplace", async () => {
+  it("loads the public directory only when it is opened", () => {
     render(<SkillsMarketplace />);
-    expect(screen.getByRole("button", { name: "导入本地技能" })).toBeTruthy();
-    expect(screen.queryByRole("tab", { name: "公开" })).toBeNull();
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining("/api/extensions/marketplace"), expect.anything());
+    fireEvent.click(screen.getByRole("button", { name: "公开", exact: true }));
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/extensions/marketplace"), expect.anything());
   });
-
-  it("adds an installed skill to the next user turn", async () => {
+  it("opens row details and keeps the Add menu state separate from row actions", () => {
     render(<SkillsMarketplace />);
-    await screen.findByText("代码审查");
-    fireEvent.click(screen.getByRole("tab", { name: "本地" }));
-    fireEvent.click(screen.getByRole("button", { name: "使用" }));
-
-    expect(useAppStore.getState().selectedSkills).toEqual([expect.objectContaining({
-      name: "docs",
-      path: undefined,
-      description: "处理文档",
-      sourceLevel: "user",
-      kind: "skill",
-    })]);
+    fireEvent.click(screen.getByRole("button", { name: "查看技能详情 docs" }));
+    expect(showAlert).toHaveBeenCalledWith(expect.objectContaining({ title: "文档处理" }));
+    fireEvent.click(screen.getByRole("button", { name: "管理技能 docs" }));
+    expect(screen.getByRole("button", { name: "添加", exact: true }).getAttribute("aria-expanded")).toBe("false");
   });
-
-  it("returns to the application from the catalog", () => {
+  it("takes a selected skill to the composer even when opened from settings over a maximized editor", async () => {
+    useAppStore.setState({ skillsMarketplaceReturnTarget: "settings", panelSlots: [
+      { id: "chat", kind: "chat", focused: false }, { id: "editor", kind: "editor", focused: true, maximized: true },
+    ] });
+    const focus = vi.fn();
+    window.addEventListener("composer:focus", focus, { once: true });
     render(<SkillsMarketplace />);
-    fireEvent.click(screen.getByRole("button", { name: "返回应用" }));
+    fireEvent.click(screen.getByRole("button", { name: "管理技能 docs" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "用于下一条消息" }));
+    expect(useAppStore.getState().skillsMarketplaceOpen).toBe(false);
+    expect(useAppStore.getState().settingsOpen).toBe(false);
+    expect(useAppStore.getState().selectedSkills[0].name).toBe("docs");
+    expect(useAppStore.getState().panelSlots.find((slot) => slot.id === "chat")?.focused).toBe(true);
+    expect(useAppStore.getState().panelSlots.some((slot) => slot.maximized)).toBe(false);
+    await waitFor(() => expect(focus).toHaveBeenCalledOnce());
+  });
+  it("displays the remote catalog and installs through the real skill API contract", async () => {
+    render(<SkillsMarketplace />);
+    fireEvent.click(screen.getByRole("button", { name: "公开", exact: true }));
+    fireEvent.click(await screen.findByRole("button", { name: "安装技能 remote-review" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("http://test.local/api/skills/install", expect.objectContaining({ method: "POST", body: JSON.stringify({ skill_name: "remote-review" }) })));
+    expect(sendClientCommand).toHaveBeenCalledWith({ type: "skills.list" }, { silent: true });
+  });
+  it("keeps installed skills usable when the public catalog fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(json({ detail: "offline" }, 503))));
+    render(<SkillsMarketplace />);
+    fireEvent.click(screen.getByRole("button", { name: "公开", exact: true }));
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "管理技能 docs" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "用于下一条消息" }));
+    expect(useAppStore.getState().selectedSkills).toEqual([expect.objectContaining({ name: "docs", path: "C:/skills/docs/SKILL.md" })]);
     expect(useAppStore.getState().skillsMarketplaceOpen).toBe(false);
   });
-
-  it("returns to the Skills settings page when opened from Settings", () => {
+  it("honors user_invocable and removes only personal skills", async () => {
+    render(<SkillsMarketplace />);
+    fireEvent.click(screen.getAllByRole("button", { name: "管理技能 internal" })[0]);
+    expect((screen.getByRole("menuitem", { name: "用于下一条消息" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("menuitem", { name: "卸载技能" })).toBeNull();
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    expect(useAppStore.getState().skillsMarketplaceOpen).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "管理技能 docs" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "卸载技能" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("http://test.local/api/skills/docs", expect.objectContaining({ method: "DELETE" })));
+  });
+  it("supports the add menu and web-host local imports", async () => {
+    render(<SkillsMarketplace />);
+    fireEvent.click(screen.getByRole("button", { name: "添加", exact: true }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "导入本地技能" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("http://test.local/api/skills/import", expect.objectContaining({ body: JSON.stringify({ source_path: "C:/skills/local" }) })));
+  });
+  it("preserves query and an in-flight installation across tab switches and page hiding", async () => {
+    let finish!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      if (String(input).endsWith("/api/skills/install")) return new Promise<Response>((resolve) => { finish = resolve; });
+      if (String(input).includes("/api/plugins")) return Promise.resolve(json({ plugins: [], marketplaces: [] }));
+      return Promise.resolve(json(catalog));
+    }));
+    render(<SkillsMarketplace />);
+    fireEvent.click(screen.getByRole("button", { name: "公开", exact: true }));
+    const install = await screen.findByRole("button", { name: "安装技能 remote-review" });
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索技能" }), { target: { value: "Review" } });
+    fireEvent.click(install);
+    fireEvent.click(screen.getByRole("tab", { name: "插件", exact: true }));
+    act(() => useAppStore.setState({ skillsMarketplaceOpen: false }));
+    await act(async () => finish(json({ installed: true })));
+    expect(pushToast).toHaveBeenCalledWith("已安装技能：remote-review", "success");
+    act(() => useAppStore.setState({ skillsMarketplaceOpen: true, skillsMarketplaceTab: "skills" }));
+    expect((screen.getByRole("textbox", { name: "搜索技能" }) as HTMLInputElement).value).toBe("Review");
+  });
+  it("navigates product tabs with arrows and returns to the correct settings page", () => {
     useAppStore.setState({ skillsMarketplaceReturnTarget: "settings" });
     render(<SkillsMarketplace />);
-
+    fireEvent.keyDown(screen.getByRole("tab", { name: "技能", exact: true }), { key: "ArrowLeft" });
+    expect(useAppStore.getState().skillsMarketplaceTab).toBe("plugins");
     fireEvent.click(screen.getByRole("button", { name: "返回技能设置" }));
-
-    expect(useAppStore.getState().skillsMarketplaceOpen).toBe(false);
     expect(useAppStore.getState().settingsOpen).toBe(true);
     expect(useAppStore.getState().settingsTab).toBe("skills");
-  });
-
-  // Regression: the 本地 list shows everything non-builtin, but removal is served
-  // by `remove_user_skill`, which only deletes inside the user skills directory.
-  // Non-`user` sources therefore got a disabled trash button whose tooltip read
-  // 内置技能不能卸载 — not the reason, and not even a source in the list.
-  it("explains per source why an installed skill cannot be uninstalled here", async () => {
-    useAppStore.setState({
-      availableSkills: [
-        { name: "docs", display_name: "文档处理", description: "", source_level: "user", active: false },
-        { name: "policy", display_name: "受管技能", description: "", source_level: "managed", active: false },
-        { name: "from-plugin", display_name: "插件技能", description: "", source_level: "plugin", active: false },
-        { name: "repo-skill", display_name: "项目技能", description: "", source_level: "workspace", active: false },
-      ],
-    });
-    render(<SkillsMarketplace />);
-    fireEvent.click(screen.getByRole("tab", { name: "本地" }));
-
-    const removable = screen.getByRole("button", { name: "卸载技能 docs" });
-    expect(removable.getAttribute("title")).toBe("卸载");
-    expect((removable as HTMLButtonElement).disabled).toBe(false);
-
-    for (const [name, reason] of [
-      ["policy", "受管技能由管理员策略提供，不能在此卸载"],
-      ["from-plugin", "插件提供的技能请在插件中管理"],
-      ["repo-skill", "工作区技能属于项目文件，请在项目中删除"],
-    ] as const) {
-      const blocked = screen.getByRole("button", { name: `${name}：${reason}` });
-      expect(blocked.getAttribute("title")).toBe(reason);
-      expect((blocked as HTMLButtonElement).disabled).toBe(true);
-    }
-    expect(screen.queryByTitle("内置技能不能卸载")).toBeNull();
-  });
-
-  it("labels installed skill sources with the backend vocabulary", () => {
-    useAppStore.setState({
-      availableSkills: [
-        { name: "policy", display_name: "受管技能", description: "", source_level: "managed", active: false },
-        { name: "from-plugin", display_name: "插件技能", description: "", source_level: "plugin", active: false },
-      ],
-    });
-    render(<SkillsMarketplace />);
-    fireEvent.click(screen.getByRole("tab", { name: "本地" }));
-
-    expect(screen.getByText("受管")).toBeTruthy();
-    expect(screen.getByText("插件")).toBeTruthy();
   });
 });

@@ -16,7 +16,7 @@ import stat
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Callable, Literal, Optional
 
 from pathspec.gitignore import GitIgnoreSpec
 
@@ -126,6 +126,7 @@ class FuzzySearchEngine:
         query: str,
         max_results: int = 20,
         include_tests: bool = True,
+        is_allowed: Callable[[Path], bool] | None = None,
     ) -> list[FuzzyMatch]:
         """
         执行模糊搜索。
@@ -159,6 +160,8 @@ class FuzzySearchEngine:
         for path, path_str, path_chars in files:
             # 快速检查：查询中的所有字符是否都在路径中
             if not query_chars.issubset(path_chars):
+                continue
+            if is_allowed is not None and not is_allowed(path):
                 continue
             match = self._score_match(path, query_lower, path_str=path_str)
             if match is not None:

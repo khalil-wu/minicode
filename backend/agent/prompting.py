@@ -351,8 +351,9 @@ def _build_tool_runtime_guidance_uncached(
             "  - NEVER skip hooks (--no-verify, --no-gpg-sign) unless the user "
             "explicitly asks; if a hook fails, investigate and fix the cause.\n"
             "  - NEVER force-push to main/master; warn the user if they request it.\n"
-            "  - Pass commit messages via a HEREDOC so formatting is preserved, and "
-            "create PRs with gh pr create (title + HEREDOC body)."
+            "  - For multiline commit messages and PR bodies, write a UTF-8 text file "
+            "and use git commit -F <file> or gh pr create --body-file <file>. "
+            "Use write_file when available, preserving literal text and newlines."
         )
 
     if mcp_tools:
@@ -395,8 +396,11 @@ def _build_tool_runtime_guidance_uncached(
     )
     sections.append("# Using your tools\n" + "\n".join(tool_items))
     if mcp_tools and mcp_instructions:
+        from backend.mcp.registry import normalize_name_for_mcp
+
         exposed_servers = {
-            parts[1] for tool in mcp_tools if len(parts := tool.split("__")) >= 2
+            server for server in mcp_instructions
+            if any(tool.startswith(f"mcp__{normalize_name_for_mcp(server)}__") for tool in mcp_tools)
         }
         blocks = [
             json.dumps(
@@ -465,11 +469,10 @@ def build_static_environment_info(workspace_root: Path | None = None) -> str:
     if is_windows:
         host_shell = "PowerShell 7" if shutil.which("pwsh.exe") else "Windows PowerShell 5.1"
         lines.append(
-            "- Shell: on Windows, run_command's command syntax is PowerShell even when the execution sandbox "
-            "is enabled; the sandbox changes permissions/network, not the command language. Use workspace- "
-            "relative paths and cross-platform executables; Windows-only programs and cmd.exe require an "
-            "explicitly approved host escalation. In bypass mode, run_command uses host "
-            f"{host_shell}. Use run_command's cwd and env fields instead of shell cd/env setup, and use "
+            "- Shell: on Windows, run_command's command syntax is PowerShell; the sandbox changes permissions/network, "
+            "not the command language. When executing directly, run_command uses host "
+            f"{host_shell}. The active permissions determine sandboxing. "
+            "Use run_command's cwd and env fields instead of shell cd/env setup, and use "
             "semicolons rather than assuming && is available."
         )
         lines.append(
@@ -800,15 +803,13 @@ class PromptBuilderV2:
         context_candidates: list[tuple[str, str]] = [
             ("workspace_summary", workspace_summary),
             ("skill_context", skill_context.strip() if skill_context else ""),
+            ("project_guidelines", project_guidelines.strip() if project_guidelines else ""),
         ]
-        # Read-only exploration/planning workers receive a self-contained task
-        # prompt and workspace summary. Parent project instructions, durable
-        # memory and conversation facts are often large and unrelated to that
-        # bounded task, so omit them just as their git snapshot is omitted.
+        # Bounded workers still follow project instructions. Parent memory and
+        # conversation facts remain scoped by the delegated task contract.
         if not lightweight_subagent:
             context_candidates.extend(
                 (
-                    ("project_guidelines", project_guidelines.strip() if project_guidelines else ""),
                     ("memory_context", memory_context.strip() if memory_context else ""),
                     ("persistent_context", persistent_context.strip() if persistent_context else ""),
                 )
@@ -817,11 +818,7 @@ class PromptBuilderV2:
         # the stable boundary) and is stripped for subagents, which operate on a
         # scoped task rather than the repo working tree.
         if not is_subagent:
-            git_status = (
-                build_git_status_context(workspace_root)
-                if git_status_context is None
-                else git_status_context
-            )
+            git_status = git_status_context
             if git_status:
                 context_candidates.append(("git_status", git_status))
         for name, content in context_candidates:

@@ -517,6 +517,7 @@ export interface ControlProviderAuthPromptRequest {
 }
 
 export type ControlRequestPayload =
+  | { subtype: "conversation_resources_cleanup"; workspace_root: string }
   | ControlCanUseToolRequest
   | ControlElicitationRequest
   | ControlProviderAuthPromptRequest;

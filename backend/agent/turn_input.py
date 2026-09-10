@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from threading import RLock
@@ -254,6 +255,7 @@ class TurnInputQueue:
         *,
         mode: TurnInputMode = "steer",
         target_message_id: str = "",
+        before_publish: Callable[[TurnInput], None] | None = None,
     ) -> TurnInput | None:
         waiters: tuple[tuple[asyncio.AbstractEventLoop, asyncio.Event], ...] = ()
         with self._lock:
@@ -266,6 +268,8 @@ class TurnInputQueue:
             )
             if not item.content.strip() and not item.attachments:
                 return None
+            if before_publish is not None:
+                before_publish(item)
             self._steering.append(item)
             self._activity_seq += 1
             waiters = tuple(self._activity_waiters)

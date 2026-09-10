@@ -809,6 +809,9 @@ const hasValidControlRequest = (value: Record<string, unknown>): boolean => {
     ))
   ) return false;
 
+  if (request.subtype === "conversation_resources_cleanup") {
+    return isBoundedString(request.workspace_root, 32_768, { allowEmpty: true });
+  }
   if (request.subtype === "can_use_tool") {
     return isNonEmptyString(request.tool_name)
       && isRecord(request.input)

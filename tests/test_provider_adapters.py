@@ -987,7 +987,8 @@ def test_anthropic_message_delta_refreshes_all_cumulative_usage_fields() -> None
     )
 
     done = events[-1]
-    assert done.usage.input_tokens == 11
+    assert done.usage.input_tokens == 21
+    assert done.usage.ordinary_input_tokens == 11
     assert done.usage.output_tokens == 5
     assert done.usage.cache_creation_input_tokens == 4
     assert done.usage.cache_read_input_tokens == 6

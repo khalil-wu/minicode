@@ -1,18 +1,43 @@
 from __future__ import annotations
 
 import os
+import asyncio
 import hashlib
 import secrets
 import stat
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator, TypeVar
 
 from filelock import FileLock
+
+_IOResult = TypeVar("_IOResult")
+
+
+async def await_task_despite_cancellation(task: asyncio.Task[_IOResult]) -> _IOResult:
+    """Keep ownership of dispatched file I/O until its worker has settled."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+    return task.result()
+
+
+async def run_blocking_io(operation: Callable[..., _IOResult], /, *args: Any, **kwargs: Any) -> _IOResult:
+    """Run one complete synchronous file transaction outside the event loop."""
+    task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with suppress(Exception):
+            await await_task_despite_cancellation(task)
+        raise
 
 
 @dataclass

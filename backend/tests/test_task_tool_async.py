@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from dataclasses import asdict
 from typing import Any
 
 from backend.agent.message import AgentEvent
@@ -12,7 +13,7 @@ from backend.agent.run_context import RunContext
 from backend.agent.state import ToolCallRecord
 from backend.artifact.store import ArtifactStore
 from backend.config import AgentSettings, PermissionSettings, TokenBudget
-from backend.llm.base import LLMAdapter, LLMMessage, StreamEvent, StreamEventType, ToolCallEvent
+from backend.llm.base import LLMAdapter, LLMMessage, StreamEvent, StreamEventType, ToolCallEvent, UsageInfo
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult
@@ -235,10 +236,10 @@ def test_parallel_task_can_run_explicitly_in_background(monkeypatch, tmp_path):
         started = asyncio.Event()
         release = asyncio.Event()
 
-    async def fake_run_agent_loop(**kwargs):
-        started.set()
-        await release.wait()
-        yield AgentEvent.agent_message_completed("worker result")
+        async def fake_run_agent_loop(**kwargs):
+            started.set()
+            await release.wait()
+            yield AgentEvent.agent_message_completed("worker result")
 
         monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", fake_run_agent_loop)
         runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
@@ -280,10 +281,10 @@ def test_single_read_only_task_can_run_explicitly_in_background(monkeypatch, tmp
         started = asyncio.Event()
         release = asyncio.Event()
 
-    async def fake_run_agent_loop(**kwargs):
-        started.set()
-        await release.wait()
-        yield AgentEvent.agent_message_completed("worker result")
+        async def fake_run_agent_loop(**kwargs):
+            started.set()
+            await release.wait()
+            yield AgentEvent.agent_message_completed("worker result")
 
         monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", fake_run_agent_loop)
         runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
@@ -643,6 +644,9 @@ def test_task_tool_retains_max_iteration_fallback_as_partial(monkeypatch, tmp_pa
         async def fake_run_agent_loop(**kwargs):
             kwargs["state"].stopped_reason = "max_iterations"
             kwargs["state"].reply = "成都天气可用总结"
+            kwargs["run_context"].llm_turn_context.usage = UsageInfo(
+                input_tokens=3, output_tokens=5, cache_read_input_tokens=2, cost_usd=0.05,
+            )
             yield AgentEvent.agent_message_completed("成都天气可用总结")
             yield AgentEvent.error(
                 "已达到最大迭代次数限制（24次）。",
@@ -686,18 +690,10 @@ def test_task_tool_retains_max_iteration_fallback_as_partial(monkeypatch, tmp_pa
         assert snapshot["result"]["status"] == "partial"
         assert done_events[0]["status"] == "partial"
         assert done_events[0]["termination_reason"] == "max_iterations"
-        assert done_events[0]["usage"] == {
-            "input_tokens": 3,
-            "output_tokens": 5,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 2,
-            "prompt_cache_total_tokens": 3,
-            "prompt_cache_hit_rate": 66.7,
-            "ordinary_input_tokens": 1,
-            "input_includes_cache_read": True,
-            "input_includes_cache_write": True,
-        }
-        assert tracker.get_summary()["input_tokens"] == 3
+        assert done_events[0]["usage"] == asdict(UsageInfo(
+            input_tokens=3, output_tokens=5, cache_read_input_tokens=2, cost_usd=0.05,
+        ))
+        assert tracker.get_summary()["input_tokens"] == 0
 
     asyncio.run(run())
 
@@ -1024,7 +1020,8 @@ async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_pat
         "availability_filters": [],
     }
     first_epoch = first_record.mailbox_epoch
-    original_run_path = runtime.get_run(subagent_id).agent_path
+    original_agent_path = first_record.agent_path
+    first_run = next(record for record in runtime._runs.values() if record.task_id == subagent_id)
 
     initial_transcript = runtime.load_agent_transcript(subagent_id)
     initial_assistant_messages = [
@@ -1058,8 +1055,9 @@ async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_pat
         runtime.get_subagent_snapshot(subagent_id, include_result=True)
     )
     assert len(llm.calls) == 2
-    resumed_run = runtime.get_run(subagent_id)
-    assert resumed_run.agent_path == original_run_path
+    resumed_run = next(record for record in runtime._runs.values() if record.task_id == subagent_id and record.mailbox_epoch == resumed_record.mailbox_epoch)
+    assert resumed_record.agent_path == original_agent_path
+    assert resumed_run.run_id != first_run.run_id
     assert resumed_run.parent_run_id == parent_context.metadata["run_id"]
     resumed_messages = llm.calls[1]
     assert any("Inspect the parser and report once." in text for text in resumed_messages)
@@ -1080,8 +1078,8 @@ async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_pat
     # durable runtime record and canonical context checkpoint own recovery.
     resumed_epoch = resumed_record.mailbox_epoch
     runtime._subagents.pop(subagent_id, None)
-    runtime._runs.pop(subagent_id)
-    runtime._registry.discard(subagent_id, kind="run")
+    runtime._runs.pop(resumed_run.run_id)
+    runtime._registry.discard(resumed_run.run_id, kind="run")
     assert runtime.get_subagent(subagent_id) is None
 
     resumed_from_transcript = await SendMessageTool().execute(
@@ -1099,10 +1097,11 @@ async def _test_send_message_resumes_completed_agent_with_full_sidechain(tmp_pat
         await asyncio.sleep(0.01)
     assert resumed_record is not None and resumed_record.status == "completed"
     assert resumed_record.mailbox_epoch == resumed_epoch + 1
-    restored_run = runtime.get_run(subagent_id)
-    assert restored_run.agent_path == original_run_path
+    restored_run = next(record for record in runtime._runs.values() if record.task_id == subagent_id and record.mailbox_epoch == resumed_record.mailbox_epoch)
+    assert resumed_record.agent_path == original_agent_path
+    assert restored_run.run_id not in {first_run.run_id, resumed_run.run_id}
     assert restored_run.parent_run_id == parent_context.metadata["run_id"]
-    assert runtime._swarm_store.get_agent_run(subagent_id) == restored_run.to_dict()
+    assert runtime._swarm_store.get_agent_run(restored_run.run_id) == restored_run.to_dict()
     assert len(llm.calls) == 3
     assert "initial child result" in llm.calls[2]
     assert "resumed child result" in llm.calls[2]
@@ -1285,7 +1284,7 @@ async def _test_running_subagent_receives_parent_mailbox_messages(tmp_path):
             )
 
         async def execute(self, args, context=None):
-            subagent_id = str((context.metadata or {}).get("run_id") or "")
+            subagent_id = str((context.metadata or {}).get("agent_id") or "")
             await SendMessageTool().execute(
                 {
                     "recipient": subagent_id,

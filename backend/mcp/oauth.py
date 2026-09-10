@@ -27,6 +27,8 @@ from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 import keyring
 from keyring.errors import KeyringError, PasswordDeleteError
+from filelock import AsyncFileLock, FileLock
+from mcp.client.auth import OAuthClientProvider as SDKOAuthClientProvider
 
 from backend.atomic_io import atomic_write_text, file_mutation_locks
 
@@ -40,6 +42,11 @@ class MCPAuthenticationRequired(ConnectionError):
     def __init__(self, authorization_url: str = "") -> None:
         super().__init__("Authentication required; sign in from the Connectors settings.")
         self.authorization_url = authorization_url
+
+
+def _credential_lock_path(service: str, server: str, path: Path) -> Path:
+    identity = hashlib.sha256(f"{service}:{server}".encode()).hexdigest()
+    return path.parent / f".mcp-oauth-{identity}.lock"
 
 
 @dataclass
@@ -180,7 +187,8 @@ class TokenStore:
                 raise
 
     def clear(self, server: str) -> None:
-        with file_mutation_locks([self._path]):
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(str(_credential_lock_path(self._service, server, self._path)), timeout=60), file_mutation_locks([self._path]):
             for suffix in ("legacy", "tokens", "client"):
                 try:
                     keyring.delete_password(self._service, f"{server}:{suffix}")
@@ -194,7 +202,7 @@ class TokenStore:
                 self._save_unlocked(legacy_data)
 
     def sdk_storage(self, server: str) -> "SDKTokenStorage":
-        return SDKTokenStorage(self._service, server)
+        return SDKTokenStorage(self._service, server, self._path)
 
     def has_sdk_tokens(self, server: str) -> bool:
         try:
@@ -213,9 +221,16 @@ class TokenStore:
 class SDKTokenStorage:
     """Adapter for the official MCP SDK TokenStorage protocol."""
 
-    def __init__(self, service: str, server: str) -> None:
+    def __init__(self, service: str, server: str, path: Path) -> None:
         self._service = service
         self._server = server
+        self.refresh_lock_path = _credential_lock_path(service, server, path)
+        self.refresh_lock = AsyncFileLock(str(self.refresh_lock_path), timeout=60)
+        self.expires_at: float | None = None
+        self.oauth_metadata: Any = None
+        self.protected_resource_metadata: Any = None
+        self.auth_server_url: str | None = None
+        self.context: Any = None
 
     async def _get(self, suffix: str) -> str | None:
         return await asyncio.to_thread(
@@ -225,21 +240,54 @@ class SDKTokenStorage:
         )
 
     async def _set(self, suffix: str, value: str) -> None:
-        await asyncio.to_thread(
+        write = asyncio.create_task(asyncio.to_thread(
             keyring.set_password,
             self._service,
             f"{self._server}:{suffix}",
             value,
-        )
+        ))
+        cancelled = False
+        # Native credential writes cannot be cancelled. Finish this one write
+        # before releasing its refresh lock, including on repeated cancellation.
+        while not write.done():
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                cancelled = True
+        write.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def get_tokens(self) -> Any | None:
-        from mcp.shared.auth import OAuthToken
+        from mcp.shared.auth import OAuthMetadata, OAuthToken, ProtectedResourceMetadata
 
         raw = await self._get("tokens")
-        return OAuthToken.model_validate_json(raw) if raw else None
+        if not raw:
+            self.expires_at = None
+            return None
+        payload = json.loads(raw)
+        # Old records lack acquisition time. Refresh expiring legacy tokens
+        # once rather than restarting their relative TTL on every connection.
+        expiry = payload.pop("_minicode_expires_at", 1.0 if payload.get("expires_in") is not None else None)
+        self.expires_at = float(expiry) if expiry is not None else None
+        metadata = payload.pop("_minicode_oauth_metadata", None)
+        resource = payload.pop("_minicode_resource_metadata", None)
+        self.auth_server_url = payload.pop("_minicode_auth_server_url", None)
+        self.oauth_metadata = OAuthMetadata.model_validate(metadata) if metadata is not None else None
+        self.protected_resource_metadata = ProtectedResourceMetadata.model_validate(resource) if resource is not None else None
+        return OAuthToken.model_validate(payload)
 
     async def set_tokens(self, tokens: Any) -> None:
-        await self._set("tokens", tokens.model_dump_json())
+        payload = tokens.model_dump(mode="json")
+        self.expires_at = time.time() + tokens.expires_in if tokens.expires_in is not None else None
+        payload["_minicode_expires_at"] = self.expires_at
+        if self.context is not None:
+            metadata = self.context.oauth_metadata
+            resource = self.context.protected_resource_metadata
+            payload["_minicode_oauth_metadata"] = metadata.model_dump(mode="json") if metadata is not None else None
+            payload["_minicode_resource_metadata"] = resource.model_dump(mode="json") if resource is not None else None
+            payload["_minicode_auth_server_url"] = self.context.auth_server_url
+        await self._set("tokens", json.dumps(payload))
 
     async def get_client_info(self) -> Any | None:
         from mcp.shared.auth import OAuthClientInformationFull
@@ -249,6 +297,45 @@ class SDKTokenStorage:
 
     async def set_client_info(self, client_info: Any) -> None:
         await self._set("client", client_info.model_dump_json())
+
+
+class CredentialOAuthProvider(SDKOAuthClientProvider):
+    """Keep the SDK flow inside its shared credential's refresh transaction."""
+
+    def __init__(self, *args: Any, configured_client_info: Any = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._configured_client_info = configured_client_info
+        self.context.storage.context = self.context
+
+    async def _initialize(self) -> None:
+        await super()._initialize()
+        storage = self.context.storage
+        self.context.token_expiry_time = storage.expires_at
+        self.context.oauth_metadata = storage.oauth_metadata
+        self.context.protected_resource_metadata = storage.protected_resource_metadata
+        self.context.auth_server_url = storage.auth_server_url
+        if self._configured_client_info is not None:
+            if self.context.client_info != self._configured_client_info:
+                await storage.set_client_info(self._configured_client_info)
+            self.context.client_info = self._configured_client_info
+
+    async def async_auth_flow(self, request: Any):
+        storage = self.context.storage
+        storage.refresh_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        async with storage.refresh_lock:
+            # Re-read inside the lock: another manager/process may have rotated
+            # these tokens while this provider retained its previous context.
+            self._initialized = False
+            flow = super().async_auth_flow(request)
+            try:
+                outgoing = await anext(flow)
+                while True:
+                    response = yield outgoing
+                    outgoing = await flow.asend(response)
+            except StopAsyncIteration:
+                return
+            finally:
+                await flow.aclose()
 
 
 class LoopbackOAuthCallback:
@@ -382,7 +469,6 @@ async def create_sdk_oauth_provider(
     client_id: str = "",
     callback_port: int | None = None,
 ) -> tuple[Any, LoopbackOAuthCallback]:
-    from mcp.client.auth import OAuthClientProvider
     from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata
 
     callback = await create_loopback_callback(
@@ -398,19 +484,17 @@ async def create_sdk_oauth_provider(
         )
         # Name-only credentials cannot establish which endpoint owns them.
         storage = store.for_server(server_url, client_id).sdk_storage(server_name)
-        if client_id:
-            await storage.set_client_info(
-                OAuthClientInformationFull(
-                    **metadata.model_dump(),
-                    client_id=client_id,
-                )
-            )
-        provider = OAuthClientProvider(
+        configured_client_info = (
+            OAuthClientInformationFull(**metadata.model_dump(), client_id=client_id)
+            if client_id else None
+        )
+        provider = CredentialOAuthProvider(
             server_url,
             metadata,
             storage,
             redirect_handler=callback.redirect,
             callback_handler=callback.callback,
+            configured_client_info=configured_client_info,
         )
     except BaseException:
         await callback.close()

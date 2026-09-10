@@ -1379,6 +1379,28 @@ async def _handle_conversation_delete_fenced(session: "WebSocketSession", data: 
         _release_conversation_mutation(mutation_claim)
 
 
+async def _request_conversation_resource_cleanup(session: "WebSocketSession", target: Any) -> dict[str, Any]:
+    request_id = f"conversation-cleanup-{secrets.token_hex(12)}"
+    payload = {
+        "type": "control_request",
+        "request_id": request_id,
+        "conversation_id": target.id,
+        "request": {
+            "subtype": "conversation_resources_cleanup",
+            "workspace_root": str(target.worktree_path or target.workspace_root or ""),
+        },
+    }
+    session.turn_wait_state.pending_approval_payloads[request_id] = payload
+    try:
+        await session.send_payload(payload, log_context="conversation-resource-cleanup")
+    except BaseException:
+        session.turn_wait_state.pending_approval_payloads.pop(request_id, None)
+        raise
+    return await asyncio.wait_for(
+        session.approval_handler(request_id), timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+    )
+
+
 async def _handle_conversation_delete_after_run_fence(
     session: "WebSocketSession",
     *,
@@ -1463,6 +1485,23 @@ async def _handle_conversation_delete_after_run_fence(
         )
         return True
 
+    if request.cleanup_worktree:
+        check = await _cleanup_conversation_worktree(session, target, force=request.force_cleanup, check_only=True)
+        if not (check.get("ready") or check.get("removed")):
+            await session.emit_command_result(
+                "conversation.delete", check.get("error") or "Worktree cleanup was refused.",
+                level="error", data=check,
+            )
+            return True
+    if request.client_resource_cleanup:
+        response = await _request_conversation_resource_cleanup(session, target)
+        if response.get("action") != "approve":
+            await session.emit_command_result(
+                "conversation.delete", response.get("guidance") or "Local resources could not be closed; the conversation was kept.",
+                level="error", data={"conversation_id": request.conversation_id},
+            )
+            return True
+
     released_workspace_sessions: list["WebSocketSession"] = []
     if request.cleanup_worktree:
         for owner_session in owner_sessions:
@@ -1482,7 +1521,7 @@ async def _handle_conversation_delete_after_run_fence(
                 else build_worktree_cleanup_outcome(cleanup)
             )
             await session.emit_command_result(
-                outcome.command,
+                "conversation.delete",
                 outcome.message,
                 level=outcome.level,
                 data=outcome.data,
@@ -2028,11 +2067,11 @@ async def _handle_conversation_worktree_handoff_claimed(
             if not recreated:
                 checkout_rollback_errors.append("create_worktree:failed")
             if stash_ref:
-                restored_stash = await asyncio.to_thread(
+                restored_stash, stash_error = await asyncio.to_thread(
                     restore_workspace_stash, source_path, stash_ref
                 )
                 if not restored_stash:
-                    checkout_rollback_errors.append(f"restore_workspace_stash:{stash_ref}")
+                    checkout_rollback_errors.append(f"restore_workspace_stash:{stash_error}")
             await _switch_active_sessions_to_conversation_workspace(
                 session,
                 conversation,
@@ -2171,6 +2210,7 @@ async def _handle_conversation_worktree_handoff_claimed(
         data={
             **preflight,
             "completed": True,
+            **({"stash_ref": stash_ref} if stash_ref else {}),
             "workspace_root": str(getattr(updated, "workspace_root", "") or ""),
             "worktree_path": str(getattr(updated, "worktree_path", "") or ""),
             "git_branch": str(getattr(updated, "git_branch", "") or ""),
@@ -2193,15 +2233,24 @@ async def _persist_workspace_binding(
 ) -> tuple[Any | None, str]:
     """Commit a workspace binding and detect post-commit filesystem errors."""
 
-    try:
-        updated = await asyncio.to_thread(
-            session.conversation_repo.update_workspace_binding,
+    def commit_binding():
+        owner_root = worktree_path or workspace_root
+        session.attachment_store.share_for_conversation(
+            conversation_id, conversation_id, owner_root,
+        )
+        session.artifact_store.share_for_conversation(
+            conversation_id, conversation_id, owner_root,
+        )
+        return session.conversation_repo.update_workspace_binding(
             conversation_id,
             workspace_root=workspace_root,
             git_branch=git_branch,
             worktree_path=worktree_path,
             git_isolated=git_isolated,
         )
+
+    try:
+        updated = await asyncio.to_thread(commit_binding)
     except Exception as exc:
         logger.exception(
             "Failed to persist workspace binding for %s",
@@ -3273,14 +3322,15 @@ async def _project_permission_rules_update(
     return errors
 
 
-async def _cleanup_conversation_worktree(session: "WebSocketSession", conversation: Any, *, force: bool = False) -> dict[str, Any]:
+async def _cleanup_conversation_worktree(session: "WebSocketSession", conversation: Any, *, force: bool = False, check_only: bool = False) -> dict[str, Any]:
     from backend.services.conversation_payload_service import cleanup_isolated_worktree
 
-    current_workspace_root = session.session_lifecycle.current_workspace_root()
+    current_workspace_root = None if check_only else session.session_lifecycle.current_workspace_root()
     return await asyncio.to_thread(
         cleanup_isolated_worktree,
         conversation,
         force=force,
+        check_only=check_only,
         current_workspace_root=current_workspace_root,
         main_worktree_root=session.main_worktree_root,
         is_path_within=session.is_path_within,
@@ -3296,16 +3346,20 @@ async def handle_permissions_content_rule_add(session: "WebSocketSession", data:
     saved rule takes effect immediately for subsequent calls.
     """
     from backend.config import SETTINGS_FILE
-    from backend.hooks.runtime import run_config_change_hook
+    from backend.hooks.runtime import ConfigChangeHookBlocked, raise_if_config_change_blocked, run_config_change_hook
     from backend.services.permission_content_service import add_permission_content_rule
 
+    hook_result = await run_config_change_hook(source="permissions", file_path=str(SETTINGS_FILE))
+    try:
+        raise_if_config_change_blocked(hook_result, source="permissions", file_path=str(SETTINGS_FILE))
+    except ConfigChangeHookBlocked as exc:
+        await session.emit_command_result("permissions.content_rule.add", str(exc), level="error")
+        return True
     result = add_permission_content_rule(
         str(data.get("rule") or ""),
         deny=bool(data.get("deny", False)),
         scope=str(data.get("scope") or "global"),
     )
-    if result.should_emit_config_change:
-        await run_config_change_hook(source="permissions", file_path=str(SETTINGS_FILE))
     outcome = result.outcome
     await session.emit_command_result(
         outcome.command,

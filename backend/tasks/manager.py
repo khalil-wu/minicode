@@ -27,6 +27,7 @@ class ManagedTask:
     result: Any = None
     error: str | None = None
     task: asyncio.Task[Any] | None = None
+    source_task: asyncio.Future[Any] | None = field(default=None, repr=False)
     cleanup_pending: bool = False
     cleanup_reason: str = ""
     cleanup_requested_at: str | None = None
@@ -34,7 +35,7 @@ class ManagedTask:
 
     @property
     def is_terminal(self) -> bool:
-        return self.status in {"completed", "failed", "cancelled"}
+        return self.status in {"completed", "failed", "cancelled"} and not self.cleanup_pending
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -102,10 +103,11 @@ class TaskManager:
 
             def _cancel_source_if_supervisor_stops(finished: asyncio.Task[Any]) -> None:
                 if finished.cancelled() and not source_task.done():
-                    source_task.cancel()
+                    if not isinstance(source_task, asyncio.Task) or not source_task.cancelling():
+                        source_task.cancel()
 
             task.add_done_callback(_cancel_source_if_supervisor_stops)
-        managed = ManagedTask(id=task_id, kind=kind, task=task)
+        managed = ManagedTask(id=task_id, kind=kind, task=task, source_task=source_task)
         self._tasks[task_id] = managed
         task.add_done_callback(lambda finished, managed_task=managed: self._finalize(managed_task, finished))
         self._enforce_task_limit()
@@ -143,7 +145,7 @@ class TaskManager:
         managed = self._tasks.get(task_id)
         if managed is None or managed.task is None:
             return False
-        if managed.task.done():
+        if managed.task.done() and (managed.source_task is None or managed.source_task.done()):
             return False
         # Cancellation is a request, not a terminal state. The done callback
         # publishes cancelled only after the coroutine's cleanup has finished.
@@ -151,7 +153,9 @@ class TaskManager:
         managed.cleanup_reason = "cancel_requested"
         managed.cleanup_requested_at = _utc_now_iso()
         managed.cleanup_completed_at = None
-        managed.task.cancel()
+        for task in {managed.task, managed.source_task}:
+            if task is not None and not task.done() and (not isinstance(task, asyncio.Task) or not task.cancelling()):
+                task.cancel()
         self._notify_changed()
         return True
 
@@ -172,15 +176,16 @@ class TaskManager:
         current = asyncio.current_task()
         pending: list[asyncio.Task[Any]] = []
         for managed in self._tasks.values():
-            task = managed.task
-            if task is None or task.done() or task is current:
-                continue
-            task.cancel()
-            pending.append(task)
+            for task in {managed.task, managed.source_task}:
+                if task is None or task.done() or task is current:
+                    continue
+                if not isinstance(task, asyncio.Task) or not task.cancelling():
+                    task.cancel()
+                pending.append(task)
         if pending:
             requested_at = _utc_now_iso()
             for managed in self._tasks.values():
-                if managed.task in pending:
+                if managed.task in pending or managed.source_task in pending:
                     managed.cleanup_pending = True
                     managed.cleanup_reason = "manager_shutdown"
                     managed.cleanup_requested_at = requested_at
@@ -200,6 +205,20 @@ class TaskManager:
 
     def _finalize(self, managed: ManagedTask, task: asyncio.Task[Any]) -> None:
         managed.updated_at = _utc_now_iso()
+        source = managed.source_task
+        if source is not None and source is not task:
+            if not source.done():
+                managed.cleanup_pending = True
+                managed.cleanup_reason = "source_task_pending"
+                managed.cleanup_requested_at = managed.cleanup_requested_at or managed.updated_at
+                managed.cleanup_completed_at = None
+                source.add_done_callback(lambda _source: self._finalize(managed, task))
+                self._notify_changed()
+                return
+            if not source.cancelled():
+                source_error = source.exception()
+                if source_error is not None:
+                    managed.error = str(source_error)
         try:
             managed.result = task.result()
             if managed.cleanup_pending:

@@ -1,14 +1,18 @@
 import {
+  AppWindow,
+  BookOpenText,
   Code2,
   FileSearch,
   FileText,
+  FolderOpen,
   Globe,
   ListChecks,
+  MonitorPlay,
   PencilLine,
   Search,
   TerminalSquare,
   Wrench,
-} from "lucide-react";
+} from "../lib/icons";
 
 export const ToolGlyph = ({
   kind,
@@ -22,13 +26,16 @@ export const ToolGlyph = ({
   const normalized = String(kind || "").trim().toLowerCase();
   const props = { size, className: ["mc-tool-glyph", className].filter(Boolean).join(" ") };
   if (normalized === "websearch" || normalized === "search") return <Search {...props} />;
-  if (normalized === "web" || normalized === "browser" || normalized === "preview") return <Globe {...props} />;
+  if (normalized === "web") return <Globe {...props} />;
+  if (normalized === "browser") return <AppWindow {...props} />;
+  if (normalized === "preview") return <MonitorPlay {...props} />;
   if (normalized === "commandexecution" || normalized === "command") return <TerminalSquare {...props} />;
   if (normalized === "filechange" || normalized === "edit") return <PencilLine {...props} />;
   if (normalized === "fileread" || normalized === "file") return <FileText {...props} />;
-  if (normalized === "workspacelist") return <ListChecks {...props} />;
+  if (normalized === "workspacelist") return <FolderOpen {...props} />;
   if (normalized === "workspacesearch") return <FileSearch {...props} />;
-  if (normalized === "skill" || normalized === "plan") return <ListChecks {...props} />;
+  if (normalized === "skill") return <BookOpenText {...props} />;
+  if (normalized === "plan") return <ListChecks {...props} />;
   if (normalized === "code") return <Code2 {...props} />;
   return <Wrench {...props} />;
 };

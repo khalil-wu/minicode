@@ -26,6 +26,14 @@ _PUBLIC_USAGE_COUNT_FIELDS = (
     "ordinary_input_tokens",
     "iterations",
     "prompt_cache_total_tokens",
+    # Original provider counters remain available in raw usage traces.
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "cached_prompt_tokens",
+    "cache_write_tokens",
+    "prompt_cache_hit_tokens",
+    "prompt_cache_miss_tokens",
 )
 
 

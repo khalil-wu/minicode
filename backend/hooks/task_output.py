@@ -24,9 +24,13 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import BinaryIO, TypeVar
+from typing import BinaryIO
 
 from backend.agent.tool_result_persistence import TOOL_RESULT_DATA_DIR
+from backend.atomic_io import (
+    await_task_despite_cancellation as _await_task_despite_cancellation,
+    run_blocking_io as _run_blocking,
+)
 
 
 DEFAULT_MAX_MEMORY_BYTES = 8 * 1024 * 1024
@@ -41,7 +45,6 @@ _MAX_PROTOCOL_FIRST_LINE_BYTES = 64 * 1024
 _DISK_CAP_NOTICE = (
     f"\n[output truncated: exceeded {MAX_HOOK_OUTPUT_BYTES_DISPLAY} disk cap]\n"
 ).encode("utf-8")
-_IOResult = TypeVar("_IOResult")
 
 
 class HookOutputCaptureError(RuntimeError):
@@ -350,41 +353,6 @@ async def _write_stdin(proc: asyncio.subprocess.Process, input_data: bytes) -> N
             stdin.close()
         with suppress(Exception):
             await stdin.wait_closed()
-
-
-async def _run_blocking(
-    operation: Callable[..., _IOResult],
-    /,
-    *args: object,
-    **kwargs: object,
-) -> _IOResult:
-    """Finish an already-dispatched file operation before propagating cancel."""
-
-    task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        # A second Task.cancel() must not abandon an already-dispatched file
-        # operation. The output store owns the file until the write or close
-        # has converged; retain that ownership, then propagate cancellation.
-        with suppress(Exception):
-            await _await_task_despite_cancellation(task)
-        raise
-
-
-async def _await_task_despite_cancellation(
-    task: asyncio.Task[_IOResult],
-) -> _IOResult:
-    """Wait for an uncancellable worker while absorbing repeated cancels."""
-
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if task.cancelled():
-                raise
-            continue
-    return task.result()
 
 
 async def _open_hook_output_file(

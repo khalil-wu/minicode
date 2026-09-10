@@ -4,37 +4,36 @@
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { Children, useState } from 'react'
 import type { ActivityBrowserItem } from './activitySidebarState'
-import { StatusIcon, type StatusIconStatus } from '../components/icons'
+import { StatusIcon, statusIconColor, type StatusIconStatus } from '../components/icons'
 
 // ── Status Mark ──────────────────────────────────────────────────
 
-export const statusColor = (status: string): string => {
-  if (status === 'running' || status === 'in_progress') return 'var(--state-info)'
-  if (status === 'done' || status === 'success' || status === 'completed') return 'var(--state-success)'
-  if (status === 'error' || status === 'failed') return 'var(--state-danger)'
-  if (status === 'blocked') return 'var(--state-warning)'
-  return 'var(--text-muted)'
+const statusAliases: Record<string, StatusIconStatus> = {
+  pending: 'pending', pending_approval: 'pending_approval',
+  running: 'running', in_progress: 'running',
+  done: 'success', success: 'success', completed: 'success',
+  error: 'failed', failed: 'failed', blocked: 'blocked',
+  partial: 'partial', timeout: 'timeout', cancelled: 'cancelled', interrupted: 'interrupted',
 }
+
+export const statusColor = (status: string): string => statusIconColor(statusAliases[status] ?? 'pending')
 
 export const statusMarkLabel = (status: string): string => {
   if (status === 'running' || status === 'in_progress') return '运行中'
   if (status === 'done' || status === 'success' || status === 'completed') return '已完成'
   if (status === 'error' || status === 'failed') return '失败'
   if (status === 'blocked') return '需要处理'
+  if (status === 'pending_approval') return '等待审批'
+  if (status === 'partial') return '部分完成'
+  if (status === 'timeout') return '已超时'
+  if (status === 'cancelled') return '已取消'
+  if (status === 'interrupted') return '已中断'
   return '等待中'
 }
 
 export const StatusMark = ({ status, animated = true }: { status: string; animated?: boolean }) => {
   const label = statusMarkLabel(status)
-  const iconStatus: StatusIconStatus = status === 'running' || status === 'in_progress'
-    ? 'running'
-    : status === 'completed' || status === 'done' || status === 'success'
-      ? 'success'
-      : status === 'failed' || status === 'error'
-        ? 'failed'
-        : status === 'blocked'
-          ? 'blocked'
-          : 'pending'
+  const iconStatus = statusAliases[status] ?? 'pending'
   return (
     <span role="img" aria-label={label} style={{ display: 'inline-flex', flexShrink: 0 }}>
       <StatusIcon status={iconStatus} size={14} spinningClassName={animated ? undefined : 'shrink-0'} />

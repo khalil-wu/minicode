@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import aclosing
 from collections.abc import AsyncIterator
 from typing import Any, Callable
 
@@ -54,7 +55,6 @@ from backend.agent.terminal_projection import (
     terminal_boundary_events,
     terminal_status_and_reason,
 )
-from backend.agent.terminal_validation import validate_terminal_outcome
 from backend.artifact.store import ArtifactStore
 from backend.config import AgentSettings, TokenBudget
 from backend.llm.base import LLMAdapter, LLMTurnContext
@@ -125,7 +125,7 @@ async def run_agent_loop(
             lifecycle_runtime=run_context.lifecycle_runtime,
         )
     bootstrap = None
-    async for bootstrap_update in bootstrap_agent_loop(
+    async with aclosing(bootstrap_agent_loop(
         AgentLoopBootstrapRequest(
             user_message=user_message,
             llm=llm,
@@ -153,11 +153,12 @@ async def run_agent_loop(
             initial_max_iterations_limit=initial_max_iterations_limit,
             turn_budget_controller=turn_budget_controller,
         )
-    ):
-        if isinstance(bootstrap_update, AgentLoopBootstrap):
-            bootstrap = bootstrap_update
-        else:
-            yield bootstrap_update
+    )) as owned_events:
+        async for bootstrap_update in owned_events:
+            if isinstance(bootstrap_update, AgentLoopBootstrap):
+                bootstrap = bootstrap_update
+            else:
+                yield bootstrap_update
     if bootstrap is None:
         raise RuntimeError("agent loop bootstrap returned without a result")
     user_message = bootstrap.user_message
@@ -194,7 +195,12 @@ async def run_agent_loop(
         raise TypeError("RunContext llm_turn_context must be an LLMTurnContext")
     turn_usage = llm_turn_context.usage
     terminal_projection: TurnTerminalProjection | None = None
-    saw_non_text_result = False
+    iteration_execution_state = IterationExecutionState(
+        turn_usage=turn_usage,
+        tool_batch_count=0,
+        degraded_reason="",
+        stream_text=stream_text,
+    )
 
     try:
         for event in apply_hook_results(
@@ -307,12 +313,6 @@ async def run_agent_loop(
             emit_event=emit_event,
             turn_budget_controller=turn_budget_controller,
         )
-        iteration_execution_state = IterationExecutionState(
-            turn_usage=turn_usage,
-            tool_batch_count=tool_batch_count,
-            degraded_reason=degraded_reason,
-            stream_text=stream_text,
-        )
         deferred_cancel: asyncio.CancelledError | None = None
         try:
             while True:
@@ -322,19 +322,18 @@ async def run_agent_loop(
                 stream_text = StreamTextState()
                 iteration_execution_state.stream_text = stream_text
                 iteration_admission_result = None
-                async for iteration_admission_update in iteration_admission.admit(
+                async with aclosing(iteration_admission.admit(
                     previous_tool_schema_state=turn_tool_schema_state,
                     initial_turn_pending=initial_user_turn_pending,
                     pending_turn_context=pending_turn_context,
-                ):
-                    if isinstance(iteration_admission_update, IterationAdmissionResult):
-                        iteration_admission_result = iteration_admission_update
-                    elif isinstance(iteration_admission_update, TurnTerminalProjection):
-                        terminal_projection = iteration_admission_update
-                    else:
-                        if iteration_admission_update.type == "image_chunk":
-                            saw_non_text_result = True
-                        yield iteration_admission_update
+                )) as owned_events:
+                    async for iteration_admission_update in owned_events:
+                        if isinstance(iteration_admission_update, IterationAdmissionResult):
+                            iteration_admission_result = iteration_admission_update
+                        elif isinstance(iteration_admission_update, TurnTerminalProjection):
+                            terminal_projection = iteration_admission_update
+                        else:
+                            yield iteration_admission_update
                 if iteration_admission_result is None:
                     raise RuntimeError(
                         "iteration admission returned without a result"
@@ -367,24 +366,23 @@ async def run_agent_loop(
                 iteration_id = iteration_admission_result.iteration_id
 
                 iteration_execution_result = None
-                async for iteration_execution_update in iteration_executor.execute(
+                async with aclosing(iteration_executor.execute(
                     messages=messages,
                     tool_schemas=tool_schemas,
                     prompt_cache_safe_params=prompt_cache_safe_params,
                     iteration_id=iteration_id,
                     execution_state=iteration_execution_state,
-                ):
-                    if isinstance(
-                        iteration_execution_update,
-                        IterationExecutionResult,
-                    ):
-                        iteration_execution_result = iteration_execution_update
-                    elif isinstance(iteration_execution_update, TurnTerminalProjection):
-                        terminal_projection = iteration_execution_update
-                    else:
-                        if iteration_execution_update.type == "image_chunk":
-                            saw_non_text_result = True
-                        yield iteration_execution_update
+                )) as owned_events:
+                    async for iteration_execution_update in owned_events:
+                        if isinstance(
+                            iteration_execution_update,
+                            IterationExecutionResult,
+                        ):
+                            iteration_execution_result = iteration_execution_update
+                        elif isinstance(iteration_execution_update, TurnTerminalProjection):
+                            terminal_projection = iteration_execution_update
+                        else:
+                            yield iteration_execution_update
                 if iteration_execution_result is None:
                     raise RuntimeError(
                         "iteration executor returned without a result"
@@ -412,27 +410,6 @@ async def run_agent_loop(
             # persisted the checkpoint and emitted its receipt.
             deferred_cancel = exc
 
-        validation = validate_terminal_outcome(
-            status=str(state.terminal_status or "completed"),
-            reason=str(state.stopped_reason or ""),
-            reply=state.reply,
-            tool_statuses=(record.status for record in state.tool_calls),
-            has_non_text_result=saw_non_text_result,
-        )
-        if validation.changed:
-            _set_terminal_reason(
-                state,
-                validation.reason,
-                status=validation.status,
-            )
-            state.mark_transition(validation.reason)
-            yield AgentEvent.error(
-                validation.message,
-                recoverable=validation.recoverable,
-                error_type="missing_final_answer",
-                error_code="agent.missing_final_answer",
-            )
-
         # The loop exit is the sole normal terminal transition. Inner provider,
         # admission, and budget paths only set terminal state and report evidence.
         # QueryEngine owns the only durable terminal CAS. The provider/tool loop
@@ -457,6 +434,22 @@ async def run_agent_loop(
 
         if deferred_cancel is not None:
             raise deferred_cancel
+    except GeneratorExit:
+        if state.terminal_status is None:
+            # Closing a query iterator is also an interruption. Resource
+            # cleanup alone leaves unmatched tool calls in the next prompt.
+            turn_kernel.interrupt(
+                context_builder=ctx,
+                stream_text=iteration_execution_state.stream_text,
+                scrub_text=_scrub_thinking_tags,
+            )
+            turn_kernel.finalize_checkpoint(
+                session_id=session_id,
+                user_message=user_message,
+                state=state,
+                context_builder=ctx,
+            )
+        raise
     except asyncio.CancelledError:
         raise
     except Exception as exc:

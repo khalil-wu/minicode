@@ -142,10 +142,10 @@ def test_record_non_stream_usage_parses_responses_cache_and_reasoning() -> None:
     )
 
     totals = CostTracker.get_instance().get_summary()
-    assert totals["input_tokens"] == 0
-    assert totals["output_tokens"] == 0
-    assert totals["cache_read_tokens"] == 0
-    assert totals["reasoning_output_tokens"] == 0
+    assert totals["input_tokens"] == 100
+    assert totals["output_tokens"] == 20
+    assert totals["cache_read_tokens"] == 40
+    assert totals["reasoning_output_tokens"] == 7
     assert bucket.input_tokens == 100
     assert bucket.output_tokens == 20
     assert bucket.cache_read_input_tokens == 40
@@ -170,7 +170,7 @@ def test_record_non_stream_usage_parses_chat_cache_fields() -> None:
     assert totals["cache_read_tokens"] == 30
 
 
-def test_record_non_stream_usage_none_is_noop() -> None:
+def test_record_non_stream_usage_none_records_an_unpriced_request() -> None:
     LLMAdapter.record_non_stream_usage(
         None,
         provider="openai",
@@ -180,6 +180,7 @@ def test_record_non_stream_usage_none_is_noop() -> None:
     totals = CostTracker.get_instance().get_summary()
     assert totals["input_tokens"] == 0
     assert totals["output_tokens"] == 0
+    assert totals["unpriced_requests"] == 1
 
 
 def test_cost_tracker_separates_session_totals() -> None:
@@ -249,7 +250,7 @@ def test_cost_tracker_preserves_authoritative_mixed_provider_prompt_totals() -> 
     )
 
     summary = tracker.get_summary()
-    assert summary["input_tokens"] == 900
+    assert summary["input_tokens"] == 1_800
     assert summary["ordinary_input_tokens"] == 700
     assert summary["cache_read_tokens"] == 800
     assert summary["cache_creation_tokens"] == 300
@@ -279,7 +280,7 @@ def test_turn_usage_ignores_malformed_non_stream_provider_counters() -> None:
     assert bucket.input_tokens == 0
     assert bucket.output_tokens == 0
     assert bucket.cache_read_input_tokens == 0
-    assert bucket.cost_usd == 0.0
+    assert bucket.cost_usd is None
 
 
 def test_turn_cost_runtime_reads_turn_owned_provider_cost_before_terminal_commit() -> None:
@@ -292,8 +293,8 @@ def test_turn_cost_runtime_reads_turn_owned_provider_cost_before_terminal_commit
 
 
 def test_record_non_stream_usage_accumulates_explicit_provider_cost() -> None:
-    bucket = UsageInfo()
-    turn_context = LLMTurnContext(usage=bucket)
+    turn_context = LLMTurnContext()
+    bucket = turn_context.usage
     LLMAdapter.record_non_stream_usage(
         {"input_tokens": 1, "cost_usd": 0.75},
         provider="gateway",
@@ -309,7 +310,7 @@ def test_record_non_stream_usage_accumulates_explicit_provider_cost() -> None:
     assert bucket.cost_usd == 0.75
 
 
-def test_record_non_stream_usage_preserves_provider_cache_accounting_mode() -> None:
+def test_record_non_stream_usage_normalizes_provider_cache_accounting_mode() -> None:
     bucket = UsageInfo(input_includes_cache_read=True)
     turn_context = LLMTurnContext(usage=bucket)
     LLMAdapter.record_non_stream_usage(
@@ -328,7 +329,8 @@ def test_record_non_stream_usage_preserves_provider_cache_accounting_mode() -> N
         ),
     )
 
-    assert bucket.input_includes_cache_read is False
+    assert bucket.input_includes_cache_read is True
+    assert bucket.input_tokens == 125
     assert bucket.billable_tokens == 110
 
 

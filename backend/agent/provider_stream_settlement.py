@@ -8,9 +8,6 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from backend.agent.message import AgentEvent
-from backend.agent.provider_protocol import (
-    add_usage,
-)
 from backend.agent.stream_sanitizer import scrub_thinking_tags
 from backend.llm.base import UsageInfo
 
@@ -44,9 +41,8 @@ async def settle_provider_stream(
     context_builder: Any,
     usage: UsageInfo,
     turn_usage: UsageInfo,
-    chain: Any,
 ) -> AsyncIterator[AgentEvent | ProviderStreamSettlement]:
-    """Close provider lifecycle state and account usage."""
+    """Close lifecycle state after the request owner has settled usage."""
 
     missing_terminal = (
         not provider_done
@@ -106,22 +102,6 @@ async def settle_provider_stream(
         action = "retry"
     elif state.stopped_reason:
         action = "terminate"
-
-    # Provider usage is spent even when steering, recovery, or a budget
-    # boundary rejects the attempted response. Codex records every completed
-    # sampling call into the shared rollout budget, not only accepted output.
-    turn_usage = add_usage(turn_usage, usage)
-    record_provider_usage_total = getattr(
-        budget_runtime,
-        "record_provider_usage_total",
-        None,
-    )
-    if callable(record_provider_usage_total):
-        record_provider_usage_total(turn_usage)
-    chain.record_usage(
-        input_tokens=usage.input_tokens or 0,
-        output_tokens=usage.output_tokens or 0,
-    )
 
     if action == "proceed":
         if pending_tool_calls and not provider_raw_done:

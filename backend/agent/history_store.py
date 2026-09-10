@@ -58,8 +58,8 @@ def repair_tool_messages(
         return LLMMessage(
             role="tool",
             content=(
-                f"[Tool call '{tool_name}' did not complete. "
-                "Do not retry the same call; use the information you already have or try a different approach.]"
+                f"[Tool call '{tool_name}' did not complete with a recorded result; "
+                "the execution outcome is unknown.]"
             ),
             name=tool_name,
             tool_call_id=call_id,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -29,20 +30,6 @@ from backend.agent.turn_recovery_runtime import (
     degrade_and_finish,
     recover_withheld_error,
 )
-
-
-def _exposed_tool_names(tool_schemas: list[dict[str, Any]]) -> set[str]:
-    names: set[str] = set()
-    for schema in tool_schemas:
-        if not isinstance(schema, dict):
-            continue
-        function = schema.get("function")
-        if not isinstance(function, dict):
-            continue
-        name = str(function.get("name") or "").strip()
-        if name:
-            names.add(name)
-    return names
 
 
 @dataclass(slots=True)
@@ -217,7 +204,7 @@ class TurnIterationExecutor:
             name=f"mailbox-claim-heartbeat-{iteration_id}",
         )
         try:
-            async for update in stream_provider_response(
+            async with aclosing(stream_provider_response(
                 llm=self.llm,
                 messages=messages,
                 tool_schemas=tool_schemas,
@@ -245,11 +232,12 @@ class TurnIterationExecutor:
                 stream_text=stream_text,
                 degrade_and_finish=degrade_and_finish,
                 recover_withheld_error=recover_withheld_error,
-            ):
-                if isinstance(update, ProviderStreamResult):
-                    provider_stream_result = update
-                else:
-                    yield update
+            )) as owned_events:
+                async for update in owned_events:
+                    if isinstance(update, ProviderStreamResult):
+                        provider_stream_result = update
+                    else:
+                        yield update
         finally:
             lease_stop.set()
             lease_task.cancel()
@@ -273,7 +261,7 @@ class TurnIterationExecutor:
             return
 
         post_stream_result = None
-        async for update in recover_provider_response(
+        async with aclosing(recover_provider_response(
             state=self.agent_state,
             stream_state=stream_state,
             stream_text=stream_text,
@@ -285,12 +273,12 @@ class TurnIterationExecutor:
             scrub_text=scrub_thinking_tags,
             tool_batch_count=execution_state.tool_batch_count,
             degraded_reason=execution_state.degraded_reason,
-            exposed_tool_names=_exposed_tool_names(tool_schemas),
-        ):
-            if isinstance(update, PostStreamRecoveryResult):
-                post_stream_result = update
-            else:
-                yield update
+        )) as owned_events:
+            async for update in owned_events:
+                if isinstance(update, PostStreamRecoveryResult):
+                    post_stream_result = update
+                else:
+                    yield update
         if post_stream_result is None:
             raise RuntimeError("post-stream recovery returned without a result")
         execution_state.tool_batch_count = post_stream_result.tool_batch_count
@@ -311,7 +299,7 @@ class TurnIterationExecutor:
                     dict(item) for item in side_calls if isinstance(item, dict)
                 ]
             final_answer_outcome = None
-            async for update in orchestrate_final_answer(
+            async with aclosing(orchestrate_final_answer(
                 user_message=self.user_message,
                 state=self.agent_state,
                 context_builder=self.context_builder,
@@ -327,11 +315,13 @@ class TurnIterationExecutor:
                 provider_raw_final_text=stream_state.raw_final_text,
                 provider_raw_done=stream_state.raw_done,
                 degraded_reason=execution_state.degraded_reason,
-            ):
-                if isinstance(update, FinalAnswerOutcome):
-                    final_answer_outcome = update
-                else:
-                    yield update
+                has_non_text_result=stream_state.has_non_text_result,
+            )) as owned_events:
+                async for update in owned_events:
+                    if isinstance(update, FinalAnswerOutcome):
+                        final_answer_outcome = update
+                    else:
+                        yield update
             if final_answer_outcome is None:
                 raise RuntimeError(
                     "final-answer orchestrator returned without an outcome"
@@ -347,7 +337,7 @@ class TurnIterationExecutor:
             return
 
         tool_turn_result = None
-        async for update in execute_tool_turn(
+        async with aclosing(execute_tool_turn(
             pending_tool_calls=pending_tool_calls,
             provider_phase=provider_stream_result.response_phase,
             provider_items=stream_state.response_items,
@@ -369,11 +359,12 @@ class TurnIterationExecutor:
             budget_runtime=self.budget_runtime,
             deadline_controller=self.deadline_controller,
             record_tool_call=self.chain.record_tool_call,
-        ):
-            if isinstance(update, ToolTurnResult):
-                tool_turn_result = update
-            else:
-                yield update
+        )) as owned_events:
+            async for update in owned_events:
+                if isinstance(update, ToolTurnResult):
+                    tool_turn_result = update
+                else:
+                    yield update
         if tool_turn_result is None:
             raise RuntimeError("tool turn runtime returned without a result")
         execution_state.tool_batch_count = tool_turn_result.tool_batch_count

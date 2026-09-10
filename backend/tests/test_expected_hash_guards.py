@@ -7,7 +7,6 @@ from pathlib import Path
 
 from backend.agent.loop import AgentLoopSessionContext, run_agent_loop
 from backend.agent.tool_batch_execution import (
-    _refresh_read_file_hashes_after_write,
     execute_tool_batch,
 )
 from backend.agent.tool_execution import inject_expected_hash
@@ -89,17 +88,10 @@ def test_successful_write_advances_read_time_hash_for_next_edit(tmp_path: Path) 
     ctx = _ctx(tmp_path)
     key = canonical_file_path_key(target)
     ctx.metadata["_read_file_hashes"][key] = content_hash("first\n")
-    target.write_text("second\n", encoding="utf-8")
-
-    _refresh_read_file_hashes_after_write(
-        ToolCallEvent(
-            id="write-1",
-            name="write_file",
-            arguments={"file_path": str(target), "content": "second\n"},
-        ),
-        {"files": [{"path": str(target), "status": "modified"}]},
-        ctx,
-    )
+    result = asyncio.run(WriteFileTool().execute(
+        {"file_path": str(target), "content": "second\n", "expected_hash": content_hash("first\n")}, ctx,
+    ))
+    assert not result.is_error
 
     args = {"file_path": str(target), "content": "third\n"}
     inject_expected_hash(args, key, read_time_hashes=ctx.metadata["_read_file_hashes"])

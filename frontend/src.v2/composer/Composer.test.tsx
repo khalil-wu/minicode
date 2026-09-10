@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
@@ -123,6 +123,26 @@ describe("Composer goal bar", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("submits once while context preparation is pending and preserves a newly typed draft", async () => {
+    let finishContext!: (value: string) => void;
+    mocks.buildContextPayload.mockReturnValueOnce(new Promise((resolve) => { finishContext = resolve; }));
+    useAppStore.setState({
+      conversationId: "send-owner", draft: "first draft", currentModel: "gpt-5",
+      isConnected: true, isStreaming: false, attachments: [], selectedMentions: [], selectedSkills: [],
+      slashPanelOpen: false, mentionPanelOpen: false,
+    });
+    render(<Composer />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "composer" }), { key: "Enter" });
+    expect(mocks.buildContextPayload).toHaveBeenCalledTimes(1);
+    fireEvent.change(screen.getByRole("textbox", { name: "composer" }), { target: { value: "next draft" } });
+    await act(async () => finishContext(""));
+    expect(mocks.sendChatMessage).toHaveBeenCalledTimes(1);
+    expect(mocks.sendChatMessage).toHaveBeenCalledWith(expect.objectContaining({ displayContent: "first draft" }));
+    expect(useAppStore.getState().draft).toBe("next draft");
   });
 
   it("marks Code mode for the wide composer axis", () => {

@@ -321,6 +321,66 @@ describe("MarkdownRenderer", () => {
     }
   });
 
+  it.each(["[file](calculator.py)", "[file](C:/side-project/calculator.py)"])(
+    "keeps a side-chat file bound to its owner after the main workspace changes: %s",
+    async (content) => {
+      const original = useAppStore.getState().openEditorFile;
+      const openEditorFile = vi.fn();
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+        path: "calculator.py", content: "return a + b", media_type: "text/x-python",
+      }), { headers: { "content-type": "application/json" } }));
+      useAppStore.setState({ workingDirectory: "C:/main-project", conversationId: "main-owner", openEditorFile });
+      try {
+        render(<MarkdownRenderer content={content} workspaceRoot="C:/side-project" conversationId="side-owner" />);
+        fireEvent.click(screen.getByRole("button", { name: "file" }));
+        expect(openEditorFile).not.toHaveBeenCalled();
+        expect(useAppStore.getState().previewOwnerConversationId).toBe("side-owner");
+        await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+        expect(String(fetchMock.mock.calls[0][0])).toContain(encodeURIComponent("C:/side-project"));
+        expect(useAppStore.getState().workingDirectory).toBe("C:/main-project");
+      } finally {
+        fetchMock.mockRestore();
+        useAppStore.setState({ openEditorFile: original });
+      }
+    },
+  );
+
+  it("resolves side-chat images in their own workspace", () => {
+    useAppStore.setState({ workingDirectory: "C:/main-project", conversationId: "main-owner" });
+    render(<MarkdownRenderer content="![plot](output/plot.png)" workspaceRoot="C:/side-project" conversationId="side-owner" />);
+    expect(screen.getByRole("img", { name: "plot" }).getAttribute("src")).toContain(encodeURIComponent("C:/side-project"));
+  });
+
+  it.each(["。", "，", "；", "：", "！", "？", ",", ";", "!", "?"])(
+    "keeps prose separated by %s outside a bare file reference",
+    (separator) => {
+      const original = useAppStore.getState().openEditorFile;
+      const openEditorFile = vi.fn();
+      useAppStore.setState({ openEditorFile });
+      try {
+        const { container } = render(<MarkdownRenderer content={`任务完成${separator}资料/calculator.py:2 已修复。`} />);
+        fireEvent.click(screen.getByRole("button", { name: "资料/calculator.py:2" }));
+        expect(openEditorFile).toHaveBeenCalledWith("资料/calculator.py", undefined, { line: 2, column: undefined });
+        expect(container.textContent).toContain(`任务完成${separator}`);
+      } finally {
+        useAppStore.setState({ openEditorFile: original });
+      }
+    },
+  );
+
+  it("keeps punctuation in explicitly quoted file names", () => {
+    const original = useAppStore.getState().openEditorFile;
+    const openEditorFile = vi.fn();
+    useAppStore.setState({ openEditorFile });
+    try {
+      render(<MarkdownRenderer content={"读取 `任务完成。calculator.py:2`。"} />);
+      fireEvent.click(screen.getByRole("button", { name: "任务完成。calculator.py:2" }));
+      expect(openEditorFile).toHaveBeenCalledWith("任务完成。calculator.py", undefined, { line: 2, column: undefined });
+    } finally {
+      useAppStore.setState({ openEditorFile: original });
+    }
+  });
+
   it("turns bare file references without line numbers into editor chips", () => {
     const originalOpenEditorFile = useAppStore.getState().openEditorFile;
     const openEditorFile = vi.fn();

@@ -20,7 +20,7 @@ import shlex
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import urlparse
 from weakref import WeakKeyDictionary
 
@@ -50,6 +50,11 @@ _WORKSPACE_ROOT_UNSET = object()
 # Windows and macOS resolve paths case-insensitively, so a denylist entry must
 # match regardless of the casing the model happens to use.
 _FILESYSTEM_IS_CASE_INSENSITIVE = sys.platform in {"win32", "darwin"}
+@lru_cache(maxsize=128)
+def _compiled_path_deny_spec(patterns: tuple[str, ...]) -> GitIgnoreSpec:
+    return GitIgnoreSpec.from_lines(patterns)
+
+
 def _tool_pattern_matches(tool_name: str, pattern: str) -> bool:
     """Match ordinary globs plus an MCP server-level rule.
 
@@ -1178,11 +1183,6 @@ class PermissionChecker:
         if context is not None and context.mode == "bypass":
             if tool_level == PermissionLevel.ALWAYS_DENY:
                 return PermissionLevel.ALWAYS_DENY, "tool", f"{tool_name}.check_permission"
-            # Bypass removes ordinary prompts, not parser-differential risk
-            # signals. A substitution can hide a destructive command from the
-            # token-level classifier, so it remains a confirmation boundary.
-            if injection_reason:
-                return PermissionLevel.CONFIRM, "injection_risk", injection_reason
             if tool is not None:
                 try:
                     side_effect_kind = str(tool.get_side_effect_kind(args) or "").strip().lower()
@@ -1384,6 +1384,7 @@ class PermissionChecker:
         content: str | None = None,
         *,
         context: PermissionContext | None = None,
+        allow_workspace_escape: bool = False,
     ) -> tuple[bool, str]:
         if operation not in {"read", "write", "execute"}:
             return False, f"Unsupported file operation: {operation}"
@@ -1419,7 +1420,12 @@ class PermissionChecker:
             if self._workspace_root == effective_root and self._sandbox is not None
             else SandboxValidator(effective_root)
         )
-        return sandbox.validate_file_operation(str(path), operation, content)
+        return sandbox.validate_file_operation(
+            str(path.resolve()), operation, content,
+            allow_workspace_escape=(
+                allow_workspace_escape or (context is not None and context.mode == "bypass")
+            ),
+        )
 
     def evaluate(
         self,
@@ -1519,19 +1525,15 @@ class PermissionChecker:
         return normalized_path in {"", "."} and resolved_path.exists()
 
     def is_path_allowed(self, file_path: str, *, context: PermissionContext | None = None) -> bool:
-        """
-        检查路径是否在允许范围内。
+        """检查路径是否在允许范围内，denylist 优先于 allowlist。"""
+        return self.prepare_path_check(context=context)(file_path)
 
-        规则：
-        1. 路径不能匹配 denylist 中的任何模式
-        2. 如果 allowlist 非空，路径必须匹配其中至少一个
+    def prepare_path_check(self, *, context: PermissionContext | None = None) -> Callable[[str], bool]:
+        """Prepare one operation's policy; each candidate is resolved afresh.
 
-        Returns:
-            True 表示允许访问
+        Search operations check thousands of files against the same roots and
+        rules. Resolve those roots once without caching any path decision.
         """
-        # 检查黑名单
-        if windows_path_safety_reason(file_path):
-            return False
         effective_root = (
             getattr(context, "workspace_root", None)
             if context is not None and getattr(context, "workspace_root", None) is not None
@@ -1544,42 +1546,13 @@ class PermissionChecker:
         )
         path_denylist = list(self._settings.path_denylist)
         path_allowlist = list(self._settings.path_allowlist)
-        path_obj = Path(file_path).expanduser()
-        resolved_path = (
-            path_obj
-            if path_obj.is_absolute()
-            else resolved_root / path_obj
-            if resolved_root is not None
-            else path_obj.resolve()
-        )
-        declared_readable = False
+        readable_roots: list[Path] = []
         if context is not None:
             for raw_root in context.filesystem_constraints.get("readable_roots", []):
                 try:
-                    resolved_path.resolve().relative_to(
-                        Path(str(raw_root)).expanduser().resolve()
-                    )
-                    declared_readable = True
-                    break
+                    readable_roots.append(Path(str(raw_root)).expanduser().resolve())
                 except (OSError, ValueError):
                     continue
-        if resolved_root is None and not declared_readable:
-            return False
-        if resolved_root is not None:
-            try:
-                normalized_path = resolved_path.resolve().relative_to(
-                    resolved_root
-                ).as_posix()
-            except ValueError:
-                normalized_path = str(file_path).replace("\\", "/").strip()
-        else:
-            normalized_path = resolved_path.resolve().as_posix()
-        if normalized_path == ".":
-            normalized_path = ""
-        raw_path = str(file_path).replace("\\", "/").strip()
-        while normalized_path.startswith("./"):
-            normalized_path = normalized_path[2:]
-        if context is not None:
             host_denylist: list[str] = []
             if "denylist" in context.filesystem_constraints:
                 host_denylist = list(context.filesystem_constraints["denylist"])
@@ -1592,53 +1565,75 @@ class PermissionChecker:
             if context.mode == "bypass":
                 path_denylist = _bypass_denylist(host_denylist)
 
-        deny_spec = GitIgnoreSpec.from_lines(
+        deny_patterns = tuple(
             pattern.replace("\\", "/").strip()
             for pattern in path_denylist
             if str(pattern or "").strip()
         )
-        candidate = normalized_path or raw_path.lstrip("/")
-        if deny_spec.match_file(candidate):
-            return False
-        if _FILESYSTEM_IS_CASE_INSENSITIVE:
-            # NTFS and APFS resolve "Secrets/api.txt" and "secrets/api.txt" to
-            # the same file, but gitignore matching is case-sensitive, so a
-            # differently-cased path would slip past a denylist entry. cc
-            # normalizes case for the same reason (filesystem.ts).
-            folded_spec = GitIgnoreSpec.from_lines(
-                pattern.replace("\\", "/").strip().lower()
-                for pattern in path_denylist
-                if str(pattern or "").strip()
-            )
-            if folded_spec.match_file(candidate.lower()):
-                return False
-
-        # 检查白名单（空白名单 = 不限制）
-        if context is not None and context.mode == "bypass":
-            return True
-
-        if declared_readable:
-            return True
-
-        if not path_allowlist:
-            return True
-
+        deny_spec = _compiled_path_deny_spec(deny_patterns)
+        # Match case-insensitively on NTFS/APFS without changing gitignore's
+        # interpretation or the order of negation rules.
+        folded_spec = (
+            _compiled_path_deny_spec(tuple(pattern.lower() for pattern in deny_patterns))
+            if _FILESYSTEM_IS_CASE_INSENSITIVE else None
+        )
+        bypass = context is not None and context.mode == "bypass"
+        allow_patterns: list[str] = []
         for allow_pattern in path_allowlist:
             normalized = allow_pattern.replace("\\", "/").strip().rstrip("/")
             while normalized.startswith("./"):
                 normalized = normalized[2:]
-            if normalized in {"", "."}:
-                return True
-            if not normalized_path and normalized in {"", "."}:
-                return True
-            if normalized_path == normalized or normalized_path.startswith(normalized + "/"):
-                return True
-            if fnmatch.fnmatch(normalized_path, normalized + "/*"):
-                return True
-            if fnmatch.fnmatch(normalized_path, normalized + "/**"):
-                return True
+            allow_patterns.append(normalized)
 
-        return False
+        def is_allowed(file_path: str) -> bool:
+            if windows_path_safety_reason(file_path):
+                return False
+            path_obj = Path(file_path).expanduser()
+            resolved_path = (
+                path_obj if path_obj.is_absolute() or resolved_root is None
+                else resolved_root / path_obj
+            ).resolve()
+            declared_readable = False
+            for readable_root in readable_roots:
+                try:
+                    resolved_path.relative_to(readable_root)
+                    declared_readable = True
+                    break
+                except ValueError:
+                    continue
+            if resolved_root is None and not declared_readable:
+                return False
+            if resolved_root is not None:
+                try:
+                    normalized_path = resolved_path.relative_to(resolved_root).as_posix()
+                except ValueError:
+                    normalized_path = str(file_path).replace("\\", "/").strip()
+            else:
+                normalized_path = resolved_path.as_posix()
+            if normalized_path == ".":
+                normalized_path = ""
+            raw_path = str(file_path).replace("\\", "/").strip()
+            while normalized_path.startswith("./"):
+                normalized_path = normalized_path[2:]
+            candidate = normalized_path or raw_path.lstrip("/")
+            if deny_spec.match_file(candidate):
+                return False
+            if folded_spec is not None and folded_spec.match_file(candidate.lower()):
+                return False
+            if bypass or declared_readable or not allow_patterns:
+                return True
+            for normalized in allow_patterns:
+                if normalized in {"", "."}:
+                    return True
+                if normalized_path == normalized or normalized_path.startswith(normalized + "/"):
+                    return True
+                if fnmatch.fnmatch(normalized_path, normalized + "/*"):
+                    return True
+                if fnmatch.fnmatch(normalized_path, normalized + "/**"):
+                    return True
+            return False
+
+        return is_allowed
 
     def get_denial_reason(
         self,
@@ -1730,6 +1725,11 @@ class PermissionChecker:
                         str(file_path),
                         operation,
                         context=context,
+                        allow_workspace_escape=(
+                            tool_name == "run_command"
+                            and args.get("with_escalated_permissions") is True
+                            and (context is None or context.allow_unsandboxed_commands)
+                        ),
                     )
                     if not allowed:
                         return reason

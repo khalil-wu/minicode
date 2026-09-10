@@ -10,7 +10,7 @@ import tempfile
 from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from filelock import FileLock
@@ -144,6 +144,7 @@ class PluginStore:
         source: Mapping[str, Any] | None = None,
         activate: bool = True,
         overwrite: bool = False,
+        after_activate: Callable[[StoredPlugin], None] | None = None,
     ) -> StoredPlugin:
         raw_source_dir = Path(source_dir).expanduser()
         if raw_source_dir.is_symlink():
@@ -192,6 +193,8 @@ class PluginStore:
                     True,
                     strict=True,
                 )
+            if after_activate is not None:
+                after_activate(existing)
             return existing
         _ensure_safe_store_parent(self.root, target.parent)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -199,6 +202,8 @@ class PluginStore:
         backup = target.parent / f".{target.name}.{uuid4().hex}.backup"
         target_replaced = False
         backup_created = False
+        selector_path = target.parent / "active.json"
+        previous_selector = selector_path.read_bytes() if selector_path.exists() else None
         try:
             shutil.copytree(source_dir, temp, symlinks=False)
             if _lexists(target):
@@ -229,6 +234,8 @@ class PluginStore:
                     source=record.source,
                     active=True,
                 )
+            if after_activate is not None:
+                after_activate(record)
             if backup_created and backup.exists():
                 shutil.rmtree(backup)
             return record
@@ -239,6 +246,13 @@ class PluginStore:
                 shutil.rmtree(target, ignore_errors=True)
             if backup_created and backup.exists() and not target.exists():
                 backup.replace(target)
+            if activate:
+                if previous_selector is None:
+                    selector_path.unlink(missing_ok=True)
+                else:
+                    from backend.atomic_io import atomic_write_bytes
+
+                    atomic_write_bytes(selector_path, previous_selector)
             raise
 
     @_synchronized_store_mutation

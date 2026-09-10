@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 
 export interface ContextMenuItem {
@@ -6,6 +7,7 @@ export interface ContextMenuItem {
   icon?: React.ReactNode;
   shortcut?: string;
   disabled?: boolean;
+  danger?: boolean;
   separator?: boolean;
   onClick?: () => void;
 }
@@ -19,35 +21,27 @@ interface ContextMenuProps {
 export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
   const ref = useRef<HTMLDivElement>(null);
   const [adjusted, setAdjusted] = useState(position);
-  const activeIndexRef = useRef(-1);
+  const triggerRef = useRef<HTMLElement | null>(null);
 
-  const actionableIndexes = items
-    .map((item, index) => (item.separator || item.disabled ? -1 : index))
-    .filter((index) => index >= 0);
-
-  const focusItemAt = useCallback((index: number) => {
-    const menu = ref.current;
-    if (!menu) return;
-    const buttons = Array.from(menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]:not([disabled])'));
-    const next = buttons[index];
-    if (next) {
-      activeIndexRef.current = index;
-      next.focus();
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape" || event.key === "Tab") {
+      event.stopPropagation();
+      if (event.key === "Escape") event.preventDefault();
+      triggerRef.current?.focus();
+      onClose();
+      return;
     }
-  }, []);
-
-  const moveActive = useCallback(
-    (delta: 1 | -1) => {
-      if (actionableIndexes.length === 0) return;
-      const current = activeIndexRef.current;
-      const currentPos = actionableIndexes.indexOf(current);
-      const nextPos = currentPos < 0
-        ? (delta === 1 ? 0 : actionableIndexes.length - 1)
-        : (currentPos + delta + actionableIndexes.length) % actionableIndexes.length;
-      focusItemAt(actionableIndexes[nextPos]);
-    },
-    [actionableIndexes, focusItemAt],
-  );
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]:not(:disabled)'));
+    const current = buttons.findIndex((button) => button === document.activeElement);
+    const next = event.key === "Home" ? 0
+      : event.key === "End" ? buttons.length - 1
+      : current < 0 ? (event.key === "ArrowDown" ? 0 : buttons.length - 1)
+      : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+    buttons[next]?.focus();
+  };
 
   // Dismiss on outside mousedown or Escape; arrow/Home/End roving focus
   useEffect(() => {
@@ -56,27 +50,15 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
         onClose();
       }
     };
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        onClose();
-        return;
-      }
-      if (e.key === "ArrowDown") { e.preventDefault(); moveActive(1); return; }
-      if (e.key === "ArrowUp") { e.preventDefault(); moveActive(-1); return; }
-      if (e.key === "Home") { e.preventDefault(); focusItemAt(actionableIndexes[0] ?? -1); return; }
-      if (e.key === "End") { e.preventDefault(); focusItemAt(actionableIndexes[actionableIndexes.length - 1] ?? -1); return; }
-    };
     // Use setTimeout so the current click event doesn't immediately fire
     const timer = window.setTimeout(() => {
       window.addEventListener("mousedown", handleMouseDown);
-      window.addEventListener("keydown", handleKeyDown);
     }, 0);
     return () => {
       window.clearTimeout(timer);
       window.removeEventListener("mousedown", handleMouseDown);
-      window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [onClose, moveActive, focusItemAt, actionableIndexes]);
+  }, [onClose]);
 
   // Adjust position to stay within viewport
   useLayoutEffect(() => {
@@ -93,6 +75,7 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
 
   // Focus the menu so keyboard events work
   useEffect(() => {
+    triggerRef.current = document.activeElement as HTMLElement;
     ref.current?.focus();
   }, []);
 
@@ -102,6 +85,7 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
       className="context-menu-surface"
       tabIndex={-1}
       role="menu"
+      onKeyDown={handleKeyDown}
       style={{
         position: "fixed",
         left: adjusted.x,
@@ -131,6 +115,8 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
         ) : (
           <button
             key={i}
+            type="button"
+            tabIndex={-1}
             role="menuitem"
             aria-disabled={item.disabled || undefined}
             className="mc-menu-item"
@@ -138,10 +124,6 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
             onClick={() => {
               item.onClick?.();
               onClose();
-            }}
-            onFocus={() => {
-              const index = items.slice(0, i + 1).filter((it) => !it.separator && !it.disabled).length - 1;
-              activeIndexRef.current = index;
             }}
             style={{
               display: "flex",
@@ -153,7 +135,7 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
               border: 0,
               color: item.disabled
                 ? "var(--text-muted)"
-                : "var(--text-secondary)",
+                : item.danger ? "var(--state-danger)" : "var(--text-secondary)",
               cursor: item.disabled ? "default" : "pointer",
               padding: "6px 12px",
               fontSize: "var(--text-sm, 13px)",

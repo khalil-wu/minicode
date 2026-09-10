@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import mimetypes
 import os
 from pathlib import Path
 from typing import Any
 
 from backend.artifact.store import ArtifactStore
 from backend.attachments.store import AttachmentStore
+from backend.media_types import media_type_for_path
 from backend.permissions.context import ToolExecutionContext
-from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
+from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema, artifact_owner_workspace_root
 
 
 PRESENTABLE_FILE_EXTENSIONS = frozenset({
@@ -130,7 +130,7 @@ class PresentFileTool(BaseTool):
 
         label = str(args.get("label") or resolved.name).strip() or resolved.name
         markdown_path = resolved.as_posix()
-        mime_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+        mime_type = media_type_for_path(resolved)
         output_file = {
             "path": str(resolved),
             "name": label,
@@ -243,7 +243,7 @@ class ReadArtifactTool(BaseTool):
             return self._error_result("Missing artifact_id argument")
 
         conversation_id = str(getattr(context, "conversation_id", "") or "") if context else ""
-        workspace_root = str(getattr(context, "workspace_root", "") or "") if context else ""
+        workspace_root = artifact_owner_workspace_root(context)
         payload = None
         if self._attachment_store is not None:
             payload = self._attachment_store.find_payload(

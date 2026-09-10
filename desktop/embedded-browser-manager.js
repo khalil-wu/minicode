@@ -739,7 +739,8 @@ function activate(id, conversationId) {
   const requestedId = entry.id;
   activeViewId = requestedId;
   for (const [entryId, entry] of views) {
-    entry.view.setVisible(entryId === requestedId);
+    const bounds = entry.view.getBounds();
+    entry.view.setVisible(entryId === requestedId && bounds.width > 0 && bounds.height > 0);
   }
   return true;
 }

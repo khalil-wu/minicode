@@ -181,25 +181,12 @@ describe("ws-outbox", () => {
     await expect(pending).resolves.toEqual(result);
   });
 
-  it("sends authoritative conversation deletion before desktop cleanup settles", async () => {
+  it("requests backend-coordinated cleanup without closing local resources ahead of preflight", async () => {
     const lifecycle: string[] = [];
-    let resolvePtyCleanup!: (value: number) => void;
-    let resolveBrowserCleanup!: (value: number) => void;
     vi.mocked(isDesktop).mockReturnValue(true);
-    vi.mocked(ptyKillConversation).mockImplementation(() => {
-      lifecycle.push("pty-cleanup");
-      return new Promise<number>((resolve) => {
-        resolvePtyCleanup = resolve;
-      });
-    });
-    vi.mocked(embeddedBrowserCloseConversation).mockImplementation(() => {
-      lifecycle.push("browser-cleanup");
-      return new Promise<number>((resolve) => {
-        resolveBrowserCleanup = resolve;
-      });
-    });
     registerWebSocketSender((command) => {
       lifecycle.push("delete-command");
+      expect(command).toMatchObject({ client_resource_cleanup: true });
       queueMicrotask(() => resolveClientCommandResult({
         type: "command.result",
         command: "conversation.delete",
@@ -215,14 +202,11 @@ describe("ws-outbox", () => {
       conversation_id: "conv_delete_owner",
     });
 
-    expect(lifecycle).toEqual(["delete-command", "pty-cleanup", "browser-cleanup"]);
+    expect(lifecycle).toEqual(["delete-command"]);
     await expect(deletion).resolves.toBe(true);
 
-    expect(ptyKillConversation).toHaveBeenCalledWith("conv_delete_owner");
-    expect(embeddedBrowserCloseConversation).toHaveBeenCalledWith("conv_delete_owner");
-    resolvePtyCleanup(2);
-    resolveBrowserCleanup(1);
-    await Promise.resolve();
+    expect(ptyKillConversation).not.toHaveBeenCalled();
+    expect(embeddedBrowserCloseConversation).not.toHaveBeenCalled();
   });
 
   it("uses the long-operation deadline for authoritative conversation deletion", async () => {
@@ -253,15 +237,14 @@ describe("ws-outbox", () => {
     }
   });
 
-  it("keeps deletion authoritative when desktop cleanup fails and reports a warning", async () => {
+  it("reports authoritative cleanup rejection as a failed deletion", async () => {
     vi.mocked(isDesktop).mockReturnValue(true);
-    vi.mocked(ptyKillConversation).mockRejectedValue(new Error("terminal still running"));
     const sender = vi.fn((command) => {
       queueMicrotask(() => resolveClientCommandResult({
         type: "command.result",
         command: "conversation.delete",
-        level: "success",
-        message: "",
+        level: "error",
+        message: "terminal still running",
         data: { client_command_id: command.client_command_id },
       }));
       return true;
@@ -271,45 +254,42 @@ describe("ws-outbox", () => {
     await expect(sendConversationDeleteCommand({
       type: "conversation.delete",
       conversation_id: "conv_delete_owner",
-    })).resolves.toBe(true);
+    })).resolves.toBe(false);
     await Promise.resolve();
 
     expect(sender).toHaveBeenCalledOnce();
     expect(pushToast).toHaveBeenCalledWith(
-      expect.stringContaining("会话删除已继续：terminal still running"),
-      "warning",
-      5000,
+      "terminal still running",
+      "error",
+      6000,
     );
   });
 
-  it("bounds hanging desktop cleanup without delaying backend deletion", async () => {
+  it("waits for the backend cleanup outcome instead of declaring deletion after 2.5 seconds", async () => {
     vi.useFakeTimers();
     try {
       vi.mocked(isDesktop).mockReturnValue(true);
-      vi.mocked(ptyKillConversation).mockReturnValue(new Promise<number>(() => {}));
-      vi.mocked(embeddedBrowserCloseConversation).mockReturnValue(new Promise<number>(() => {}));
+      let commandId = "";
       registerWebSocketSender((command) => {
-        queueMicrotask(() => resolveClientCommandResult({
-          type: "command.result",
-          command: "conversation.delete",
-          level: "success",
-          message: "",
-          data: { client_command_id: command.client_command_id },
-        }));
+        commandId = String(command.client_command_id);
         return true;
       });
 
-      await expect(sendConversationDeleteCommand({
+      const observed = vi.fn();
+      const deletion = sendConversationDeleteCommand({
         type: "conversation.delete",
         conversation_id: "conv_hanging_cleanup",
-      })).resolves.toBe(true);
+      }).then(observed);
 
       await vi.advanceTimersByTimeAsync(2_500);
-      expect(pushToast).toHaveBeenCalledWith(
-        expect.stringContaining("清理超过 2.5 秒"),
-        "warning",
-        5000,
-      );
+      expect(observed).not.toHaveBeenCalled();
+      expect(pushToast).not.toHaveBeenCalled();
+      resolveClientCommandResult({
+        type: "command.result", command: "conversation.delete", level: "error",
+        message: "cleanup timed out; conversation retained", data: { client_command_id: commandId },
+      });
+      await deletion;
+      expect(observed).toHaveBeenCalledWith(false);
     } finally {
       vi.useRealTimers();
     }

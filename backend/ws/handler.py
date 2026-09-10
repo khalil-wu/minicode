@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 from datetime import datetime, timezone
 import logging
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -886,6 +888,7 @@ class WebSocketSession(
         )
         run_cancel_event = asyncio.Event()
         run_metadata = dict(metadata or {})
+        run_metadata.setdefault("user_message_id", f"user_{uuid.uuid4().hex}")
         admission_restored = bool(run_metadata.get("_turn_admission_restored"))
         admission_required = not bool(run_metadata.get("_parent_notification_only"))
         admission_future: asyncio.Future[None] | None = None
@@ -1271,13 +1274,13 @@ class WebSocketSession(
         self._mcp_manager_snapshot_id = manager_snapshot_id
         return True
 
-    async def cancel_pending_approvals(
+    def cancel_pending_approvals(
         self,
         *,
         reason: str,
         conversation_id: str | None = None,
-    ) -> list[str]:
-        return await self._cancel_pending_approvals(
+    ) -> Awaitable[list[str]]:
+        return self._cancel_pending_approvals(
             reason=reason,
             conversation_id=conversation_id,
         )
@@ -1581,22 +1584,26 @@ class WebSocketSession(
         await self.send_payload(payload, log_context=f"event:{event.type}")
         if event.type not in _NOTIFICATION_HOOK_EVENT_TYPES:
             return
+        from backend.hooks.manager import get_hook_manager_for_session
+
+        hook_scope_id = str(payload.get("conversation_id") or self.active_conversation_id or self.session_id)
+        hook_manager = get_hook_manager_for_session(hook_scope_id)
         # Notification is observational work. It must not hold up the
         # authoritative WebSocket projection or make a started child appear
         # only after it has completed. Keep the task session-owned so shutdown
         # can cancel and drain it with explicit cleanup accounting.
         hook_task = asyncio.create_task(
-            self._run_notification_hook_for_event(event, dict(payload)),
+            self._run_notification_hook_for_event(event, dict(payload), hook_manager),
             name=f"notification-hook:{event.type}",
         )
         self._notification_hook_tasks.add(hook_task)
         hook_task.add_done_callback(self._notification_hook_tasks.discard)
         hook_task.add_done_callback(_consume_task_result)
 
-    async def _run_notification_hook_for_event(self, event: AgentEvent, payload: dict[str, Any]) -> None:
+    async def _run_notification_hook_for_event(self, event: AgentEvent, payload: dict[str, Any], hook_manager: Any | None) -> None:
         from backend.hooks.runtime import run_notification_hook_for_event
 
-        await run_notification_hook_for_event(event_type=event.type, payload=payload)
+        await run_notification_hook_for_event(event_type=event.type, payload=payload, hook_manager=hook_manager)
 
     def _build_ws_payload(self, event: AgentEvent) -> dict[str, Any]:
         if event.type == "approval_request":

@@ -37,6 +37,41 @@ class _RecordingLLM(LLMAdapter):
         return "Audit answer"
 
 
+@pytest.mark.asyncio
+async def test_continuation_metrics_sum_query_turns_once(startup_case, monkeypatch):
+    from backend.agent.message import AgentEvent
+    from backend.agent.query_engine import QueryEngine
+    from backend.llm.base import ToolCallEvent, UsageInfo
+    from backend.tools import agent_tools
+
+    run_ids = []
+    agent_ids = []
+    turns = [UsageInfo(input_tokens=100, output_tokens=20, cost_usd=0.1), UsageInfo(input_tokens=80, output_tokens=10, cost_usd=0.2)]
+
+    async def submit(self, submission):
+        index = len(run_ids)
+        run_ids.append(submission.runtime.metadata["run_id"])
+        agent_ids.append(submission.runtime.metadata["agent_id"])
+        submission.runtime.run_context.llm_turn_context = SimpleNamespace(usage=turns[index])
+        submission.state.reply = f"Turn {index + 1} answer"
+        submission.state.iterations = index + 1
+        submission.state.tool_calls = [ToolCallEvent(id=f"tool-{index}", name="read_file", arguments={})]
+        yield AgentEvent.done(status="completed", reason="success")
+
+    monkeypatch.setattr(QueryEngine, "submit", submit)
+    monkeypatch.setattr(agent_tools._SubagentLifecycleOwner, "after_subagent_stop", AsyncMock(side_effect=[SimpleNamespace(action="continue", prompt="Continue the review"), SimpleNamespace(action="terminal")]))
+    child_id, result = await _launch(startup_case, "foreground")
+    assert not result.is_error
+    assert len(set(run_ids)) == 2
+    assert agent_ids == [child_id, child_id]
+    stored = startup_case.runtime._subagent_results[child_id]
+    assert stored.iterations == 3
+    assert stored.tool_call_count == 2
+    assert stored.usage["input_tokens"] == 180
+    assert stored.usage["output_tokens"] == 30
+    assert stored.usage["cost_usd"] == pytest.approx(0.3)
+
+
 @pytest.fixture
 def startup_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     workspace = tmp_path / "workspace"

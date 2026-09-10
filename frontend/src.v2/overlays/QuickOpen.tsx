@@ -75,7 +75,7 @@ export const QuickOpen = () => {
   };
 
   const openFile = (file: { path: string; name: string }) => {
-    useAppStore.getState().openEditorFile(file.path, file.name);
+    useAppStore.getState().openEditorFile(file.path, file.name, { exact: true });
     close();
   };
 

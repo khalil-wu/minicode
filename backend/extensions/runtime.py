@@ -16,7 +16,7 @@ import copy
 import inspect
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any
 
@@ -173,36 +173,35 @@ def _normalise_content(value: Any) -> str:
 
 
 def _as_tool_result(value: Any) -> Any:
-    """Return a host ``ToolResult`` when available, otherwise a tiny fallback."""
+    """Project extension results through the existing host result contract."""
+    from backend.tools.base import ToolResult
 
-    try:
-        from backend.tools.base import ToolResult
-    except Exception:  # pragma: no cover - import is available in MiniCode
-        ToolResult = None  # type: ignore[assignment]
-
-    if ToolResult is not None and isinstance(value, ToolResult):
+    if isinstance(value, ToolResult):
         return value
     if isinstance(value, Mapping):
-        content = _normalise_content(value.get("content", value.get("result", "")))
+        payload = value.get("content", value.get("result", ""))
         kwargs = {
-            "is_error": bool(value.get("is_error", False)),
-            "status": value.get("status"),
-            "display_summary": value.get("display_summary"),
-            "details": value.get("details"),
+            item.name: value[item.name]
+            for item in fields(ToolResult)
+            if item.name != "content" and item.name in value
         }
-        # ToolResult intentionally has a narrow constructor; only pass fields
-        # that are part of the current host contract.
-        if ToolResult is not None:
-            allowed = {
-                key: val
-                for key, val in kwargs.items()
-                if key in {"is_error", "status", "display_summary"}
-            }
-            return ToolResult(content=content, **allowed)
-        return {"content": content, **kwargs}
-    if ToolResult is not None:
-        return ToolResult(content=_normalise_content(value))
-    return {"content": _normalise_content(value), "is_error": False}
+        if isinstance(payload, list):
+            text_blocks = []
+            images = list(kwargs.get("images", []))
+            for block in payload:
+                if isinstance(block, Mapping) and block.get("type") == "image":
+                    native = {
+                        "data": block["data"],
+                        "media_type": block.get("media_type", block.get("mime_type", block.get("mimeType", "image/png"))),
+                    }
+                    if native not in images:
+                        images.append(native)
+                else:
+                    text_blocks.append(block)
+            payload = text_blocks
+            kwargs["images"] = images
+        return ToolResult(content=_normalise_content(payload), **kwargs)
+    return ToolResult(content=_normalise_content(value))
 
 
 class ExtensionEventBus:
@@ -407,6 +406,8 @@ class ExtensionRuntime:
             for item in self.pending_provider_registrations
             if item.extension_path != extension_path
         ]
+        for unsubscribe in self._event_unsubscribers.pop(extension_path, ()):
+            unsubscribe()
 
     def track_event_subscription(
         self, owner: str, unsubscribe: Callable[[], None]
@@ -1679,12 +1680,6 @@ class ExtensionRunner:
         modified = False
         for extension, handler in self._handlers_for("tool_result"):
             try:
-                before_state = (
-                    event.content,
-                    event.details,
-                    event.is_error,
-                    event.usage,
-                )
                 value = await _maybe_await(
                     _call_with_signature(
                         handler,
@@ -1692,6 +1687,10 @@ class ExtensionRunner:
                         (event, ctx),
                     )
                 )
+                # Handlers may mutate the event, including nested fields, and
+                # return None. Project that same event instead of comparing
+                # shallow aliases that cannot observe in-place mutations.
+                modified = True
                 patch = ToolResultPatch.from_value(value)
                 if patch is None:
                     continue
@@ -1706,15 +1705,6 @@ class ExtensionRunner:
                     modified = True
                 if patch.has_usage:
                     event.usage = patch.usage
-                    modified = True
-                if (
-                    event.content,
-                    event.details,
-                    event.is_error,
-                    event.usage,
-                ) != before_state:
-                    # Preserve the ergonomic in-place mutation form as well as
-                    # the documented returned patch form.
                     modified = True
             except Exception as exc:
                 self.record_error("tool_result", extension.path, exc)

@@ -38,7 +38,6 @@ from backend.tools.path_resolution import (
     PathTraversalError,
     _is_bypass_mode,
     _is_declared_readable_path,
-    denied_path_patterns,
 )
 from backend.workspace.path_filters import is_windows_reserved_path
 
@@ -66,8 +65,7 @@ from backend.tools.search_support import (
     _coerce_head_limit,
     _coerce_nonnegative_int,
     _compile_glob_filter,
-    _denied_path_patterns,
-    _denylist_ripgrep_globs,
+    search_path_permission,
     _glob_with_python,
     _glob_with_ripgrep,
     _grep_candidates,
@@ -198,9 +196,7 @@ class GlobFilesTool(BaseTool):
         if not path.exists() or not path.is_dir():
             return self._error_result(f"Directory does not exist: {directory}")
 
-        denied_patterns = _denied_path_patterns(context)
-        checker = getattr(context, "permission_checker", None) if context is not None else None
-        permission = getattr(context, "permission", None) if context is not None else None
+        is_allowed = search_path_permission(context)
 
         if _HAS_RIPGREP:
             display_matches, truncated, error = await _glob_with_ripgrep(
@@ -208,7 +204,7 @@ class GlobFilesTool(BaseTool):
                 pattern=str(pattern),
                 limit=head_limit,
                 offset=offset,
-                exclude_globs=_denylist_ripgrep_globs(denied_patterns),
+                is_allowed=is_allowed,
             )
             if error is not None:
                 return self._error_result(error)
@@ -225,11 +221,7 @@ class GlobFilesTool(BaseTool):
                     pattern=str(pattern),
                     limit=head_limit,
                     offset=offset,
-                    is_allowed=(
-                        (lambda candidate: checker.is_path_allowed(str(candidate), context=permission))
-                        if checker is not None and denied_patterns
-                        else None
-                    ),
+                    is_allowed=is_allowed,
                 )
             except SearchResourceLimitError as exc:
                 return self._error_result(str(exc))
@@ -378,7 +370,7 @@ class GrepFilesTool(BaseTool):
                     },
                     "path": {
                         "type": "string",
-                        "description": "Alias for directory.",
+                        "description": "File or directory to search; defaults to workspace root.",
                     },
                     "file_extensions": {
                         "type": "array",
@@ -477,9 +469,11 @@ class GrepFilesTool(BaseTool):
             return self._error_result(str(exc))
 
         if not path.exists():
-            return self._error_result(f"目录不存在: {directory}")
+            return self._error_result(f"搜索路径不存在: {directory}")
 
-        denied_patterns = _denied_path_patterns(context)
+        is_allowed = search_path_permission(context)
+        if path.is_file() and is_allowed is not None and not is_allowed(path):
+            return self._error_result(f"Read permission denied: {path}")
 
         # --- Ripgrep backend (preferred whenever available) ---
         if _HAS_RIPGREP:
@@ -498,7 +492,7 @@ class GrepFilesTool(BaseTool):
                 multiline=multiline,
                 file_type=file_type or None,
                 file_extensions=file_extensions,
-                exclude_globs=_denylist_ripgrep_globs(denied_patterns),
+                is_allowed=is_allowed,
             )
             if is_error:
                 return self._error_result(rg_output)
@@ -522,17 +516,11 @@ class GrepFilesTool(BaseTool):
         except (re.error, getattr(_safe_regex, "error", re.error)) as exc:
             return self._error_result(f"无效的正则表达式: {exc}")
 
-        checker = getattr(context, "permission_checker", None) if context is not None else None
-        permission = getattr(context, "permission", None) if context is not None else None
         candidate_files: Iterator[Path] = _iter_candidate_files(
             path,
             file_extensions,
             ignore_rules="directories" if glob_filter and not glob_filter.startswith("!") else "all",
-            is_allowed=(
-                (lambda candidate: checker.is_path_allowed(str(candidate), context=permission))
-                if checker is not None and denied_patterns
-                else None
-            ),
+            is_allowed=is_allowed,
         )
         if glob_filter:
             root = path.resolve()

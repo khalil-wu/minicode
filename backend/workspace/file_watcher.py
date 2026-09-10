@@ -19,6 +19,7 @@ from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
 from backend.workspace.file_state_cache import get_global_file_cache
 from backend.workspace.fuzzy_search import invalidate_global_fuzzy_search
+from backend.config_helpers import DATA_ROOT
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,6 @@ class WorkspaceFileWatcher:
         ".idea",
         ".vscode",
         ".DS_Store",
-        "data",
         "*.pyc",
         "*.pyo",
         "*.pyd",
@@ -109,6 +109,8 @@ class WorkspaceFileWatcher:
         Returns:
             True 如果应该忽略
         """
+        if path.is_relative_to(DATA_ROOT):
+            return True
         try:
             rel_path = path.relative_to(self.workspace_root)
         except ValueError:

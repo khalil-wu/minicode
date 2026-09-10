@@ -15,7 +15,6 @@ const CommandPalette = lazy(() => import("./overlays/CommandPalette").then((m) =
 const SettingsCenter = lazy(() => import("./overlays/SettingsCenter").then((m) => ({ default: m.SettingsCenter })));
 const AutomationsCenter = lazy(() => import("./overlays/AutomationsCenter").then((m) => ({ default: m.AutomationsCenter })));
 const KeyboardShortcutsHelp = lazy(() => import("./overlays/KeyboardShortcutsHelp").then((m) => ({ default: m.KeyboardShortcutsHelp })));
-const SkillsMarketplace = lazy(() => import("./overlays/SkillsMarketplace").then((m) => ({ default: m.SkillsMarketplace })));
 const LiveArtifacts = lazy(() => import("./overlays/LiveArtifacts").then((m) => ({ default: m.LiveArtifacts })));
 const AgentEditor = lazy(() => import("./overlays/AgentEditor").then((m) => ({ default: m.AgentEditor })));
 
@@ -36,7 +35,6 @@ export const App = () => {
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const automationsOpen = useAppStore((s) => s.automationsOpen);
   const shortcutsHelpOpen = useAppStore((s) => s.shortcutsHelpOpen);
-  const skillsMarketplaceOpen = useAppStore((s) => s.skillsMarketplaceOpen);
   const liveArtifactsOpen = useAppStore((s) => s.liveArtifactsOpen);
   const agentEditorOpen = useAppStore((s) => s.agentEditorOpen);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
@@ -45,7 +43,9 @@ export const App = () => {
   return (
     <>
       <SafeBoundary fallback={<div style={{padding: 32, textAlign: 'center'}}>Something went wrong. <button onClick={() => window.location.reload()}>Reload</button></div>}>
-        {!settingsOpen && <WorkbenchShell />}
+        <div hidden={settingsOpen} style={{ display: settingsOpen ? "none" : "contents" }}>
+          <WorkbenchShell />
+        </div>
       </SafeBoundary>
       <ChunkErrorBoundary>
         <Suspense fallback={<RouteLoading />}>
@@ -53,7 +53,6 @@ export const App = () => {
           {settingsOpen && <SettingsCenter />}
           {automationsOpen && <AutomationsCenter />}
           {shortcutsHelpOpen && <KeyboardShortcutsHelp />}
-          {skillsMarketplaceOpen && <SkillsMarketplace />}
           {liveArtifactsOpen && <LiveArtifacts />}
           {agentEditorOpen && agentEditorEnabled && <AgentEditor />}
         </Suspense>

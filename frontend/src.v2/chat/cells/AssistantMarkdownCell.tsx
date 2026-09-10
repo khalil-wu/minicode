@@ -5,7 +5,6 @@ import { createPortal } from "react-dom";
 import type { AssistantMarkdownCellState, AssistantReplyAttachment } from "./cellTypes";
 import type { ArtifactPreview, ProgressContentBlock } from "../../stores/types";
 import { MarkdownRenderer } from "../messages/MarkdownRenderer";
-import { normalizeCitationText } from "../messages/citationText";
 import { citationUrl } from "../citationProjection";
 import { BrandIcon } from "../../components/BrandIcon";
 import { useAppStore } from "../../stores";
@@ -50,7 +49,7 @@ export function AssistantMarkdownCell({
   const conversationId = String(ownerConversationId || "").trim();
   const workspaceRoot = String(ownerWorkspaceRoot || "").trim();
   const rawMarkdown = cell.markdownSource;
-  const displayMarkdown = normalizeCitationText(rawMarkdown, cell.citations);
+  const displayMarkdown = rawMarkdown;
   const sources = uniqueCitationSources(rawMarkdown, cell.citations);
   const visibleSources = sourcesExpanded ? sources : sources.slice(0, 3);
   const hiddenSourceCount = Math.max(0, sources.length - visibleSources.length);
@@ -206,9 +205,11 @@ export function AssistantMarkdownCell({
       <div className="assistant-cell-content md-prose">
         {(cell.markdownBeforeArtifacts ?? rawMarkdown) && (
           <MarkdownRenderer
-            content={cell.markdownBeforeArtifacts ?? rawMarkdown}
-            isStreaming={cell.isStreaming || false}
-            citations={cell.citations}
+          content={cell.markdownBeforeArtifacts ?? rawMarkdown}
+          isStreaming={cell.isStreaming || false}
+          citations={cell.citations}
+          workspaceRoot={workspaceRoot}
+          conversationId={conversationId}
           />
         )}
         {(visibleImageProgress.length > 0 || imageArtifacts.length > 0 || otherArtifacts.length > 0) && (
@@ -239,9 +240,11 @@ export function AssistantMarkdownCell({
         )}
         {cell.markdownAfterArtifacts && (
           <MarkdownRenderer
-            content={cell.markdownAfterArtifacts}
-            isStreaming={cell.isStreaming || false}
-            citations={cell.citations}
+          content={cell.markdownAfterArtifacts}
+          isStreaming={cell.isStreaming || false}
+          citations={cell.citations}
+          workspaceRoot={workspaceRoot}
+          conversationId={conversationId}
           />
         )}
         {visibleAttachments.length > 0 && (

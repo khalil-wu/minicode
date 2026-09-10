@@ -190,6 +190,9 @@ class _PolicyManager:
     def get_client(self, _name: str):
         return None
 
+    def get_server_contract(self, _name: str):
+        return None
+
 
 @pytest.mark.parametrize(
     "mode, read_only, expected",
@@ -311,6 +314,9 @@ def test_tool_refresh_reapplies_filters_and_fences_stale_client() -> None:
         state.client = fresh
         stale.release.set()
         await task
+        assert state.tools == []
+        manager._schedule_tool_refresh("remote", fresh)
+        await manager._tool_refresh_tasks["remote"]
         assert [tool.name for tool in state.tools] == ["read"]
 
     asyncio.run(scenario())

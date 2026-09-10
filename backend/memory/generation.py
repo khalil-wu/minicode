@@ -98,11 +98,15 @@ async def begin_memory_reset(*, timeout: float = 5.0) -> set[asyncio.Task[Any]] 
         if _RESET_IN_PROGRESS:
             return None
         _RESET_IN_PROGRESS = True
-    pending = await cancel_and_drain(
-        list(_BACKGROUND_TASKS),
-        timeout=timeout,
-        label="memory maintenance",
-    )
+    try:
+        pending = await cancel_and_drain(
+            list(_BACKGROUND_TASKS),
+            timeout=timeout,
+            label="memory maintenance",
+        )
+    except BaseException:
+        end_memory_reset()
+        raise
     if pending:
         end_memory_reset()
     return pending
@@ -551,7 +555,7 @@ class MemoryGenerationCoordinator:
         if claim is None:
             return
 
-        heartbeat = asyncio.create_task(self._heartbeat_phase2(claim))
+        heartbeat = asyncio.create_task(self._heartbeat_phase2(claim, asyncio.current_task()))
         try:
             outputs = await _to_thread_cancel_safe(
                 self.store.list_stage1_outputs,
@@ -606,7 +610,7 @@ class MemoryGenerationCoordinator:
             except asyncio.CancelledError:
                 pass
 
-    async def _heartbeat_phase2(self, claim: JobClaim) -> None:
+    async def _heartbeat_phase2(self, claim: JobClaim, owner: asyncio.Task[Any] | None = None) -> None:
         while True:
             await asyncio.sleep(PHASE2_HEARTBEAT_SECONDS)
             owned = await _to_thread_cancel_safe(
@@ -615,6 +619,8 @@ class MemoryGenerationCoordinator:
                 lease_seconds=PHASE2_LEASE_SECONDS,
             )
             if not owned:
+                if owner is not None:
+                    owner.cancel()
                 return
 
     def _eligible_phase2_outputs(self, outputs: Iterable[Stage1Output]) -> list[Stage1Output]:

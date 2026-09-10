@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import aclosing
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -89,11 +90,12 @@ async def execute_tool_turn(
         tool_tracker.mark_yielded(tool_call.id)
     tool_batch_count += 1
     tool_call_count = transition_execution.call_count
-    async for event in project_tool_transition(
+    async with aclosing(project_tool_transition(
         transition_execution,
         cancel_remaining=tool_tracker.cancel_remaining,
-    ):
-        yield event
+    )) as owned_events:
+        async for event in owned_events:
+            yield event
     boundary = turn_budget_controller.evaluate(
         elapsed_seconds=deadline_controller.elapsed(),
         iterations=state.work_iterations,

@@ -45,7 +45,7 @@ async def prepare_turn_input(
     deadline: float | None,
     cancel_event: asyncio.Event | None,
     hook_manager: Any | None,
-    resume_from_checkpoint: bool = False,
+    input_restored: bool = False,
 ) -> TurnPreflightResult:
     """Run hooks and schedule the one canonical turn input."""
     deadline_reached = False
@@ -59,7 +59,7 @@ async def prepare_turn_input(
     try:
         if (
             not deadline_reached
-            and not resume_from_checkpoint
+            and not input_restored
             and hook_manager
             and session_id
             and hook_manager_has_hooks(hook_manager, HookEvent.SESSION_START)
@@ -94,6 +94,7 @@ async def prepare_turn_input(
                 state.prompt_context["hook_watch_paths"] = list(watch_paths)
         if (
             not deadline_reached
+            and not input_restored
             and hook_manager
             and hook_manager_has_hooks(hook_manager, HookEvent.USER_PROMPT_SUBMIT)
         ):
@@ -116,7 +117,7 @@ async def prepare_turn_input(
         deadline_reached = True
         logger.warning("Turn deadline reached while running prompt hooks")
 
-    if not blocked and not resume_from_checkpoint:
+    if not blocked and not input_restored:
         turn_kernel.schedule_user_input(user_message)
     return TurnPreflightResult(
         user_message=user_message,
@@ -142,15 +143,19 @@ async def await_preflight(
     waiters = {task, *([cancel_task] if cancel_task is not None else [])}
     timeout = max(0.0, deadline - time.monotonic()) if deadline is not None else None
     try:
+        # Own the awaitable, but stop it before its first step when the phase
+        # has already ended. Even a synchronous hook prefix can mutate files.
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError
+        if timeout == 0.0:
+            raise PhaseDeadlineExceeded
         done, _ = await asyncio.wait(waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
         if cancel_task is not None and cancel_task in done:
-            await cancel_and_drain([task], timeout=2.5, label="agent preflight operation")
             raise asyncio.CancelledError
         if task in done:
             return task.result()
-        await cancel_and_drain([task], timeout=2.5, label="agent preflight operation")
         raise PhaseDeadlineExceeded
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, PhaseDeadlineExceeded):
         await cancel_and_drain([task], timeout=2.5, label="agent preflight operation")
         raise
     finally:

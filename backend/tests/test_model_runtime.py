@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 from dataclasses import replace
@@ -67,20 +68,22 @@ def test_base_provider_runtime_projects_saved_proxy_mode(monkeypatch) -> None:
     monkeypatch.setattr(
         model_runtime_module,
         "get_openai_settings",
-        lambda: section("openai", "inherit"),
+        lambda _snapshot: section("openai", "inherit"),
     )
     monkeypatch.setattr(
         model_runtime_module,
         "get_anthropic_settings",
-        lambda: section("anthropic", "inherit"),
+        lambda _snapshot: section("anthropic", "inherit"),
     )
     monkeypatch.setattr(
         model_runtime_module,
         "get_custom_settings",
-        lambda: section("custom", "direct"),
+        lambda _snapshot: section("custom", "direct"),
     )
 
-    providers = ModelRuntime._load_base_providers()
+    runtime = object.__new__(ModelRuntime)
+    runtime._settings_snapshot = None
+    providers = runtime._load_base_providers()
 
     assert providers["custom"]["proxy_mode"] == "direct"
     assert providers["openai"]["proxy_mode"] == "inherit"
@@ -1352,103 +1355,13 @@ def test_provider_layers_apply_extension_oauth_then_models_json_override_last() 
     }
 
 
-@pytest.mark.skip(reason="obsolete upstream compat/model override shape; MiniCode model schema is independent")
-def test_models_json_compat_cost_and_thinking_overrides_use_pi_merge_rules() -> None:
-    runtime = ModelRuntime(provider_configs={
-        "compat-provider": {
-            "api_key": "configured-key",
-            "compat": {
-                "openRouterRouting": {"zdr": True},
-                "chatTemplateKwargs": {"configured": 2},
-                "opaque": {"configured": 2},
-            },
-            "model_overrides": {
-                "model-1": {
-                    "thinking_level_map": {"high": "override-high"},
-                    "cost": {
-                        "output": 22,
-                        "tiers": [{
-                            "inputTokensAbove": 10,
-                            "input": 21,
-                            "output": 22,
-                            "cacheRead": 23,
-                            "cacheWrite": 24,
-                        }],
-                    },
-                    "compat": {
-                        "openRouterRouting": {"require_parameters": True},
-                        "chatTemplateKwargs": {"base": 9},
-                        "opaque": {"final": 3},
-                    },
-                }
-            },
-        }
-    })
-    runtime._base_providers = {
-        "compat-provider": {
-            "name": "Compat Provider",
-            "api_key": "base-key",
-            "models": (
-                ModelDefinition(
-                    provider="compat-provider",
-                    id="model-1",
-                    name="Compat Model",
-                    api="openai-completions",
-                    base_url="https://compat.example.test/v1",
-                    thinking_level_map={"low": "base-low"},
-                    cost={
-                        "input": 11,
-                        "output": 12,
-                        "cacheRead": 13,
-                        "cacheWrite": 14,
-                        "tiers": [{"inputTokensAbove": 1}],
-                    },
-                    context_window=128_000,
-                    max_context_window=128_000,
-                    max_tokens=16_384,
-                    max_output_tokens=16_384,
-                    compat={
-                        "openRouterRouting": {
-                            "order": ["base"],
-                            "zdr": False,
-                        },
-                        "chatTemplateKwargs": {"base": 1},
-                        "opaque": {"base": 1},
-                    },
-                ),
-            ),
-        }
-    }
-
-    model = runtime.get_model("compat-provider", "model-1")
-
+def test_models_json_cost_and_thinking_overrides_preserve_base_fields() -> None:
+    runtime = ModelRuntime(provider_configs={'compat-provider': {'api_key': 'configured-key', 'model_overrides': {'model-1': {'thinking_level_map': {'high': 'override-high'}, 'cost': {'output': 22, 'tiers': [{'inputTokensAbove': 10, 'input': 21, 'output': 22, 'cacheRead': 23, 'cacheWrite': 24}]}}}}})
+    runtime._base_providers = {'compat-provider': {'name': 'Compat Provider', 'api_key': 'base-key', 'models': (ModelDefinition(provider='compat-provider', id='model-1', name='Compat Model', api='openai-completions', base_url='https://compat.example.test/v1', thinking_level_map={'low': 'base-low'}, cost={'input': 11, 'output': 12, 'cacheRead': 13, 'cacheWrite': 14, 'tiers': [{'inputTokensAbove': 1}]}, context_window=128000, max_context_window=128000, max_tokens=16384, max_output_tokens=16384),)}}
+    model = runtime.get_model('compat-provider', 'model-1')
     assert model is not None
-    assert model.thinking_level_map == {
-        "low": "base-low",
-        "high": "override-high",
-    }
-    assert model.cost == {
-        "input": 11,
-        "output": 22,
-        "cacheRead": 13,
-        "cacheWrite": 14,
-        "tiers": [{
-            "inputTokensAbove": 10,
-            "input": 21,
-            "output": 22,
-            "cacheRead": 23,
-            "cacheWrite": 24,
-        }],
-    }
-    assert model.compat == {
-        "openRouterRouting": {
-            "order": ["base"],
-            "zdr": True,
-            "require_parameters": True,
-        },
-        "chatTemplateKwargs": {"base": 9, "configured": 2},
-        "opaque": {"final": 3},
-    }
+    assert model.thinking_level_map == {'low': 'base-low', 'high': 'override-high'}
+    assert model.cost == {'input': 11, 'output': 22, 'cacheRead': 13, 'cacheWrite': 14, 'tiers': [{'inputTokensAbove': 10, 'input': 21, 'output': 22, 'cacheRead': 23, 'cacheWrite': 24}]}
 
 
 
@@ -1534,66 +1447,16 @@ def test_models_json_accepts_bom_and_rejects_duplicate_keys(tmp_path) -> None:
     assert "duplicate JSON object key: api_key" in str(duplicate.get_error())
 
 
-@pytest.mark.skip(reason="obsolete upstream open TypeBox metadata; MiniCode preserves only its canonical model fields")
-def test_models_json_open_typebox_objects_preserve_unknown_fields(tmp_path) -> None:
-    models_path = tmp_path / "models.json"
-    models_path.write_text(
-        json.dumps({
-            "rootExtension": {"enabled": True},
-            "providers": {
-                "open-schema-provider": {
-                    "api_key": "configured-key",
-                    "providerExtension": {"enabled": True},
-                    "compat": {"opaque": {"provider": True}},
-                    "models": [{
-                        "id": "model-1",
-                        "api": "openai-completions",
-                        "base_url": "https://open-schema.example.test/v1",
-                        "modelExtension": {"enabled": True},
-                        "thinking_level_map": {
-                            "low": "low-wire",
-                            "future": {"opaque": True},
-                        },
-                        "cost": {
-                            "input": 1,
-                            "output": 2,
-                            "cacheRead": 3,
-                            "cacheWrite": 4,
-                            "futureRate": 5,
-                            "tiers": [{
-                                "inputTokensAbove": 10,
-                                "input": 11,
-                                "output": 12,
-                                "cacheRead": 13,
-                                "cacheWrite": 14,
-                                "futureTier": True,
-                            }],
-                        },
-                    }],
-                    "model_overrides": {
-                        "model-1": {
-                            "overrideExtension": True,
-                            "compat": {"opaque": {"override": True}},
-                        }
-                    },
-                }
-            },
-        }),
-        encoding="utf-8",
-    )
-
+def test_models_json_preserves_supported_thinking_and_cost_metadata(tmp_path) -> None:
+    models_path = tmp_path / 'models.json'
+    models_path.write_text(json.dumps({'rootExtension': {'enabled': True}, 'providers': {'open-schema-provider': {'api_key': 'configured-key', 'providerExtension': {'enabled': True}, 'models': [{'id': 'model-1', 'api': 'openai-completions', 'base_url': 'https://open-schema.example.test/v1', 'modelExtension': {'enabled': True}, 'thinking_level_map': {'low': 'low-wire', 'future': {'opaque': True}}, 'cost': {'input': 1, 'output': 2, 'cacheRead': 3, 'cacheWrite': 4, 'futureRate': 5, 'tiers': [{'inputTokensAbove': 10, 'input': 11, 'output': 12, 'cacheRead': 13, 'cacheWrite': 14, 'futureTier': True}]}}], 'model_overrides': {'model-1': {'overrideExtension': True}}}}}), encoding='utf-8')
     runtime = ModelRuntime(models_path=models_path)
-    model = runtime.get_model("open-schema-provider", "model-1")
-
+    model = runtime.get_model('open-schema-provider', 'model-1')
     assert runtime.get_error() is None
     assert model is not None
-    assert model.thinking_level_map == {
-        "low": "low-wire",
-        "future": {"opaque": True},
-    }
-    assert model.cost["futureRate"] == 5
-    assert model.cost["tiers"][0]["futureTier"] is True
-    assert model.compat == {"opaque": {"override": True}}
+    assert model.thinking_level_map == {'low': 'low-wire', 'future': {'opaque': True}}
+    assert model.cost['futureRate'] == 5
+    assert model.cost['tiers'][0]['futureTier'] is True
 
 
 @pytest.mark.parametrize(
@@ -1866,50 +1729,23 @@ def test_provider_auth_context_ignores_blank_values_and_falls_back_to_ambient(
     )
 
 
-@pytest.mark.skip(reason="obsolete provider layering model; MiniCode uses canonical base/config/extension registry")
-def test_refresh_provider_auth_without_id_visits_every_composed_provider_layer(
-    monkeypatch,
-) -> None:
+def test_refresh_provider_auth_visits_canonical_layers_once(monkeypatch) -> None:
     runtime = ModelRuntime()
-    runtime._base_providers = {"base-layer": {}}
-    runtime._transport_providers = {"native-layer": {}}
-    runtime._model_configs = {"config-layer": {}}
-    runtime._extension_providers = {"extension-layer": {}}
+    runtime._base_providers = {'base-layer': {}, 'shared': {}}
+    runtime._model_configs = {'config-layer': {}, 'shared': {}}
+    runtime._extension_providers = {'extension-layer': {}, 'shared': {}}
     seen: list[str] = []
 
     def handler(provider_id: str):
+
         async def resolve(_input_value):
             seen.append(provider_id)
-            return {
-                "auth": {"api_key": f"{provider_id}-key"},
-                "source": provider_id,
-            }
-
-        return {"resolve": resolve}
-
-    handlers = {
-        provider_id: handler(provider_id)
-        for provider_id in (
-            "base-layer",
-            "native-layer",
-            "config-layer",
-            "extension-layer",
-        )
-    }
-    monkeypatch.setattr(
-        runtime,
-        "_api_key_provider",
-        lambda provider_id: handlers.get(provider_id),
-    )
-
+            return {'auth': {'api_key': f'{provider_id}-key'}, 'source': provider_id}
+        return {'resolve': resolve}
+    handlers = {provider_id: handler(provider_id) for provider_id in ('base-layer', 'shared', 'config-layer', 'extension-layer')}
+    monkeypatch.setattr(runtime, '_api_key_provider', lambda provider_id: handlers.get(provider_id))
     asyncio.run(runtime.refresh_provider_auth(None, publish_snapshot=False))
-
-    assert seen == [
-        "base-layer",
-        "native-layer",
-        "config-layer",
-        "extension-layer",
-    ]
+    assert seen == ['base-layer', 'shared', 'config-layer', 'extension-layer']
 
 
 def test_modern_api_key_auth_supports_async_ambient_header_only_base_url_and_env(
@@ -2794,42 +2630,37 @@ def test_filter_failure_preserves_last_good_available_snapshot() -> None:
     assert runtime.get_available_snapshot() == expected
 
 
-@pytest.mark.skip(reason="MiniCode exposes dynamic model filter failure instead of restoring a last-good snapshot")
-def test_refresh_models_filter_failure_keeps_last_good_published_snapshot() -> None:
+def test_refresh_models_filter_failure_exposes_error_and_recovers() -> None:
     fail = False
-    catalog: list[dict]
 
     async def refresh_models(_context):
-        catalog[:] = [
-            {
-                "id": "model-2",
-                "api": "openai-completions",
-                "base_url": "https://models.example.test/v2",
-            }
-        ]
+        provider = runtime._base_providers["native-filter"]
+        provider["models"] = (replace(
+            provider["models"][0], id="model-2",
+            base_url="https://models.example.test/v2",
+        ),)
 
     def filter_models(models, _credential):
         if fail:
             raise RuntimeError("filter exploded")
         return models
 
-    runtime, storage, catalog = _native_filter_runtime(
-        filter_models,
-        refresh_models=refresh_models,
+    runtime, storage, _catalog = _native_filter_runtime(
+        filter_models, refresh_models=refresh_models,
     )
-    storage.values["native-filter"] = {
-        "type": "api_key",
-        "key": "stored-key",
-    }
+    storage.values["native-filter"] = {"type": "api_key", "key": "stored-key"}
     asyncio.run(runtime.refresh_provider_auth("native-filter"))
-    expected = runtime.get_available_snapshot()
+    assert [m.id for m in runtime.get_available_snapshot()] == ["model-1"]
     fail = True
 
     asyncio.run(runtime.refresh_dynamic_models())
 
     assert runtime.get_model("native-filter", "model-2") is not None
-    assert runtime.get_available_snapshot() == expected
+    assert runtime.get_available_snapshot() == ()
     assert "filter exploded" in str(runtime.get_error())
+    fail = False
+    assert [m.id for m in runtime.get_available()] == ["model-2"]
+    assert runtime.get_error() is None
 
 
 def test_provider_auth_storage_serializes_modify_and_logout_across_instances(

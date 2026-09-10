@@ -123,15 +123,16 @@ async def _run_git(workspace_root: str, *args: str) -> str:
     return stdout.decode("utf-8", errors="replace")
 
 
-async def _run_git_ok(workspace_root: str, *args: str) -> bool:
+async def _run_git_ok(workspace_root: str, *args: str, input_data: bytes | None = None) -> bool:
     proc = await spawn_exec(
         "git", "--literal-pathspecs", *args,
         cwd=workspace_root,
         env=sanitized_git_env(workspace_root),
+        stdin=asyncio.subprocess.PIPE if input_data is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _stdout, stderr = await communicate(proc, timeout=15)
+    _stdout, stderr = await communicate(proc, input_data=input_data, timeout=15)
     if proc.returncode != 0:
         raise GitCommandError(
             args,
@@ -151,16 +152,16 @@ async def get_working_tree_diff(workspace_root: str) -> StructuredDiff:
     # Combined conflict diffs suppress patches when --raw is present. Compare
     # unresolved files with the index's stage 2 to retain their working content.
     raw = await _run_git(
-        workspace_root, "diff", "--ours", "--raw", "-z", "--patch", "--no-color",
-        "--submodule=short", *_GIT_DIFF_SAFETY_FLAGS
+        workspace_root, "diff", "--ours", "--relative", "--raw", "-z", "--patch", "--no-color",
+        "--submodule=short", *_GIT_DIFF_SAFETY_FLAGS, "--", "."
     )
     return _parse_diff_output(raw)
 
 
 async def get_staged_diff(workspace_root: str) -> StructuredDiff:
     raw = await _run_git(
-        workspace_root, "diff", "--cached", "--raw", "-z", "--patch", "--no-color",
-        "--submodule=short", *_GIT_DIFF_SAFETY_FLAGS
+        workspace_root, "diff", "--cached", "--relative", "--raw", "-z", "--patch", "--no-color",
+        "--submodule=short", *_GIT_DIFF_SAFETY_FLAGS, "--", "."
     )
     return _parse_diff_output(raw)
 
@@ -188,3 +189,11 @@ async def unstage_all(workspace_root: str) -> bool:
 
 async def revert_file(workspace_root: str, path: str) -> bool:
     return await _run_git_ok(workspace_root, "restore", "--worktree", "--", path)
+
+
+async def revert_patch(workspace_root: str, patch: str) -> bool:
+    """Undo the displayed edit while Git checks its context and preserves other edits."""
+    return await _run_git_ok(
+        workspace_root, "apply", "--reverse", "--whitespace=nowarn", "-",
+        input_data=patch.encode("utf-8"),
+    )

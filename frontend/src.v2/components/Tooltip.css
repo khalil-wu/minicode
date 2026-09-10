@@ -1,9 +1,7 @@
 /*
- * Tooltip — 纯 CSS 悬浮提示（components/Tip.tsx）。
- *
- * 显示延迟用 transition-delay 实现：hover 350ms 后浮现，离开立即消失，
- * 不需要 JS 定时器。气泡是纯视觉增强（aria-hidden），触发元素自己持有
- * aria-label，屏幕阅读器语义不受影响。
+ * Tooltips live in a body portal so pane overflow cannot clip them. Pointer
+ * hints use a CSS delay; keyboard focus is immediate. The trigger retains
+ * its accessible label and the bubble is a visual supplement.
  */
 
 .mc-tip {
@@ -12,8 +10,7 @@
 }
 
 .mc-tip-bubble {
-  position: absolute;
-  left: 50%;
+  position: fixed;
   z-index: var(--z-tooltip);
   padding: 4px 8px;
   border: 1px solid var(--border-subtle);
@@ -22,37 +19,28 @@
   color: var(--text-primary);
   font-size: var(--text-2xs);
   line-height: var(--leading-snug);
-  white-space: nowrap;
+  width: max-content;
+  box-sizing: border-box;
+  max-width: calc(100vw - 16px);
+  overflow-wrap: anywhere;
+  white-space: normal;
   box-shadow: var(--shadow-refined);
   pointer-events: none;
-  opacity: 0;
-  transform: translateX(-50%) translateY(2px);
-  transition:
-    opacity var(--duration-fast) var(--easing-standard),
-    transform var(--duration-fast) var(--easing-standard);
-  transition-delay: 0s;
+  animation: mc-tip-enter var(--duration-fast) var(--easing-enter) both;
+  animation-delay: calc(var(--duration-fast) + var(--duration-base));
 }
 
-.mc-tip[data-side="top"] .mc-tip-bubble {
-  bottom: calc(100% + 6px);
+.mc-tip-bubble[data-focused="true"] {
+  animation-delay: 0ms;
 }
 
-.mc-tip[data-side="bottom"] .mc-tip-bubble {
-  top: calc(100% + 6px);
-}
-
-.mc-tip:hover .mc-tip-bubble,
-.mc-tip:focus-within .mc-tip-bubble {
-  opacity: 1;
-  transform: translateX(-50%) translateY(0);
-  transition-delay: 350ms;
+@keyframes mc-tip-enter {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .mc-tip-bubble,
-  .mc-tip:hover .mc-tip-bubble,
-  .mc-tip:focus-within .mc-tip-bubble {
-    transition: none;
-    transition-delay: 0ms;
+  .mc-tip-bubble {
+    animation: none;
   }
 }

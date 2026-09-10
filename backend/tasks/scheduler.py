@@ -858,6 +858,7 @@ class TaskScheduler:
 
         worker = asyncio.create_task(execute())
         self._run_tasks[run.id] = worker
+        worker.add_done_callback(lambda finished: self._finalize_worker(task, run, finished))
         return worker
 
     def _schedule_fire(
@@ -954,19 +955,27 @@ class TaskScheduler:
             logger.error("scheduled task %s fire failed: %s", task.id, exc)
             run.status = "failed"
             run.error = str(exc)[:4000]
-        finally:
-            run.finished_at = datetime.now(UTC).isoformat()
-            if run.cleanup_requested_at is not None:
-                run.cleanup_pending = False
-                run.cleanup_completed_at = run.finished_at
-            task.last_run_id = run.id
-            task.last_run_status = run.status
-            task.last_error = run.error or None
-            self._run_tasks.pop(run.id, None)
-            try:
-                self._save()
-            except OSError:
-                logger.error("Failed to persist terminal state for scheduled run %s", run.id, exc_info=True)
+    def _finalize_worker(self, task: ScheduledTask, run: ScheduledTaskRun, worker: asyncio.Task[Any]) -> None:
+        if self._run_tasks.get(run.id) is not worker:
+            return
+        if worker.cancelled() or run.cleanup_requested_at is not None:
+            run.status = "cancelled"
+            run.error = run.error or "cancelled"
+        elif worker.exception() is not None:
+            run.status = "failed"
+            run.error = str(worker.exception())[:4000]
+        run.finished_at = datetime.now(UTC).isoformat()
+        if run.cleanup_requested_at is not None:
+            run.cleanup_pending = False
+            run.cleanup_completed_at = run.finished_at
+        task.last_run_id = run.id
+        task.last_run_status = run.status
+        task.last_error = run.error or None
+        self._run_tasks.pop(run.id, None)
+        try:
+            self._save()
+        except OSError:
+            logger.error("Failed to persist terminal state for scheduled run %s", run.id, exc_info=True)
 
     async def _invoke_callback(self, task: ScheduledTask, run: ScheduledTaskRun) -> dict[str, Any] | None:
         callback = self._on_fire

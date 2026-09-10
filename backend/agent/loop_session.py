@@ -49,11 +49,14 @@ class AgentLoopSessionContext:
     emit_event: Callable[[AgentEvent], None] | None = None
     metadata: dict[str, Any] | None = None
     run_context: RunContext | None = None
+    deadline_controller: Any | None = None
 
 def prepare_turn_state(
     state: AgentState,
     *,
     settings: Any,
+    user_message: str,
+    max_iterations: int,
 ) -> None:
     """Reset exactly the ephemeral fields owned by a new user turn.
 
@@ -61,6 +64,14 @@ def prepare_turn_state(
     same function as a compatibility adapter. Keeping one reset contract avoids
     state leaking or being cleared twice as lifecycle ownership moves outward.
     """
+    state.user_message = user_message
+    state.max_iterations = max_iterations
+    state.iterations = 0
+    state.recovery_iterations = 0
+    state.total_retries = 0
+    state.provider_continuation_recovery_count = 0
+    state.budget_warning_emitted = False
+    state.ui_tool_started_at.clear()
     state.max_total_retries = max(0, int(getattr(settings, "turn_error_budget", 0) or 0))
     state.disabled_tools.clear()
     state.stop_hook_feedback_count = 0

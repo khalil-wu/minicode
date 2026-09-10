@@ -166,14 +166,14 @@ class ConversationRepository:
             return record
 
     def get_conversation(self, conversation_id: str) -> ConversationRecord | None:
-        cached = self._record_cache.get(conversation_id)
-        if cached is not None and self._record_cache_stamps.get(conversation_id) == self._record_disk_stamp(conversation_id):
-            return copy.deepcopy(cached)
-        # 优化：不直接使用 summary_index 作排他检查，优先尝试从磁盘读取 record 以防同步延迟导致会话加载为 None
-        record = self._load_record(conversation_id)
-        if record is not None:
-            self._cache_record(record)
-        return copy.deepcopy(record) if record is not None else None
+        with self._store_lock():
+            cached = self._record_cache.get(conversation_id)
+            if cached is not None and self._record_cache_stamps.get(conversation_id) == self._record_disk_stamp(conversation_id):
+                return copy.deepcopy(cached)
+            record = self._load_record(conversation_id)
+            if record is not None:
+                self._cache_record(record)
+            return copy.deepcopy(record) if record is not None else None
 
     def clone_conversation(
         self,
@@ -1406,8 +1406,8 @@ class ConversationRepository:
                 raise ValueError("generation meta must be an object")
             if str(meta_payload.get("id") or "") != conversation_id:
                 raise ValueError("generation meta conversation id mismatch")
-            transcript = self._read_transcript_path(transcript_path, strict=True)
-            snapshot = self._read_snapshot_path(snapshot_path, strict=True)
+            transcript = self._read_transcript_path(transcript_path, strict=True, repair_encoding=False)
+            snapshot = self._read_snapshot_path(snapshot_path, strict=True, repair_encoding=False)
             if "message_count" in meta_payload and int(meta_payload["message_count"]) != len(transcript):
                 raise ValueError("generation message count mismatch")
             record = ConversationRecord.from_dict(
@@ -1598,10 +1598,12 @@ class ConversationRepository:
                 transcript = self._read_transcript_path(
                     transcript_path,
                     strict=transcript_path.exists(),
+                    repair_encoding=meta_payload.get("encoding_version") != "utf-8-v1",
                 )
                 snapshot = self._read_snapshot_path(
                     snapshot_path,
                     strict=snapshot_path.exists(),
+                    repair_encoding=meta_payload.get("encoding_version") != "utf-8-v1",
                 )
 
                 if not transcript and snapshot.get("history"):
@@ -1689,6 +1691,7 @@ class ConversationRepository:
         path: Path,
         *,
         strict: bool,
+        repair_encoding: bool = True,
     ) -> list[dict[str, Any]]:
         if not path.exists():
             if strict:
@@ -1707,7 +1710,8 @@ class ConversationRepository:
             if not stripped:
                 continue
             try:
-                transcript.append(repair_mojibake_payload(json.loads(stripped)))
+                message = json.loads(stripped)
+                transcript.append(repair_mojibake_payload(message) if repair_encoding else message)
             except (json.JSONDecodeError, TypeError) as exc:
                 if strict:
                     raise ValueError(f"malformed transcript line {line_number}") from exc
@@ -1725,14 +1729,16 @@ class ConversationRepository:
             strict=False,
         )
 
-    def _read_snapshot_path(self, path: Path, *, strict: bool) -> dict[str, Any]:
+    def _read_snapshot_path(self, path: Path, *, strict: bool, repair_encoding: bool = True) -> dict[str, Any]:
         if not path.exists():
             if strict:
                 raise FileNotFoundError(path)
             return {}
         try:
             content = self._safe_read_text(path, encoding="utf-8")
-            payload = repair_mojibake_payload(json.loads(content))
+            payload = json.loads(content)
+            if repair_encoding:
+                payload = repair_mojibake_payload(payload)
             if not isinstance(payload, dict):
                 raise ValueError("snapshot must be an object")
             return dict(payload)

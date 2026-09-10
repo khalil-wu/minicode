@@ -19,6 +19,7 @@ from backend.atomic_io import (
     file_mutation_locks,
     normalize_text_newlines,
     preserve_text_line_endings,
+    run_blocking_io,
 )
 from backend.permissions.context import ToolExecutionContext
 from backend.security.sensitive_files import is_protected_write_path
@@ -37,6 +38,7 @@ from backend.tools.file_tools_common import (
     _validate_text_arg,
     _workspace_display_path,
     content_hash,
+    record_file_hash,
     invalidate_workspace_file_caches,
 )
 
@@ -463,22 +465,23 @@ class EditFileTool(BaseTool):
 
         try:
             # Read, prepare, and publish the reviewed edit in the same-file queue.
-            with file_mutation_locks([path]):
-                ok, message = _validate_expected_hash(path, args.get("expected_hash"))
-                if not ok:
-                    return self._error_result(message)
-                content = path.read_bytes().decode("utf-8")
-                new_content, replaced_count = prepare_edit_content(
-                    content, old_string, new_string,
-                    file_path=file_path, replace_all=args.get("replace_all", False),
-                )
-                atomic_write_bytes(path, new_content.encode("utf-8"))
+            def commit_edit():
+                with file_mutation_locks([path]):
+                    ok, message = _validate_expected_hash(path, args.get("expected_hash"))
+                    if not ok:
+                        raise ValueError(message)
+                    previous = path.read_bytes().decode("utf-8")
+                    updated, count = prepare_edit_content(
+                        previous, old_string, new_string,
+                        file_path=file_path, replace_all=args.get("replace_all", False),
+                    )
+                    atomic_write_bytes(path, updated.encode("utf-8"))
+                    record_file_hash(context, path, content_hash(updated))
+                    get_global_file_cache().invalidate(path)
+                    invalidate_workspace_file_caches(file_tree_changed=path.name == ".gitignore")
+                    return previous, updated, count
 
-                # Invalidate file caches before another queued mutation can
-                # observe the newly committed file through a stale cache.
-                cache = get_global_file_cache()
-                cache.invalidate(path)
-                invalidate_workspace_file_caches(file_tree_changed=path.name == ".gitignore")
+            content, new_content, replaced_count = await run_blocking_io(commit_edit)
         except UnicodeDecodeError:
             return self._error_result(f"Cannot read binary or non-UTF-8 file: {file_path}")
         except ValueError as exc:

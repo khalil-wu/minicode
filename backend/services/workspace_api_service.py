@@ -204,9 +204,15 @@ def _run_workspace_git(root: Path, *args: str) -> str:
 
 def workspace_git_status_payload(root: Path) -> dict[str, Any]:
     try:
-        return parse_workspace_git_status(_run_workspace_git(
-            root, "status", "--porcelain=v1", "--branch", "-z", "--untracked-files=all",
+        prefix = _run_workspace_git(root, "rev-parse", "--show-prefix").removesuffix("\n")
+        status = parse_workspace_git_status(_run_workspace_git(
+            root, "status", "--porcelain=v1", "--branch", "-z", "--untracked-files=all", "--", ".",
         ))
+        # Porcelain paths are repository-relative even when Git runs in a
+        # subdirectory. The workspace API and file buttons use workspace paths.
+        for field in ("modified", "staged", "untracked"):
+            status[field] = [path.removeprefix(prefix) for path in status[field]]
+        return status
     except (OSError, subprocess.SubprocessError) as exc:
         return {"branch": "", "modified": [], "staged": [], "untracked": [], "error": str(getattr(exc, "stderr", None) or exc).strip()}
 
@@ -246,15 +252,15 @@ def workspace_git_diff_payload(root: Path, file: str) -> dict[str, Any]:
                 raise
             baseline = _run_workspace_git(root, "hash-object", "-t", "tree", "--stdin").strip()
 
-        paths = (file,) if file else ()
-        diff_args = ("diff", "--no-color", "--no-textconv", "--no-ext-diff")
+        paths = (file,) if file else (".",)
+        diff_args = ("diff", "--relative", "--no-color", "--no-textconv", "--no-ext-diff")
         patches = [_run_workspace_git(root, *diff_args, baseline, "--", *paths)]
         untracked = _run_workspace_git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", *paths)
         for path in untracked.split("\0"):
             if not path:
                 continue
             try:
-                patches.append(_run_workspace_git(root, *diff_args, "--no-index", "--", os.devnull, path))
+                patches.append(_run_workspace_git(root, *diff_args, "--no-index", "--", "/dev/null", path))
             except subprocess.CalledProcessError as exc:
                 if exc.returncode != 1:  # --no-index returns 1 when there are differences.
                     raise

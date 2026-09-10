@@ -81,6 +81,7 @@ class BackgroundCommand:
     output_file_redundant: bool = False
     effective_command: str = field(default="", repr=False)
     sandbox_policy: SandboxPolicy | None = field(default=None, repr=False)
+    runner: SandboxRunner | None = field(default=None, repr=False)
     lifecycle: ExecutionLifecycle | None = field(default=None, repr=False)
     task_output: DurableTaskOutput | None = field(default=None, repr=False)
     output_write_error: str = field(default="", repr=False)
@@ -241,7 +242,7 @@ class BackgroundCommandManager:
         # 清理已完成的命令
         self._cleanup_completed()
 
-        running = [c for c in self._commands.values() if c.status == "running"]
+        running = [c for c in self._commands.values() if c.status == "running" or c.cleanup_pending]
         if len(running) >= self._max_commands:
             raise RuntimeError(
                 f"后台命令数已达上限（{self._max_commands}）。"
@@ -439,6 +440,7 @@ class BackgroundCommandManager:
             if policy is None:
                 raise RuntimeError("Background command has no sandbox policy")
             runner = SandboxRunner(policy)
+            bg_cmd.runner = runner
             host_command = normalize_windows_shell_command(
                 bg_cmd.effective_command or bg_cmd.command
             )
@@ -466,6 +468,7 @@ class BackgroundCommandManager:
                         owner_task_id=bg_cmd.owner_task_id,
                         parent_run_id=bg_cmd.parent_run_id,
                         process_start_time=bg_cmd.process_start_time,
+                        **runner.container_ownership,
                     )
                 if self._on_started:
                     try:
@@ -495,6 +498,8 @@ class BackgroundCommandManager:
             finally:
                 stall_stop()
 
+            if result.cleanup_pending:
+                unproven_cleanup = result.cleanup_reason or "process_cleanup_pending"
             if bg_cmd.output_write_error:
                 raise RuntimeError(
                     f"Background output could not be persisted: {bg_cmd.output_write_error}"
@@ -505,10 +510,6 @@ class BackgroundCommandManager:
                 bg_cmd.exit_code = -1
                 bg_cmd.completed_at = time.time()
                 bg_cmd.transition(phase="cancelled", status="cancelled")
-                if result.cleanup_pending:
-                    unproven_cleanup = (
-                        result.cleanup_reason or "process_cleanup_pending"
-                    )
                 return
             if result.sandbox_unavailable:
                 bg_cmd.status = "failed"
@@ -535,10 +536,6 @@ class BackgroundCommandManager:
                     status="failed",
                     error={"kind": "timeout", "message": timeout_message},
                 )
-                if result.cleanup_pending:
-                    unproven_cleanup = (
-                        result.cleanup_reason or "process_cleanup_pending"
-                    )
                 return
 
             # The stream callback is the source of truth.  A startup failure can
@@ -577,6 +574,8 @@ class BackgroundCommandManager:
                 # termination path, so nothing proved the process tree exited.
                 unproven_cleanup = "cancelled_without_process_exit_proof"
         except Exception as exc:
+            if getattr(exc, "cleanup_pending", False):
+                unproven_cleanup = str(exc.cleanup_reason)
             bg_cmd.status = "failed"
             error_message = f"执行错误: {exc}"
             if bg_cmd.output:
@@ -593,8 +592,6 @@ class BackgroundCommandManager:
             logger.error("Background command %s failed: %s", bg_cmd.command_id, exc)
 
         finally:
-            self._processes.pop(bg_cmd.command_id, None)
-            self._stdin_locks.pop(bg_cmd.command_id, None)
             # Only a proven process exit closes the cleanup receipt. When the
             # tree's exit could not be observed the record stays pending so the
             # owner (or the next process's reconciliation) can still reap it.
@@ -637,77 +634,108 @@ class BackgroundCommandManager:
                     bg_cmd.command_id,
                     exc_info=True,
                 )
-            # A surviving process tree keeps its durable owner record: the UI
-            # may show a terminal status, but the reaper still needs the PID
-            # identity. Commit that evidence before the notification so a crash
-            # in between cannot lose it.
-            if self._session_id and bg_cmd.cleanup_pending:
-                try:
-                    from backend.terminal.task_persistence import save_task
-
-                    save_task(
-                        session_id=self._session_id,
-                        task_id=bg_cmd.command_id,
-                        command=bg_cmd.command,
-                        description=bg_cmd.description,
-                        cwd=bg_cmd.cwd,
-                        pid=bg_cmd.pid,
-                        started_at=bg_cmd.started_at,
-                        timeout_ms=bg_cmd.timeout_ms,
-                        status="interrupted",
-                        conversation_id=bg_cmd.conversation_id,
-                        owner_task_id=bg_cmd.owner_task_id,
-                        parent_run_id=bg_cmd.parent_run_id,
-                        process_start_time=bg_cmd.process_start_time,
-                        cleanup_pending=True,
-                        cleanup_reason=bg_cmd.cleanup_reason,
-                        cleanup_requested_at=bg_cmd.cleanup_requested_at,
-                    )
-                except Exception as exc:
-                    bg_cmd.cleanup_error = {
-                        "kind": "owner_persistence_failed",
-                        "message": str(exc),
-                    }
-                    bg_cmd.transition(
-                        phase="cleanup_pending",
-                        status="interrupted",
-                        error=dict(bg_cmd.cleanup_error),
-                    )
-                    logger.exception(
-                        "Unreaped background command %s could not be durably recorded",
-                        bg_cmd.command_id,
-                    )
-            # The durable record is the recovery handle for a live process. Drop
-            # it only once this command owns no process that could outlive it.
-            # Settle this before the completion projection so persistence
-            # failures are part of the same canonical terminal evidence.
-            if self._session_id and not bg_cmd.cleanup_pending:
-                try:
-                    from backend.terminal.task_persistence import delete_task
-                    delete_task(self._session_id, bg_cmd.command_id)
-                except Exception as exc:
-                    bg_cmd.cleanup_pending = True
-                    bg_cmd.cleanup_reason = "owner_record_delete_failed"
-                    bg_cmd.cleanup_requested_at = bg_cmd.cleanup_requested_at or time.time()
-                    bg_cmd.cleanup_completed_at = None
-                    bg_cmd.cleanup_error = {
-                        "kind": "owner_record_delete_failed",
-                        "message": str(exc),
-                    }
-                    bg_cmd.transition(
-                        phase="cleanup_pending",
-                        status=bg_cmd.status,
-                        error=dict(bg_cmd.cleanup_error),
-                    )
-                    logger.error(
-                        "Task persistence delete failed for %s; retaining in-memory evidence: %s",
-                        bg_cmd.command_id,
-                        exc,
-                        exc_info=True,
-                    )
-            # Every terminal state (success, failure, timeout, or cancellation)
-            # must update the UI after its durable cleanup boundary settles.
+            await self._settle_cleanup(bg_cmd)
             await self._notify_completed_once(bg_cmd)
+
+    async def _settle_cleanup(self, bg_cmd: BackgroundCommand) -> None:
+        # A surviving process tree keeps its durable owner record: the UI
+        # may show a terminal status, but the reaper still needs the PID
+        # identity. Commit that evidence before the notification so a crash
+        # in between cannot lose it.
+        if self._session_id and bg_cmd.cleanup_pending:
+            try:
+                from backend.terminal.task_persistence import save_task
+
+                save_task(
+                    session_id=self._session_id,
+                    task_id=bg_cmd.command_id,
+                    command=bg_cmd.command,
+                    description=bg_cmd.description,
+                    cwd=bg_cmd.cwd,
+                    pid=bg_cmd.pid,
+                    started_at=bg_cmd.started_at,
+                    timeout_ms=bg_cmd.timeout_ms,
+                    status="interrupted",
+                    conversation_id=bg_cmd.conversation_id,
+                    owner_task_id=bg_cmd.owner_task_id,
+                    parent_run_id=bg_cmd.parent_run_id,
+                    process_start_time=bg_cmd.process_start_time,
+                    cleanup_pending=True,
+                    cleanup_reason=bg_cmd.cleanup_reason,
+                    cleanup_requested_at=bg_cmd.cleanup_requested_at,
+                    **(bg_cmd.runner.container_ownership if bg_cmd.runner is not None else {}),
+                )
+            except Exception as exc:
+                bg_cmd.cleanup_error = {
+                    "kind": "owner_persistence_failed",
+                    "message": str(exc),
+                }
+                bg_cmd.transition(
+                    phase="cleanup_pending",
+                    status="interrupted",
+                    error=dict(bg_cmd.cleanup_error),
+                )
+                logger.exception(
+                    "Unreaped background command %s could not be durably recorded",
+                    bg_cmd.command_id,
+                )
+        # The durable record is the recovery handle for a live process. Drop
+        # it only once this command owns no process that could outlive it.
+        # Settle this before the completion projection so persistence
+        # failures are part of the same canonical terminal evidence.
+        if self._session_id and not bg_cmd.cleanup_pending:
+            try:
+                from backend.terminal.task_persistence import delete_task
+                delete_task(self._session_id, bg_cmd.command_id)
+            except Exception as exc:
+                bg_cmd.cleanup_pending = True
+                bg_cmd.cleanup_reason = "owner_record_delete_failed"
+                bg_cmd.cleanup_requested_at = bg_cmd.cleanup_requested_at or time.time()
+                bg_cmd.cleanup_completed_at = None
+                bg_cmd.cleanup_error = {
+                    "kind": "owner_record_delete_failed",
+                    "message": str(exc),
+                }
+                bg_cmd.transition(
+                    phase="cleanup_pending",
+                    status=bg_cmd.status,
+                    error=dict(bg_cmd.cleanup_error),
+                )
+                logger.error(
+                    "Task persistence delete failed for %s; retaining in-memory evidence: %s",
+                    bg_cmd.command_id,
+                    exc,
+                    exc_info=True,
+                )
+        if not bg_cmd.cleanup_pending:
+            self._processes.pop(bg_cmd.command_id, None)
+            self._stdin_locks.pop(bg_cmd.command_id, None)
+            bg_cmd.runner = None
+
+    async def retain_foreground_cleanup(
+        self, *, runner: SandboxRunner, command: str, cwd: str,
+        conversation_id: str, task_id: str, parent_run_id: str, reason: str,
+    ) -> BackgroundCommand:
+        """Keep a foreground command's unfinished cleanup in the existing owner."""
+        from backend.terminal.task_persistence import get_process_start_time
+
+        process = runner.process
+        command_id = f"bg_{uuid.uuid4().hex[:8]}"
+        now = time.time()
+        bg_cmd = BackgroundCommand(
+            command_id=command_id, command=command, cwd=cwd,
+            conversation_id=conversation_id, owner_task_id=task_id,
+            parent_run_id=parent_run_id, status="interrupted",
+            started_at=now, completed_at=now, runner=runner,
+            pid=process.pid if process is not None else None,
+            process_start_time=get_process_start_time(process.pid) if process is not None else None,
+            cleanup_pending=True, cleanup_reason=reason, cleanup_requested_at=now,
+        )
+        self._commands[command_id] = bg_cmd
+        if process is not None:
+            self._processes[command_id] = process
+        await self._settle_cleanup(bg_cmd)
+        return bg_cmd
 
     def get_status(self, command_id: str, *, conversation_id: str) -> BackgroundCommand | None:
         owner = str(conversation_id or "").strip()
@@ -821,6 +849,7 @@ class BackgroundCommandManager:
                             cleanup_pending=True,
                             cleanup_reason=cmd.cleanup_reason,
                             cleanup_requested_at=cmd.cleanup_requested_at,
+                            **(cmd.runner.container_ownership if cmd.runner is not None else {}),
                         )
                     except Exception as exc:
                         logger.debug("Background cleanup intent persistence failed: %s", exc)
@@ -832,18 +861,26 @@ class BackgroundCommandManager:
             if cmd and not receipt.completed:
                 cmd.cleanup_reason = "process_cleanup_pending"
             elif cmd:
-                # _execute owns the terminal status, the cleanup verdict, and
-                # the durable-record removal. This assignment is defensive for
-                # task doubles that terminate without running the command
-                # coroutine's finalizer; a real command that finished with an
-                # unproven process teardown keeps its pending receipt.
-                if cmd.status == "running":
+                # A worker cancelled before its first step never creates a
+                # runner or process and therefore has no coroutine finalizer.
+                if cmd.status == "running" and cmd.runner is None:
                     cmd.status = "cancelled"
                     cmd.completed_at = time.time()
                     cmd.transition(phase="cancelled", status="cancelled")
                     cmd.cleanup_pending = False
                     cmd.cleanup_completed_at = cmd.cleanup_completed_at or time.time()
+                    await self._settle_cleanup(cmd)
                 await self._notify_completed_once(cmd)
+            return True
+        cmd = self._commands.get(command_id)
+        if cmd is not None and cmd.cleanup_pending:
+            cmd.cleanup_requested_at = time.time()
+            completed = await cmd.runner.cleanup() if cmd.runner is not None else True
+            cmd.cleanup_pending = not completed
+            cmd.cleanup_reason = "" if completed else "command_resource_cleanup_pending"
+            cmd.cleanup_completed_at = time.time() if completed else None
+            cmd.transition(phase="completed" if completed else "cleanup_pending", status=cmd.status)
+            await self._settle_cleanup(cmd)
             return True
         return False
 

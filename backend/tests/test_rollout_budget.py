@@ -119,14 +119,14 @@ def test_reused_subagent_id_records_each_incarnation_once() -> None:
     budget = RolloutBudget(token_limit=1_000)
     first = _runtime(
         budget,
-        run_id="child-a",
+        run_id="child-a-run-1",
         usage=UsageInfo(input_tokens=80, output_tokens=20),
         agent_path="main/root/child-a",
         mailbox_epoch=1,
     )
     second = _runtime(
         budget,
-        run_id="child-a",
+        run_id="child-a-run-2",
         usage=UsageInfo(input_tokens=40, output_tokens=10),
         agent_path="main/root/child-a",
         mailbox_epoch=2,
@@ -157,15 +157,17 @@ def test_incarnation_usage_consumes_pre_registration_reservation() -> None:
     assert snapshot.available_tokens == 200
 
 
-def test_retried_provider_usage_still_counts_toward_rollout() -> None:
+def test_stream_settlement_preserves_usage_already_charged_by_request_owner() -> None:
     budget = RolloutBudget()
+    turn_usage = UsageInfo(input_tokens=11, output_tokens=7)
+    budget.record_usage_total("root-run", turn_usage)
 
     class _BudgetRuntime:
         async def apply_boundary(self, _boundary):
             return False, ()
 
         def record_provider_usage_total(self, usage: UsageInfo) -> None:
-            budget.record_usage_total("root-run", usage)
+            raise AssertionError("Lifecycle settlement must not charge usage again")
 
     class _TurnKernel:
         async def close_provider_attempt(self, *_args, **_kwargs) -> None:
@@ -190,8 +192,7 @@ def test_retried_provider_usage_still_counts_toward_rollout() -> None:
                 stream_text=SimpleNamespace(sanitize=lambda _scrub: None),
                 context_builder=SimpleNamespace(),
                 usage=UsageInfo(input_tokens=11, output_tokens=7),
-                turn_usage=UsageInfo(),
-                chain=SimpleNamespace(record_usage=lambda **_kwargs: None),
+                turn_usage=turn_usage,
             )
         ]
         return updates[-1]

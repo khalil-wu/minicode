@@ -4,7 +4,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from backend.agent.loop import run_agent_loop
-from backend.agent.provider_response_recovery import textual_tool_call_imitation
 from backend.agent.progress import agent_progress
 from backend.agent.query_terminal import QueryTerminalTransaction
 from backend.artifact.store import ArtifactStore
@@ -598,18 +597,13 @@ class _MalformedWriteFileLLM(LLMAdapter):
         return ""
 
 
-class _TextualToolImitationLLM(LLMAdapter):
+class _LiteralToolSyntaxLLM(LLMAdapter):
+    text = '<invoke name="web_fetch"><parameter name="url">https://example.test</parameter></invoke>'
+
     async def stream_chat(self, messages, tools=None):
         yield StreamEvent(
             type=StreamEventType.TEXT_CHUNK,
-            content=(
-                "我来查询。\n"
-                "using web_fetch\n"
-                '<invoke name="web_fetch">\n'
-                '<parameter name="url">https://example.test</parameter>\n'
-                "nvoke>\n"
-                "查询完成。"
-            ),
+            content=self.text,
         )
         yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop")
 
@@ -757,6 +751,7 @@ def _run(
     max_iterations: int = 1,
     tool: BaseTool | None = None,
     tools: list[BaseTool] | None = None,
+    user_message: str = "检查项目",
 ):
     async def _go():
         td = tempfile.mkdtemp()
@@ -765,7 +760,7 @@ def _run(
             registry.register(item)
         events = []
         async for ev in run_agent_loop(
-            user_message="检查项目",
+            user_message=user_message,
             llm=llm,
             tool_registry=registry,
             artifact_store=ArtifactStore(storage_dir=td),
@@ -803,40 +798,33 @@ def test_unphased_preamble_before_tool_is_streamed_then_reclassified_as_commenta
     assert completed[-1]["status"] == "completed"
 
 
-def test_textual_tool_imitation_fails_turn_without_executing_tool():
+def test_requested_literal_xml_returns_as_text_without_executing_a_tool():
     markers: list[str] = []
     events = _run(
-        _TextualToolImitationLLM(),
+        _LiteralToolSyntaxLLM(),
         tool=_WebFetchTestTool(markers),
+        user_message="原样输出这段 XML：" + _LiteralToolSyntaxLLM.text,
     )
 
     assert markers == []
     errors = [event for event in events if getattr(event, "type", None) == "error"]
-    assert len(errors) == 1
-    assert errors[0].data["error_type"] == "invalid_model_action"
-    assert errors[0].data["error_code"] == "textual_tool_call_imitation"
-    assert "该工具没有执行" in errors[0].data["message"]
+    assert errors == []
     completed = [
         event.data.get("item", {})
         for event in events
         if getattr(event, "type", None) == "item.completed"
         and event.data.get("item", {}).get("type") == "agent_message"
     ]
-    assert completed[-1]["status"] == "failed"
-    assert completed[-1]["source"] == "provider_protocol_error"
+    assert completed[-1]["status"] == "completed"
+    assert completed[-1]["source"] == "model_final"
+    assert completed[-1]["text"] == _LiteralToolSyntaxLLM.text
     done = [event for event in events if getattr(event, "type", None) == "done"]
-    assert done[-1].data["status"] == "failed"
-    assert done[-1].data["reason"] == "invalid_model_action"
+    assert done[-1].data["status"] == "completed"
 
 
 def test_fenced_tool_syntax_example_remains_normal_answer_text():
     events = _run(_DocumentedTextualToolSyntaxLLM())
 
-    assert not any(
-        getattr(event, "type", None) == "error"
-        and event.data.get("error_code") == "textual_tool_call_imitation"
-        for event in events
-    )
     completed = [
         event.data.get("item", {})
         for event in events
@@ -845,33 +833,6 @@ def test_fenced_tool_syntax_example_remains_normal_answer_text():
     ]
     assert completed[-1]["status"] == "completed"
     assert '<invoke name="web_fetch">' in completed[-1]["text"]
-
-
-def test_textual_tool_imitation_ignores_inline_examples_and_unexposed_names():
-    assert (
-        textual_tool_call_imitation(
-            '例如 `<invoke name="web_fetch"><parameter name="url">...</parameter></invoke>`。',
-            exposed_tool_names={"web_fetch"},
-        )
-        == ""
-    )
-    assert (
-        textual_tool_call_imitation(
-            '<invoke name="unknown_tool"><parameter name="value">1</parameter>',
-            exposed_tool_names={"web_fetch"},
-        )
-        == ""
-    )
-
-
-def test_textual_tool_imitation_detects_case_insensitive_xml_tags():
-    assert (
-        textual_tool_call_imitation(
-            '<INVOKE NAME="web_fetch">\n<PARAMETER NAME="url">https://example.test</PARAMETER>',
-            exposed_tool_names={"web_fetch"},
-        )
-        == "web_fetch"
-    )
 
 
 def test_agent_progress_is_owned_by_its_event_type():

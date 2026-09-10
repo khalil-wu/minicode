@@ -37,6 +37,9 @@ def test_workspace_tree_lists_visible_entries(monkeypatch, tmp_path) -> None:
     (tmp_path / "src").mkdir(parents=True)
     (tmp_path / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
     (tmp_path / ".git").mkdir(parents=True)
+    (tmp_path / ".vscode").mkdir()
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".gitignore").write_text("dist/\n", encoding="utf-8")
 
     monkeypatch.setattr("backend.main.PROJECT_ROOT", tmp_path)
 
@@ -51,6 +54,14 @@ def test_workspace_tree_lists_visible_entries(monkeypatch, tmp_path) -> None:
     names = {entry["name"] for entry in payload["entries"]}
     assert "src" in names
     assert ".git" not in names
+    assert {".vscode", ".github", ".gitignore"} <= names
+
+
+def test_workspace_git_diff_rejects_a_file_outside_its_selected_directory(tmp_path) -> None:
+    with TestClient(app) as client:
+        response = client.get("/api/workspace/git/diff", params=_workspace_params(tmp_path, file="../outside.txt"))
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Git file is outside workspace root."
 
 
 def test_workspace_file_write_and_read_round_trip(monkeypatch, tmp_path) -> None:
@@ -605,5 +616,5 @@ def test_workspace_preview_snapshot_remains_bounded_through_http(monkeypatch, tm
     if expected_status == 413:
         assert "too large" in response.json()["detail"]
     else:
-        assert response.json()["content"] == "中文预览"
+        assert response.json()["content"] == "中文预览\r\n"
         assert response.json()["size_bytes"] == len(expected)

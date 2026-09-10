@@ -29,7 +29,7 @@ import { isPreviewableHttpUrl } from "../openWebInPreview";
 import { openWebInBrowser } from "../openWebInBrowser";
 import { openWebTarget } from "../openWebTarget";
 import { openLocalFilePreview, openWorkspaceFilePreview } from "../openAttachmentPreview";
-import { normalizeCitationText } from "./citationText";
+import { removeCitationMarkers } from "./citationText";
 import { BrandIcon } from "../../components/BrandIcon";
 import { workspaceRawResourceUrlWithToken } from "../../protocol/api";
 import { isDesktop, openPath, revealPath } from "../../desktop/runtime";
@@ -50,6 +50,8 @@ interface Props {
   content: string;
   isStreaming?: boolean;
   citations?: Citation[];
+  workspaceRoot?: string;
+  conversationId?: string;
 }
 
 type MarkdownNode = {
@@ -275,7 +277,7 @@ const anyFilePathPattern = new RegExp(String.raw`\.(?:${CODE_FILE_EXTENSIONS}|${
 const externalDeliverablePathPattern = /\.(?:7z|aac|avif|bmp|csv|doc|docx|epub|flac|gif|ico|jpe?g|json|m4a|md|mov|mp3|mp4|odp|ods|odt|ogg|pdf|png|ppt|pptx|rtf|tar|tiff?|tsv|txt|wav|webm|webp|xls|xlsx|xml|ya?ml|zip)$/i;
 
 const bareFileRefPattern = new RegExp(
-  String.raw`(^|[\s([{'"，。；：、])((?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[/\\])?(?:[^\s` + "`" + String.raw`"'<>()[\]{}|:]+[\\/])*[^\s` + "`" + String.raw`"'<>()[\]{}|:]+\.(?:${CODE_FILE_EXTENSIONS}))(?::(\d+)(?::(\d+))?)?(?=$|[\s,，。;；:：)）\]}])`,
+  String.raw`(^|[\s([{'",;!?，。；：、！？“”‘’（])((?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[/\\])?(?:[^\s` + "`" + String.raw`"'<>()[\]{}|:,;!?，。；：、！？“”‘’（）]+[\\/])*[^\s` + "`" + String.raw`"'<>()[\]{}|:,;!?，。；：、！？“”‘’（）]+\.(?:${CODE_FILE_EXTENSIONS}))(?::(\d+)(?::(\d+))?)?(?=$|[\s,，。;；:：)）\]}!?！？“”‘’])`,
   "gi",
 );
 
@@ -779,11 +781,11 @@ const isWorkspaceRawResourceUrl = (url: string): boolean => {
 
 const workspacePathFromHref = (
   href: string,
-  options: { allowLineTarget?: boolean; allowExternalDeliverable?: boolean } = {},
+  options: { allowLineTarget?: boolean; allowExternalDeliverable?: boolean; workspaceRoot?: string } = {},
 ): string | null => {
   const trimmed = href.trim();
   if (!trimmed) return null;
-  const workingDirectory = String(useAppStore.getState().workingDirectory || "");
+  const workingDirectory = options.workspaceRoot ?? String(useAppStore.getState().workingDirectory || "");
   let candidate = "";
   let fromLocalFrontend = false;
   if (trimmed.startsWith("minicode-local-file:")) {
@@ -840,19 +842,19 @@ const workspacePathFromHref = (
   return candidate;
 };
 
-const localImageWithinWorkspace = (url: string): { path: string; src: string } | null => {
+const localImageWithinWorkspace = (url: string, workspaceRoot?: string): { path: string; src: string } | null => {
   if (isWorkspaceRawResourceUrl(url)) {
     try {
       const parsed = new URL(url, window.location.href);
-      const path = workspacePathFromHref(parsed.searchParams.get("path") || "");
+      const path = workspacePathFromHref(parsed.searchParams.get("path") || "", { workspaceRoot });
       return path ? { path, src: url } : null;
     } catch {
       return null;
     }
   }
   if (!isLocalImageUrl(url)) return null;
-  const workingDirectory = String(useAppStore.getState().workingDirectory || "");
-  const candidate = workspacePathFromHref(url);
+  const workingDirectory = workspaceRoot ?? String(useAppStore.getState().workingDirectory || "");
+  const candidate = workspacePathFromHref(url, { workspaceRoot });
   if (!candidate) return null;
   const absolutePath = absoluteWorkspacePath(candidate, workingDirectory);
   if (!absolutePath) return null;
@@ -862,37 +864,38 @@ const localImageWithinWorkspace = (url: string): { path: string; src: string } |
     : null;
 };
 
-const workspaceFileTargetFromHref = (href: string): { path: string; line?: number; column?: number } | null => {
-  const candidate = workspacePathFromHref(href, { allowLineTarget: true });
+const workspaceFileTargetFromHref = (href: string, workspaceRoot?: string): { path: string; line?: number; column?: number } | null => {
+  const candidate = workspacePathFromHref(href, { allowLineTarget: true, workspaceRoot });
   if (!candidate) return null;
   return parseEditorPathTarget(candidate);
 };
 
-const workspaceGenericFileTargetFromHref = (href: string): FileTarget | null => {
-  const candidate = workspacePathFromHref(href, { allowExternalDeliverable: true });
+const workspaceGenericFileTargetFromHref = (href: string, workspaceRoot?: string): FileTarget | null => {
+  const candidate = workspacePathFromHref(href, { allowExternalDeliverable: true, workspaceRoot });
   if (!candidate || isCodeFilePath(candidate) || !anyFilePathPattern.test(candidate)) return null;
   return { path: candidate };
 };
 
-const workspaceFolderTargetFromHref = (href: string): FolderTarget | null => {
-  const candidate = workspacePathFromHref(href);
+const workspaceFolderTargetFromHref = (href: string, workspaceRoot?: string): FolderTarget | null => {
+  const candidate = workspacePathFromHref(href, { workspaceRoot });
   if (!candidate || anyFilePathPattern.test(candidate)) return null;
   return { path: candidate.replace(/[\\/]+$/, "") };
 };
 
-const editorTargetFromHref = (href: string): { path: string; line?: number; column?: number } | null => {
+const editorTargetFromHref = (href: string, workspaceRoot?: string): { path: string; line?: number; column?: number } | null => {
   if (href.startsWith("minicode-file-ref:")) {
     const params = new URLSearchParams(href.slice("minicode-file-ref:".length));
     const path = params.get("path")?.trim();
     if (!path) return null;
-    if (!isWorkspaceRelativeEditorPath(path)) return null;
+    const target = workspaceFileTargetFromHref(path, workspaceRoot);
+    if (!target) return null;
     return {
-      path,
+      path: target.path,
       line: parsePositiveInt(params.get("line")),
       column: parsePositiveInt(params.get("column")),
     };
   }
-  const workspaceTarget = workspaceFileTargetFromHref(href);
+  const workspaceTarget = workspaceFileTargetFromHref(href, workspaceRoot);
   if (workspaceTarget) return workspaceTarget;
   if (href.startsWith("file://")) {
     return null;
@@ -918,9 +921,9 @@ const canUseLinkTextAsEditorTarget = (href: string): boolean => {
   }
 };
 
-const editorTargetFromLinkText = (href: string, text: string): EditorTarget | null => {
+const editorTargetFromLinkText = (href: string, text: string, workspaceRoot?: string): EditorTarget | null => {
   if (!canUseLinkTextAsEditorTarget(href)) return null;
-  return workspaceFileTargetFromHref(text);
+  return workspaceFileTargetFromHref(text, workspaceRoot);
 };
 
 const proseOptionListPattern = /^\s*[\p{L}\p{N}][\p{L}\p{N}\s&+.-]*(?:\s*\/\s*[\p{L}\p{N}][\p{L}\p{N}\s&+.-]*){1,}\s*$/u;
@@ -1064,17 +1067,28 @@ const absoluteEditorTitlePath = (path: string, workingDirectory: string): string
   return root ? `${root}/${normalizedPath.replace(/^\/+/, "")}` : normalizedPath;
 };
 
-const FileReferenceChip = ({ target, children }: { target: EditorTarget; children: React.ReactNode }) => {
-  const workingDirectory = useAppStore((s) => s.workingDirectory);
+type MessageResourceScope = { workspaceRoot?: string; conversationId?: string };
+
+const FileReferenceChip = ({ target, children, workspaceRoot, conversationId }: { target: EditorTarget; children: React.ReactNode } & MessageResourceScope) => {
+  const activeWorkspace = useAppStore((s) => s.workingDirectory);
+  const workingDirectory = workspaceRoot ?? activeWorkspace;
+  const opensInPreview = workspaceRoot !== undefined && !workspacePathsEqual(workspaceRoot, activeWorkspace);
   const label = textFromReactNode(children) || target.path;
   const { directory, name } = displayPathParts(label);
   const { fileName, meta } = splitFileLabelMeta(name);
   const titlePath = absoluteEditorTitlePath(target.path, workingDirectory || "");
   const extension = fileExtensionFromPath(target.path) || fileExtensionFromPath(label);
+  const openFile = () => {
+    if (opensInPreview) {
+      openWorkspaceFilePreview({ path: target.path, name: fileName, workspaceRoot, conversationId });
+    } else {
+      useAppStore.getState().openEditorFile(target.path, undefined, { line: target.line, column: target.column });
+    }
+  };
   const { onContextMenu, menu } = useContextMenu(() => [
     {
-      label: "在编辑器中打开",
-      onClick: () => useAppStore.getState().openEditorFile(target.path, undefined, { line: target.line, column: target.column }),
+      label: opensInPreview ? "预览文件" : "在编辑器中打开",
+      onClick: openFile,
     },
     // OS shell actions have no meaning in browser mode; offering them there
     // produced a menu entry that did nothing at all.
@@ -1090,12 +1104,8 @@ const FileReferenceChip = ({ target, children }: { target: EditorTarget; childre
     <span className="md-file-reference-wrap relative inline" onContextMenu={onContextMenu}>
       <button
         type="button"
-        onClick={() => useAppStore.getState().openEditorFile(
-          target.path,
-          undefined,
-          { line: target.line, column: target.column },
-        )}
-        title={`在编辑器中打开 ${titlePath}`}
+        onClick={openFile}
+        title={`${opensInPreview ? "预览" : "在编辑器中打开"} ${titlePath}`}
         aria-label={label}
         className={fileChipClassName}
         data-ext={extension || "file"}
@@ -1112,8 +1122,8 @@ const FileReferenceChip = ({ target, children }: { target: EditorTarget; childre
   );
 };
 
-const GenericFileReferenceChip = ({ target, children }: { target: FileTarget; children: React.ReactNode }) => {
-  const workingDirectory = useAppStore((s) => s.workingDirectory);
+const GenericFileReferenceChip = ({ target, children, workspaceRoot, conversationId }: { target: FileTarget; children: React.ReactNode } & MessageResourceScope) => {
+  const workingDirectory = useAppStore((s) => workspaceRoot ?? s.workingDirectory);
   const label = textFromReactNode(children) || target.path;
   const { directory, name } = displayPathParts(label);
   const titlePath = absoluteEditorTitlePath(target.path, workingDirectory || "");
@@ -1140,7 +1150,7 @@ const GenericFileReferenceChip = ({ target, children }: { target: FileTarget; ch
         type="button"
         onClick={() => {
           if (previewInsideWorkspace) {
-            openWorkspaceFilePreview({ path: target.path, name, workspaceRoot: workingDirectory });
+            openWorkspaceFilePreview({ path: target.path, name, workspaceRoot: workingDirectory, conversationId });
           } else {
             void openPath(titlePath);
           }
@@ -1161,8 +1171,8 @@ const GenericFileReferenceChip = ({ target, children }: { target: FileTarget; ch
   );
 };
 
-const FolderReferenceChip = ({ target, children }: { target: FolderTarget; children: React.ReactNode }) => {
-  const workingDirectory = useAppStore((s) => s.workingDirectory);
+const FolderReferenceChip = ({ target, children, workspaceRoot }: { target: FolderTarget; children: React.ReactNode } & MessageResourceScope) => {
+  const workingDirectory = useAppStore((s) => workspaceRoot ?? s.workingDirectory);
   const label = textFromReactNode(children) || target.path;
   const { name } = displayPathParts(label.replace(/[\\/]+$/, ""));
   const titlePath = absoluteEditorTitlePath(target.path, workingDirectory || "");
@@ -1170,7 +1180,7 @@ const FolderReferenceChip = ({ target, children }: { target: FolderTarget; child
   return (
     <button
       type="button"
-      onClick={() => useAppStore.getState().requestFileTreeReveal(target.path, "folder")}
+      onClick={() => useAppStore.getState().requestFileTreeReveal(workspaceRoot === undefined ? target.path : titlePath, "folder")}
       title={`在文件树中显示 ${titlePath}`}
       aria-label={label}
       className={`${fileChipClassName} md-folder-chip`}
@@ -1184,11 +1194,11 @@ const FolderReferenceChip = ({ target, children }: { target: FolderTarget; child
   );
 };
 
-const MarkdownImage = (props: React.ImgHTMLAttributes<HTMLImageElement>) => {
+const MarkdownImage = ({ workspaceRoot, conversationId, ...props }: React.ImgHTMLAttributes<HTMLImageElement> & MessageResourceScope) => {
   const [loadedRemoteUrl, setLoadedRemoteUrl] = useState<string | null>(null);
   const rawSrc = typeof props.src === "string" ? props.src : "";
   const alt = typeof props.alt === "string" ? props.alt : "image";
-  const workspaceLocalImage = localImageWithinWorkspace(rawSrc);
+  const workspaceLocalImage = localImageWithinWorkspace(rawSrc, workspaceRoot);
   const blockedLocalImage = Boolean(rawSrc) && isLocalImageUrl(rawSrc) && !workspaceLocalImage;
   const src = workspaceLocalImage?.src ?? rawSrc;
   const remoteSrc = !workspaceLocalImage && isPreviewableHttpUrl(src) ? src : "";
@@ -1249,7 +1259,8 @@ const MarkdownImage = (props: React.ImgHTMLAttributes<HTMLImageElement>) => {
       openWorkspaceFilePreview({
         path: workspaceLocalImage.path,
         name: alt,
-        workspaceRoot: useAppStore.getState().workingDirectory,
+        workspaceRoot: workspaceRoot ?? useAppStore.getState().workingDirectory,
+        conversationId,
       });
       return;
     }
@@ -1267,6 +1278,7 @@ const MarkdownImage = (props: React.ImgHTMLAttributes<HTMLImageElement>) => {
       name: alt,
       mediaType,
       url: src,
+      conversationId,
     });
   };
 
@@ -1305,6 +1317,7 @@ const mdComponents = (
   resolvedTheme: ResolvedTheme,
   scopeId: string,
   headingId: ReturnType<typeof createMarkdownHeadingIdAssigner>,
+  resourceScope: MessageResourceScope,
 ): MarkdownComponents => {
   const heading = (level: 1 | 2 | 3) => ({ node, ...props }: MarkdownPositionedProps<React.HTMLAttributes<HTMLHeadingElement>>) => {
     const base = markdownHeadingSlug(textFromReactNode(props.children));
@@ -1361,13 +1374,13 @@ const mdComponents = (
         </div>
       );
     }
-    const inlineEditorTarget = workspaceFileTargetFromHref(text);
+    const inlineEditorTarget = workspaceFileTargetFromHref(text, resourceScope.workspaceRoot);
     if (inlineEditorTarget) {
-      return <FileReferenceChip target={inlineEditorTarget}>{children}</FileReferenceChip>;
+      return <FileReferenceChip target={inlineEditorTarget} {...resourceScope}>{children}</FileReferenceChip>;
     }
-    const inlineFileTarget = workspaceGenericFileTargetFromHref(text);
+    const inlineFileTarget = workspaceGenericFileTargetFromHref(text, resourceScope.workspaceRoot);
     if (inlineFileTarget) {
-      return <GenericFileReferenceChip target={inlineFileTarget}>{children}</GenericFileReferenceChip>;
+      return <GenericFileReferenceChip target={inlineFileTarget} {...resourceScope}>{children}</GenericFileReferenceChip>;
     }
     if (isProseOptionList(text)) {
       return <InlineOptionList text={text} />;
@@ -1402,29 +1415,29 @@ const mdComponents = (
         </a>
       );
     }
-    const editorTarget = editorTargetFromHref(href) ?? editorTargetFromLinkText(href, childrenText);
+    const editorTarget = editorTargetFromHref(href, resourceScope.workspaceRoot) ?? editorTargetFromLinkText(href, childrenText, resourceScope.workspaceRoot);
     const fileTarget = editorTarget
       ? null
-      : workspaceGenericFileTargetFromHref(href) ?? (
-          canUseLinkTextAsEditorTarget(href) ? workspaceGenericFileTargetFromHref(childrenText) : null
+      : workspaceGenericFileTargetFromHref(href, resourceScope.workspaceRoot) ?? (
+          canUseLinkTextAsEditorTarget(href) ? workspaceGenericFileTargetFromHref(childrenText, resourceScope.workspaceRoot) : null
         );
     const folderTarget = editorTarget || fileTarget
       ? null
-      : workspaceFolderTargetFromHref(href) ?? (
-          canUseLinkTextAsEditorTarget(href) ? workspaceFolderTargetFromHref(childrenText) : null
+      : workspaceFolderTargetFromHref(href, resourceScope.workspaceRoot) ?? (
+          canUseLinkTextAsEditorTarget(href) ? workspaceFolderTargetFromHref(childrenText, resourceScope.workspaceRoot) : null
         );
     const opensInApp = isPreviewableHttpUrl(href);
     if (href.startsWith("minicode-file-ref:") && !editorTarget) {
       return <span className="font-[var(--font-mono)] text-[0.9em]">{props.children}</span>;
     }
     if (editorTarget) {
-      return <FileReferenceChip target={editorTarget}>{props.children}</FileReferenceChip>;
+      return <FileReferenceChip target={editorTarget} {...resourceScope}>{props.children}</FileReferenceChip>;
     }
     if (fileTarget) {
-      return <GenericFileReferenceChip target={fileTarget}>{props.children}</GenericFileReferenceChip>;
+      return <GenericFileReferenceChip target={fileTarget} {...resourceScope}>{props.children}</GenericFileReferenceChip>;
     }
     if (folderTarget) {
-      return <FolderReferenceChip target={folderTarget}>{props.children}</FolderReferenceChip>;
+      return <FolderReferenceChip target={folderTarget} {...resourceScope}>{props.children}</FolderReferenceChip>;
     }
     return (
       <a
@@ -1482,7 +1495,7 @@ const mdComponents = (
   h3: heading(3),
   hr: () => <hr className="border-0 h-px my-4 bg-gradient-to-r from-transparent via-[var(--border-subtle)] to-transparent" />,
   img: ({ node: _node, ...props }: MarkdownElementProps<React.ImgHTMLAttributes<HTMLImageElement>>) => {
-    return <MarkdownImage {...props} />;
+    return <MarkdownImage {...props} {...resourceScope} />;
   },
   });
 };
@@ -1672,20 +1685,20 @@ const PlainText = memo(({ content }: { content: string }) => (
 PlainText.displayName = "PlainText";
 
 /** Memoized renderer for the stable (completed) portion of streaming content. */
-const StableMarkdown = memo(({ content, components }: { content: string; components: MarkdownComponents }) => {
+const StableMarkdown = memo(({ content, components, plugins }: { content: string; components: MarkdownComponents; plugins: MarkdownRemarkPlugins }) => {
   // Check if this is plain text — skip react-markdown entirely
   if (!hasMarkdownSyntax(content)) {
     return <PlainText content={content} />;
   }
   return (
-    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
+    <ReactMarkdown remarkPlugins={plugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
       {content}
     </ReactMarkdown>
   );
 });
 StableMarkdown.displayName = "StableMarkdown";
 
-const StreamingTailMarkdown = memo(({ content, components }: { content: string; components: MarkdownComponents }) => {
+const StreamingTailMarkdown = memo(({ content, components, plugins }: { content: string; components: MarkdownComponents; plugins: MarkdownRemarkPlugins }) => {
   // Plain-text fast path for the streaming tail too — short tails like
   // a few words being typed don't need the full markdown pipeline.
   if (!hasMarkdownSyntax(content)) {
@@ -1709,7 +1722,7 @@ const StreamingTailMarkdown = memo(({ content, components }: { content: string; 
     return (
       <>
         {before.trim() && (
-          <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
+            <ReactMarkdown remarkPlugins={plugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
             {before}
           </ReactMarkdown>
         )}
@@ -1718,25 +1731,30 @@ const StreamingTailMarkdown = memo(({ content, components }: { content: string; 
     );
   }
   return (
-    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
+    <ReactMarkdown remarkPlugins={plugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
       {content}
     </ReactMarkdown>
   );
 });
 StreamingTailMarkdown.displayName = "StreamingTailMarkdown";
 
-export const MarkdownRenderer = memo(({ content, isStreaming, citations }: Props) => {
+export const MarkdownRenderer = memo(({ content, isStreaming, citations, workspaceRoot, conversationId }: Props) => {
   const resolved = useResolvedTheme();
   const rawScopeId = useId();
   const scopeId = useMemo(() => `md-${rawScopeId.replace(/[^a-zA-Z0-9_-]/g, "")}`, [rawScopeId]);
   const headingId = useMemo(() => createMarkdownHeadingIdAssigner(scopeId), [scopeId]);
   const displayContent = useMemo(
-    () => preserveWindowsMarkdownFileLinks(normalizeLatexDelimiters(normalizeCitationText(content, citations))),
-    [content, citations],
+    () => preserveWindowsMarkdownFileLinks(normalizeLatexDelimiters(content)),
+    [content],
+  );
+  const hasCitations = Boolean(citations?.length);
+  const plugins = useMemo<MarkdownRemarkPlugins>(
+    () => hasCitations ? [...remarkPlugins, removeCitationMarkers] : remarkPlugins,
+    [hasCitations],
   );
   const components = useMemo(
-    () => mdComponents(resolved, scopeId, headingId),
-    [resolved, scopeId, headingId],
+    () => mdComponents(resolved, scopeId, headingId, { workspaceRoot, conversationId }),
+    [resolved, scopeId, headingId, workspaceRoot, conversationId],
   );
   headingId.reset();
   const prevStableRef = useRef("");
@@ -1761,8 +1779,8 @@ export const MarkdownRenderer = memo(({ content, isStreaming, citations }: Props
       if (!hasMarkdownHeading(tail)) {
         return (
           <div className="md-body">
-            <StableMarkdown content={stable} components={components} />
-            {tail && <StreamingTailMarkdown content={tail} components={components} />}
+            <StableMarkdown content={stable} components={components} plugins={plugins} />
+            {tail && <StreamingTailMarkdown content={tail} components={components} plugins={plugins} />}
           </div>
         );
       }
@@ -1784,12 +1802,12 @@ export const MarkdownRenderer = memo(({ content, isStreaming, citations }: Props
   // A stream that starts with a code fence has no stable prefix yet. It still
   // needs the unhighlighted tail path instead of re-highlighting on each delta.
   if (isStreaming) {
-    return <div className="md-body"><StreamingTailMarkdown content={displayContent} components={components} /></div>;
+    return <div className="md-body"><StreamingTailMarkdown content={displayContent} components={components} plugins={plugins} /></div>;
   }
 
   return (
     <div className="md-body">
-      <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
+      <ReactMarkdown remarkPlugins={plugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
         {displayContent}
       </ReactMarkdown>
     </div>

@@ -500,12 +500,11 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     if (!path) return;
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
-      if (!(await writeWorkspaceFile(targetPath, "", workingDirectory))) {
-        await showAlert({ title: "创建失败", message: `无法创建文件：${path}` });
-        return;
-      }
+      await writeWorkspaceFile(targetPath, "", workingDirectory);
       void refresh();
-    } catch { await showAlert({ title: "创建失败", message: `无法创建文件：${path}` }); }
+    } catch (error) {
+      await showAlert({ title: "创建失败", message: error instanceof Error ? error.message : String(error) });
+    }
   };
 
   const createFolder = async () => {
@@ -514,12 +513,11 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     if (!path) return;
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
-      if (!(await createWorkspaceDirectory(targetPath, workingDirectory))) {
-        await showAlert({ title: "创建失败", message: `无法创建文件夹：${path}` });
-        return;
-      }
+      await createWorkspaceDirectory(targetPath, workingDirectory);
       void refresh();
-    } catch { await showAlert({ title: "创建失败", message: `无法创建文件夹：${path}` }); }
+    } catch (error) {
+      await showAlert({ title: "创建失败", message: error instanceof Error ? error.message : String(error) });
+    }
   };
 
   if (loading && !tree) {

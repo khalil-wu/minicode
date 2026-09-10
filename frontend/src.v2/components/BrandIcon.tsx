@@ -20,7 +20,7 @@ import slackIcon from "@iconify-icons/simple-icons/slack";
 import sqliteIcon from "@iconify-icons/simple-icons/sqlite";
 import stripeIcon from "@iconify-icons/simple-icons/stripe";
 import supabaseIcon from "@iconify-icons/simple-icons/supabase";
-import { Blend, Globe2, Sparkles } from "lucide-react";
+import { Blocks, BookOpenText, Globe2 } from "../lib/icons";
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import anthropicIcon from "@lobehub/icons-static-svg/icons/anthropic.svg?url";
 import claudeIcon from "@lobehub/icons-static-svg/icons/claude-color.svg?url";
@@ -87,9 +87,11 @@ export const resolveBrandIcon = (value: string): BrandAsset | { label: string; i
 const safeWebUrl = (value?: string): URL | null => {
   if (!value?.trim()) return null;
   try {
-    const url = new URL(value);
+    const url = value.startsWith("/") && typeof window !== "undefined"
+      ? new URL(value, window.location.origin) : new URL(value);
     if (url.protocol === "https:") return url;
-    if (url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname)) return url;
+    if (url.protocol === "http:" && (["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
+      || (typeof window !== "undefined" && url.origin === window.location.origin))) return url;
   } catch {
     return null;
   }
@@ -123,6 +125,7 @@ export const BrandIcon = ({
   iconUrl,
   websiteUrl,
   fallbackIcon,
+  inferBrand = true,
 }: {
   value: string;
   size?: number;
@@ -132,22 +135,22 @@ export const BrandIcon = ({
   iconUrl?: string;
   websiteUrl?: string;
   fallbackIcon?: ReactNode;
+  inferBrand?: boolean;
 }) => {
-  const brand = resolveBrandIcon(value);
-  const remoteCandidates = resolveWebsiteIconCandidates(iconUrl, websiteUrl);
+  const brand = inferBrand ? resolveBrandIcon(value) : null;
+  const remoteCandidates = resolveWebsiteIconCandidates(iconUrl, brand ? undefined : websiteUrl);
   const remoteCandidateKey = remoteCandidates.join("\n");
   const [failedRemoteIcons, setFailedRemoteIcons] = useState<string[]>([]);
   useEffect(() => setFailedRemoteIcons([]), [remoteCandidateKey]);
   const remoteIcon = remoteCandidates.find((candidate) => !failedRemoteIcons.includes(candidate)) ?? "";
-  // Prefer bundled, verified brand assets. Remote favicons are only a fallback
-  // for unknown sites, avoiding an unnecessary third-party request whenever
-  // the product/domain is already recognized locally.
-  const showRemoteIcon = !brand && Boolean(remoteIcon);
+  // A bundle's declared icon is authoritative. Brand inference applies only
+  // when that asset is absent or fails, and never overrides an extension logo.
+  const showRemoteIcon = Boolean(remoteIcon);
   const style = { width: size, height: size } satisfies CSSProperties;
   const accessibleTitle = title ?? brand?.label ?? value;
 
   return (
-    <span className={`brand-icon${className ? ` ${className}` : ""}`} style={style} title={accessibleTitle} aria-hidden="true" data-brand={brand?.label.toLowerCase() ?? (showRemoteIcon ? "website" : "generic")}>
+    <span className={`brand-icon${className ? ` ${className}` : ""}`} style={style} title={accessibleTitle} aria-hidden="true" data-brand={showRemoteIcon ? "website" : brand?.label.toLowerCase() ?? "generic"}>
       {showRemoteIcon ? (
         <img
           src={remoteIcon}
@@ -166,9 +169,9 @@ export const BrandIcon = ({
       ) : fallback === "web" ? (
         <Globe2 size={size} strokeWidth={1.8} />
       ) : fallback === "skill" ? (
-        <Sparkles size={size} strokeWidth={1.8} />
+        <BookOpenText size={size} strokeWidth={1.8} />
       ) : (
-        <Blend size={size} strokeWidth={1.8} />
+        <Blocks size={size} strokeWidth={1.8} />
       )}
     </span>
   );

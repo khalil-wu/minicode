@@ -294,9 +294,9 @@ class DurableUserMessageQueue:
             return _DurableQueueState.empty()
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
+        except ValueError as exc:
             self._quarantine_corrupt_file_unlocked(
-                "unreadable" if isinstance(exc, OSError) else "malformed_json",
+                "malformed_json",
                 str(exc),
             )
             return _DurableQueueState.empty()

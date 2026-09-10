@@ -390,6 +390,7 @@ async def _fetch_openai_compatible_models(
             ),
         )
         response.raise_for_status()
+
         return _extract_model_discovery(response.json())
 
 
@@ -517,6 +518,13 @@ async def _check_openai_compatible_generation(
             json=body,
         )
         response.raise_for_status()
+        choices = response.json().get("choices", [])
+        if not any(
+            message.get("content") or message.get("tool_calls") or message.get("refusal")
+            for choice in choices
+            if isinstance(message := choice.get("message"), dict)
+        ):
+            raise ValueError("Chat Completions returned no generation result.")
 
 
 async def _check_openai_compatible_image_generation(
@@ -666,6 +674,8 @@ async def _check_anthropic_generation(
             },
         )
         response.raise_for_status()
+        if not response.json().get("content"):
+            raise ValueError("Anthropic Messages returned no generation result.")
 
 
 async def _fetch_anthropic_models(

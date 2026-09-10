@@ -295,7 +295,6 @@ export const ToolCallCard = memo(({
           type="button"
           aria-expanded={open}
           aria-label={`${open ? "收起" : "展开"}${toolLabel}详情`}
-          className={record.status === "running" ? "anim-tool-running" : undefined}
           onClick={() => {
             userToggled.current = true;
             setOpen((value) => !value);

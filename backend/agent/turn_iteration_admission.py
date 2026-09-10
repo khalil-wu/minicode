@@ -8,9 +8,8 @@ mailbox delivery, context rendering, and the model-phase timeline events.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
+from contextlib import aclosing
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -26,7 +25,7 @@ from backend.agent.tool_schema_derivation import TurnToolSchemaDerivation
 from backend.agent.turn_budget import TurnBudgetController
 from backend.agent.turn_context_runtime import prepare_turn_context
 from backend.agent.turn_kernel import _set_terminal_reason
-from backend.agent.loop_preflight import PhaseDeadlineExceeded
+from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.llm.base import LLMMessage
 from backend.services.context_budget import manage_context_budget
 
@@ -96,6 +95,42 @@ class TurnIterationAdmission:
         initial_turn_pending: bool,
         pending_turn_context: list[str],
     ) -> AsyncIterator[AgentEvent | TurnTerminalProjection | IterationAdmissionResult]:
+        """Keep every admission await inside the existing turn lifetime."""
+        async with aclosing(self._admit(
+            previous_tool_schema_state=previous_tool_schema_state,
+            initial_turn_pending=initial_turn_pending,
+            pending_turn_context=pending_turn_context,
+        )) as updates:
+            while True:
+                try:
+                    update = await await_preflight(
+                        anext(updates),
+                        deadline=self.budget_runtime.active_phase_deadline(),
+                        cancel_event=self.tool_context.cancel_event,
+                    )
+                except StopAsyncIteration:
+                    return
+                except PhaseDeadlineExceeded:
+                    _, events = await self.budget_runtime.apply_boundary(
+                        self.budget_runtime.phase_deadline_boundary(),
+                    )
+                    for event in events:
+                        yield event
+                    yield self._result(
+                        action="terminate",
+                        tool_schema_state=previous_tool_schema_state,
+                        initial_turn_pending=initial_turn_pending,
+                    )
+                    return
+                yield update
+
+    async def _admit(
+        self,
+        *,
+        previous_tool_schema_state: TurnToolSchemaDerivation,
+        initial_turn_pending: bool,
+        pending_turn_context: list[str],
+    ) -> AsyncIterator[AgentEvent | TurnTerminalProjection | IterationAdmissionResult]:
         """Yield admission events and finish with exactly one result sentinel."""
 
         turn_elapsed_seconds = self.deadline_controller.elapsed()
@@ -152,53 +187,11 @@ class TurnIterationAdmission:
             )
             return
 
-        try:
-            self.budget_runtime.bounded_provider_timeout(0.0)
-        except PhaseDeadlineExceeded:
-            _, deadline_events = await self.budget_runtime.apply_boundary(
-                self.budget_runtime.phase_deadline_boundary(),
-            )
-            for event in deadline_events:
+        async with aclosing(manage_context_budget(
+            self.context, self.state, self.token_budget, tool_schemas,
+        )) as budget_events:
+            async for event in budget_events:
                 yield event
-            yield self._result(
-                action="terminate",
-                tool_schema_state=tool_schema_state,
-                initial_turn_pending=initial_turn_pending,
-            )
-            return
-
-        active_deadline = self.budget_runtime.active_phase_deadline()
-        try:
-            if active_deadline is None:
-                async for event in manage_context_budget(
-                    self.context,
-                    self.state,
-                    self.token_budget,
-                    tool_schemas,
-                ):
-                    yield event
-            else:
-                remaining = max(0.0, active_deadline - time.monotonic())
-                async with asyncio.timeout(remaining):
-                    async for event in manage_context_budget(
-                        self.context,
-                        self.state,
-                        self.token_budget,
-                        tool_schemas,
-                    ):
-                        yield event
-        except TimeoutError:
-            _, deadline_events = await self.budget_runtime.apply_boundary(
-                self.budget_runtime.phase_deadline_boundary(),
-            )
-            for event in deadline_events:
-                yield event
-            yield self._result(
-                action="terminate",
-                tool_schema_state=tool_schema_state,
-                initial_turn_pending=initial_turn_pending,
-            )
-            return
         if self.state.stopped_reason:
             if self.state.stopped_reason == "budget_exceeded":
                 _, budget_events = await self.budget_runtime.apply_boundary(

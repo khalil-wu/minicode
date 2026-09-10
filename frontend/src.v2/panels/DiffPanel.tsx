@@ -829,7 +829,7 @@ const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState
           <span className="flex-1" />
           {selectedFile && (
             <button
-              onClick={() => useAppStore.getState().openEditorFile(selectedFile.path, selectedFile.path.split(/[/\\]/).pop())}
+              onClick={() => useAppStore.getState().openEditorFile(selectedFile.path, selectedFile.path.split(/[/\\]/).pop(), { exact: true })}
               title="在编辑器中打开文件" aria-label="在编辑器中打开文件" style={iconButtonStyle}
             >
               <ExternalLink size={14} />
@@ -1197,7 +1197,7 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
             {visibleUntracked.map((path) => (
               <div key={`ut-${path}`} className="flex items-center gap-1 mb-0.5">
                 <button
-                  onClick={() => useAppStore.getState().openEditorFile(path, path.split(/[/\\]/).pop())}
+                  onClick={() => useAppStore.getState().openEditorFile(path, path.split(/[/\\]/).pop(), { exact: true })}
                   className="flex-1 min-w-0 border-0 cursor-pointer text-left px-1.5 py-1"
                   style={{
                     borderRadius: "var(--radius-sm, 4px)",

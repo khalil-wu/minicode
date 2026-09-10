@@ -70,11 +70,8 @@ async def project_non_text_provider_event(
             yield ProviderProjectionResult(True)
             return
         projected_reasoning_type = reasoning_type or "thinking"
-        # Provider streams may split reasoning into whitespace-only deltas.
-        # They carry no visible content and must not cross the strict event
-        # constructor, which rejects empty delta bodies. Lifecycle boundaries
-        # remain representable with an empty body.
-        if event.content.strip() or event.lifecycle in {"start", "end"}:
+        # Whitespace deltas preserve word and paragraph boundaries.
+        if event.content or event.lifecycle in {"start", "end"}:
             yield AgentEvent.thinking_chunk(
                 event.content,
                 source="provider",
@@ -112,6 +109,7 @@ async def project_non_text_provider_event(
         yield ProviderProjectionResult(True)
         return
     if event.type == StreamEventType.IMAGE_CHUNK:
+        stream_state.accept_provider_event(event)
         yield AgentEvent.image_chunk(event.image_data, event.image_media_type)
         yield ProviderProjectionResult(True)
         return

@@ -105,7 +105,7 @@ describe("MainSlots", () => {
         { id: "main-chat", kind: "chat", label: "Chat", focused: false, size: 1 },
         { id: "editor-readme", kind: "editor", label: "README.md", focused: true, size: 1 },
       ],
-      editorTabs: [{ path: "README.md", content: "", original: "", loading: false, error: null }],
+      editorTabs: [{ id: "editor-fixture-1", path: "README.md", content: "", original: "", loading: false, error: null }],
       activeTabPath: "README.md",
     });
 
@@ -135,7 +135,7 @@ describe("MainSlots", () => {
         { id: "main-chat", kind: "chat", label: "Chat", focused: false, size: 1 },
         { id: "editor-readme", kind: "editor", label: "README.md", focused: true, size: 1 },
       ],
-      editorTabs: [{ path: "README.md", content: "", original: "", loading: false, error: null }],
+      editorTabs: [{ id: "editor-fixture-2", path: "README.md", content: "", original: "", loading: false, error: null }],
       activeTabPath: "README.md",
     });
 
@@ -162,7 +162,7 @@ describe("MainSlots", () => {
         { id: "main-chat", kind: "chat", label: "Chat", focused: false, size: 1 },
         { id: "main-editor", kind: "editor", label: "File", focused: true, size: 1 },
       ],
-      editorTabs: [{ path: "README.md", content: "", original: "", loading: false, error: null }],
+      editorTabs: [{ id: "editor-fixture-3", path: "README.md", content: "", original: "", loading: false, error: null }],
       activeTabPath: "README.md",
     });
 
@@ -187,7 +187,7 @@ describe("MainSlots", () => {
         { id: "main-chat", kind: "chat", label: "Chat", focused: false, size: 1 },
         { id: "main-editor", kind: "editor", label: "File", focused: true, size: 1 },
       ],
-      editorTabs: [{ path: "README.md", content: "", original: "", loading: false, error: null }],
+      editorTabs: [{ id: "editor-fixture-4", path: "README.md", content: "", original: "", loading: false, error: null }],
       activeTabPath: "README.md",
     });
 

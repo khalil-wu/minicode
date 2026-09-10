@@ -491,7 +491,7 @@ const streamResumeRejectionReason = (
     return "snapshot_is_terminal";
   }
   const lastEventType = String(event.last_event_type || "").trim().toLowerCase();
-  if (["done", "error", "agent.run.completed"].includes(lastEventType)) {
+  if (["done", "agent.run.completed"].includes(lastEventType)) {
     return "snapshot_crossed_terminal_fence";
   }
 
@@ -564,9 +564,11 @@ const resolveTerminalEventTarget = (
   conversationId?: string,
   messageId?: string,
   turnId?: string,
+  allowSealed = false,
 ): { stale: boolean; messageId?: string } => {
   if (messageId && hasTerminalAssistantForConversation(conversationId, messageId)) {
-    return { stale: true, messageId };
+    const message = messagesForConversation(conversationId, messageId).find((item) => item.role === "assistant");
+    return { stale: !allowSealed || Boolean(turnId && message?.turnId && turnId !== message.turnId), messageId };
   }
   const streamingAssistants = messagesForConversation(conversationId).filter((message) =>
     message.role === "assistant" && (message.isStreaming || message.isThinkingStreaming),
@@ -1257,13 +1259,15 @@ export const handleChatStreamEvent = (
         return true;
       }
       if (consumeKnownStaleTurnEvent(conversationId, messageId)) return true;
-      const target = resolveTerminalEventTarget(conversationId, messageId, eventTurnId(e));
+      const target = resolveTerminalEventTarget(conversationId, messageId, eventTurnId(e), true);
       if (target.stale) return true;
       const terminalMessageId = terminalMessageIdForEvent(conversationId, target.messageId);
+      const previousMessage = messagesForConversation(conversationId, terminalMessageId).find((item) => item.role === "assistant");
+      const metadataOnly = Boolean(previousMessage?.terminalStatus);
       flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
       const usage = usageFromDoneEvent(e);
       const replayed = isReplayedChatEvent(e);
-      if (!replayed && usage && (!conversationId || conversationId === useAppStore.getState().conversationId)) {
+      if (!replayed && usage && !previousMessage?.usage && (!conversationId || conversationId === useAppStore.getState().conversationId)) {
         s.setLastUsage(usage);
       }
       const providerRaw = providerRawFromDoneEvent(e);
@@ -1308,7 +1312,7 @@ export const handleChatStreamEvent = (
         : undefined;
       const durationMs = Number((e as unknown as { duration_ms?: unknown; durationMs?: unknown }).duration_ms
         ?? (e as unknown as { duration_ms?: unknown; durationMs?: unknown }).durationMs);
-      s.finishAgentProgress(
+      if (!metadataOnly) s.finishAgentProgress(
         conversationId,
         terminalStatus === "failed" || terminalStatus === "interrupted"
           ? "failed"
@@ -1326,6 +1330,7 @@ export const handleChatStreamEvent = (
         Number.isFinite(durationMs) ? durationMs : undefined,
         String((e as unknown as { reason?: unknown }).reason || "").trim() || undefined,
       );
+      if (metadataOnly) return true;
       // approval.cancelled is authoritative, but DONE is the terminal fence
       // for the turn. Clear prompts owned by this conversation as a fallback
       // for cancellation races, reconnect gaps, or out-of-order delivery.
@@ -1472,18 +1477,6 @@ export const handleChatStreamEvent = (
           diffReview: state.diffReview?.requestId === requestId
             ? { ...state.diffReview, status: "error", error: message }
             : state.diffReview,
-        }));
-      }
-      if (err.error_type === "blocked" || err.error_type === "billing") {
-        useAppStore.setState((state) => ({
-          isStreaming: false,
-          // Clear conversationStreaming for the error-affected conversation
-          // so background conversations don't remain stuck as "running"
-          conversationStreaming: conversationId
-            ? { ...state.conversationStreaming, [conversationId]: false }
-            : state.conversationId
-              ? { ...state.conversationStreaming, [state.conversationId]: false }
-              : state.conversationStreaming,
         }));
       }
       // A recoverable error is evidence, not terminal authority: the loop keeps

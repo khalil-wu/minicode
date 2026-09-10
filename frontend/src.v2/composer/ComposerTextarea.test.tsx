@@ -5,8 +5,55 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ComposerTextarea } from "./ComposerTextarea";
 import { MAX_EDITABLE_PASTE_CHARS } from "./pastedText";
 import { useAppStore } from "../stores";
+import { useState } from "react";
 
 afterEach(cleanup);
+
+it("shows a readable skill name and declared icon while removing by the original identifier", () => {
+  const remove = vi.fn();
+  render(<ComposerTextarea value="review this" onChange={vi.fn()} onSubmit={vi.fn()}
+    skillTokens={[{ name: "code-review", displayName: "Code Review", icon: "/api/skills/asset?skill_path=review&variant=small" }]}
+    onRemoveSkill={remove} />);
+  const label = screen.getByText("Code Review");
+  expect(label.closest(".composer-skill-token")?.querySelector("img")?.getAttribute("src")).toContain("skill_path=review");
+  fireEvent.click(label);
+  expect(remove).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "移除技能 Code Review" }));
+  expect(remove).toHaveBeenCalledWith("code-review");
+  expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("review this");
+  expect(document.activeElement).toBe(screen.getByRole("textbox"));
+});
+
+it("keeps the textarea mounted and focused when Backspace removes the last selected skill", () => {
+  function ComposerWithSkill() {
+    const [skills, setSkills] = useState([{ name: "verify", displayName: "Verify" }]);
+    return <ComposerTextarea value="" onChange={vi.fn()} onSubmit={vi.fn()}
+      skillTokens={skills} onRemoveLastSkill={() => setSkills([])} />;
+  }
+  render(<ComposerWithSkill />);
+  const textarea = screen.getByRole("textbox");
+  textarea.focus();
+  fireEvent.keyDown(textarea, { key: "Backspace" });
+  expect(screen.queryByText("Verify")).toBeNull();
+  expect(screen.getByRole("textbox")).toBe(textarea);
+  expect(document.activeElement).toBe(textarea);
+});
+
+it("removes an inline skill with Backspace at the start without erasing the draft or intercepting forward Delete", () => {
+  const remove = vi.fn();
+  render(<ComposerTextarea value="review this change" onChange={vi.fn()} onSubmit={vi.fn()}
+    skillTokens={[{ name: "code-review", displayName: "Code Review" }]} onRemoveLastSkill={remove} />);
+  const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+  textarea.setSelectionRange(0, 6);
+  fireEvent.keyDown(textarea, { key: "Backspace" });
+  expect(remove).not.toHaveBeenCalled();
+  textarea.setSelectionRange(0, 0);
+  fireEvent.keyDown(textarea, { key: "Delete" });
+  expect(remove).not.toHaveBeenCalled();
+  fireEvent.keyDown(textarea, { key: "Backspace" });
+  expect(remove).toHaveBeenCalledOnce();
+  expect(textarea.value).toBe("review this change");
+});
 
 const renderTextarea = (overrides?: {
   value?: string;
@@ -81,8 +128,8 @@ describe("ComposerTextarea paste-to-attachment", () => {
   it("keeps the Code mode input aligned with the compact desktop composer", () => {
     const { textarea } = renderTextarea({ compact: true });
 
-    expect(textarea.style.minHeight).toBe("44px");
-    expect(textarea.style.padding).toBe("8px 12px 6px");
+    expect(textarea.style.padding).toBe("0px");
+    expect(textarea.parentElement?.className).toBe("composer-textarea-frame");
     expect(textarea.getAttribute("placeholder")).toBe("描述任务或提出问题…");
   });
 

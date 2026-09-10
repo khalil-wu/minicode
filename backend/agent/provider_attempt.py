@@ -34,6 +34,8 @@ class ProviderAttempt:
     first_byte_at: int | None = None
     first_event_reported: bool = False
     closed: bool = False
+    usage_reported: bool = False
+    usage_settled: bool = False
 
     @property
     def attempt_number(self) -> int:

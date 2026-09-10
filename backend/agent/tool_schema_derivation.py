@@ -131,12 +131,6 @@ def derive_turn_tool_schema_state(
         json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         for schema in canonical_base_schemas
     )
-    if (
-        previous is not None
-        and previous.permission_key == permission_key
-        and previous.schema_key == schema_key
-    ):
-        return previous
     names = sorted(tool_schema_names(canonical_base_schemas))
     deferred = ""
     if "tool_search" in names and tool_registry is not None:

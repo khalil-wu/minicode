@@ -244,7 +244,7 @@ def test_prompt_builder_keeps_dynamic_turn_context_out_of_stable_prefix(tmp_path
     assert "DYNAMIC_DEFERRED_TOOL" not in parts.context
 
 
-def test_read_only_subagent_omits_parent_project_and_memory_context(tmp_path: Path) -> None:
+def test_read_only_subagent_keeps_project_instructions_without_parent_memory(tmp_path: Path) -> None:
     class _WorkspaceContext:
         def get_project_summary(self) -> str:
             return "SCOPED WORKSPACE SUMMARY"
@@ -269,7 +269,7 @@ def test_read_only_subagent_omits_parent_project_and_memory_context(tmp_path: Pa
 
     assert "SCOPED WORKSPACE SUMMARY" in parts.context
     assert "TASK SPECIFIC SKILL" in parts.context
-    assert "PARENT PROJECT GUIDELINES" not in parts.context
+    assert "PARENT PROJECT GUIDELINES" in parts.context
     assert "PARENT CONVERSATION MEMORY" not in parts.context
     assert "PARENT PERSISTENT FACTS" not in parts.context
 
