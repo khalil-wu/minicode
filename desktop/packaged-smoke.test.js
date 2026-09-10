@@ -162,25 +162,24 @@ async function evaluate(client, expression, timeoutMs = 15000) {
 }
 
 async function waitForRendererReady(client, timeoutMs) {
-  return evaluate(client, `
-    new Promise((resolve) => {
-      const deadline = Date.now() + ${timeoutMs};
-      const poll = () => {
-        const readyState = document.readyState;
-        const hasRuntime = Boolean(window.__MINICODE_RUNTIME__);
-        if (["interactive", "complete"].includes(readyState) && hasRuntime) {
-          resolve({ ready: true, readyState, hasRuntime, href: location.href });
-          return;
-        }
-        if (Date.now() >= deadline) {
-          resolve({ ready: false, readyState, hasRuntime, href: location.href });
-          return;
-        }
-        setTimeout(poll, 50);
-      };
-      poll();
-    })
-  `, timeoutMs + 5000);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      // Poll from the host: a Promise in the startup document is destroyed
+      // when Electron commits the application document.
+      const state = await evaluate(client, `({
+        ready: document.readyState === "complete" && Boolean(window.__MINICODE_RUNTIME__),
+        readyState: document.readyState,
+        hasRuntime: Boolean(window.__MINICODE_RUNTIME__),
+        href: location.href,
+      })`);
+      if (state.ready) return state;
+    } catch (error) {
+      if (error.message !== "Execution context was destroyed.") throw error;
+    }
+    await delay(50);
+  }
+  throw new Error("Packaged renderer did not finish loading its runtime.");
 }
 
 function listDescendantProcesses(rootPid) {
@@ -287,13 +286,27 @@ test("packaged Windows app boots renderer, preload, IPC, and managed Python side
     );
     assert.equal(health.ready, true);
 
+    for (const name of ["browser", "code-review", "verify", "skill-creator", "plugin-creator"]) {
+      const skillPath = path.join(path.dirname(APP_PATH), "resources", "skills", name, "SKILL.md");
+      assert.equal(fs.existsSync(skillPath), true, `Bundled skill is missing: ${name}`);
+      const assetUrl = new URL(`http://127.0.0.1:${backendPort}/api/skills/asset`);
+      assetUrl.searchParams.set("skill_path", skillPath);
+      const asset = await fetch(assetUrl, {
+        headers: { "x-minicode-token": runtimeToken },
+        signal: AbortSignal.timeout(5000),
+      });
+      assert.equal(asset.status, 200, `Bundled skill icon was not discovered: ${name}`);
+      assert.match(asset.headers.get("content-type"), /^image\//);
+      assert.ok((await asset.arrayBuffer()).byteLength > 0);
+    }
+
     const targets = await waitForJson(
       `http://127.0.0.1:${cdpPort}/json/list`,
-      (payload) => Array.isArray(payload) && payload.some((target) => target.type === "page" && target.webSocketDebuggerUrl),
+      (payload) => Array.isArray(payload) && payload.some((target) => target.type === "page" && target.url.startsWith("file:") && target.webSocketDebuggerUrl),
       30000,
       "Packaged renderer CDP endpoint",
     );
-    const target = targets.find((candidate) => candidate.type === "page" && candidate.webSocketDebuggerUrl);
+    const target = targets.find((candidate) => candidate.type === "page" && candidate.url.startsWith("file:") && candidate.webSocketDebuggerUrl);
     assert.ok(target);
     cdp = await createCdpClient(target.webSocketDebuggerUrl);
 

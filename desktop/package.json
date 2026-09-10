@@ -98,6 +98,10 @@
         "to": "pyproject.toml"
       },
       {
+        "from": "../skills",
+        "to": "skills"
+      },
+      {
         "from": "python-runtime",
         "to": "python-runtime",
         "filter": [
