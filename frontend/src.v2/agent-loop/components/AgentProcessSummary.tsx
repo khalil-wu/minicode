@@ -1,4 +1,4 @@
-import { CheckCircle2, ChevronDown, ChevronRight, CircleAlert } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert } from "lucide-react";
 import type { AgentTurnStatus } from "../projection/project-turn";
 
 type AgentProcessSummaryProps = {
@@ -33,7 +33,9 @@ export function AgentProcessSummary({
           ? "已停止"
           : "已处理";
   const durationLabel = running ? "" : formatElapsedSeconds(durationMs);
-  const displayLabel = durationLabel ? `${statusLabel} ${durationLabel}` : statusLabel;
+  const displayLabel = durationLabel
+    ? `${status === "completed" ? "用时" : statusLabel} ${durationLabel}`
+    : statusLabel;
   const normalizedFailure = status === "failed" ? failureMessage?.trim() : "";
   const summaryFailure = normalizedFailure && !processExpanded ? normalizedFailure : "";
   const accessibleStatusLabel = summaryFailure
@@ -41,13 +43,9 @@ export function AgentProcessSummary({
     : displayLabel || "处理完成";
   const content = (
     <>
-      {!running && (
+      {!running && status !== "completed" && (
         <span className="agent-loop-process-summary-icon" aria-hidden="true">
-          {status === "failed" || status === "partial" || status === "stopped" ? (
-            <CircleAlert size={14} className="agent-loop-failed-icon" />
-          ) : (
-            <CheckCircle2 size={14} className="agent-loop-done-icon" />
-          )}
+          <CircleAlert size={14} className="agent-loop-failed-icon" />
         </span>
       )}
       <span className="agent-loop-process-summary-body">

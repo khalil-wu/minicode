@@ -525,7 +525,7 @@ describe("chat surface explicit projection", () => {
     ]);
   });
 
-  it("coalesces consecutive edits to one compact file action", () => {
+  it("preserves each consecutive edit and its own patch before the final file summary", () => {
     const edit = (id: string, filePath: string, plus: number, minus: number, patch: string) => ({
       type: "tool_call" as const,
       record: {
@@ -545,13 +545,13 @@ describe("chat surface explicit projection", () => {
       edit("edit-b", "src/b.ts", 2, 0, "@@ b"),
     ])], false)[0]?.committedCells ?? [];
 
-    expect(cells.map((cell) => cell.id)).toEqual(["edit-a-1", "edit-b", "diff-assistant-animated-files"]);
+    expect(cells.map((cell) => cell.id)).toEqual(["edit-a-1", "edit-a-2", "edit-b", "diff-assistant-animated-files"]);
     expect(cells[0]).toEqual(expect.objectContaining({
       kind: "activity",
-      toolCallRecords: expect.arrayContaining([
-        expect.objectContaining({ id: "edit-a-1" }),
-        expect.objectContaining({ id: "edit-a-2" }),
-      ]),
+      toolCallRecords: [expect.objectContaining({ id: "edit-a-1", diff: { plus: 1, minus: 1, patch: "@@ first" } })],
+    }));
+    expect(cells[1]).toEqual(expect.objectContaining({
+      toolCallRecords: [expect.objectContaining({ id: "edit-a-2", diff: { plus: 6, minus: 3, patch: "@@ second" } })],
     }));
   });
 
@@ -665,7 +665,7 @@ describe("chat surface explicit projection", () => {
     }));
   });
 
-  it("merges absolute and relative spellings of the same workspace file", () => {
+  it("merges path aliases only in the final summary and preserves both edit actions", () => {
     const turns = projectMessagesToTurns([message("assistant-paths", "assistant", [
       {
         type: "tool_call",
@@ -696,7 +696,7 @@ describe("chat surface explicit projection", () => {
     ])], false, "C:\\Desktop\\MiniCode");
 
     const cells = turns[0]?.committedCells ?? [];
-    expect(cells.filter((cell) => cell.kind === "activity")).toHaveLength(1);
+    expect(cells.filter((cell) => cell.kind === "activity")).toHaveLength(2);
     expect(cells.filter((cell) => cell.kind === "diff")).toEqual([
       expect.objectContaining({
         files: [expect.objectContaining({

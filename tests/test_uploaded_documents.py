@@ -51,6 +51,19 @@ def test_ingest_markdown_file_creates_document_attachment() -> None:
     assert result.attachment.summary == "Markdown document"
 
 
+def test_ingest_svg_preserves_renderable_media_type_and_text() -> None:
+    content = b'<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>'
+
+    result = ingest_uploaded_document(
+        file_name="diagram.svg",
+        raw_content=content,
+        artifact_store=ArtifactStore(),
+    )
+
+    assert result.attachment.media_type == "image/svg+xml"
+    assert "<circle" in result.full_text
+
+
 @pytest.mark.parametrize("file_name", [".gitconfig", ".bashrc", ".mcp.json"])
 def test_dangerous_config_files_cannot_be_uploaded(file_name: str, tmp_path) -> None:
     with pytest.raises(ValueError, match="Sensitive files"):

@@ -481,7 +481,7 @@ describe("SubagentsTab", () => {
     const { container } = render(<SubagentsTab />);
     fireEvent.click(screen.getByRole("button", { name: "打开子智能体任务：检查并修复实现" }));
 
-    expect(await screen.findByText("已处理 6 秒")).toBeTruthy();
+    expect(await screen.findByText("用时 6 秒")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
     fireEvent.click(screen.getByRole("button", { name: "读取了文件并搜索了内容并运行了命令并编辑了文件" }));
 

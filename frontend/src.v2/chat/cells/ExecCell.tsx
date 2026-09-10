@@ -91,10 +91,10 @@ export function ExecCell({
           </span>
           <span className="exec-cell-title">{running ? "正在运行" : title}</span>
           <span className="exec-cell-command-preview" title={cell.command}>{cell.command}</span>
-          <span className="exec-cell-meta">
+          {(status !== "success" || cell.background) && <span className="exec-cell-meta">
             {statusMeta}
             {duration ? ` · ${duration}` : ""}
-          </span>
+          </span>}
           <span className="exec-cell-toggle" aria-hidden="true">
             {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </span>
@@ -131,7 +131,7 @@ export function ExecCell({
           </pre>
           <div className="exec-cell-output-status" data-status={status}>
             <StatusIcon status={cell.status} size={13} spinningClassName="exec-cell-spin-icon" />
-            <span>{statusLabel}</span>
+            <span>{statusLabel}{cell.exitCode != null ? ` · exit ${cell.exitCode}` : ""}{duration ? ` · ${duration}` : ""}</span>
           </div>
         </div>
       )}

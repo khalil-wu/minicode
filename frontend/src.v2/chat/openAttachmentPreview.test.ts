@@ -140,6 +140,30 @@ describe("attachment preview request generation", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:conv-a-first");
   });
 
+  it("keeps the local SVG blob URL after its text content loads", async () => {
+    const createObjectURL = vi.fn(() => "blob:local-svg");
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL: vi.fn() });
+    const svgFile = {
+      type: "image/svg+xml",
+      size: 46,
+      text: async () => '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    } as File;
+
+    openLocalFilePreview({
+      id: "local-svg",
+      name: "diagram.svg",
+      file: svgFile,
+      conversationId: "conv-preview",
+    });
+
+    await vi.waitFor(() => expect(useAppStore.getState().previewArtifact).toMatchObject({
+      artifactId: "local:local-svg",
+      mediaType: "image/svg+xml",
+      url: "blob:local-svg",
+      loading: false,
+    }));
+  });
+
   it("does not revive a file request after the conversation preview is released and reopened", async () => {
     const oldText = deferred<string>();
     const oldFile = { type: "text/plain", size: 3, text: () => oldText.promise } as File;

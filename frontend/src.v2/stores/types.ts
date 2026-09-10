@@ -1132,12 +1132,12 @@ export interface ChatMessage {
   queuePosition?: number;
   queueMessageId?: string;
   steeredIntoMessageId?: string;
-  /** Attachments carried by a BriefTool (send_message) reply on this message.
-   * Rendered as the focused assistant reply. */
+  /** Verified workspace deliverables produced by tools during this reply.
+   * The transport name is retained for persisted transcript compatibility. */
   replyAttachments?: ReplyAttachmentMeta[];
 }
 
-/** Metadata for a BriefTool reply attachment (local-first, no upload). */
+/** Metadata for a generated workspace deliverable (local-first, no upload). */
 export interface ReplyAttachmentMeta {
   /** Absolute or workspace-relative file path. */
   path: string;

@@ -415,6 +415,94 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().rightStackTab)).toBe("tasks");
   });
 
+  test("keeps commentary, individual edits and generated SVG previews in their owning surfaces", async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 1100 });
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="140"><rect width="320" height="140" rx="20" fill="#e8f0fe"/><text x="30" y="80" fill="#1765cc" font-size="24">MiniCode preview</text></svg>';
+    let previewRequests = 0;
+    let artifactRequests = 0;
+    await page.route(/\/api\/workspace\/preview/, async (route) => {
+      previewRequests += 1;
+      await route.fulfill({ json: {
+        file_name: "diagram.svg", path: "output/diagram.svg", media_type: "image/svg+xml",
+        kind: "code", size_bytes: svg.length, content: svg, has_native: true,
+      } });
+    });
+    await page.route(/\/api\/workspace\/raw/, (route) => route.fulfill({ contentType: "image/svg+xml", body: svg }));
+    await page.route(/\/api\/artifacts\/raw/, async (route) => {
+      artifactRequests += 1;
+      await route.fulfill({ status: 404, json: { detail: "Workspace files are not artifacts" } });
+    });
+    await page.evaluate(() => {
+      const store = (window as any).__zustandStore;
+      const command = (id: string, value: string) => ({ type: "tool_call", record: {
+        id, name: "run_command", args: { command: value }, status: "success",
+        resultKind: "command", activityKind: "commandExecution", startedAt: 100, finishedAt: 200,
+        stdoutPreview: "检查完成", exitCode: 0,
+      } });
+      const edit = (id: string, plus: number, minus: number, patch: string) => ({ type: "tool_call", record: {
+        id, name: "apply_patch", args: { file_path: "src/chart.ts" }, status: "success",
+        resultKind: "edit", activityKind: "fileChange", startedAt: 300, finishedAt: 400,
+        diff: { plus, minus, patch },
+      } });
+      const messages = [
+        { id: "user-layout", role: "user", content: "生成流程图并验证布局", artifacts: [], timestamp: 1 },
+        {
+          id: "assistant-layout", turnId: "turn-layout", role: "assistant", content: "流程图已生成，检查完成。",
+          artifacts: [], timestamp: 100, completedAt: 874100, durationMs: 874000, isStreaming: false,
+          replyAttachments: [{ path: "output/diagram.svg", size: 200, isImage: true }],
+          blocks: [
+            { type: "text", itemId: "commentary-a", source: "commentary", status: "completed", content: "先核对生成文件与预览入口。" },
+            command("inspect", "git status --short"), command("inspect2", "npm run check"),
+            { type: "text", itemId: "commentary-b", source: "commentary", status: "completed", content: "已找到 MIME 分类不一致，现在修复并验证。" },
+            edit("edit-a", 1, 0, "--- a/src/chart.ts\n+++ b/src/chart.ts\n@@ -0,0 +1 @@\n+export const preview = true;"),
+            edit("edit-b", 2, 1, "--- a/src/chart.ts\n+++ b/src/chart.ts\n@@ -1 +1,2 @@\n-export const preview = true;\n+export const preview = 'svg';\n+export const verified = true;"),
+            command("verify", "npm test"),
+            { type: "text", itemId: "answer-layout", source: "model_final", status: "completed", content: "流程图已生成，检查完成。" },
+          ],
+        },
+      ];
+      store.setState({
+        messages, conversationId: "conv-cells", conversationMessages: { "conv-cells": messages },
+        workingDirectory: "C:/Desktop/MiniCode", isStreaming: false, viewMode: "normal",
+      });
+      (window as any).__mockWs._receive({
+        type: "turn.diff.updated", conversation_id: "conv-cells", thread_id: "conv-cells",
+        turn_id: "turn-layout", message_id: "assistant-layout", revision: 2,
+        diff: "diff --git a/src/chart.ts b/src/chart.ts\nnew file mode 100644\n--- /dev/null\n+++ b/src/chart.ts\n@@ -0,0 +1,2 @@\n+export const preview = 'svg';\n+export const verified = true;\n",
+      });
+    });
+    await expect(page.getByText("先核对生成文件与预览入口。")).toBeHidden();
+    await expect(page.getByRole("region", { name: "附件摘要" })).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "生成文件摘要" })).toBeVisible();
+    await page.screenshot({ path: "../output/playwright/codex-layout-collapsed.png", fullPage: true });
+    await page.getByRole("button", { name: "展开处理步骤" }).click();
+    await expect(page.getByText("先核对生成文件与预览入口。")).toBeVisible();
+    await page.getByRole("button", { name: "编辑了文件并运行了命令" }).click();
+    const editRows = page.locator('[data-zone="work"] .activity-cell[data-activity-kind="fileChange"]');
+    await expect(editRows).toHaveCount(2);
+    const gap = await editRows.first().evaluate((element) => {
+      const path = element.querySelector(".activity-cell-file-change-target")!.getBoundingClientRect();
+      const stats = element.querySelector(".activity-cell-file-change-stats")!.getBoundingClientRect();
+      return stats.left - path.right;
+    });
+    expect(gap).toBeLessThan(24);
+    await editRows.first().getByRole("button", { name: "展开活动详情" }).click();
+    await expect(editRows.first().locator(".inline-diff")).toBeVisible();
+    const patchHeader = editRows.first().locator(".activity-cell-change-card-header");
+    await expect(patchHeader.getByRole("button", { name: "复制修改" })).toBeVisible();
+    expect(await patchHeader.locator(".activity-cell-added").evaluate((node) => getComputedStyle(node).color))
+      .not.toBe(await patchHeader.locator(".activity-cell-removed").evaluate((node) => getComputedStyle(node).color));
+    await expect(page.locator('[data-zone="diff"] .diff-cell')).toHaveCount(1);
+    await expect(page.locator('[data-zone="diff"] .diff-cell-header-stats')).toHaveText("+2-0");
+    await page.screenshot({ path: "../output/playwright/codex-layout-expanded.png", fullPage: true });
+    await page.getByRole("button", { name: "查看生成文件：diagram.svg" }).click();
+    await expect(page.getByRole("img", { name: "diagram.svg" })).toBeVisible();
+    await expect.poll(() => previewRequests).toBe(1);
+    expect(artifactRequests).toBe(0);
+    await expect.poll(() => page.getByRole("img", { name: "diagram.svg" }).evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0);
+    await page.screenshot({ path: "../output/playwright/codex-layout-svg.png", fullPage: true });
+  });
+
   test("verifies ActivityCell flat tool projection and inline read records", async ({ page }) => {
     const composer = page.locator('textarea, input[placeholder*="message" i], [contenteditable="true"]').first();
     await composer.fill("分析前端输出，不要修改文件");
@@ -511,7 +599,7 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     await workGroup.getByRole("button").click();
     await expect(processArea.getByText("已编辑", { exact: true })).toHaveCount(2);
     await expect(processArea.locator(".diff-cell")).toHaveCount(0);
-    await expect(replyArea.locator(".diff-cell")).toHaveCount(0);
+    await expect(replyArea.locator(".diff-cell")).toHaveCount(1);
     const outcome = page.locator('[data-zone="diff"]');
     await expect(outcome.locator(".diff-cell")).toHaveCount(1);
     await expect(outcome.getByText("已编辑 2 个文件")).toBeVisible();

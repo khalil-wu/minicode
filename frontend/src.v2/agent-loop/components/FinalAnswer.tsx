@@ -1,16 +1,19 @@
 import type { RenderAgentCell } from "./AgentTurn";
 import type { AgentLoopAnswerCell } from "../projection/project-turn";
+import type { ReactNode } from "react";
 
 export function FinalAnswer({
   cell,
   isStreaming,
   isActive,
   renderCell,
+  afterContent,
 }: {
   cell: AgentLoopAnswerCell;
   isStreaming: boolean;
   isActive: boolean;
   renderCell: RenderAgentCell;
+  afterContent?: ReactNode;
 }) {
   return (
     <section
@@ -22,6 +25,7 @@ export function FinalAnswer({
         cell,
         isActive,
         className: "chat-turn-answer-cell agent-loop-answer-cell",
+        afterContent,
       })}
     </section>
   );

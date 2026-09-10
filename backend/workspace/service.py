@@ -234,7 +234,7 @@ class WorkspaceService:
             "content": visible_content,
             "content_chars": len(content),
             "truncated": len(visible_content) < len(content),
-            "has_native": kind == "image" or media_type == "application/pdf",
+            "has_native": media_type.startswith("image/") or media_type == "application/pdf",
         }
 
     def write_file(self, path: str, content: str) -> WorkspaceFileResponse:

@@ -10,6 +10,25 @@ const message = (patch: Partial<ChatMessage> & Pick<ChatMessage, "id" | "role">)
 });
 
 describe("buildActivitySidebarState", () => {
+  it("keeps generated workspace files on the workspace route through live output, restore and preview", () => {
+    const file = { path: "output/diagram.svg", size: 100, isImage: true };
+    const messages = [message({
+      id: "generated", role: "assistant", replyAttachments: [file],
+      blocks: [{ type: "tool_call", record: {
+        id: "present", name: "present_file", args: { file_path: file.path },
+        status: "success", startedAt: 1, outputFiles: [file],
+      } }],
+    })];
+    const items = buildOutput(messages, {
+      artifactId: `workspace:${file.path}`, source: "workspace",
+      name: "diagram.svg", mediaType: "image/svg+xml", content: "", loadedAt: 2,
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0].path).toBe(file.path);
+    expect(items[0].artifactId).toBeUndefined();
+    expect(items[0].mediaType).toBe("image/svg+xml");
+    expect(buildOutput([], { artifactId: "upload", source: "attachment", content: "", loadedAt: 2 })).toEqual([]);
+  });
   it("projects agent.progress events without inferring ownership from tool names", () => {
     const state = buildActivitySidebarState({
       conversationId: "conv-current",
@@ -1071,12 +1090,6 @@ describe("buildActivitySidebarState", () => {
 
     expect(state.attachments).toMatchObject([
       {
-        id: "C:/Desktop/MiniCode/report.txt",
-        messageId: "assistant-attachments",
-        label: "report.txt",
-        kind: "file",
-      },
-      {
         id: "artifact-screen",
         messageId: "user-attachments",
         label: "screen.png",
@@ -1084,6 +1097,13 @@ describe("buildActivitySidebarState", () => {
         artifactId: "artifact-screen",
       },
     ]);
+    expect(state.output).toContainEqual(expect.objectContaining({
+      id: "workspace:C:/Desktop/MiniCode/report.txt",
+      label: "report.txt",
+      kind: "file",
+      path: "C:/Desktop/MiniCode/report.txt",
+      mediaType: "text/plain",
+    }));
     expect(state.runs).toMatchObject([
       {
         id: "terminal:term-1",

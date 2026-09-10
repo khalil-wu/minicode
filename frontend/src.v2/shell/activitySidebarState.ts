@@ -3,6 +3,7 @@ import { getContentBlocks, getToolCallsFromMessage } from "../lib/content-blocks
 import { planStepProgressStatus, shouldSurfacePlanProgress } from "../lib/planVisibility";
 import { isProviderRequestProgress, providerProgressLabel } from "../lib/provider-progress";
 import { previewUrlsShareOrigin } from "../lib/preview-projection";
+import { mediaTypeForPath } from "../lib/media-types";
 import {
   artifactFallbackLabel as projectionArtifactFallbackLabel,
   artifactMediaTypeForProjection,
@@ -400,15 +401,15 @@ export function buildOutput(messages: ChatMessage[], previewArtifact: ArtifactCo
   const indexes = new Map<string, number>();
 
   const upsert = (item: ActivityOutputItem): void => {
-    const artifactId = String(item.artifactId || item.id || "").trim();
-    if (!artifactId) return;
-    const existingIndex = indexes.get(artifactId);
+    const id = String(item.artifactId || item.id || "").trim();
+    if (!id) return;
+    const existingIndex = indexes.get(id);
     if (existingIndex === undefined) {
-      indexes.set(artifactId, items.length);
-      items.push({ ...item, id: artifactId, artifactId });
+      indexes.set(id, items.length);
+      items.push({ ...item, id });
       return;
     }
-    items[existingIndex] = mergeOutputItems(items[existingIndex], { ...item, id: artifactId, artifactId });
+    items[existingIndex] = mergeOutputItems(items[existingIndex], { ...item, id });
   };
 
   for (const message of messages) {
@@ -421,13 +422,24 @@ export function buildOutput(messages: ChatMessage[], previewArtifact: ArtifactCo
     for (const record of getToolCallsFromMessage(message)) {
       const item = outputFromToolRecord(record);
       if (item) upsert(item);
+      for (const file of record.outputFiles ?? []) {
+        upsert(outputFromReplyFile({ ...file, isImage: Boolean(file.isImage) }));
+      }
+    }
+    for (const outputFile of message.replyAttachments ?? []) {
+      upsert(outputFromReplyFile(outputFile));
     }
   }
 
   const previewId = String(previewArtifact?.artifactId || "").trim();
-  if (previewArtifact && previewId) {
-    const previewItem = outputFromPreviewArtifact(previewArtifact, previewId);
+  if (previewArtifact && previewId
+    && previewArtifact.source !== "attachment"
+    && previewArtifact.source !== "local"
+    && (previewArtifact.source !== "workspace" || indexes.has(previewId))) {
     const existingIndex = indexes.get(previewId);
+    const previewItem = previewArtifact.source === "workspace" && existingIndex !== undefined
+      ? { ...items[existingIndex], url: previewArtifact.url }
+      : outputFromPreviewArtifact(previewArtifact, previewId);
     if (existingIndex === undefined) {
       indexes.set(previewId, items.length);
       items.push(previewItem);
@@ -564,17 +576,12 @@ function buildAttachments(messages: ChatMessage[]): ActivityAttachmentItem[] {
   const seen = new Set<string>();
 
   for (const message of messages) {
+    if (message.role !== "user") continue;
     for (const attachment of message.attachmentRefs ?? []) {
       const id = attachment.artifactId || attachment.docId || attachment.id || `${message.id}:${attachment.name}`;
       if (seen.has(id)) continue;
       seen.add(id);
       items.push(attachmentFromRef(message.id, attachment));
-    }
-    for (const attachment of message.replyAttachments ?? []) {
-      const id = attachment.path || `${message.id}:reply:${items.length}`;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      items.push(attachmentFromReply(message.id, id, attachment));
     }
   }
 
@@ -750,19 +757,16 @@ function attachmentFromRef(messageId: string, attachment: MessageAttachmentRef):
   };
 }
 
-function attachmentFromReply(
-  messageId: string,
-  id: string,
-  attachment: ReplyAttachmentMeta,
-): ActivityAttachmentItem {
+function outputFromReplyFile(attachment: ReplyAttachmentMeta): ActivityOutputItem {
+  const mediaType = mediaTypeForPath(attachment.path);
+  const kind = canonicalArtifactKind(attachment.isImage ? "image" : "file", mediaType);
   return {
-    id,
-    messageId,
-    label: cleanDisplayText(basename(attachment.path)) || "Attachment",
-    kind: attachment.isImage ? "image" : "file",
+    id: `workspace:${attachment.path}`,
+    label: cleanDisplayText(basename(attachment.path)) || "生成文件",
+    kind,
     detail: sizeLabel(attachment.size),
     path: attachment.path,
-    mediaType: attachment.isImage ? "image/*" : undefined,
+    mediaType,
   };
 }
 

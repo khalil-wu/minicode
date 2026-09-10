@@ -1020,8 +1020,10 @@ _USER_UPDATES_PROMPT = """\
 Keep the user informed while you work with tools.
 - Chat Completions has no separate commentary channel. Write these updates as ordinary assistant text immediately before the tool call; the runtime will place that text in the ordered process timeline instead of the final answer.
 - Before the first tool call, send one short, meaningful update naming the immediate next step.
-- Before each new tool phase, send one short, meaningful update naming the concrete operation and target (for example, the file you are about to read, the search you are about to run, or the command you are about to execute).
-- After a meaningful result or when changing from one tool type to another, send one short commentary update describing what changed and what you will do next.
+- Group related reads, commands, and edits under one update. Changing tool types is not by itself a reason to send another message.
+- After a meaningful finding, completed step, or change of direction, explain what you learned and what you will do next in one or two short sentences. During longer work, give useful updates at reasonable intervals.
+- Write for the user: describe the result or decision, not tool parameters, internal bookkeeping, or a running command log. Tool rows already carry execution details. Distinguish verified results from assumptions.
+- Keep intermediate updates in the work timeline. Reserve the final answer for the outcome, relevant validation, remaining limitations, and links to files the user should open. User uploads are input attachments; generated deliverables should be linked from the answer.
 - Keep each update to one or two sentences. Never emit a placeholder such as `...`, `…`, an empty line, or a bare punctuation-only update. If there is no meaningful change to report, omit the update rather than using a placeholder. Do not repeat the exact same update, expose private reasoning, or narrate every low-level parameter when the operation is unchanged.
 """
 

@@ -358,7 +358,9 @@ describe("ChatTurn", () => {
     const diffArea = screen.getByLabelText("文件修改");
     expect(workArea.querySelectorAll(".diff-cell")).toHaveLength(0);
     expect(diffArea.querySelectorAll(".diff-cell")).toHaveLength(1);
-    expect(replyArea.querySelector(".diff-cell")).toBeNull();
+    expect(replyArea.querySelector(".diff-cell")).toBeTruthy();
+    const actions = replyArea.querySelector(".assistant-cell-actions")!;
+    expect(diffArea.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(replyArea.compareDocumentPosition(diffArea) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const processText = workArea.textContent ?? "";
     expect(processText).toContain("npm test");
@@ -480,7 +482,7 @@ describe("ChatTurn", () => {
 
     expect(screen.getByText("Implementation complete.")).toBeTruthy();
     expect(screen.queryByText("Ran explicit tool")).toBeNull();
-    expect(screen.getByText("已处理 2 秒")).toBeTruthy();
+    expect(screen.getByText("用时 2 秒")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
     expect(screen.getByText("Ran explicit tool", { selector: ".activity-cell-name" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
@@ -514,7 +516,7 @@ describe("ChatTurn", () => {
     render(<ChatTurn turn={turn} />);
 
     expect(screen.getByTitle(command)).toBeTruthy();
-    expect(screen.getByText("已处理 26 秒")).toBeTruthy();
+    expect(screen.getByText("用时 26 秒")).toBeTruthy();
     expect(screen.queryByText("1 个工具")).toBeNull();
     expect(screen.queryByText("1 条命令")).toBeNull();
     expect(screen.queryByRole("button", { name: "展开处理步骤" })).toBeNull();
@@ -636,7 +638,7 @@ describe("ChatTurn", () => {
     }} />);
 
     expect(screen.getByRole("button", { name: "展开处理步骤" }).getAttribute("aria-expanded")).toBe("false");
-    expect(screen.getByText("已处理 2 秒")).toBeTruthy();
+    expect(screen.getByText("用时 2 秒")).toBeTruthy();
     expect(screen.queryByText("Inspecting projection", { selector: ".activity-cell-name" })).toBeNull();
   });
 

@@ -18,7 +18,7 @@ describe("AgentProcessSummary", () => {
       />,
     );
 
-    expect(screen.getByText("已处理 26 秒")).toBeTruthy();
+    expect(screen.getByText("用时 26 秒")).toBeTruthy();
     expect(screen.queryByText(/个工具|个失败|输入|输出|推理/)).toBeNull();
   });
 

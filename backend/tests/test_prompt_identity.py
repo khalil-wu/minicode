@@ -30,8 +30,9 @@ def test_stable_prompt_has_one_minicode_identity() -> None:
     assert "Do not infer or continue an earlier task" in prompt
     assert "# User updates" in prompt
     assert "Before the first tool call" in prompt
-    assert "Before each new tool phase" in prompt
-    assert "After a meaningful result" in prompt
+    assert "Group related reads, commands, and edits under one update" in prompt
+    assert "After a meaningful finding" in prompt
+    assert "Tool rows already carry execution details" in prompt
     assert "Chat Completions has no separate commentary channel" in prompt
     assert "Never emit a placeholder" in prompt
     assert "# Tone and style" in prompt

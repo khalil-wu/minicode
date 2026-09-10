@@ -390,6 +390,7 @@ export const openLocalFilePreview = (target: LocalFilePreviewTarget): boolean =>
         publishPreview(lease, conversationId, {
           ...base,
           content: visible,
+          url: supportsNativePreview(mediaType) ? url : undefined,
           sizeBytes: target.file?.size,
           contentChars: content.length,
           truncated: visible.length < content.length,

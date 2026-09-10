@@ -123,6 +123,17 @@ def test_workspace_preview_size_matches_the_bytes_sent_to_the_parser(tmp_path, m
     assert snapshot["size_bytes"] == len(expected.encode("utf-8"))
 
 
+def test_workspace_svg_preview_exposes_the_same_native_surface_as_the_file_tree(tmp_path):
+    content = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"></svg>'
+    (tmp_path / "diagram.svg").write_text(content, encoding="utf-8")
+
+    snapshot = WorkspaceService(lambda: tmp_path).preview_file("diagram.svg")
+
+    assert snapshot["media_type"] == "image/svg+xml"
+    assert snapshot["has_native"] is True
+    assert snapshot["content"] == content
+
+
 @pytest.mark.parametrize("content", [b"", b"at limit", "中文\r\n".encode("utf-8")], ids=["empty", "ascii", "crlf-unicode"])
 def test_workspace_read_accepts_exact_byte_limit(tmp_path, content):
     (tmp_path / "sample.txt").write_bytes(content)

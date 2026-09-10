@@ -1,6 +1,5 @@
 import { memo } from "react";
 import { MarkdownRenderer } from "../messages/MarkdownRenderer";
-import { readableToolLabel } from "../toolDisplayName";
 import type { ThinkingCellState } from "./cellTypes";
 import {
   isProviderReasoningSummary,
@@ -20,7 +19,7 @@ export const ThinkingCell = memo(function ThinkingCell({
   workspaceRoot?: string;
 }) {
   const streaming = Boolean(isStreaming || cell.isStreaming);
-  const content = readableToolLabel(cell.content).trim();
+  const content = cell.content.trim();
   if (!content) return null;
   const summary = isProviderReasoningSummary(cell);
   const transient = isTransientProviderReasoning(cell);

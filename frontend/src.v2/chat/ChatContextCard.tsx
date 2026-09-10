@@ -22,6 +22,7 @@ import {
 } from "../desktop/runtime";
 import { projectAgentViews } from "../lib/agent-view-model";
 import { getToolCallsFromMessage } from "../lib/content-blocks";
+import { mediaTypeForPath } from "../lib/media-types";
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
 import {
   artifactMediaTypeForProjection,
@@ -144,6 +145,15 @@ export const collectAttachments = (
       conversationId: existing.conversationId || item.conversationId,
     };
   };
+  const addWorkspaceFile = (messageId: string, file: { path: string; isImage?: boolean }) => {
+    const mediaType = mediaTypeForPath(file.path);
+    upsert({
+      id: `reply:${file.path}`, label: shortPath(file.path),
+      kind: file.isImage || mediaType.startsWith("image/") ? "image" : "file",
+      source: "workspace", messageId, path: file.path, mediaType,
+      generated: true, conversationId,
+    });
+  };
   for (const message of messages) {
     for (const attachment of message.attachmentRefs ?? []) {
       const resourceId = attachment.artifactId || attachment.docId || attachment.id || `${message.id}:${attachment.name}`;
@@ -162,17 +172,7 @@ export const collectAttachments = (
       });
     }
     for (const attachment of message.replyAttachments ?? []) {
-      const id = `reply:${attachment.path || `${message.id}:${items.length}`}`;
-      upsert({
-        id,
-        label: shortPath(attachment.path),
-        kind: attachment.isImage ? "image" : "file",
-        source: "workspace",
-        messageId: message.id,
-        path: attachment.path,
-        mediaType: attachment.isImage ? "image/*" : undefined,
-        conversationId,
-      });
+      addWorkspaceFile(message.id, attachment);
     }
     for (const rawArtifact of message.artifacts ?? []) {
       const artifact = normalizeArtifactPreview(rawArtifact);
@@ -199,6 +199,7 @@ export const collectAttachments = (
     for (const record of getToolCallsFromMessage(message)) {
       const item = contextAttachmentFromToolRecord(message.id, record, conversationId);
       if (item) upsert(item);
+      for (const file of record.outputFiles ?? []) addWorkspaceFile(message.id, file);
     }
   }
   const groupCounts = new Map<string, number>();
@@ -595,25 +596,28 @@ export const ChatContextCard = () => {
           </div>
         </section>}
 
-        {attachments.length > 0 && (
-          <section className="mc-chat-context-card-section" aria-label="附件摘要">
+        {[
+          { label: "附件", items: attachments.filter((item) => item.source === "attachment") },
+          { label: "生成文件", items: attachments.filter((item) => item.source !== "attachment") },
+        ].filter((group) => group.items.length > 0).map(({ label, items }) => (
+          <section key={label} className="mc-chat-context-card-section" aria-label={`${label}摘要`}>
             <button type="button" className="mc-chat-context-section-title" onClick={() => openPanel("artifacts")}>
-              <span>附件</span>
-              <small>{attachments.length}</small>
+              <span>{label}</span>
+              <small>{items.length}</small>
             </button>
-            {attachments.slice(0, 3).map((attachment) => {
+            {items.slice(0, 3).map((attachment) => {
               const Icon = attachment.kind === "image" ? FileImage : FileText;
               return (
                 <button
                   key={attachment.id}
                   type="button"
                   className="mc-chat-context-source"
-                  aria-label={`查看附件：${attachment.label}`}
+                  aria-label={`查看${label}：${attachment.label}`}
                   title={attachment.label}
                   onClick={() => openAttachment(attachment)}
                 >
                   <span>
-                    {attachment.kind === "image"
+                    {attachment.kind === "image" && attachment.source !== "workspace"
                       ? <ContextAttachmentThumbnail attachment={attachment} />
                       : <Icon size={15} />}
                   </span>
@@ -622,19 +626,19 @@ export const ChatContextCard = () => {
                     <small>
                       {attachment.relatedCount > 1
                         ? `同组 ${attachment.relatedCount} 项`
-                        : "来自当前对话"}
+                        : attachment.source === "attachment" ? "用户提供" : "生成的文件"}
                     </small>
                   </span>
                 </button>
               );
             })}
-            {attachments.length > 3 && (
+            {items.length > 3 && (
               <button type="button" className="mc-chat-context-more" onClick={() => openPanel("artifacts")}>
-                还有 {attachments.length - 3} 项 <ChevronRight size={14} />
+                还有 {items.length - 3} 项 <ChevronRight size={14} />
               </button>
             )}
           </section>
-        )}
+        ))}
 
         {sources.length > 0 && <section className="mc-chat-context-card-section" aria-label="来源摘要">
           <button type="button" className="mc-chat-context-section-title" onClick={() => openPanel("tasks")}>

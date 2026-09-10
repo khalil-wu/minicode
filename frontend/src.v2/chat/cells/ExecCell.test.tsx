@@ -29,7 +29,7 @@ describe("ExecCell", () => {
 
     expect(screen.getByText("已运行命令")).toBeTruthy();
     expect(screen.getByText(command)).toBeTruthy();
-    expect(screen.getByText("exit 0 · 1.3s")).toBeTruthy();
+    expect(screen.queryByText("exit 0 · 1.3s")).toBeNull();
     expect(container.querySelector(".exec-cell-header-button")).toBeTruthy();
     expect(container.querySelector(".exec-cell-output-stack")).toBeNull();
     expect(container.querySelector(".exec-cell-collapsed-output")).toBeNull();
@@ -50,6 +50,7 @@ describe("ExecCell", () => {
     expect(screen.queryByText("命令已在 1.3s 内运行完成")).toBeNull();
     expect(screen.getByText("$ " + command)).toBeTruthy();
     expect(screen.getByText("7 passed")).toBeTruthy();
+    expect(screen.getByText(/exit 0 · 1.3s/)).toBeTruthy();
   });
 
   it("keeps a running command stoppable without opening a result card", () => {

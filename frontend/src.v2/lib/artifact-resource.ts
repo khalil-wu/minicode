@@ -22,13 +22,14 @@ export const normalizeArtifactMediaType = (value?: unknown): string =>
 
 export const isDisplayableImageMediaType = (value?: unknown): boolean => {
   const mediaType = normalizeArtifactMediaType(value);
-  return mediaType.startsWith("image/") && mediaType !== "image/svg+xml";
+  return mediaType.startsWith("image/");
 };
 
 /**
  * Browser screenshots and generated images are represented either by a
  * trusted inline bitmap while it is live, or by an owner-scoped raw endpoint
- * once persisted. SVG is deliberately not part of this preview surface.
+ * once persisted. SVG files use the same raw image endpoint or a local Blob;
+ * arbitrary inline SVG data URLs are not accepted by this helper.
  */
 export const inlineImageResourceUrl = (value?: unknown): string => {
   const url = String(value || "").trim();

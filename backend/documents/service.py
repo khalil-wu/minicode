@@ -118,6 +118,7 @@ CODE_MEDIA_TYPES: dict[str, str] = {
     ".yml": "application/yaml",
     ".toml": "application/toml",
     ".xml": "application/xml",
+    ".svg": "image/svg+xml",
     ".html": "text/html",
     ".css": "text/css",
     ".sql": "application/sql",

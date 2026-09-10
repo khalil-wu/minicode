@@ -177,7 +177,7 @@ describe("ChatContextCard", () => {
     });
 
     const { container } = render(<ChatContextCard />);
-    const imageButton = screen.getByRole("button", { name: "查看附件：生成的猫咪图片" });
+    const imageButton = screen.getByRole("button", { name: "查看生成文件：生成的猫咪图片" });
     expect(container.querySelector('.mc-chat-context-source img')?.getAttribute("src"))
       .toBe("data:image/png;base64,iVBORw0KGgo=");
 
@@ -275,7 +275,7 @@ describe("ChatContextCard", () => {
     });
 
     const { container } = render(<ChatContextCard />);
-    expect(screen.getByRole("button", { name: "查看附件：Browser screenshot" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "查看生成文件：Browser screenshot" })).toBeTruthy();
     const src = container.querySelector('.mc-chat-context-source img')?.getAttribute("src") || "";
     expect(src).toContain("/api/artifacts/raw");
     expect(src).toContain("artifact_id=legacy-browser-shot");
@@ -317,7 +317,7 @@ describe("ChatContextCard", () => {
     });
 
     const { container } = render(<ChatContextCard />);
-    expect(screen.getByRole("button", { name: "查看附件：页面截图" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "查看生成文件：页面截图" })).toBeTruthy();
     const src = container.querySelector('.mc-chat-context-source img')?.getAttribute("src") || "";
     expect(src).toContain("artifact_id=sparse-browser-shot");
   });

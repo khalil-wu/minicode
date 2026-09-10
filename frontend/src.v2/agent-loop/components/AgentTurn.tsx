@@ -5,13 +5,13 @@ import type { AgentLoopTurnProjection } from "../projection/project-turn";
 import { AgentProcessSummary } from "./AgentProcessSummary";
 import { AgentTimeline } from "./AgentTimeline";
 import { FinalAnswer } from "./FinalAnswer";
-import { isBrowserScreenshotRecord } from "../../lib/artifact-projection";
 
 export type RenderAgentCellArgs = {
   key?: React.Key;
   cell: HistoryCellState;
   isActive?: boolean;
   className?: string;
+  afterContent?: React.ReactNode;
 };
 
 export type RenderAgentCell = (args: RenderAgentCellArgs) => React.ReactNode;
@@ -30,11 +30,7 @@ export const AgentTurn = memo(function AgentTurn({
   // Incomplete, interrupted, failed, or answer-less turns are evidence, not a
   // disclosure preference. They stay visible until a complete final answer
   // establishes the only valid collapse boundary for the turn.
-  const hasBrowserScreenshot = turn.processCells.some((cell) => (
-    cell.kind === "activity"
-    && cell.toolCallRecords?.some((record) => Boolean(record.artifactId) && isBrowserScreenshotRecord(record))
-  ));
-  const initialProcessExpanded = hasBrowserScreenshot || !turn.hasCompleteFinalAnswer
+  const initialProcessExpanded = !turn.hasCompleteFinalAnswer
     ? true
     : defaultProcessExpanded ?? turn.initialProcessExpanded;
   const [processExpanded, setProcessExpanded] = useState(initialProcessExpanded);
@@ -65,7 +61,6 @@ export const AgentTurn = memo(function AgentTurn({
       reachedCompleteAnswer
       && turn.processDetailMode === "normal"
       && defaultProcessExpanded !== true
-      && !hasBrowserScreenshot
       && !userToggled.current
     ) {
       setProcessExpanded(initialProcessExpanded);
@@ -90,7 +85,6 @@ export const AgentTurn = memo(function AgentTurn({
     turn.status,
     turn.hasCompleteFinalAnswer,
     defaultProcessExpanded,
-    hasBrowserScreenshot,
   ]);
 
   // A settled file mutation is an outcome, not another activity row. Keep it
@@ -133,6 +127,11 @@ export const AgentTurn = memo(function AgentTurn({
       }}
     />
   );
+  const fileChanges = diffCells.length > 0 && turn.status !== "running" ? (
+    <section className="chat-turn-diff-zone agent-loop-diff-area" data-zone="diff" aria-label="文件修改">
+      {diffCells.map((cell) => renderCell({ key: cell.id, cell }))}
+    </section>
+  ) : null;
   return (
     <div
       className="chat-turn agent-loop-turn"
@@ -179,22 +178,12 @@ export const AgentTurn = memo(function AgentTurn({
             isStreaming={turn.answerIsStreaming}
             isActive={Boolean(turn.activeAnswerCell)}
             renderCell={renderCell}
+            afterContent={fileChanges}
           />
         </section>
       )}
 
-      {diffCells.length > 0 && turn.status !== "running" && (
-        <section
-          className="chat-turn-diff-zone agent-loop-diff-area"
-          data-zone="diff"
-          aria-label="文件修改"
-        >
-          {diffCells.map((cell) => renderCell({
-            key: cell.id,
-            cell,
-          }))}
-        </section>
-      )}
+      {!turn.answerCell && fileChanges}
 
     </div>
   );

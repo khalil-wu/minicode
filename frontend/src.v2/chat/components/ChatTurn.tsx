@@ -55,7 +55,7 @@ export const ChatTurn = memo(function ChatTurn({
     [turn, committedCells, processDetailMode],
   );
   const renderCell = useCallback(
-    ({ key, cell, isActive = false, className }: RenderAgentCellArgs) => (
+    ({ key, cell, isActive = false, className, afterContent }: RenderAgentCellArgs) => (
       <div key={key} className={className} style={{ position: "relative" }}>
         <HistoryCellRenderer
           cell={cell}
@@ -64,6 +64,7 @@ export const ChatTurn = memo(function ChatTurn({
           isTranscriptMode={isTranscriptMode}
           conversationId={conversationId}
           workspaceRoot={workspaceRoot}
+          afterContent={afterContent}
         />
       </div>
     ),
@@ -89,6 +90,7 @@ export const HistoryCellRenderer = memo(function HistoryCellRenderer({
   isTranscriptMode = false,
   conversationId,
   workspaceRoot,
+  afterContent,
 }: {
   cell: HistoryCellState;
   isActive?: boolean;
@@ -96,6 +98,7 @@ export const HistoryCellRenderer = memo(function HistoryCellRenderer({
   isTranscriptMode?: boolean;
   conversationId?: string;
   workspaceRoot?: string;
+  afterContent?: React.ReactNode;
 }) {
   switch (cell.kind) {
     case "user_message":
@@ -128,6 +131,7 @@ export const HistoryCellRenderer = memo(function HistoryCellRenderer({
         isTranscriptMode={isTranscriptMode}
         conversationId={conversationId}
         workspaceRoot={workspaceRoot}
+        afterContent={afterContent}
       />;
 
     default:

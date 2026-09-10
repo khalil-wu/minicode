@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
-import { Check, ChevronDown, ChevronRight, Circle, Pencil, Wifi, WifiOff } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Circle, Copy, Pencil, Wifi, WifiOff } from "lucide-react";
 import type { ActivityCellState } from "./cellTypes";
 import { useAppStore } from "../../stores";
 import {
@@ -120,6 +120,7 @@ export const ActivityCell = memo(function ActivityCell({
     : "";
   const shouldAutoExpand = !cell.collapsed;
   const [isExpanded, setIsExpanded] = useState(shouldAutoExpand);
+  const [copiedPatch, setCopiedPatch] = useState<string | null>(null);
   const userToggled = useRef(false);
   const previousId = useRef(cell.id);
 
@@ -350,7 +351,7 @@ export const ActivityCell = memo(function ActivityCell({
             <span className="activity-cell-progress">{readableToolLabel(cell.progress.text)}</span>
           )}
 
-          {elapsed && !isProviderRetry && <span className="activity-cell-elapsed">{elapsed}</span>}
+          {elapsed && !isProviderRetry && (isRunning || (!isFileChange && isExpanded)) && <span className="activity-cell-elapsed">{elapsed}</span>}
 
           {canToggle && (
             <span className="activity-cell-toggle">
@@ -383,6 +384,14 @@ export const ActivityCell = memo(function ActivityCell({
                   <span className="activity-cell-added">+{change.additions}</span>
                   <span className="activity-cell-removed">-{change.deletions}</span>
                 </span>
+                {change.patch && <button type="button" className="cell-action-btn activity-cell-copy-patch"
+                  aria-label={copiedPatch === `${cell.id}:${index}` ? "已复制修改" : "复制修改"}
+                  onClick={() => void navigator.clipboard.writeText(change.patch!).then(() => {
+                    setCopiedPatch(`${cell.id}:${index}`);
+                    window.setTimeout(() => setCopiedPatch(null), 1200);
+                  })}>
+                  {copiedPatch === `${cell.id}:${index}` ? <Check size={14} /> : <Copy size={14} />}
+                </button>}
               </div>
               {change.patch && <InlineDiff patch={change.patch} contextLines={1} />}
             </div>

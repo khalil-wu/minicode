@@ -119,6 +119,24 @@ describe("PreviewPanel", () => {
     expect(screen.getByText(/fallback/)).toBeTruthy();
   });
 
+  it("renders an SVG served by the owner-scoped workspace resource", () => {
+    useAppStore.setState({
+      livePreviewUrl: null,
+      previewArtifact: {
+        artifactId: "workspace:assets/diagram.svg",
+        name: "diagram.svg",
+        mediaType: "image/svg+xml",
+        kind: "code",
+        source: "workspace",
+        url: "http://127.0.0.1:8000/api/workspace/raw?path=assets%2Fdiagram.svg",
+        content: "<svg viewBox=\"0 0 10 10\"></svg>",
+        loadedAt: Date.now(),
+      },
+    });
+
+    expect(render(<PreviewPanel />).getByRole("img", { name: "diagram.svg" })).toBeTruthy();
+  });
+
   it("shows image load failures and offers a retry", () => {
     useAppStore.setState({
       livePreviewUrl: null,

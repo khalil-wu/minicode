@@ -407,8 +407,8 @@ describe("AssistantMarkdownCell image generation", () => {
   });
 });
 
-describe("AssistantMarkdownCell attachments", () => {
-  it("renders a chip per attachment with kind label and size", () => {
+describe("AssistantMarkdownCell generated files", () => {
+  it("renders a file link per generated output with semantic icons and size", () => {
     render(
       <AssistantMarkdownCell
         cell={cell({
@@ -421,9 +421,9 @@ describe("AssistantMarkdownCell attachments", () => {
       />,
     );
 
-    expect(screen.getByText("附件")).toBeTruthy();
-    expect(screen.getByText("[image]")).toBeTruthy();
-    expect(screen.getByText("[file]")).toBeTruthy();
+    expect(screen.getByLabelText("生成文件")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /shot\.png/ }).querySelector("svg.lucide-image")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /build\.log/ }).querySelector("svg.lucide-file-text")).toBeTruthy();
     expect(screen.getByText("shot.png")).toBeTruthy();
     expect(screen.getByText("build.log")).toBeTruthy();
     // Sizes formatted human-readably.
@@ -431,10 +431,10 @@ describe("AssistantMarkdownCell attachments", () => {
     expect(document.body.textContent).toContain("512 B");
   });
 
-  it("omits the attachments block when there are none", () => {
+  it("omits the generated-file block when there are none", () => {
     render(<AssistantMarkdownCell cell={cell({ markdownSource: "No files." })} />);
 
-    expect(screen.queryByText("附件")).toBeNull();
+    expect(screen.queryByLabelText("生成文件")).toBeNull();
   });
 
   it("opens image attachments in the unified Preview panel", () => {
@@ -454,7 +454,7 @@ describe("AssistantMarkdownCell attachments", () => {
     expect(openWorkspaceFilePreviewMock).toHaveBeenCalledWith(expect.objectContaining({
       path: "C:/tmp/shot.png",
       name: "shot.png",
-      mediaType: "image/*",
+      mediaType: "image/png",
       kind: "image",
     }));
   });
@@ -504,7 +504,7 @@ describe("AssistantMarkdownCell attachments", () => {
     expect(openWorkspaceFilePreviewMock).toHaveBeenCalledWith({
       path: "reports/result.md",
       name: "result.md",
-      mediaType: undefined,
+      mediaType: "text/markdown",
       kind: "file",
       workspaceRoot: "C:/workspace/transcript-owner",
       conversationId: "conv-transcript-owner",
@@ -524,7 +524,7 @@ describe("AssistantMarkdownCell attachments", () => {
     );
 
     expect(screen.getByRole("button", { name: "test.docx" })).toBeTruthy();
-    expect(screen.queryByText("附件")).toBeNull();
+    expect(screen.queryByLabelText("生成文件")).toBeNull();
   });
 });
 

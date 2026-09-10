@@ -15,6 +15,7 @@ import { useContextMenu } from "../../components/useContextMenu";
 import { openArtifactPreview, openWorkspaceFilePreview } from "../openAttachmentPreview";
 import { sendChatMessage } from "../sendChatMessage";
 import { isWindowsLikeWorkspacePath, normalizeWorkspacePath } from "../../lib/workspace-path";
+import { mediaTypeForPath } from "../../lib/media-types";
 import { pushToast } from "../../overlays/ToastContainer";
 import { getWebSocket } from "../../hooks/useWebSocket";
 import {
@@ -25,6 +26,7 @@ import {
 import {
   artifactImageResourceUrl,
   inlineImageResourceUrl,
+  isDisplayableImageMediaType,
   withPreviewCacheBust,
 } from "../../lib/artifact-resource";
 import { extractInlineCitationIndexes } from "../../lib/markdown";
@@ -35,6 +37,7 @@ export function AssistantMarkdownCell({
   isTranscriptMode = false,
   conversationId: ownerConversationId,
   workspaceRoot: ownerWorkspaceRoot,
+  afterContent,
 }: {
   cell: AssistantMarkdownCellState;
   isTranscriptMode?: boolean;
@@ -42,6 +45,7 @@ export function AssistantMarkdownCell({
   conversationId?: string;
   /** Workspace that owns paths emitted in this transcript. */
   workspaceRoot?: string;
+  afterContent?: React.ReactNode;
 }) {
   const [copied, setCopied] = useState(false);
   const [sourcesExpanded, setSourcesExpanded] = useState(false);
@@ -57,7 +61,7 @@ export function AssistantMarkdownCell({
   // "reply" marks an explicit BriefTool reply; "stream" (default) is
   // final-answer text streamed after the tool work.
   const replySource = cell.source === "reply" ? "reply" : "stream";
-  const visibleAttachments = useMemo(() => {
+  const visibleGeneratedFiles = useMemo(() => {
     const normalizedMarkdown = rawMarkdown.replace(/\\/g, "/");
     return (cell.attachments ?? []).filter((attachment) => {
       const normalizedPath = normalizeWorkspacePath(attachment.path);
@@ -247,22 +251,20 @@ export function AssistantMarkdownCell({
           conversationId={conversationId}
           />
         )}
-        {visibleAttachments.length > 0 && (
-          <div className="assistant-cell-attachments">
-            <div className="assistant-cell-sources-title">附件</div>
-            <div className="assistant-cell-attachments-list">
-              {visibleAttachments.map((attachment) => (
-                <AttachmentChip
+        {visibleGeneratedFiles.length > 0 && (
+          <div className="assistant-cell-output-files" aria-label="生成文件">
+            {visibleGeneratedFiles.map((attachment) => (
+                <GeneratedFileLink
                   key={attachment.path}
                   attachment={attachment}
                   conversationId={conversationId || undefined}
                   workspaceRoot={workspaceRoot}
                 />
               ))}
-            </div>
           </div>
         )}
       </div>
+      {afterContent}
       {(sources.length > 0 || (!isTranscriptMode && isSettled)) && (
       <div className="assistant-cell-actions" data-has-sources={sources.length > 0 ? "true" : "false"}>
         {sources.length > 0 && (
@@ -447,7 +449,7 @@ function GeneratedArtifactCard({
   const inlineUrl = kind === "image" ? safeInlineImageUrl(artifact) : "";
   const sessionId = isConnected ? String(getWebSocket()?.sessionId || "").trim() : "";
   const persistedImageUrl = useMemo(() => {
-    if (kind !== "image" || !/^image\/(?:png|jpeg|jpg|gif|webp)$/i.test(mediaType)) return "";
+    if (kind !== "image" || !isDisplayableImageMediaType(mediaType)) return "";
     return withPreviewCacheBust(artifactImageResourceUrl({
       artifactId: artifact.artifactId,
       conversationId,
@@ -677,7 +679,7 @@ function generatedImageFilename(artifact: ArtifactPreview): string {
   return `${base}.${extension}`;
 }
 
-function AttachmentChip({
+function GeneratedFileLink({
   attachment,
   conversationId,
   workspaceRoot,
@@ -687,11 +689,12 @@ function AttachmentChip({
   workspaceRoot: string;
 }) {
   const fileName = attachment.path.split(/[/\\]/).filter(Boolean).pop() || attachment.path;
+  const mediaType = mediaTypeForPath(attachment.path);
   const openAttachment = () => {
     openWorkspaceFilePreview({
       path: attachment.path,
       name: fileName,
-      mediaType: attachment.isImage ? "image/*" : undefined,
+      mediaType,
       kind: attachment.isImage ? "image" : "file",
       workspaceRoot,
       conversationId,
@@ -714,15 +717,15 @@ function AttachmentChip({
       <span onContextMenu={onContextMenu}>
         <button
           type="button"
-          className="assistant-cell-attachment"
+          className="assistant-cell-output-file"
           title={attachment.path}
           onClick={openAttachment}
         >
-          <span className="assistant-cell-attachment-kind" aria-hidden="true">
-            {attachment.isImage ? "[image]" : "[file]"}
+          <span className="assistant-cell-output-file-icon" aria-hidden="true">
+            {attachment.isImage ? <ImageIcon size={16} /> : <FileText size={16} />}
           </span>
-          <span className="assistant-cell-attachment-name">{fileName}</span>
-          <span className="assistant-cell-attachment-size">({sizeLabel})</span>
+          <span className="assistant-cell-output-file-name">{fileName}</span>
+          <span className="assistant-cell-output-file-size">{sizeLabel}</span>
         </button>
         {menu}
       </span>

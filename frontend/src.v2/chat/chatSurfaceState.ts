@@ -255,8 +255,7 @@ const activityCell = (item: TurnActivityItem, message: ChatMessage): ActivityCel
 
 /**
  * A provider may persist several tool records under one activity envelope.
- * Reads and commands retain their own chronological rows; only consecutive
- * mutations of the same path are coalesced by the projection below.
+ * Every tool call retains its own chronological row and mutation patch.
  */
 const splitActivityRecords = (item: TurnActivityItem): TurnActivityItem[] => {
   const records = item.records ?? [];
@@ -272,48 +271,6 @@ const splitActivityRecords = (item: TurnActivityItem): TurnActivityItem[] => {
     startedAt: record.startedAt ?? item.startedAt,
     finishedAt: record.finishedAt ?? item.finishedAt,
   }));
-};
-
-/** Consecutive edits to one path are one user-facing operation. Every tool
- * record stays in the cell so its accumulated stats and patch remain exact. */
-const coalesceConsecutiveFileChanges = (
-  items: TurnActivityItem[],
-  workspaceRoot: string,
-): TurnActivityItem[] => {
-  const grouped: TurnActivityItem[] = [];
-  for (const item of items) {
-    if (item.kind !== "fileChange" || !item.records?.length) {
-      grouped.push(item);
-      continue;
-    }
-    const previous = grouped.at(-1);
-    const pathKey = workspaceFilePathComparisonKey(recordInputTarget(item.records[0]), workspaceRoot);
-    const previousPathKey = previous?.kind === "fileChange" && previous.records?.length
-      ? workspaceFilePathComparisonKey(recordInputTarget(previous.records[0]), workspaceRoot)
-      : "";
-    if (!pathKey || !previous || previous.kind !== "fileChange" || pathKey !== previousPathKey) {
-      grouped.push(item);
-      continue;
-    }
-    const records = [...(previous.records ?? []), ...item.records];
-    const status = activityStatusFromToolRecords(records);
-    grouped[grouped.length - 1] = {
-      ...previous,
-      blocks: [...previous.blocks, ...item.blocks],
-      records,
-      status,
-      title: item.title || previous.title,
-      summary: item.summary || previous.summary,
-      startedAt: Math.min(previous.startedAt ?? Infinity, item.startedAt ?? Infinity),
-      finishedAt: status === "running" || status === "pending"
-        ? undefined
-        : Math.max(previous.finishedAt ?? 0, item.finishedAt ?? 0) || undefined,
-      durationMs: (previous.durationMs ?? 0) + (item.durationMs ?? 0) || undefined,
-      hasFailure: previous.hasFailure || item.hasFailure,
-      hasPendingUserAction: previous.hasPendingUserAction || item.hasPendingUserAction,
-    };
-  }
-  return grouped;
 };
 
 type ProcessItemProjection = { cells: CommittedCellState[]; diff?: DiffCellState | null };
@@ -385,7 +342,7 @@ const processCells = (
 ): CommittedCellState[] => {
   const cells: CommittedCellState[] = [];
   const diffCells: DiffCellState[] = [];
-  const normalizedItems = coalesceConsecutiveFileChanges(items.flatMap(splitActivityRecords), workspaceRoot);
+  const normalizedItems = items.flatMap(splitActivityRecords);
   for (const item of normalizedItems) {
     const anchor = item.blocks[0];
     const entries = processItemCache.get(anchor) ?? new Map<string, ProcessItemCacheEntry>();

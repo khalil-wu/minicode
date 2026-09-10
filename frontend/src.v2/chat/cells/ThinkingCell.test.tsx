@@ -36,6 +36,14 @@ const thinkingCell = (patch: Partial<ThinkingCellState>): ThinkingCellState => (
 });
 
 describe("ThinkingCell", () => {
+  it("preserves tool identifiers inside model-authored commentary", () => {
+    render(<ThinkingCell cell={thinkingCell({
+      source: "commentary",
+      content: "已修复 `write_file` 的输入转换，下一步验证 `mcp__docs__lookup`。",
+    })} />);
+    expect(document.body.textContent).toContain("write_file");
+    expect(document.body.textContent).toContain("mcp__docs__lookup");
+  });
   it.each(["model_preamble", "commentary"] as const)("renders %s narration as plain ordered process text", (source) => {
     render(<ThinkingCell cell={thinkingCell({ source, isStreaming: true })} isStreaming />);
     expect(document.body.textContent).toContain("我先查一下昨天发生了什么新闻。");

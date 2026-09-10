@@ -4,6 +4,7 @@ import { EmptyState } from '../../components/EmptyState'
 import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } from '../../chat/openAttachmentPreview'
 import { useAppStore } from '../../stores'
 import { selectActiveConversationPreview } from '../../lib/preview-projection'
+import { mediaTypeForPath } from '../../lib/media-types'
 import type { ArtifactContentState, ChatMessage, MessageAttachmentRef, ReplyAttachmentMeta } from '../../stores/types'
 import type { ToolCallRecord } from '../../lib/tool-call-reducer'
 import { getToolCallsFromMessage } from '../../lib/content-blocks'
@@ -148,11 +149,11 @@ export function collectArtifacts(
   const attachmentKeys = new Set<string>()
 
   const upsertArtifact = (item: ArtifactItem): void => {
-    const artifactId = item.artifactId
-    if (!artifactId) return
-    const existingIndex = artifactIndexes.get(artifactId)
+    const id = item.artifactId || item.id
+    if (!item.artifactId && !item.path) return
+    const existingIndex = artifactIndexes.get(id)
     if (existingIndex === undefined) {
-      artifactIndexes.set(artifactId, items.length)
+      artifactIndexes.set(id, items.length)
       items.push(item)
       return
     }
@@ -182,31 +183,39 @@ export function collectArtifacts(
     }
     for (const record of getToolCallsFromMessage(message)) {
       upsertArtifact(artifactFromToolRecord(message.id, record, ownerConversationId))
+      for (const file of record.outputFiles ?? []) {
+        upsertArtifact(generatedFileFromReply(message.id, { ...file, isImage: Boolean(file.isImage) }, ownerConversationId))
+      }
+    }
+    for (const outputFile of message.replyAttachments ?? []) {
+      const item = generatedFileFromReply(message.id, outputFile, ownerConversationId)
+      upsertArtifact(item)
     }
   }
 
   // Attachments are intentionally tracked separately.  A backend artifact id
   // must not suppress an unrelated upload that happens to use the same id.
   for (const message of messages) {
+    if (message.role !== 'user') continue
     for (const attachment of message.attachmentRefs ?? []) {
       const item = attachmentFromRef(message.id, attachment)
       if (attachmentKeys.has(item.id)) continue
       attachmentKeys.add(item.id)
       items.push({ ...item, conversationId: ownerConversationId })
     }
-    for (const attachment of message.replyAttachments ?? []) {
-      const item = attachmentFromReply(message.id, attachment)
-      if (attachmentKeys.has(item.id)) continue
-      attachmentKeys.add(item.id)
-      items.push({ ...item, conversationId: ownerConversationId })
-    }
   }
 
-  if (previewArtifact?.artifactId) {
+  if (previewArtifact?.artifactId
+    && previewArtifact.source !== 'attachment'
+    && previewArtifact.source !== 'local'
+    && (previewArtifact.source !== 'workspace' || artifactIndexes.has(previewArtifact.artifactId))) {
     const artifactId = previewArtifact.artifactId.trim()
     const kind = canonicalArtifactKind(previewArtifact.kind, previewArtifact.mediaType)
     const mediaType = artifactMediaTypeForProjection(previewArtifact.mediaType, kind)
-    const previewItem: ArtifactItem = {
+    const existingIndex = artifactIndexes.get(artifactId)
+    const previewItem: ArtifactItem = previewArtifact.source === 'workspace' && existingIndex !== undefined ? {
+      ...items[existingIndex], url: previewArtifact.url,
+    } : {
       id: artifactId,
       label: cleanArtifactLabel(previewArtifact.name) || artifactFallbackLabel(kind, mediaType),
       kind,
@@ -216,7 +225,6 @@ export function collectArtifacts(
       mediaType,
       conversationId: ownerConversationId,
     }
-    const existingIndex = artifactIndexes.get(artifactId)
     // The currently opened preview is the most recent user-visible artifact.
     // Promote it before applying the cap so a long transcript cannot hide the
     // item the user just opened.
@@ -287,15 +295,22 @@ function attachmentFromRef(messageId: string, attachment: MessageAttachmentRef):
   }
 }
 
-function attachmentFromReply(messageId: string, attachment: ReplyAttachmentMeta): ArtifactItem {
-  const label = basename(attachment.path) || 'Attachment'
+function generatedFileFromReply(
+  messageId: string,
+  attachment: ReplyAttachmentMeta,
+  conversationId?: string,
+): ArtifactItem {
+  const label = basename(attachment.path) || '生成文件'
+  const mediaType = mediaTypeForPath(attachment.path)
+  const kind = canonicalArtifactKind(attachment.isImage ? 'image' : 'file', mediaType)
   return {
-    id: `reply:${attachment.path || `${messageId}:${label}`}`,
+    id: `workspace:${attachment.path || `${messageId}:${label}`}`,
     label,
-    kind: 'attachment',
+    kind,
     detail: sizeLabel(attachment.size),
     path: attachment.path,
-    mediaType: attachment.isImage ? 'image/*' : undefined,
+    mediaType,
+    conversationId,
   }
 }
 

@@ -553,6 +553,21 @@ html[data-theme="light"] .agent-loop-process-summary-status {
   padding-left: 0;
 }
 
+.agent-loop-timeline-group-work > .agent-loop-timeline-group-items {
+  max-height: min(420px, 55vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.agent-loop-process-cell .activity-cell-main-button .activity-cell-file-change-stats {
+  color: var(--text-muted);
+}
+
+.agent-loop-process-cell .activity-cell-main-button .activity-cell-file-change-stats > span {
+  color: inherit;
+}
+
 .agent-loop-process-cell .exec-cell-command-preview,
 .agent-loop-process-cell .exec-cell-title {
   color: var(--text-muted);

@@ -74,7 +74,13 @@ describe("ArtifactsTab projection", () => {
   });
 
   it("keeps an upload separate when its id matches a generated artifact id", () => {
-    const message = messageWithToolArtifact({
+    const message = messageWithToolArtifact();
+    const upload: ChatMessage = {
+      id: "user-upload",
+      role: "user",
+      content: "Review this image",
+      artifacts: [],
+      timestamp: 99,
       attachmentRefs: [{
         id: "upload-1",
         artifactId: "artifact-browser-shot",
@@ -82,12 +88,44 @@ describe("ArtifactsTab projection", () => {
         kind: "image",
         mediaType: "image/png",
       }],
-    });
+    };
 
-    const items = collectArtifacts([message], null, "conversation-browser");
+    const items = collectArtifacts([upload, message], null, "conversation-browser");
     expect(items).toHaveLength(2);
     expect(items.map((item) => item.id)).toContain("attachment:artifact-browser-shot");
     expect(items.map((item) => item.kind)).toContain("attachment");
+  });
+
+  it("classifies assistant reply files as generated output instead of user attachments", () => {
+    const message = messageWithToolArtifact({
+      blocks: [],
+      replyAttachments: [{
+        path: "C:/Desktop/MiniCode/output/diagram.svg",
+        size: 640,
+        isImage: true,
+      }],
+    });
+
+    expect(collectArtifacts([message], null, "conversation-browser")).toMatchObject([{
+      id: "workspace:C:/Desktop/MiniCode/output/diagram.svg",
+      label: "diagram.svg",
+      kind: "image",
+      path: "C:/Desktop/MiniCode/output/diagram.svg",
+      mediaType: "image/svg+xml",
+      conversationId: "conversation-browser",
+    }]);
+  });
+
+  it("keeps a workspace output on its path route when its preview is opened", () => {
+    const message = messageWithToolArtifact({ blocks: [], replyAttachments: [{ path: "diagram.svg", size: 100, isImage: true }] });
+    const items = collectArtifacts([message], {
+      artifactId: "workspace:diagram.svg", source: "workspace",
+      content: "", mediaType: "image/svg+xml", loadedAt: 2,
+    }, "conversation-browser");
+    expect(items).toHaveLength(1);
+    expect(items[0].path).toBe("diagram.svg");
+    expect(items[0].artifactId).toBeUndefined();
+    expect(collectArtifacts([], { artifactId: "upload", source: "attachment", content: "", loadedAt: 2 })).toEqual([]);
   });
 
   it("classifies an image MIME even when the declared kind is unknown", () => {
