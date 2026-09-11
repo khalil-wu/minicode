@@ -176,15 +176,11 @@ async function mockDesktopWorkbench(page: Page) {
         if (parsed.type === "workspace.set") {
           setTimeout(() => {
             this._receive({
-              type: "workspace.imported",
-              project: { root_path: parsed.path, name: "MiniCode" },
-            });
-            this._receive({
               type: "conversation.switched",
-              conversation_id: "conv-workbench",
+              conversation_id: "conv-new-project",
               conversation: {
-                id: "conv-workbench",
-                title: "Workbench",
+                id: "conv-new-project",
+                title: "New chat",
                 updated_at: "2026-06-15T00:00:00.000Z",
                 workspace_root: parsed.path,
                 worktree_path: "",
@@ -192,6 +188,10 @@ async function mockDesktopWorkbench(page: Page) {
                 messages: [],
               },
               is_hydrating: false,
+            });
+            this._receive({
+              type: "command.result", command: "workspace.set", level: "success", message: "Conversation created.",
+              data: { client_command_id: parsed.client_command_id, conversation_id: "conv-new-project", workspace_root: parsed.path },
             });
           }, 10);
           return;
@@ -341,11 +341,21 @@ test.describe("Workbench workspace and chat continuity", () => {
     await openApp(page);
   });
 
-  test("Open folder binds the active conversation before the next agent turn", async ({ page }) => {
-    await page.getByRole("button", { name: "打开项目" }).click();
+  test("Open folder creates a new conversation before the next agent turn", async ({ page }) => {
+    await page.evaluate(() => {
+      const store = (window as any).__zustandStore;
+      const messages = [{ id: "old-user", role: "user", content: "Keep Alpha history", timestamp: 1, blocks: [], artifacts: [] }];
+      store.setState({ workingDirectory: "C:/Alpha", messages, conversations: [{ id: "conv-workbench", title: "Alpha", workspaceRoot: "C:/Alpha", updatedAt: "2026-06-15T00:00:00Z" }] });
+    });
+    await page.getByRole("button", { name: "切换项目" }).click();
 
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().workingDirectory)).toBe(workspacePath);
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().appMode)).toBe("code");
+    await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().conversationId)).toBe("conv-new-project");
+    expect(await page.evaluate(() => {
+      const state = (window as any).__zustandStore.getState();
+      return { root: state.conversations.find((item: any) => item.id === "conv-workbench")?.workspaceRoot, history: state.conversationMessages["conv-workbench"]?.[0]?.content, count: state.messages.length };
+    })).toEqual({ root: "C:/Alpha", history: "Keep Alpha history", count: 0 });
     await expect(page.getByRole("tree", { name: "文件资源管理器" })).toBeVisible();
 
     const composer = page.locator('textarea, input[placeholder*="message" i], [contenteditable="true"]').first();
@@ -364,10 +374,31 @@ test.describe("Workbench workspace and chat continuity", () => {
 
     const userMessage = payloads.find((payload: any) => payload.type === "user_message" && payload.content === "Update the README for private beta.");
     expect(userMessage).toMatchObject({
-      conversation_id: "conv-workbench",
+      conversation_id: "conv-new-project",
       workspace_root: workspacePath,
       permission_mode: "confirm",
     });
+  });
+
+  test("keeps an opened project visible after its last conversation disappears", async ({ page }) => {
+    await page.getByRole("tab", { name: "协作", exact: true }).click();
+    await page.evaluate((workspacePath) => {
+      (window as any).__mockWs._receive({ type: "workspace.recent.list", projects: [{
+        path: workspacePath, name: "MiniCode", project_type: "typescript", last_opened: 1,
+      }] });
+      const store = (window as any).__zustandStore;
+      store.setState({ conversations: [{ id: "last-task", title: "Last project task", workspaceRoot: workspacePath, updatedAt: "2026-09-10" }] });
+    }, workspacePath);
+    const folder = page.getByRole("region", { name: "工作区 MiniCode" });
+    await expect(folder).toBeVisible();
+    await expect(folder.getByText("Last project task")).toBeVisible();
+    const element = await folder.elementHandle();
+    await page.evaluate(() => (window as any).__zustandStore.setState({ conversations: [] }));
+    await expect(folder).toBeVisible();
+    await expect(folder.getByText("Last project task")).toHaveCount(0);
+    await expect(folder.getByRole("button", { name: "在 MiniCode 中新建任务" })).toBeVisible();
+    expect(await element!.evaluate(node => node.isConnected)).toBe(true);
+    await page.screenshot({ path: "../output/playwright/empty-project-retained.png" });
   });
 
   test("Cowork home keeps the composer readable across desktop and mobile", async ({ page }) => {

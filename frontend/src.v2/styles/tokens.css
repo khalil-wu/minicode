@@ -138,7 +138,7 @@
   /* ── Icon rhythm ─────────────────────────────────────
      Single stroke language for every glyph (lucide and custom svg alike).
      Declared here; components.css / ui-polish.css only consume it. ──── */
-  --mc-icon-stroke: 1.75;
+  --mc-icon-stroke: 1.6;
 
   /* ── Radius (5) — soft desktop geometry shared by navigation and cards. ─── */
   --radius-sm:   8px;
@@ -342,28 +342,28 @@ uses in its UI. The `--cjk-leading` and
   --surface-base:    oklch(1 0 0);
   --surface-sidebar: oklch(0.965 0.002 250);
   --surface-page:    oklch(1 0 0);
-  --surface-soft:    oklch(0.950 0.003 250);
-  --surface-panel:   oklch(0.945 0.003 250);
+  --surface-soft:    oklch(0.975 0.003 250);
+  --surface-panel:   oklch(0.960 0.003 250);
   --surface-raised:  oklch(1 0 0);
-  --surface-hover:   oklch(0.915 0.004 250);
-  --surface-active:  oklch(0.885 0.005 250);
+  --surface-hover:   oklch(0.940 0.004 250);
+  --surface-active:  oklch(0.915 0.005 250);
 
   --workbench-sidebar: oklch(0.973 0.009 245);
   --workbench-tool: oklch(0.978 0.001 250);
   --workbench-hover: oklch(0.958 0.004 245);
   --workbench-active: oklch(0.937 0.009 245);
 
-  /* Text (4) — muted/secondary darkened for readability on white (was 0.52/0.38) */
-  --text-primary:   oklch(0.110 0.004 250);
-  --text-secondary: oklch(0.220 0.005 250);
-  --text-muted:     oklch(0.340 0.005 250);
-  --text-disabled:  oklch(0.110 0.004 250 / 0.48);
+  /* Separate reading text, secondary controls, and quiet process evidence. */
+  --text-primary:   oklch(0.300 0.004 250);
+  --text-secondary: oklch(0.470 0.005 250);
+  --text-muted:     oklch(0.560 0.005 250);
+  --text-disabled:  oklch(0.300 0.004 250 / 0.48);
   --text-on-accent: oklch(0.985 0.005 250);
 
   /* Border (4) */
-  --border-subtle: oklch(0.220 0.006 250 / 0.12);
-  --border-soft:   oklch(0.220 0.006 250 / 0.18);
-  --border-strong: oklch(0.220 0.006 250 / 0.30);
+  --border-subtle: oklch(0.300 0.006 250 / 0.10);
+  --border-soft:   oklch(0.300 0.006 250 / 0.16);
+  --border-strong: oklch(0.300 0.006 250 / 0.28);
   --border-focus:  var(--accent-primary);
 
   /* Accent (7) — light mode pushes L lower so primary stays

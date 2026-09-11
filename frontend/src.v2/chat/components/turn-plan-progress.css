@@ -12,16 +12,16 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  min-height: 38px;
+  min-height: 34px;
   min-width: 0;
   max-width: min(560px, calc(100vw - 40px));
   overflow: hidden;
-  padding: 7px 14px;
+  padding: 6px 12px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-full);
   background: var(--surface-page);
   color: var(--text-secondary);
-  box-shadow: 0 2px 8px color-mix(in oklch, var(--text-primary) 7%, transparent);
+  box-shadow: none;
   cursor: pointer;
   font: inherit;
   font-size: var(--text-sm);
@@ -32,9 +32,8 @@
 
 .turn-plan-pill:hover,
 .turn-plan-pill[aria-expanded="true"] {
-  border-color: color-mix(in oklch, var(--accent-primary) 35%, var(--border-subtle));
-  background: var(--surface-elevated);
-  box-shadow: 0 5px 16px color-mix(in oklch, var(--text-primary) 10%, transparent);
+  border-color: var(--border-soft);
+  background: var(--workbench-hover);
 }
 
 .turn-plan-pill:focus-visible {
@@ -64,25 +63,12 @@
   font-weight: var(--fw-medium);
 }
 
-.turn-plan-pill-separator {
-  color: var(--text-muted);
-}
-
-.turn-plan-pill-files {
+.turn-plan-pill-current {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--text-muted);
 }
-
-.turn-plan-pill-add,
-.turn-plan-pill-del {
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-}
-
-.turn-plan-pill-add { color: var(--state-success); }
-.turn-plan-pill-del { color: var(--state-danger); }
 
 .turn-plan-popover {
   position: absolute;
@@ -96,23 +82,10 @@
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xl);
   background: var(--surface-elevated);
-  box-shadow: 0 18px 42px color-mix(in oklch, var(--text-primary) 17%, transparent), 0 2px 8px color-mix(in oklch, var(--text-primary) 8%, transparent);
+  box-shadow: var(--shadow-refined);
   color: var(--text-secondary);
   transform: translateX(-50%);
   animation: turn-plan-popover-in var(--transition-fast);
-}
-
-.turn-plan-popover::after {
-  position: absolute;
-  left: 50%;
-  bottom: -5px;
-  width: 9px;
-  height: 9px;
-  border-right: 1px solid var(--border-subtle);
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--surface-elevated);
-  content: "";
-  transform: translateX(-50%) rotate(45deg);
 }
 
 .turn-plan-popover-explanation {
@@ -156,7 +129,7 @@
 .turn-plan-step[data-status="failed"] > svg { color: var(--state-danger); }
 
 .turn-plan-step[data-active="true"] {
-  background: color-mix(in oklch, var(--accent-primary) 8%, var(--surface-soft));
+  background: var(--workbench-hover);
   color: var(--text-primary);
   font-weight: var(--fw-medium);
 }

@@ -46,7 +46,7 @@ describe('ConversationsTab project navigation', () => {
 
   afterEach(() => { cleanup(); vi.useRealTimers() })
 
-  it('removes selection and recent-workspace controls without deleting saved history', () => {
+  it('uses one project list and refreshes its saved folders after connecting', () => {
     render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
     expect(screen.getByText('项目')).toBeTruthy()
     expect(screen.getByText('Existing workspace task')).toBeTruthy()
@@ -55,16 +55,36 @@ describe('ConversationsTab project navigation', () => {
     expect(screen.queryByRole('button', { name: '清空最近工作区' })).toBeNull()
     expect(screen.queryByRole('checkbox')).toBeNull()
     act(() => useAppStore.setState({ isConnected: true }))
-    expect(sendClientCommandMock).not.toHaveBeenCalledWith({ type: 'workspace.recent' })
+    expect(sendClientCommandMock).toHaveBeenCalledWith({ type: 'workspace.recent' })
     expect(useAppStore.getState().recentWorkspaces).toHaveLength(2)
   })
 
-  it('shows the task empty state even when saved recent workspaces exist', () => {
+  it('keeps saved folders when no conversations exist and can start a task in an empty folder', () => {
     useAppStore.setState({ conversations: [] })
+    const original = useAppStore.getState().createConversation
+    const create = vi.fn(async () => true)
+    useAppStore.setState({ createConversation: create })
+    try {
+      render(<ConversationsTab conversationId="" onSetConfirmDialog={vi.fn()} />)
+      expect(screen.queryByText('开始你的第一个任务')).toBeNull()
+      expect(screen.getByRole('region', { name: '工作区 Represented' })).toBeTruthy()
+      expect(screen.getByRole('region', { name: '工作区 Tools' })).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: '在 Tools 中新建任务' }))
+      expect(create).toHaveBeenCalledWith({ bindWorkspace: true, workspaceRoot: 'D:\\External\\Tools', appMode: 'cowork' })
+    } finally { useAppStore.setState({ createConversation: original }) }
+  })
+
+  it('keeps the same folder row after its last conversation is archived or removed', () => {
+    const { unmount } = render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
+    const folder = screen.getByRole('region', { name: '工作区 Represented' })
+    act(() => useAppStore.setState({ conversations: useAppStore.getState().conversations.map(item => ({ ...item, archived: true })) }))
+    expect(screen.getByRole('region', { name: '工作区 Represented' })).toBe(folder)
+    expect(screen.queryByText('Existing workspace task')).toBeNull()
+    act(() => useAppStore.setState({ conversations: [] }))
+    expect(screen.getByRole('region', { name: '工作区 Represented' })).toBe(folder)
+    unmount()
     render(<ConversationsTab conversationId="" onSetConfirmDialog={vi.fn()} />)
-    expect(screen.getByText('开始你的第一个任务')).toBeTruthy()
-    expect(screen.getByRole('button', { name: '新建任务' })).toBeTruthy()
-    expect(screen.queryByText('最近工作区')).toBeNull()
+    expect(screen.getByRole('region', { name: '工作区 Represented' })).toBeTruthy()
   })
 
   it('excludes archived tasks while keeping active tasks visible', () => {

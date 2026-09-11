@@ -9,7 +9,7 @@ import os
 import re
 import time
 from copy import copy, deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -33,6 +33,8 @@ from backend.agent.attachment_policy import (
     AttachmentInputPlan,
     AttachmentUnavailableError,
     build_attachment_input_plan,
+    unsupported_image_hint,
+    supports_native_pdf_input,
 )
 from backend.attachments.store import AttachmentStore
 from backend.llm.base import LLMMessage, SideQueryOptions, ToolCallEvent, UsageInfo
@@ -251,6 +253,9 @@ def _sanitize_attachment_refs(raw_refs: Any) -> list[dict[str, Any]]:
                     "kind",
                     "size_bytes",
                     "input_source",
+                    "parse_error",
+                    "parse_warning",
+                    "page_count",
                 )
                 if key in raw
             }
@@ -895,6 +900,7 @@ class ContextBuilder:
             attachment_store=self._attachment_store,
             conversation_id=str(getattr(state, "conversation_id", "") or ""),
             workspace_root=str(workspace_root or ""),
+            retain_native_media=True,
         )
         if attachment_plan.unavailable:
             raise AttachmentUnavailableError(attachment_plan.unavailable)
@@ -968,6 +974,9 @@ class ContextBuilder:
                         "kind",
                         "size_bytes",
                         "input_source",
+                        "parse_error",
+                        "parse_warning",
+                        "page_count",
                     )
                     if key in attachment
                 }
@@ -1060,8 +1069,27 @@ class ContextBuilder:
             messages.append(
                 LLMMessage(role="developer", content=tool_runtime_instructions)
             )
-        history = self._get_history_within_budget()
-        messages.extend(history)
+        supports_images = capabilities_for_adapter(self._llm).vision is not False
+        supports_pdf = supports_native_pdf_input(self._llm)
+        for message in self._get_history_within_budget():
+            if message.documents and not supports_pdf:
+                pdf_refs = [ref for ref in message.attachment_refs if ref.get("media_type") == "application/pdf"]
+                plan = build_attachment_input_plan(
+                    pdf_refs or [{**document, "kind": "document"} for document in message.documents],
+                    llm=self._llm, attachment_store=self._attachment_store,
+                    conversation_id=str(getattr(active_state, "conversation_id", "") or ""),
+                    workspace_root=str(workspace_root or ""),
+                )
+                message = replace(message, documents=[], content=self._with_attachment_text_fallback(message.content, plan))
+            if message.images and not supports_images:
+                # Keep canonical pixels/refs in history. Like Codex for_prompt,
+                # unsupported media is omitted only from this model's request.
+                hints = [
+                    unsupported_image_hint(str(ref.get("file_name") or "Image"), str(ref.get("artifact_id") or ""))
+                    for ref in message.attachment_refs if ref.get("kind") == "image"
+                ] or [unsupported_image_hint("Image")]
+                message = replace(message, images=[], content=message.content + "\n\n" + "\n".join(hints))
+            messages.append(message)
         # ``build`` is the provider boundary: callers consume this exact list
         # for the next request.  Freeze the durable transcript now so a later
         # iteration can only append new runtime/user data and never rewrite the
@@ -1294,7 +1322,9 @@ class ContextBuilder:
         changed = False
         for index, message in enumerate(self._history):
             refs = list(getattr(message, "attachment_refs", []) or [])
-            if message.role != "user" or not refs or message.images or message.documents:
+            needs_images = not message.images and any(ref.get("kind") == "image" for ref in refs)
+            needs_pdf = not message.documents and any(ref.get("media_type") == "application/pdf" for ref in refs)
+            if message.role != "user" or not (needs_images or needs_pdf):
                 continue
             plan = build_attachment_input_plan(
                 refs,
@@ -1302,6 +1332,7 @@ class ContextBuilder:
                 attachment_store=self._attachment_store,
                 conversation_id=conversation_id,
                 workspace_root=str(workspace_root or ""),
+                retain_native_media=True,
             )
             if not plan.images and not plan.documents:
                 continue
@@ -1314,8 +1345,8 @@ class ContextBuilder:
                 is_error=message.is_error,
                 phase=message.phase,
                 provider_items=list(message.provider_items),
-                images=plan.images,
-                documents=plan.documents,
+                images=message.images or plan.images,
+                documents=message.documents or plan.documents,
                 attachment_refs=refs,
                 runtime_context=message.runtime_context,
                 timestamp_ms=message.timestamp_ms,

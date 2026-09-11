@@ -329,9 +329,11 @@ export function getRecordOutputPreview(record: ActivityToolRecord): string {
     || String(record.activityKind || "").toLowerCase() === "fileread"
     || String(record.resultKind || "").toLowerCase() === "file";
   if (isReadResult) {
-    // A read result is already bounded by the requested line range. Preserve
-    // the complete bounded body so each file remains paired with its record.
-    return output;
+    // Line numbers and edit hashes belong to the model's read protocol. The
+    // disclosure shows code; the header already carries the requested range.
+    return record.name === "read_file"
+      ? output.replace(/^[ \t]*\d+→/gm, "")
+      : output;
   }
   const tail = output.split("\n").slice(-24).join("\n");
   return tail.length > 1600 ? `...${tail.slice(-1600)}` : tail;

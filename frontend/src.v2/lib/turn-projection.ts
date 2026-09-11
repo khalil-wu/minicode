@@ -479,7 +479,7 @@ export function projectTurn(
     }
     if (block.type === "text" && block.isStreaming === true) {
       const source = String(block.source || "");
-      if (VISIBLE_NARRATION_SOURCES.has(source) && block.content.trim()) {
+      if (VISIBLE_NARRATION_SOURCES.has(source) && !isContentFreeNarration(block.content)) {
         segment += 1;
         activityItems.push(narrationItem(block, index, segment, "running"));
       } else if (source === "runtime") {
@@ -488,7 +488,7 @@ export function projectTurn(
       return;
     }
     if (block.type === "text" && VISIBLE_NARRATION_SOURCES.has(String(block.source || ""))) {
-      if (!block.content.trim()) return;
+      if (isContentFreeNarration(block.content)) return;
       if (isToolProtocolSummary(block.content, typedToolNames)) return;
       segment += 1;
       activityItems.push(narrationItem(

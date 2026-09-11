@@ -38,6 +38,23 @@ describe("DiffCell", () => {
     expect(container.querySelectorAll(".diff-file-section-header > .diff-cell-file-path")).toHaveLength(2);
   });
 
+  it("updates the same file row and rolls from its previous count without replaying history from zero", () => {
+    const { container, rerender } = render(<DiffCell cell={cell} />);
+    const firstRow = container.querySelector(".diff-file-section");
+    const count = firstRow?.querySelector(".diff-cell-added");
+    expect(count?.getAttribute("data-animating")).toBe("false");
+    rerender(<DiffCell cell={{
+      ...cell,
+      files: [{ ...cell.files[0], additions: 3 }, cell.files[1]],
+      summary: { ...cell.summary, added: 4 },
+    }} />);
+    expect(container.querySelector(".diff-file-section")).toBe(firstRow);
+    expect(firstRow?.querySelector(".diff-cell-added")).toBe(count);
+    expect(count?.getAttribute("aria-label")).toBe("+3");
+    expect(count?.querySelector(".rolling-number-old")?.textContent).toBe("+1");
+    expect(count?.getAttribute("data-animating")).toBe("true");
+  });
+
   it("does not inline-expand file patches in the final card", () => {
     render(<DiffCell cell={cell} />);
     expect(screen.getByText("src/a.ts")).toBeTruthy();

@@ -1,27 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 export function RollingNumber({
   value,
   prefix = "",
   className = "",
-  animateOnMount = false,
 }: {
   value: number;
   prefix?: string;
   className?: string;
-  animateOnMount?: boolean;
 }) {
   const lastValue = useRef(value);
   const [previous, setPrevious] = useState<number | null>(null);
   const [sequence, setSequence] = useState(0);
 
-  useEffect(() => {
-    if (!animateOnMount || value === 0) return;
-    setPrevious(0);
-    setSequence((current) => current + 1);
-  }, []);
-
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (value === lastValue.current) return;
     setPrevious(lastValue.current);
     lastValue.current = value;
@@ -36,7 +28,7 @@ export function RollingNumber({
 
   const direction = previous == null || value >= previous ? "up" : "down";
   const text = `${prefix}${value.toLocaleString()}`;
-  const previousText = previous == null ? "" : previous === 0 ? "0" : `${prefix}${previous.toLocaleString()}`;
+  const previousText = previous == null ? "" : `${prefix}${previous.toLocaleString()}`;
 
   return (
     <span

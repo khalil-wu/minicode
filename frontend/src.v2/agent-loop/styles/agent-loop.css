@@ -194,8 +194,8 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 /* ── Timeline ────────────────────────────────────────────────────────── */
 
 .agent-loop-timeline {
-  gap: 14px;
-  padding: 4px 0 0;
+  gap: 10px;
+  padding: 8px 0 0;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -222,12 +222,12 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 .agent-loop-process-cell .exec-cell-header-button {
   flex-wrap: nowrap;
   overflow: hidden;
-  min-height: 30px;
-  padding: 4px 2px;
+  min-height: 28px;
+  padding: 3px 0;
   border: 0;
   border-radius: 0;
   background: transparent;
-  font-size: var(--text-md);
+  font-size: var(--text-sm);
   white-space: nowrap;
   transition:
     background-color var(--transition-fast);
@@ -296,7 +296,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
    disclosure frame. Keep separators in the content itself only where a
    command/output or diff needs them. */
 .agent-loop-process-cell .activity-cell-expanded {
-  margin: 4px 0 8px 22px;
+  margin: 4px 0 6px;
 }
 
 .agent-loop-process-cell .activity-cell-tool-detail-card,
@@ -341,7 +341,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 .agent-loop-process-cell .activity-cell-detail-path,
 .agent-loop-process-cell .activity-cell-file-change-target {
   font-family: var(--font-prose);
-  font-size: var(--mc-font-reading);
+  font-size: var(--text-sm);
   font-weight: var(--fw-regular);
   line-height: var(--cjk-leading);
 }
@@ -349,7 +349,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 .agent-loop-process-cell .activity-cell-file-change-target,
 .agent-loop-process-cell .activity-cell-file-change-stats,
 .agent-loop-process-cell .exec-cell-meta {
-  font-size: var(--text-base);
+  font-size: var(--text-sm);
 }
 
 .agent-loop-process-cell :is(
@@ -368,7 +368,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
   .exec-cell-output-pre,
   .inline-diff
 ) {
-  font-size: var(--text-base);
+  font-size: var(--text-sm);
 }
 
 .agent-loop-process-cell :is(
@@ -385,16 +385,20 @@ html[data-theme="light"] .agent-loop-process-summary-status {
   line-height: 1.45;
 }
 
-.agent-loop-diff-area :is(.diff-cell-title, .diff-cell-file-path) {
+.agent-loop-diff-area .diff-cell-title {
   font-size: var(--text-md);
 }
 
+.agent-loop-diff-area .diff-cell-file-path {
+  font-size: var(--text-sm);
+}
+
 .agent-loop-diff-area .diff-cell-stats {
-  font-size: var(--text-base);
+  font-size: var(--text-xs);
 }
 
 .agent-loop-diff-area :is(.diff-cell-action-button, .diff-cell-more-files) {
-  font-size: var(--text-base);
+  font-size: var(--text-sm);
 }
 
 .agent-loop-process-cell .activity-cell-read-target,
@@ -434,13 +438,16 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 }
 
 .agent-loop-process-cell > .thinking-cell-commentary {
-  padding: 7px 0 5px;
+  padding: 0;
 }
+
+.thinking-cell-commentary > :first-child { margin-top: 0; }
+.thinking-cell-commentary > :last-child { margin-bottom: 0; }
 
 /* ── Final answer（回答正文 + 流式光标）───────────────────────────────── */
 
 .agent-loop-final-answer {
-  margin-top: 10px;
+  margin-top: 4px;
   padding-top: 0;
   border-top: 0;
   box-shadow: none;
@@ -488,23 +495,23 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 }
 
 .agent-loop-timeline-group {
-  margin: 4px 0 6px;
+  margin: 0;
 }
 
 .agent-loop-timeline-group-title {
   display: flex;
   align-items: center;
-  min-height: 30px;
+  min-height: 28px;
   width: 100%;
   gap: 8px;
-  padding: 4px 2px;
+  padding: 3px 0;
   border: 0;
   border-radius: 0;
   background: transparent;
   color: var(--text-muted);
   font-family: var(--font-prose);
-  font-size: var(--mc-font-reading);
-  line-height: var(--cjk-leading);
+  font-size: var(--text-sm);
+  line-height: 1.5;
   font-weight: var(--fw-regular);
   text-align: left;
   cursor: pointer;

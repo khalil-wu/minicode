@@ -81,12 +81,10 @@ function useElapsedTime(startedAt: number | undefined, isRunning: boolean): stri
  */
 export const ActivityCell = memo(function ActivityCell({
   cell,
-  isActive = false,
   conversationId,
   workspaceRoot,
 }: {
   cell: ActivityCellState;
-  isActive?: boolean;
   /** Explicit owner for artifacts in this cell.  Cells can be rendered from a
    * historical or child transcript while the app's active conversation differs. */
   conversationId?: string;
@@ -106,7 +104,7 @@ export const ActivityCell = memo(function ActivityCell({
   const isWebFetchAction = isWebFetchActivity(cell);
   const isInlineAction = isRead || isWorkspaceSearch || isWorkspaceList || isWebAction;
   const status = activityCellStatus(cell.status);
-  const isRunning = isActive || isRunningCellStatus(status);
+  const isRunning = isRunningCellStatus(status);
   const fileChangeStats = useMemo(() => {
     if (!isFileChange) return undefined;
     return records.reduce((stats, record) => {
@@ -157,7 +155,7 @@ export const ActivityCell = memo(function ActivityCell({
   const showOutputPreview = !isInlineAction
     && !isFileChange
     && !isFailed
-    && !isActive
+    && !isRunning
     && hasOutputPreview(nonPlanRecords);
   const inlineDisclosureRecords = useMemo(() => {
     if (!isInlineAction) return [];
@@ -325,8 +323,8 @@ export const ActivityCell = memo(function ActivityCell({
               {fileChangeTarget && <span className="activity-cell-file-change-target">{fileChangeTarget}</span>}
               {fileChangeStats && (
                 <span className="activity-cell-file-change-stats">
-                  <RollingNumber value={fileChangeStats?.plus ?? 0} prefix="+" className="activity-cell-added" animateOnMount />
-                  <RollingNumber value={fileChangeStats?.minus ?? 0} prefix="-" className="activity-cell-removed" animateOnMount />
+                  <RollingNumber value={fileChangeStats?.plus ?? 0} prefix="+" className="activity-cell-added" />
+                  <RollingNumber value={fileChangeStats?.minus ?? 0} prefix="-" className="activity-cell-removed" />
                 </span>
               )}
             </>

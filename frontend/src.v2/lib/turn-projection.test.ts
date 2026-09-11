@@ -211,6 +211,19 @@ describe("projectTurn explicit event contract", () => {
     expect(projection.activityItems.map((item) => item.id)).toEqual(["real-tool"]);
   });
 
+  it.each(["pending", "commentary", "model_preamble", "post_tool"] as const)("does not project %s punctuation as streaming or restored narration", (source) => {
+    for (const isStreaming of [true, false]) {
+      const projection = projectTurn([
+        { type: "text", itemId: "placeholder", content: "...\n…", source, isStreaming },
+        toolBlock({ id: "read", name: "read_file", activityKind: "fileRead" }),
+        { type: "text", itemId: "finding", content: "发现 README 与实现不符，继续核对备份。", source, isStreaming },
+      ]);
+      expect(projection.activityItems).toHaveLength(2);
+      expect(projection.activityItems[0].id).toBe("read");
+      expect(projection.activityItems[1].content).toBe("发现 README 与实现不符，继续核对备份。");
+    }
+  });
+
   it("keeps normal process prose that mentions a tool name", () => {
     const projection = projectTurn([
       {

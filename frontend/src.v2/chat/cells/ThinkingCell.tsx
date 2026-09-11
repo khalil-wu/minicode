@@ -12,11 +12,13 @@ export const ThinkingCell = memo(function ThinkingCell({
   isStreaming = false,
   conversationId,
   workspaceRoot,
+  knownFilePaths,
 }: {
   cell: ThinkingCellState;
   isStreaming?: boolean;
   conversationId?: string;
   workspaceRoot?: string;
+  knownFilePaths?: string[];
 }) {
   const streaming = Boolean(isStreaming || cell.isStreaming);
   const content = cell.content.trim();
@@ -32,7 +34,7 @@ export const ThinkingCell = memo(function ThinkingCell({
       data-reasoning-type={cell.providerReasoningType}
       data-streaming={streaming ? "true" : "false"}
     >
-      <MarkdownRenderer content={content} isStreaming={streaming} conversationId={conversationId} workspaceRoot={workspaceRoot} />
+      <MarkdownRenderer content={content} isStreaming={streaming} conversationId={conversationId} workspaceRoot={workspaceRoot} knownFilePaths={knownFilePaths} />
     </div>
   );
 });

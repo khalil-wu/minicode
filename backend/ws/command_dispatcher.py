@@ -28,6 +28,8 @@ COMMAND_BACKLOG_BYPASS_TYPES = {
 }
 
 _CONVERSATION_LIFECYCLE_COMMAND_TYPES = {
+    "llm.model.set",
+    "llm.config.set",
     "memory.reset",
     "session.restore",
     "session.sync",
@@ -702,12 +704,16 @@ class SessionCommandDispatcher:
             else self._session.active_conversation
         )
         bound_workspace = conversation_workspace_path(target_conversation)
-        if bound_workspace and not workspace_path_needs_activation(
-            requested_workspace_path, Path(bound_workspace)
-        ):
-            # A message repeats its owner's cwd; it is not a workspace handoff.
-            # Rebinding here erased the worktree path and isolation metadata.
-            return True, target_conversation.id
+        if bound_workspace:
+            if not workspace_path_needs_activation(requested_workspace_path, Path(bound_workspace)):
+                return True, target_conversation.id
+            event = AgentEvent.error(
+                "This message targets a different project from its conversation. Open the project in a new conversation.",
+                recoverable=True, error_type="workspace", error_code="workspace_owner_mismatch",
+            )
+            event.data["conversation_id"] = target_conversation.id
+            await self._session.send_event(event)
+            return False, target_conversation.id
         current_workspace_root = self._session.session_lifecycle.workspace_root_for_conversation(
             target_conversation
         )

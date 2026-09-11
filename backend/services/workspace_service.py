@@ -11,16 +11,8 @@ from typing import Any
 
 from backend.agent.message import AgentEvent
 from backend.atomic_io import atomic_write_text, file_mutation_locks
-from backend.conversations.public_projection import project_public_conversation
 from backend.runtime_env import sanitized_git_env
 from backend.subprocesses import communicate, spawn_exec
-
-
-@dataclass(frozen=True)
-class WorkspaceImportRequest:
-    path_str: str
-    project_path: Path | None
-    error_event: AgentEvent | None = None
 
 
 @dataclass(frozen=True)
@@ -35,36 +27,6 @@ class UserMessageWorkspaceRequest:
     path_str: str
     project_path: Path | None
     error_event: AgentEvent | None = None
-
-
-def parse_workspace_import_request(data: dict[str, Any]) -> WorkspaceImportRequest:
-    from backend.workspace.path_utils import build_missing_path_hint, normalize_project_import_path
-
-    path_str = str(data.get("path", "")).strip()
-    if not path_str:
-        return WorkspaceImportRequest(
-            path_str,
-            None,
-            AgentEvent.error("Project path is required", recoverable=True),
-        )
-
-    project_path = normalize_project_import_path(path_str)
-    if not project_path.exists() or not project_path.is_dir():
-        hint = build_missing_path_hint(path_str)
-        message = f"Invalid project path: {path_str}"
-        if hint:
-            message = f"{message}. {hint}"
-        return WorkspaceImportRequest(
-            path_str,
-            project_path,
-            AgentEvent.error(
-                message,
-                recoverable=True,
-                error_type="workspace",
-                error_code="workspace_missing",
-            ),
-        )
-    return WorkspaceImportRequest(path_str, project_path)
 
 
 def parse_workspace_activation_request(path_str: str) -> WorkspaceActivationRequest:
@@ -229,14 +191,14 @@ def workspace_recent_payload(projects: list[Any]) -> dict[str, Any]:
     }
 
 
-def list_workspace_recent_payload(*, limit: int = 10) -> dict[str, Any]:
+def list_workspace_recent_payload(*, limit: int | None = None) -> dict[str, Any]:
     from backend.workspace.recent_projects import RecentProjectStore
 
     store = RecentProjectStore()
     return workspace_recent_payload(store.list(limit=limit))
 
 
-def remove_workspace_recent(path: str, *, limit: int = 10) -> tuple[bool, dict[str, Any]]:
+def remove_workspace_recent(path: str, *, limit: int | None = None) -> tuple[bool, dict[str, Any]]:
     """Remove one MRU entry without touching the project directory."""
 
     from backend.workspace.recent_projects import RecentProjectStore
@@ -246,7 +208,7 @@ def remove_workspace_recent(path: str, *, limit: int = 10) -> tuple[bool, dict[s
     return removed, workspace_recent_payload(store.list(limit=limit))
 
 
-def clear_workspace_recent(*, limit: int = 10) -> tuple[int, dict[str, Any]]:
+def clear_workspace_recent(*, limit: int | None = None) -> tuple[int, dict[str, Any]]:
     """Clear MRU metadata without deleting any workspace from disk."""
 
     from backend.workspace.recent_projects import RecentProjectStore
@@ -254,15 +216,6 @@ def clear_workspace_recent(*, limit: int = 10) -> tuple[int, dict[str, Any]]:
     store = RecentProjectStore()
     removed = store.clear()
     return removed, workspace_recent_payload(store.list(limit=limit))
-
-
-def workspace_conversation_switched_payload(conversation: Any) -> dict[str, Any]:
-    return {
-        "type": "conversation.switched",
-        "conversation_id": conversation.id,
-        "conversation": project_public_conversation(conversation),
-        "is_hydrating": False,
-    }
 
 
 def git_branch_for(path: Path) -> str:

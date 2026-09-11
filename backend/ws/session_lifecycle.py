@@ -509,6 +509,7 @@ class SessionLifecycle:
         *,
         announce: bool,
         wait_for_initialize: bool = False,
+        error_command: str | None = "workspace.activate",
     ) -> bool:
         from backend.services.workspace_service import conversation_workspace_path, workspace_matches_context
 
@@ -524,6 +525,7 @@ class SessionLifecycle:
             workspace_path,
             announce=announce,
             wait_for_initialize=wait_for_initialize,
+            error_command=error_command,
             conversation_id=str(conversation.id or "").strip(),
         )
 
@@ -540,6 +542,7 @@ class SessionLifecycle:
             create_workspace_context,
             parse_workspace_activation_request,
             record_recent_workspace_project,
+            list_workspace_recent_payload,
             workspace_context_root,
             workspace_imported_payload,
         )
@@ -762,6 +765,10 @@ class SessionLifecycle:
                     if not activation_is_current():
                         return False
                     record_recent_workspace_project(project_path, metadata)
+                    await self._session.send_payload(
+                        list_workspace_recent_payload(),
+                        log_context="workspace.recent.list",
+                    )
                     if announce:
                         await self._session.send_payload(
                             workspace_imported_payload(

@@ -913,10 +913,10 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         ? currentState.messages
         : currentState.conversationMessages[owner] ?? [];
       const ownerMessage = messages.find((message) =>
-        message.role === "assistant" && message.turnId === turnId,
+        message.role === "assistant" && message.turnId === turnId
+        && (!ev.message_id || message.id === ev.message_id),
       );
       if (!ownerMessage) return true;
-      if (ev.message_id && ownerMessage.id !== ev.message_id) return true;
       const validStatus = new Set(["pending", "in_progress", "completed"]);
       s.setPlan({
         threadId,

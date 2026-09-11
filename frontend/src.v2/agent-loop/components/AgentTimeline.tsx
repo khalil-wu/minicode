@@ -161,7 +161,7 @@ function WorkGroup({ group, renderCell, expandWorkGroups, isRunning }: { group: 
       </button>
       {expanded && (
         <div id={detailId} className="agent-loop-timeline-group-items">
-          {keyed.map(({ cell, key }) => renderCell({ key, cell, isActive: liveGroup && cell.id === latest?.id, className: "chat-turn-process-cell agent-loop-process-cell" }))}
+          {keyed.map(({ cell, key }) => renderCell({ key, cell, className: "chat-turn-process-cell agent-loop-process-cell" }))}
         </div>
       )}
     </section>

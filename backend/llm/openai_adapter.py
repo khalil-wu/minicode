@@ -799,9 +799,13 @@ def _openai_chat_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
     leading_instructions: list[str] = []
     seen_instruction_blocks: set[str] = set()
     accepting_leading_instructions = True
+    tool_images: list[dict[str, Any]] = []
 
     for message in messages:
         role = str(message.role or "").strip().lower()
+        if role != "tool" and tool_images:
+            chat_messages.extend(tool_images)
+            tool_images = []
         if _is_instruction_role(role):
             if not accepting_leading_instructions:
                 continue
@@ -814,6 +818,15 @@ def _openai_chat_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
 
         accepting_leading_instructions = False
         chat_messages.append(message.to_openai_message())
+        if role == "tool" and message.images:
+            # Chat tool messages accept text only. Keep every tool response
+            # together, then supply its pixels as native user image content.
+            tool_images.append(LLMMessage(
+                role="user", content=f"Image returned by {message.name or 'tool'} ({message.tool_call_id or ''}).",
+                images=message.images,
+            ).to_openai_message())
+
+    chat_messages.extend(tool_images)
 
     if leading_instructions:
         chat_messages.insert(

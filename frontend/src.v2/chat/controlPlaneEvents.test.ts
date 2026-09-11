@@ -246,8 +246,8 @@ describe("handleControlPlaneProjectionEvent", () => {
       ],
     } as ServerEvent)).toBe(true);
     expect(useAppStore.getState().recentWorkspaces).toEqual([
-      { path: "C:\\newer", name: "Newer", projectType: "python", lastOpened: 20 },
       { path: "C:\\older", name: "Older", projectType: "node", lastOpened: 10 },
+      { path: "C:\\newer", name: "Newer", projectType: "python", lastOpened: 20 },
     ]);
     expect(useAppStore.getState().inspectorEntries).toContainEqual(expect.objectContaining({
       targetKind: "workspace",

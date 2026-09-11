@@ -1957,6 +1957,17 @@ describe("runtime plan_updated events", () => {
     expect(useAppStore.getState().agentProgress).toEqual([]);
   });
 
+  it("accepts a plan from the explicitly addressed assistant after a steer in the same turn", () => {
+    const first = useAppStore.getState().messages[0];
+    useAppStore.setState({ messages: [first, { ...first, id: "assistant-steered" }] });
+    handleRuntimeEvent({
+      type: "turn.plan.updated", thread_id: "conv-runtime", conversation_id: "conv-runtime",
+      turn_id: "turn-sess1", message_id: "assistant-steered",
+      plan: [{ step: "Update README", status: "completed" }],
+    } as ServerEvent);
+    expect(useAppStore.getState().plan?.plan).toEqual([{ step: "Update README", status: "completed" }]);
+  });
+
   it("stores pending plan updates without appending generic progress", () => {
     expect(handleRuntimeEvent({
       type: "turn.plan.updated",

@@ -18,110 +18,24 @@ async def _activate_workspace_for_command(
     *,
     command: str,
 ) -> bool:
-    """Single owner for every explicit workspace activation command.
+    """Opening a project starts a new conversation; history keeps its owner."""
+    from backend.ws.command_results import emit_command_error
+    from backend.ws.handlers.conversation import handle_conversation_create
 
-    ``workspace.import``, ``workspace.switch`` and ``workspace.set`` are the
-    same capability, so they share one implementation: activate the path, rebind
-    the active conversation, publish the authoritative switched payload and
-    refresh every renderer's inventory. Errors are reported under the command the
-    client actually sent so its pending state resolves.
-    """
-
-    from backend.services.workspace_service import (
-        parse_workspace_import_request,
-        workspace_conversation_switched_payload,
-        workspace_imported_payload,
-    )
-
-    request = parse_workspace_import_request(data)
-    if request.error_event is not None:
-        from backend.ws.command_results import emit_command_error
-        await emit_command_error(session, command, request.error_event)
+    project_path = str(data.get("path") or "").strip()
+    if not project_path:
+        await emit_command_error(session, command, "Project path is required")
         return True
-
-    project_path = request.project_path
-    if not str(session.active_conversation_id or "").strip():
-        # A first-run renderer may have no active conversation yet. Create it
-        # only after the path parser has accepted the requested workspace.
-        session._ensure_active_conversation()
-    activated = await session.activate_workspace_path(
-        str(project_path),
-        # Commit the conversation binding before publishing a renderer-visible
-        # workspace event. Otherwise a binding failure leaves the UI on a
-        # workspace that the backend could not persist.
-        announce=False,
-        wait_for_initialize=True,
-        error_command=command,
+    return await handle_conversation_create(
+        session,
+        {
+            "workspace_root": project_path,
+            "title": "New chat",
+            "conversation_type": "main",
+            "permission_mode": data.get("permission_mode"),
+        },
+        command=command,
     )
-    if activated and session.active_conversation_id:
-        branch = await asyncio.to_thread(session.git_branch_for, project_path)
-        updated = await asyncio.to_thread(
-            session.conversation_repo.update_workspace_binding,
-            session.active_conversation_id,
-            workspace_root=str(project_path),
-            git_branch=branch,
-            worktree_path="",
-            git_isolated=False,
-        )
-        if updated is None:
-            # The conversation disappeared between activation and rebinding, so
-            # the workspace the client now sees is not bound to anything. Saying
-            # nothing left the UI showing a successful switch over a lost bind.
-            from backend.ws.command_results import emit_command_error
-
-            await emit_command_error(
-                session,
-                command,
-                "The workspace was activated but its conversation no longer exists; "
-                "the binding was not saved.",
-                data={
-                    "workspace_root": str(project_path),
-                    "conversation_id": str(session.active_conversation_id or ""),
-                    "reason": "conversation_missing",
-                },
-            )
-            return True
-        await session.send_payload(
-            workspace_conversation_switched_payload(updated),
-            log_context="conversation.switched",
-        )
-        lifecycle_context = session.session_lifecycle.workspace_context
-        metadata = getattr(lifecycle_context, "metadata", None)
-        if lifecycle_context is not None and metadata is not None:
-            await session.send_payload(
-                workspace_imported_payload(
-                    lifecycle_context,
-                    metadata,
-                    conversation_id=session.active_conversation_id,
-                    workspace_root=project_path,
-                    request_id=session.event_outbox.client_command_id,
-                ),
-                log_context="workspace.imported",
-            )
-        from backend.ws.handlers.conversation import _broadcast_conversation_lists
-
-        broadcast_errors = await _broadcast_conversation_lists(session)
-        if broadcast_errors:
-            await session.emit_command_result(
-                command,
-                "Workspace activated, but one or more windows need to resynchronize.",
-                level="warning",
-                data={
-                    "workspace_root": str(project_path),
-                    "projection_errors": broadcast_errors,
-                },
-            )
-    if activated:
-        await session.emit_command_result(
-            command,
-            "Workspace activated.",
-            level="success",
-            data={
-                "workspace_root": str(project_path),
-                "conversation_id": str(session.active_conversation_id or ""),
-            },
-        )
-    return True
 
 
 async def handle_workspace_import(session: "WebSocketSession", data: dict[str, Any]) -> bool:

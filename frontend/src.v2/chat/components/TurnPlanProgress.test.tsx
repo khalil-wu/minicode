@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { useAppStore } from "../../stores";
 import { TurnPlanProgress } from "./TurnPlanProgress";
@@ -63,17 +63,31 @@ describe("TurnPlanProgress", () => {
 
     render(<TurnPlanProgress />);
 
-    const pill = screen.getByRole("button", { name: "第 1 / 3 步" });
+    const pill = screen.getByRole("button", { name: "已完成 0 / 3 项 · Inspect sources" });
     expect(pill).toBeTruthy();
-    expect(screen.queryByText("Inspect sources")).toBeNull();
+    expect(screen.getByText("Inspect sources")).toBeTruthy();
 
     fireEvent.click(pill);
 
     expect(screen.getByRole("dialog", { name: "当前计划" })).toBeTruthy();
     expect(screen.getByText("Execution order changed after inspection")).toBeTruthy();
-    expect(screen.getByText("Inspect sources")).toBeTruthy();
+    expect(within(screen.getByRole("dialog")).getByText("Inspect sources")).toBeTruthy();
     expect(screen.getByText("Apply fixes")).toBeTruthy();
     expect(screen.getByText("Verify")).toBeTruthy();
+    act(() => useAppStore.setState({ plan: {
+      threadId: "conv-1", turnId: "turn-1", plan: [
+        { step: "Inspect sources", status: "completed" },
+        { step: "Apply fixes", status: "in_progress" },
+        { step: "Verify", status: "completed" },
+      ],
+    } }));
+    expect(screen.getByRole("button", { name: "已完成 2 / 3 项 · Apply fixes" })).toBeTruthy();
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    act(() => useAppStore.setState({
+      messages: [{ ...useAppStore.getState().messages[0], turnId: "turn-2" }],
+      plan: { threadId: "conv-1", turnId: "turn-2", plan: [{ step: "New work", status: "in_progress" }] },
+    }));
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("rejects a plan snapshot owned by another turn", () => {

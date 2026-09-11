@@ -19,7 +19,6 @@ from backend.config import DATA_ROOT
 logger = logging.getLogger(__name__)
 
 DEFAULT_STORE_PATH = DATA_ROOT / "recent_projects.json"
-MAX_RECENT_PROJECTS = 20
 
 
 class RecentProjectPersistenceError(RuntimeError):
@@ -56,7 +55,7 @@ class RecentProjectStore:
     """
     基于 JSON 文件的最近项目存储。
 
-    自动清理不存在的路径，按最后打开时间排序。
+    已打开的项目独立于会话保留；再次打开时保持列表位置。
     """
 
     def __init__(self, store_path: Path | None = None) -> None:
@@ -99,29 +98,29 @@ class RecentProjectStore:
         return True
 
     def add(self, path: str, name: str, project_type: str = "unknown") -> None:
-        """记录打开的项目（若已存在则更新时间戳并移到最前）。"""
+        """记录打开的项目；更新元数据不会改变现有项目的位置。"""
         normalized = str(Path(path).resolve())
         identity = canonical_file_path_key(normalized)
         with file_mutation_locks([self._store_path]):
             self._load()
-            # Remove spelling aliases of the same project (not distinct POSIX
-            # paths that differ by case), then insert the latest display path.
+            existing_index = next((index for index, project in enumerate(self._projects)
+                                   if canonical_file_path_key(project.path) == identity), len(self._projects))
+            # Canonical aliases share one saved project and its stable position.
             self._projects = [
                 project
                 for project in self._projects
                 if canonical_file_path_key(project.path) != identity
             ]
-            self._projects.insert(0, RecentProject(
+            self._projects.insert(existing_index, RecentProject(
                 path=normalized,
                 name=name,
                 project_type=project_type,
                 last_opened=time.time(),
             ))
-            self._projects = self._projects[:MAX_RECENT_PROJECTS]
             self._save()
 
-    def list(self, limit: int = 10, clean: bool = True) -> list[RecentProject]:
-        """获取最近项目列表。clean=True 时自动移除不存在的路径。"""
+    def list(self, limit: int | None = None, clean: bool = False) -> list[RecentProject]:
+        """读取已保存项目；只有显式清理才移除不可用目录。"""
         with file_mutation_locks([self._store_path]):
             self._load()
             if clean:

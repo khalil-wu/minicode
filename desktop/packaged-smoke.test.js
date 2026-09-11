@@ -141,6 +141,9 @@ function createCdpClient(webSocketUrl) {
         close() {
           socket.close();
         },
+        send(method, params = {}) {
+          socket.send(JSON.stringify({ id: nextId++, method, params }));
+        },
       });
     }, { once: true });
   });
@@ -243,6 +246,9 @@ test("packaged Windows app boots renderer, preload, IPC, and managed Python side
   while (cdpPort === backendPort) cdpPort = await allocateLoopbackPort();
   const runtimeToken = crypto.randomBytes(32).toString("base64url");
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-packaged-smoke-"));
+  const nestedFile = path.join(userDataDir, "记得日记", "remember-diary", "src", "backup", "backupService.native.ts");
+  fs.mkdirSync(path.dirname(nestedFile), { recursive: true });
+  fs.writeFileSync(nestedFile, "export const backupFormat = 'JSON';\n", "utf8");
   const childEnv = { ...process.env };
   for (const name of [
     "ELECTRON_RUN_AS_NODE",
@@ -262,10 +268,15 @@ test("packaged Windows app boots renderer, preload, IPC, and managed Python side
     MINICODE_ENABLE_EMBEDDED_BROWSER_CDP: "1",
     MINICODE_RUNTIME_TOKEN: runtimeToken,
     MINICODE_USER_DATA_DIR: userDataDir,
+    LLM_PROVIDER: "custom",
+    CUSTOM_API_KEY: "packaged-smoke-placeholder-no-generation",
+    CUSTOM_BASE_URL: "http://127.0.0.1:1/v1",
+    CUSTOM_MODEL: "smoke-model",
+    CUSTOM_WIRE_API: "chat",
   });
 
   const child = spawn(APP_PATH, [], {
-    cwd: path.dirname(APP_PATH),
+    cwd: userDataDir,
     env: childEnv,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -342,6 +353,57 @@ test("packaged Windows app boots renderer, preload, IPC, and managed Python side
     assert.equal(probe.diagnosticsOk, true);
     assert.equal(probe.diagnosticsHasElectron, true);
 
+    const nestedRead = await evaluate(cdp, `window.__MINICODE_RUNTIME__.desktop.fs.readFile(${JSON.stringify(nestedFile)})`);
+    assert.equal(nestedRead.content, "export const backupFormat = 'JSON';\n");
+
+    // Exercise the shipped websocket handler as well as native filesystem IPC.
+    // Both projects are confined to this smoke test's temporary workspace.
+    const alpha = path.join(userDataDir, "记得日记");
+    const beta = path.join(userDataDir, "另一个项目");
+    fs.mkdirSync(beta);
+    await evaluate(cdp, `Promise.all([${JSON.stringify(alpha)}, ${JSON.stringify(beta)}].map(root => window.__MINICODE_RUNTIME__.desktop.trustWorkspace(root)))`);
+    const events = [];
+    const socket = new WebSocket(`ws://127.0.0.1:${backendPort}/ws?session_id=packaged-project-test`, ["minicode", `minicode-token.${Buffer.from(runtimeToken).toString("base64url")}`]);
+    socket.addEventListener("message", event => events.push(JSON.parse(event.data)));
+    try {
+      await new Promise((resolve, reject) => {
+        socket.addEventListener("open", resolve, { once: true });
+        socket.addEventListener("error", reject, { once: true });
+      });
+      const command = payload => new Promise((resolve, reject) => {
+        const id = crypto.randomUUID();
+        const timer = setTimeout(() => {
+          socket.removeEventListener("message", receive);
+          reject(new Error(`Timed out waiting for ${payload.type}: ${events.filter(event => event.type === "error").at(-1)?.message || "no backend error"}`));
+        }, 15000);
+        const receive = event => {
+          const value = JSON.parse(event.data);
+          if (value.type !== "command.result" || value.data?.client_command_id !== id) return;
+          clearTimeout(timer);
+          socket.removeEventListener("message", receive);
+          resolve(value);
+        };
+        socket.addEventListener("message", receive);
+        socket.send(JSON.stringify({ ...payload, client_command_id: id }));
+      });
+      const first = await command({ type: "workspace.set", path: alpha });
+      assert.equal(first.level, "success", first.message);
+      const second = await command({ type: "workspace.set", path: beta });
+      assert.equal(second.level, "success", second.message);
+      assert.notEqual(first.data.conversation_id, second.data.conversation_id);
+      const inventory = events.filter(event => event.type === "conversation.list").at(-1).conversations;
+      assert.equal(inventory.find(item => item.id === first.data.conversation_id).workspace_root, alpha);
+      assert.equal(inventory.find(item => item.id === second.data.conversation_id).workspace_root, beta);
+      const archived = await command({ type: "conversation.archive", conversation_id: first.data.conversation_id, archived: true });
+      assert.equal(archived.level, "success", archived.message);
+      const projects = events.filter(event => event.type === "workspace.recent.list").at(-1).projects;
+      assert.ok(projects.some(project => project.path === alpha));
+      const savedProjects = JSON.parse(fs.readFileSync(path.join(userDataDir, "data", "recent_projects.json"), "utf8"));
+      assert.ok(savedProjects.some(project => project.path === alpha), "Archiving the last task removed its saved project.");
+    } finally {
+      socket.close();
+    }
+
     const descendants = listDescendantProcesses(child.pid);
     pythonProcess = descendants.find((processInfo) => {
       const executable = String(processInfo.ExecutablePath || "").replace(/\\/g, "/").toLowerCase();
@@ -349,21 +411,13 @@ test("packaged Windows app boots renderer, preload, IPC, and managed Python side
     });
     assert.ok(pythonProcess, "The packaged app did not own an embedded Python sidecar process.");
 
-    const closeScheduled = await evaluate(cdp, `
-      (() => {
-        setTimeout(() => {
-          window.__MINICODE_RUNTIME__.desktop.windowControls.close().catch(() => undefined);
-        }, 0);
-        return true;
-      })()
-    `, 10000);
-    assert.equal(closeScheduled, true);
-    cdp.close();
-    cdp = null;
-
+    // Closing the window also closes CDP; process exit is the acknowledgement.
+    cdp.send("Runtime.evaluate", { expression: "window.__MINICODE_RUNTIME__.desktop.windowControls.close()" });
     const exit = await waitForExit(child, 15000);
     assert.equal(exit.timedOut, false, "Packaged Electron main process did not exit after closing its window.");
     assert.equal(exit.code, 0);
+    cdp.close();
+    cdp = null;
     await waitForPortClosed(backendPort, 10000);
     await waitForPortClosed(cdpPort, 10000);
     assert.equal(isProcessAlive(Number(pythonProcess.ProcessId)), false, "Embedded Python sidecar survived Electron shutdown.");

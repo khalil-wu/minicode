@@ -167,9 +167,7 @@ export const createControlPlaneSlice: StateCreator<AppStore, [], [], ControlPlan
   },
   setRecentWorkspaces: (workspaces) => set({
     recentWorkspaces: workspaces
-      .filter((workspace) => Boolean(workspace.path.trim()))
-      .sort((left, right) => right.lastOpened - left.lastOpened)
-      .slice(0, 20),
+      .filter((workspace) => Boolean(workspace.path.trim())),
   }),
   clearConversationControlPlaneState: (conversationId) => {
     const owner = conversationId.trim();

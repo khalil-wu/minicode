@@ -37,6 +37,7 @@ export function AssistantMarkdownCell({
   isTranscriptMode = false,
   conversationId: ownerConversationId,
   workspaceRoot: ownerWorkspaceRoot,
+  knownFilePaths,
   afterContent,
 }: {
   cell: AssistantMarkdownCellState;
@@ -45,6 +46,7 @@ export function AssistantMarkdownCell({
   conversationId?: string;
   /** Workspace that owns paths emitted in this transcript. */
   workspaceRoot?: string;
+  knownFilePaths?: string[];
   afterContent?: React.ReactNode;
 }) {
   const [copied, setCopied] = useState(false);
@@ -212,6 +214,7 @@ export function AssistantMarkdownCell({
           content={cell.markdownBeforeArtifacts ?? rawMarkdown}
           isStreaming={cell.isStreaming || false}
           citations={cell.citations}
+          knownFilePaths={knownFilePaths}
           workspaceRoot={workspaceRoot}
           conversationId={conversationId}
           />
@@ -247,6 +250,7 @@ export function AssistantMarkdownCell({
           content={cell.markdownAfterArtifacts}
           isStreaming={cell.isStreaming || false}
           citations={cell.citations}
+          knownFilePaths={knownFilePaths}
           workspaceRoot={workspaceRoot}
           conversationId={conversationId}
           />

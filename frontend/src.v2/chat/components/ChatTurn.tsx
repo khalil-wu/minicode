@@ -54,6 +54,15 @@ export const ChatTurn = memo(function ChatTurn({
     () => projectChatTurnToAgentLoop(turn, committedCells, processDetailMode),
     [turn, committedCells, processDetailMode],
   );
+  const knownFilePaths = useMemo(() => [...new Set(agentTurn.processCells.flatMap((cell) => {
+    if (cell.kind === "diff") return cell.files.filter((file) => file.changeType !== "deleted").map((file) => file.path);
+    if (cell.kind !== "activity") return [];
+    return (cell.toolCallRecords ?? []).filter((record) => record.status === "success").flatMap((record) => [
+      ...(typeof record.args.file_path === "string" ? [record.args.file_path] : []),
+      ...(record.diff?.files ?? []).filter((file) => file.status !== "deleted").map((file) => file.path),
+      ...(record.outputFiles ?? []).map((file) => file.path),
+    ]);
+  }))], [agentTurn.processCells]);
   const renderCell = useCallback(
     ({ key, cell, isActive = false, className, afterContent }: RenderAgentCellArgs) => (
       <div key={key} className={className} style={{ position: "relative" }}>
@@ -64,11 +73,12 @@ export const ChatTurn = memo(function ChatTurn({
           isTranscriptMode={isTranscriptMode}
           conversationId={conversationId}
           workspaceRoot={workspaceRoot}
+          knownFilePaths={knownFilePaths}
           afterContent={afterContent}
         />
       </div>
     ),
-    [conversationId, isTranscriptMode, stopActiveRun, workspaceRoot],
+    [conversationId, isTranscriptMode, stopActiveRun, workspaceRoot, knownFilePaths],
   );
 
   return (
@@ -90,6 +100,7 @@ export const HistoryCellRenderer = memo(function HistoryCellRenderer({
   isTranscriptMode = false,
   conversationId,
   workspaceRoot,
+  knownFilePaths,
   afterContent,
 }: {
   cell: HistoryCellState;
@@ -98,6 +109,7 @@ export const HistoryCellRenderer = memo(function HistoryCellRenderer({
   isTranscriptMode?: boolean;
   conversationId?: string;
   workspaceRoot?: string;
+  knownFilePaths?: string[];
   afterContent?: React.ReactNode;
 }) {
   switch (cell.kind) {
@@ -108,13 +120,13 @@ export const HistoryCellRenderer = memo(function HistoryCellRenderer({
       return <StatusNoticeCell cell={cell} />;
 
     case "thinking":
-      return <ThinkingCell cell={cell} isStreaming={cell.isStreaming || isActive} conversationId={conversationId} workspaceRoot={workspaceRoot} />;
+      return <ThinkingCell cell={cell} isStreaming={cell.isStreaming || isActive} conversationId={conversationId} workspaceRoot={workspaceRoot} knownFilePaths={knownFilePaths} />;
 
     case "collaboration":
       return <CollaborationCell cell={cell} />;
 
     case "activity":
-      return <ActivityCell cell={cell} isActive={isActive} conversationId={conversationId} workspaceRoot={workspaceRoot} />;
+      return <ActivityCell cell={cell} conversationId={conversationId} workspaceRoot={workspaceRoot} />;
 
     case "exec":
       return <ExecCell cell={cell} isActive={isActive} onStop={isTranscriptMode ? undefined : onStopExecution} />;
@@ -131,6 +143,7 @@ export const HistoryCellRenderer = memo(function HistoryCellRenderer({
         isTranscriptMode={isTranscriptMode}
         conversationId={conversationId}
         workspaceRoot={workspaceRoot}
+        knownFilePaths={knownFilePaths}
         afterContent={afterContent}
       />;
 

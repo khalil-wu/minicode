@@ -14,7 +14,7 @@ import { isReplayedEvent } from "../protocol/events";
 import type { McpServerStatus, TerminalSessionInfo } from "../stores/types";
 import { pushToast } from "../overlays/ToastContainer";
 import { sendClientCommand } from "../protocol/ws-outbox";
-import { normalizeWorkspaceRoot } from "../lib/workspace-path";
+import { normalizeWorkspaceRoot, workspaceRootsEqual } from "../lib/workspace-path";
 import { addInspectorPayload } from "./inspectorEntries";
 
 const terminalEventConversationId = (event: ServerEvent): string => {
@@ -76,18 +76,11 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
       const ev = e as WorkspaceImportedEvent;
       const owner = ev.conversation_id.trim();
       const rootPath = ev.workspace_root.trim();
-      useAppStore.setState((state) => ({
-        conversations: state.conversations.map((conversation) =>
-          conversation.id === owner
-            ? { ...conversation, workspaceRoot: rootPath, worktreePath: "" }
-            : conversation,
-        ),
-      }));
-      if (owner !== String(useAppStore.getState().conversationId || "").trim()) {
+      // Index completion describes a workspace; conversation.switched/list
+      // own project identity, including isolated worktree bindings.
+      if (owner !== String(s.conversationId || "").trim() || !workspaceRootsEqual(rootPath, s.workingDirectory)) {
         return true;
       }
-
-      s.setWorkingDirectory(rootPath);
       s.bumpFileTreeVersion();
       addInspectorPayload("workspace", `workspace:${owner}:${normalizeWorkspaceRoot(rootPath)}`, {
         event: ev.type,

@@ -13,6 +13,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEve
 import { useShallow } from "zustand/react/shallow";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { BrandIcon } from "../components/BrandIcon";
+import { RollingNumber } from "../components/RollingNumber";
 import {
   embeddedBrowserActivate,
   embeddedBrowserList,
@@ -561,7 +562,7 @@ export const ChatContextCard = () => {
           {changes && <button type="button" className="mc-chat-context-environment-row" onClick={openReview} title="审阅本轮文件更改">
             <FileDiff size={17} aria-hidden="true" />
             <span>变更</span>
-            <span className="mc-chat-context-change-stats"><span className="chat-change-added">+{changes.additions}</span><span className="chat-change-deleted">-{changes.deletions}</span></span>
+            <span className="mc-chat-context-change-stats"><RollingNumber className="chat-change-added" prefix="+" value={changes.additions} /><RollingNumber className="chat-change-deleted" prefix="-" value={changes.deletions} /></span>
             <ChevronRight size={14} aria-hidden="true" />
           </button>}
           {hasWorkspace && <>

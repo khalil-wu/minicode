@@ -225,7 +225,7 @@ describe("ActivityCell", () => {
       }],
     };
 
-    const { container } = render(React.createElement(ActivityCell, { cell, isActive: true }));
+    const { container } = render(React.createElement(ActivityCell, { cell }));
 
     expect(container.querySelector(".activity-cell-plan-spinner")).toBeNull();
     expect(container.querySelector('[data-status="in_progress"] svg')).toBeTruthy();
@@ -249,7 +249,7 @@ describe("ActivityCell", () => {
       }],
     };
 
-    const { container } = render(React.createElement(ActivityCell, { cell, isActive: true }));
+    const { container } = render(React.createElement(ActivityCell, { cell }));
 
     expect(screen.queryByRole("button", { name: "展开活动详情" })).toBeNull();
     expect(container.querySelector(".activity-cell-tool-expanded")).toBeNull();
@@ -276,7 +276,7 @@ describe("ActivityCell", () => {
           status: "success",
           activityKind: "fileRead",
           resultKind: "file",
-          outputPreview: "1→export const first = 1;\n2→export const shared = true;",
+          outputPreview: "     1→export const first = 1;\n     2→  export const shared = true;\n\n[range_hash: abc]\n[content_hash: def; write-safe full-file version]",
           startedAt: 1,
           finishedAt: 2,
         },
@@ -305,6 +305,11 @@ describe("ActivityCell", () => {
       .toBe(container.querySelector(".activity-cell-line"));
     expect(document.body.textContent).toContain("export const first");
     expect(document.body.textContent).toContain("export const second");
+    expect(container.querySelector(".activity-cell-inline-output")?.textContent)
+      .toBe("export const first = 1;\n  export const shared = true;");
+    expect(document.body.textContent).not.toContain("→");
+    expect(document.body.textContent).not.toContain("range_hash");
+    expect(cell.toolCallRecords?.[0].outputPreview).toContain("[range_hash: abc]");
   });
 
   it("opens a rounded local diff panel for a completed file edit", () => {
@@ -572,8 +577,8 @@ describe("ActivityCell", () => {
     render(React.createElement(ActivityCell, { cell }));
 
     const output = document.querySelector(".activity-cell-inline-output")?.textContent ?? "";
-    expect(output).toContain("55\u2192line 55");
-    expect(output).toContain("130\u2192line 130");
+    expect(output.split("\n")[0]).toBe("line 55");
+    expect(output.split("\n").at(-1)).toBe("line 130");
     expect(output).not.toContain("range_hash");
   });
 

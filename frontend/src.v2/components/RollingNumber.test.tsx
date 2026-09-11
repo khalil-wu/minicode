@@ -35,15 +35,17 @@ describe("RollingNumber", () => {
     expect(container.querySelector(".rolling-number-old")).toBeNull();
   });
 
-  it("can roll in from zero on mount for newly surfaced live stats", () => {
+  it("shows restored values immediately and rolls downward from the last displayed value", () => {
     vi.useFakeTimers();
-    const { container } = render(<RollingNumber value={116} prefix="+" animateOnMount />);
+    const { container, rerender } = render(<RollingNumber value={116} prefix="+" />);
 
     const rolling = container.querySelector(".rolling-number");
-    expect(rolling?.getAttribute("data-animating")).toBe("true");
-    expect(rolling?.getAttribute("data-direction")).toBe("up");
+    expect(rolling?.getAttribute("data-animating")).toBe("false");
     expect(screen.getByLabelText("+116")).toBeTruthy();
-    expect(container.querySelector(".rolling-number-old")?.textContent).toBe("0");
+    expect(container.querySelector(".rolling-number-old")).toBeNull();
+    rerender(<RollingNumber value={8} prefix="+" />);
+    expect(rolling?.getAttribute("data-direction")).toBe("down");
+    expect(container.querySelector(".rolling-number-old")?.textContent).toBe("+116");
 
     act(() => {
       vi.advanceTimersByTime(240);

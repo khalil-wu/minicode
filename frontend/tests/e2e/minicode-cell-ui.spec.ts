@@ -371,6 +371,68 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     await page.waitForFunction(() => Boolean((window as any).__mockWs));
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().isConnected)).toBe(true);
     await expect.poll(() => page.evaluate(() => (window as any).__zustandStore?.getState().currentModel || "")).not.toBe("");
+    await page.evaluate(() => document.fonts.ready);
+  });
+
+  test("replays the README tool group, plan snapshot and shortened file reference", async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 1100 });
+    const filePath = "E:/记得日记/remember-diary/src/backup/backupService.native.ts";
+    const fileRequests: string[] = [];
+    await page.route(url => url.pathname.endsWith("/workspace/file"), async route => {
+      const requested = new URL(route.request().url()).searchParams.get("path") || "";
+      fileRequests.push(requested);
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({
+        path: filePath, content: "export const backupFormat = 'JSON';", content_hash: "readme-replay",
+      }) });
+    });
+    await page.evaluate((filePath) => {
+      const store = (window as any).__zustandStore;
+      store.getState().setThemeMode("light");
+      const messages = [{
+        id: "readme-answer", role: "assistant", turnId: "readme-turn", content: "", timestamp: Date.now(), artifacts: [], isStreaming: true,
+        blocks: [
+          { type: "text", itemId: "placeholder", source: "pending", content: "...", isStreaming: false },
+          { type: "tool_call", record: { id: "read-backup", name: "read_file", args: { file_path: filePath }, status: "success", activityKind: "fileRead", outputPreview: "1→export const backupFormat = 'JSON';", startedAt: Date.now() } },
+          { type: "tool_call", record: { id: "search-readme", name: "grep_files", args: { pattern: "WebDAV", path: "E:/记得日记/remember-diary" }, status: "running", activityKind: "workspaceSearch", startedAt: Date.now() } },
+        ],
+      }];
+      store.setState({ conversationId: "conv-cells", workingDirectory: "E:/记得日记", messages, conversationMessages: { "conv-cells": messages }, isStreaming: true, viewMode: "normal" });
+      (window as any).__mockWs._receive({ type: "turn.plan.updated", conversation_id: "conv-cells", thread_id: "conv-cells", turn_id: "readme-turn", message_id: "readme-answer", plan: [
+        { step: "核对 README 与代码", status: "completed" }, { step: "更新 README", status: "in_progress" }, { step: "核实备份功能", status: "completed" },
+      ] });
+    }, filePath);
+    await expect(page.locator(".activity-cell-running")).toHaveCount(1);
+    await expect(page.getByRole("status", { name: "正在处理" })).toHaveCount(0);
+    await expect(page.locator(".thinking-cell").filter({ hasText: /^\.\.\.$/ })).toHaveCount(0);
+    const plan = page.getByRole("button", { name: "已完成 2 / 3 项 · 更新 README" });
+    await expect(plan).toBeVisible();
+    await plan.click();
+    await expect(page.locator('.turn-plan-step[data-status="completed"]')).toHaveCount(2);
+    await page.screenshot({ path: "../output/playwright/readme-replay-running.png", fullPage: true });
+    await page.evaluate(() => (window as any).__mockWs._receive({
+      type: "tool_result", id: "search-readme", status: "success",
+      summary: "(no matches)", activity_kind: "workspaceSearch", conversation_id: "conv-cells", message_id: "readme-answer",
+    }));
+    await expect(page.locator(".activity-cell-running")).toHaveCount(0);
+    await expect(page.getByRole("status", { name: "正在处理" })).toHaveCount(1);
+    await page.evaluate(() => {
+      const store = (window as any).__zustandStore;
+      const content = "已核实备份使用 JSON，依据 `src/backup/backupService.native.ts`。";
+      const messages = store.getState().messages.map((message: any) => ({ ...message, content, isStreaming: false, completedAt: Date.now(), blocks: [
+        ...message.blocks, { type: "text", itemId: "readme-final", source: "model_final", status: "completed", content },
+      ] }));
+      store.setState({ messages, isStreaming: false });
+    });
+    await expect(page.locator('.turn-plan-progress')).toHaveCount(0);
+    const link = page.getByRole("button", { name: "src/backup/backupService.native.ts" });
+    await expect(link).toHaveAttribute("title", `在编辑器中打开 ${filePath}`);
+    await link.click();
+    await expect.poll(() => fileRequests.length).toBe(1);
+    expect(fileRequests[0].replace(/\\/g, "/")).toMatch(/remember-diary\/src\/backup\/backupService.native.ts$/);
+    await expect.poll(() => page.evaluate(() => (window as any).__zustandStore.getState().editorTabs.find((tab: any) => tab.path.includes("backupService.native.ts"))?.content)).toBe("export const backupFormat = 'JSON';");
+    await expect(page.getByText("无法加载文件", { exact: true })).toHaveCount(0);
+    await expect(page.locator(".monaco-editor .view-lines")).toContainText("backupFormat");
+    await page.screenshot({ path: "../output/playwright/readme-replay-file.png", fullPage: true });
   });
 
   test("verifies inline plan progress and context routing", async ({ page }) => {
@@ -403,7 +465,7 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
       }, threadId);
     });
 
-    const planProgress = page.getByRole("button", { name: /第 1 \/ 2 步/ });
+    const planProgress = page.getByRole("button", { name: /已完成 0 \/ 2 项/ });
     await expect(planProgress).toBeVisible({ timeout: 8000 });
     await planProgress.click();
     const planRegion = page.getByRole("dialog", { name: "当前计划" });
@@ -503,6 +565,98 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     await page.screenshot({ path: "../output/playwright/codex-layout-svg.png", fullPage: true });
   });
 
+  test("keeps file links aligned, tool panels compact and repeated diff updates stable", async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 1250 });
+    await page.evaluate(() => {
+      const store = (window as any).__zustandStore;
+      store.getState().setThemeMode("light");
+      const answer = "这是一个个人日记项目。根目录的 [Prompt.txt](C:/Desktop/MiniCode/Prompt.txt) 记录了产品愿景。\n\n## 技术栈\n\n| 层面 | 技术 |\n| --- | --- |\n| 框架 | React |\n| 语言 | TypeScript |";
+      const messages = [{
+        id: "surface-answer", role: "assistant", turnId: "surface-turn", artifacts: [],
+        content: answer, timestamp: 100, completedAt: 58100, durationMs: 58000, isStreaming: false,
+        blocks: [
+          { type: "text", itemId: "surface-start", source: "commentary", status: "completed", content: "我先查看项目结构和内容。" },
+          { type: "tool_call", record: {
+            id: "surface-read", name: "read_file", args: { file_path: "README.md" },
+            status: "success", startedAt: 200, resultKind: "file", activityKind: "fileRead",
+            outputPreview: Array.from({ length: 32 }, (_, index) => `${index + 1}→${index === 0 ? '# 记得日记' : '记录生活，记住重要的人。数据默认只存本地。'}`).join("\n"),
+          } },
+          { type: "tool_call", record: {
+            id: "surface-command", name: "run_command", args: { command: "npm run check -- --reporter=default" },
+            status: "success", startedAt: 300, resultKind: "command", activityKind: "commandExecution",
+            stdoutPreview: "TypeScript 检查通过。\n界面回归通过。", exitCode: 0,
+          } },
+          { type: "text", itemId: "surface-finding", source: "commentary", status: "completed", content: "已核对 README 和技术栈，正在检查文件修改。" },
+          { type: "tool_call", record: {
+            id: "surface-edit", name: "apply_patch", args: { file_path: "src/app.ts" },
+            status: "success", startedAt: 400, resultKind: "edit", activityKind: "fileChange",
+            diff: { plus: 3, minus: 1, patch: "--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1,3 @@\n-old\n+one\n+two\n+three\n" },
+          } },
+          { type: "text", itemId: "surface-final", source: "model_final", status: "completed", content: answer },
+        ],
+      }];
+      store.setState({ messages, conversationId: "conv-cells", conversationMessages: { "conv-cells": messages }, workingDirectory: "C:/Desktop/MiniCode", isStreaming: false, viewMode: "normal" });
+      (window as any).__mockWs._receive({
+        type: "turn.diff.updated", conversation_id: "conv-cells", thread_id: "conv-cells",
+        turn_id: "surface-turn", message_id: "surface-answer", revision: 1,
+        diff: "diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1,3 @@\n-old\n+one\n+two\n+three\n",
+      });
+    });
+    const fileLink = page.locator('.md-file-chip').filter({ hasText: "Prompt.txt" });
+    const linkMetrics = await fileLink.evaluate((element) => {
+      const icon = element.querySelector(".md-official-file-icon")!.getBoundingClientRect();
+      const text = element.querySelector(".md-file-chip-name")!.getBoundingClientRect();
+      const paragraph = element.closest("p")!;
+      const proseRange = document.createRange();
+      proseRange.selectNodeContents(paragraph.firstChild!);
+      const labelRange = document.createRange();
+      labelRange.selectNodeContents(element.querySelector(".md-file-chip-name")!);
+      return { proseOffset: Math.abs(proseRange.getBoundingClientRect().bottom - labelRange.getBoundingClientRect().bottom), centerOffset: Math.abs(icon.y + icon.height / 2 - text.y - text.height / 2), height: element.getBoundingClientRect().height, display: getComputedStyle(element).display, decoration: getComputedStyle(element).textDecorationLine };
+    });
+    expect(linkMetrics.display).toBe("inline-flex");
+    expect(linkMetrics.decoration).toBe("none");
+    expect(linkMetrics.centerOffset).toBeLessThanOrEqual(1);
+    expect(linkMetrics.proseOffset).toBeLessThanOrEqual(1);
+    expect(linkMetrics.height).toBeLessThan(30);
+    await page.getByRole("button", { name: "展开处理步骤" }).click();
+    const group = page.getByRole("button", { name: "读取了文件并运行了命令" });
+    const processGap = await group.evaluate((element) => {
+      const paragraph = document.querySelector('.thinking-cell-commentary p')!.getBoundingClientRect();
+      return element.getBoundingClientRect().top - paragraph.bottom;
+    });
+    expect(processGap).toBeGreaterThanOrEqual(6);
+    expect(processGap).toBeLessThanOrEqual(24);
+    await group.click();
+    await page.locator('[data-activity-kind="fileRead"]').getByRole("button", { name: "展开活动详情" }).click();
+    await page.getByRole("button", { name: "展开命令详情" }).click();
+    const panelMetrics = await page.locator('.exec-cell-expanded').evaluate((element) => {
+      const style = getComputedStyle(element);
+      const readOutput = document.querySelector('.activity-cell-inline-output')!;
+      return { border: style.borderWidth, radius: style.borderRadius, padding: style.paddingTop, rail: getComputedStyle(readOutput, '::-webkit-scrollbar').width };
+    });
+    expect(panelMetrics).toEqual({ border: "1px", radius: "12px", padding: "8px", rail: "8px" });
+    await expect(page.locator('.activity-cell-inline-output')).not.toContainText("→");
+    await page.locator('[data-activity-kind="fileRead"] .activity-cell-expanded').screenshot({ path: "../output/playwright/chat-read-panel.png" });
+    await page.locator('[data-activity-kind="fileRead"]').getByRole("button", { name: "收起活动详情" }).click();
+    await page.locator('.exec-cell-expanded').screenshot({ path: "../output/playwright/chat-command-panel.png" });
+    const row = await page.locator('[data-zone="diff"] .diff-file-section').elementHandle();
+    const count = page.locator('[data-zone="diff"] .diff-file-section .diff-cell-added');
+    await expect(count).toHaveAttribute("data-animating", "false");
+    await page.evaluate(() => (window as any).__mockWs._receive({
+      type: "turn.diff.updated", conversation_id: "conv-cells", thread_id: "conv-cells",
+      turn_id: "surface-turn", message_id: "surface-answer", revision: 2,
+      diff: "diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1,2 @@\n-old\n+one\n+two\n",
+    }));
+    await expect(count).toHaveAttribute("aria-label", "+2");
+    expect(await row!.evaluate((element) => element === document.querySelector('[data-zone="diff"] .diff-file-section'))).toBe(true);
+    await expect(count).toHaveAttribute("data-animating", "false");
+    await page.getByText("已核对 README 和技术栈，正在检查文件修改。").click();
+    await page.screenshot({ path: "../output/playwright/chat-detail-light.png", fullPage: true });
+    await page.evaluate(() => (window as any).__zustandStore.getState().setThemeMode("dark"));
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await page.screenshot({ path: "../output/playwright/chat-detail-dark.png", fullPage: true });
+  });
+
   test("verifies ActivityCell flat tool projection and inline read records", async ({ page }) => {
     const composer = page.locator('textarea, input[placeholder*="message" i], [contenteditable="true"]').first();
     await composer.fill("分析前端输出，不要修改文件");
@@ -555,8 +709,8 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     });
     expect(readPanelStyle.borderWidth).toBe("1px");
     expect(readPanelStyle.boxShadow).toBe("none");
-    expect(readPanelStyle.copyFontSize).toBeGreaterThanOrEqual(15);
-    expect(readPanelStyle.rowFontSize).toBeGreaterThanOrEqual(16);
+    expect(readPanelStyle.copyFontSize).toBeGreaterThanOrEqual(14);
+    expect(readPanelStyle.rowFontSize).toBeGreaterThanOrEqual(14);
 
     await page.evaluate(() => (window as any).__zustandStore.getState().setThemeMode("dark"));
     const darkReadPanelStyle = await readReadme.locator(".activity-cell-tool-expanded").evaluate((node) => {
@@ -571,7 +725,7 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     });
     expect(darkReadPanelStyle.panelBorderWidth).toBe("1px");
     expect(darkReadPanelStyle.panelBoxShadow).toBe("none");
-    expect(darkReadPanelStyle.outputBorderWidth).toBe("1px 0px 0px");
+    expect(darkReadPanelStyle.outputBorderWidth).toBe("0px");
     expect(darkReadPanelStyle.outputBackground).toBe("rgba(0, 0, 0, 0)");
 
     const firstEdit = page.locator('.activity-cell[data-activity-kind="fileChange"]').first();
@@ -626,7 +780,7 @@ test.describe("MiniCode New Cell UI & Interactive Flow E2E Tests", () => {
     expect(outcomeStyle.borderWidth).toBe("1px");
     expect(outcomeStyle.boxShadow).toBe("none");
     expect(outcomeStyle.titleFontSize).toBeGreaterThanOrEqual(16);
-    expect(outcomeStyle.fileFontSize).toBeGreaterThanOrEqual(16);
+    expect(outcomeStyle.fileFontSize).toBeGreaterThanOrEqual(14);
   });
 
   test("projects Search, Fetch, and git status in one ordered expandable tool stream", async ({ page }) => {

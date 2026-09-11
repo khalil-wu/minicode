@@ -68,6 +68,22 @@ afterEach(() => {
 });
 
 describe("MarkdownRenderer", () => {
+  it("does not guess ambiguous bare names or rewrite explicit link targets", () => {
+    const root = "E:/记得日记";
+    const knownFilePaths = [`${root}/one/backup.ts`, `${root}/two/backup.ts`];
+    const { rerender } = render(<MarkdownRenderer content={"依据 `backup.ts`。"} workspaceRoot={root} knownFilePaths={knownFilePaths} />);
+    expect(screen.queryByRole("button", { name: "backup.ts" })).toBeNull();
+    rerender(<MarkdownRenderer content={"[backup.ts](one/backup.ts)"} workspaceRoot={root} knownFilePaths={knownFilePaths} />);
+    expect(screen.getByRole("button", { name: "backup.ts" }).title).toContain(`${root}/one/backup.ts`);
+  });
+
+  it("resolves unique Windows suffixes with their line target but respects POSIX case", () => {
+    const { rerender } = render(<MarkdownRenderer content={"依据 `src/Backup.ts:12`。"} workspaceRoot="E:/记得日记" knownFilePaths={["E:\\记得日记\\remember-diary\\src\\backup.ts"]} />);
+    expect(screen.getByRole("button", { name: "src/Backup.ts:12" }).title).toContain("remember-diary/src/backup.ts");
+    rerender(<MarkdownRenderer content={"依据 `Backup.ts`。"} workspaceRoot="/project" knownFilePaths={["/project/sub/backup.ts"]} />);
+    expect(screen.getByRole("button", { name: "Backup.ts" }).title).toContain("/project/Backup.ts");
+  });
+
   it("uses the plain streaming code path when a fence has no preceding paragraph", () => {
     const { container, rerender } = render(<MarkdownRenderer content={"```ts\nconst value = 1;"} isStreaming />);
     const pre = container.querySelector("pre");
@@ -95,6 +111,14 @@ describe("MarkdownRenderer", () => {
 
     expect(container.querySelector("h2")).toBe(heading);
     expect(container.querySelector("h2")?.getAttribute("id")).toBe(headingId);
+  });
+
+  it("keeps streamed paragraphs mounted when tool paths are projected into a new array", () => {
+    const content = "## 结果\n\n依据 `README.md`。";
+    const { container, rerender } = render(<MarkdownRenderer content={content} isStreaming knownFilePaths={["README.md"]} />);
+    const heading = container.querySelector("h2");
+    rerender(<MarkdownRenderer content={`${content}继续核对。`} isStreaming knownFilePaths={["README.md"]} />);
+    expect(container.querySelector("h2")).toBe(heading);
   });
 
   it("gives repeated heading text stable distinct anchors across re-renders", () => {
@@ -401,7 +425,6 @@ describe("MarkdownRenderer", () => {
       const first = screen.getByRole("button", { name: "backend/agent/loop.py" });
       const second = screen.getByRole("button", { name: "backend/agent/loop_process_events.py" });
       expect(first.className).toContain("md-file-chip");
-      expect(first.className).toContain("no-underline");
       expect(second.className).toContain("md-file-chip");
 
       fireEvent.click(first);
@@ -476,7 +499,6 @@ describe("MarkdownRenderer", () => {
 
       const chip = screen.getByRole("button", { name: "backend/agent/loop.py" });
       expect(chip.className).toContain("md-file-chip");
-      expect(chip.className).toContain("no-underline");
       expect(chip.getAttribute("title")).toBe("在编辑器中打开 C:/Desktop/MiniCode/backend/agent/loop.py");
       expect(document.querySelector('a[href*="backend/agent/loop.py"]')).toBeNull();
 

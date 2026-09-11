@@ -16,7 +16,7 @@
   --mc-sidebar-row-height: 36px;
   --mc-content-gutter: 24px;
   /* Keep the composer on the same reading axis as assistant answers. */
-  --mc-chat-width: min(960px, calc(100vw - 48px));
+  --mc-chat-width: min(var(--input-max-width), calc(100vw - 48px));
   --mc-scrollbar-color: color-mix(in oklch, var(--text-primary) 15%, transparent);
   --mc-scrollbar-hover: color-mix(in oklch, var(--text-primary) 30%, transparent);
 }
@@ -474,17 +474,15 @@ svg.lucide {
 
 /* User bubble — neutral gray surface, visually separate from assistant prose. */
 .user-cell-bubble {
-  padding: 11px 14px !important;
-  border: 1px solid var(--border-subtle) !important;
-  border-radius: var(--radius-lg) !important;
-  border-bottom-right-radius: var(--radius-sm) !important;
+  padding: 12px 16px !important;
+  border: 0 !important;
+  border-radius: var(--radius-xl) !important;
   background: var(--workbench-tool) !important;
   color: var(--text-primary) !important;
   box-shadow: none !important;
 }
 
 .user-cell-bubble:hover {
-  border-color: var(--border-strong) !important;
   box-shadow: none !important;
 }
 
@@ -511,6 +509,12 @@ svg.lucide {
   max-width: 100%;
 }
 
+.agent-loop-process-summary-wrap[data-position="top"] {
+  width: 100%;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
 #root .agent-loop-process-summary,
 #root .chat-turn-process-summary {
   justify-self: start;
@@ -524,7 +528,7 @@ svg.lucide {
   background: transparent !important;
   color: var(--text-muted) !important;
   font-size: var(--text-base) !important;
-  font-weight: var(--fw-medium) !important;
+  font-weight: var(--fw-regular) !important;
   line-height: 1.35;
   box-shadow: none !important;
 }
@@ -1041,18 +1045,24 @@ svg.lucide {
 #root .message-list-scroll.chat-scrollbar-auto-hide::-webkit-scrollbar,
 #root :where(
   .exec-cell-output-pre,
+  .activity-cell-inline-output,
+  .activity-cell-change-card .inline-diff,
+  .agent-loop-timeline-group-items,
   .activity-cell-output-pre,
   .activity-cell-error-pre,
   .error-cell-message,
   .agent-loop-shell-output,
 )::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 
 #root .message-list-scroll.chat-scrollbar-auto-hide::-webkit-scrollbar-track,
 #root :where(
   .exec-cell-output-pre,
+  .activity-cell-inline-output,
+  .activity-cell-change-card .inline-diff,
+  .agent-loop-timeline-group-items,
   .activity-cell-output-pre,
   .activity-cell-error-pre,
   .error-cell-message,
@@ -1064,13 +1074,16 @@ svg.lucide {
 #root .message-list-scroll.chat-scrollbar-auto-hide::-webkit-scrollbar-thumb,
 #root :where(
   .exec-cell-output-pre,
+  .activity-cell-inline-output,
+  .activity-cell-change-card .inline-diff,
+  .agent-loop-timeline-group-items,
   .activity-cell-output-pre,
   .activity-cell-error-pre,
   .error-cell-message,
   .agent-loop-shell-output,
 )::-webkit-scrollbar-thumb {
   min-height: 36px;
-  border: 3px solid transparent;
+  border: 1px solid transparent;
   border-radius: var(--radius-full);
   background: transparent;
   background-clip: padding-box;
@@ -1083,6 +1096,9 @@ svg.lucide {
 #root .message-list-scroll.chat-scrollbar-auto-hide.is-scrolling::-webkit-scrollbar-thumb,
 #root :where(
   .exec-cell-output-pre,
+  .activity-cell-inline-output,
+  .activity-cell-change-card .inline-diff,
+  .agent-loop-timeline-group-items,
   .activity-cell-output-pre,
   .activity-cell-error-pre,
   .error-cell-message,
@@ -1095,12 +1111,15 @@ svg.lucide {
 #root .message-list-scroll.chat-scrollbar-auto-hide::-webkit-scrollbar-thumb:hover,
 #root :where(
   .exec-cell-output-pre,
+  .activity-cell-inline-output,
+  .activity-cell-change-card .inline-diff,
+  .agent-loop-timeline-group-items,
   .activity-cell-output-pre,
   .activity-cell-error-pre,
   .error-cell-message,
   .agent-loop-shell-output,
 )::-webkit-scrollbar-thumb:hover {
-  border-width: 2px;
+  border-width: 1px;
   background: color-mix(in oklch, var(--text-primary) 38%, transparent);
   background-clip: padding-box;
 }

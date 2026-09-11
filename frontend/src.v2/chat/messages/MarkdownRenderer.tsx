@@ -39,6 +39,7 @@ import {
   normalizeWorkspacePath,
   workspacePathWithin,
   workspacePathsEqual,
+  workspaceFilePathComparisonKey,
 } from "../../lib/workspace-path";
 import {
   createMarkdownHeadingIdAssigner,
@@ -52,6 +53,7 @@ interface Props {
   citations?: Citation[];
   workspaceRoot?: string;
   conversationId?: string;
+  knownFilePaths?: string[];
 }
 
 type MarkdownNode = {
@@ -959,15 +961,7 @@ const InlineOptionList = ({ text }: { text: string }) => {
   );
 };
 
-const fileChipClassName = [
-  "md-file-chip",
-  "inline-flex max-w-full items-center gap-1.5 align-middle",
-  "rounded-[5px] border px-[5px] py-[1px]",
-  "font-[var(--font-mono)] text-[0.88em] leading-[1.42]",
-  "no-underline cursor-pointer",
-  "transition-[background,border-color,color,box-shadow] duration-150",
-  "focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent-primary)]",
-].join(" ");
+const fileChipClassName = "md-file-chip";
 
 const fileTypeLabels: Record<string, string> = {
   bash: "SH",
@@ -1067,7 +1061,27 @@ const absoluteEditorTitlePath = (path: string, workingDirectory: string): string
   return root ? `${root}/${normalizedPath.replace(/^\/+/, "")}` : normalizedPath;
 };
 
-type MessageResourceScope = { workspaceRoot?: string; conversationId?: string };
+type MessageResourceScope = { workspaceRoot?: string; conversationId?: string; knownFilePaths?: string[] };
+
+// Only auto-linked prose uses suffix resolution. Explicit Markdown targets
+// retain their exact meaning; ambiguous short names remain ordinary text.
+function knownFileTarget<T extends FileTarget>(target: T | null, scope: MessageResourceScope): T | null {
+  if (!target || !isWorkspaceRelativeEditorPath(target.path) || !scope.knownFilePaths?.length) return target;
+  const root = scope.workspaceRoot ?? useAppStore.getState().workingDirectory;
+  const referenceKey = workspaceFilePathComparisonKey(target.path, root);
+  const suffix = normalizeWorkspacePath(target.path);
+  const suffixKey = isWindowsLikeWorkspacePath(root) ? suffix.toLowerCase() : suffix;
+  const matches = new Map<string, string>();
+  for (const path of scope.knownFilePaths) {
+    const candidate = workspacePathFromHref(path, { workspaceRoot: root });
+    if (!candidate) continue;
+    const key = workspaceFilePathComparisonKey(candidate, root);
+    if (key === referenceKey) return { ...target, path: candidate };
+    if (key.endsWith(`/${suffixKey}`)) matches.set(key, candidate);
+  }
+  if (matches.size > 1) return null;
+  return matches.size === 1 ? { ...target, path: [...matches.values()][0] } : target;
+}
 
 const FileReferenceChip = ({ target, children, workspaceRoot, conversationId }: { target: EditorTarget; children: React.ReactNode } & MessageResourceScope) => {
   const activeWorkspace = useAppStore((s) => s.workingDirectory);
@@ -1374,11 +1388,11 @@ const mdComponents = (
         </div>
       );
     }
-    const inlineEditorTarget = workspaceFileTargetFromHref(text, resourceScope.workspaceRoot);
+    const inlineEditorTarget = knownFileTarget(workspaceFileTargetFromHref(text, resourceScope.workspaceRoot), resourceScope);
     if (inlineEditorTarget) {
       return <FileReferenceChip target={inlineEditorTarget} {...resourceScope}>{children}</FileReferenceChip>;
     }
-    const inlineFileTarget = workspaceGenericFileTargetFromHref(text, resourceScope.workspaceRoot);
+    const inlineFileTarget = knownFileTarget(workspaceGenericFileTargetFromHref(text, resourceScope.workspaceRoot), resourceScope);
     if (inlineFileTarget) {
       return <GenericFileReferenceChip target={inlineFileTarget} {...resourceScope}>{children}</GenericFileReferenceChip>;
     }
@@ -1415,7 +1429,10 @@ const mdComponents = (
         </a>
       );
     }
-    const editorTarget = editorTargetFromHref(href, resourceScope.workspaceRoot) ?? editorTargetFromLinkText(href, childrenText, resourceScope.workspaceRoot);
+    const parsedEditorTarget = editorTargetFromHref(href, resourceScope.workspaceRoot) ?? editorTargetFromLinkText(href, childrenText, resourceScope.workspaceRoot);
+    const editorTarget = href.startsWith("minicode-file-ref:")
+      ? knownFileTarget(parsedEditorTarget, resourceScope)
+      : parsedEditorTarget;
     const fileTarget = editorTarget
       ? null
       : workspaceGenericFileTargetFromHref(href, resourceScope.workspaceRoot) ?? (
@@ -1477,7 +1494,7 @@ const mdComponents = (
     <li {...props} className={`mb-1 leading-[var(--leading-normal)]${className ? ` ${className}` : ""}`} />
   ),
   table: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLTableElement>>) => (
-    <div className="overflow-x-auto my-2">
+    <div className="md-table-wrap">
       <table {...props} className="border-collapse text-[var(--text-sm)] w-full" />
     </div>
   ),
@@ -1495,7 +1512,7 @@ const mdComponents = (
   h3: heading(3),
   hr: () => <hr className="border-0 h-px my-4 bg-gradient-to-r from-transparent via-[var(--border-subtle)] to-transparent" />,
   img: ({ node: _node, ...props }: MarkdownElementProps<React.ImgHTMLAttributes<HTMLImageElement>>) => {
-    return <MarkdownImage {...props} {...resourceScope} />;
+    return <MarkdownImage {...props} workspaceRoot={resourceScope.workspaceRoot} conversationId={resourceScope.conversationId} />;
   },
   });
 };
@@ -1738,7 +1755,7 @@ const StreamingTailMarkdown = memo(({ content, components, plugins }: { content:
 });
 StreamingTailMarkdown.displayName = "StreamingTailMarkdown";
 
-export const MarkdownRenderer = memo(({ content, isStreaming, citations, workspaceRoot, conversationId }: Props) => {
+export const MarkdownRenderer = memo(({ content, isStreaming, citations, workspaceRoot, conversationId, knownFilePaths }: Props) => {
   const resolved = useResolvedTheme();
   const rawScopeId = useId();
   const scopeId = useMemo(() => `md-${rawScopeId.replace(/[^a-zA-Z0-9_-]/g, "")}`, [rawScopeId]);
@@ -1752,9 +1769,12 @@ export const MarkdownRenderer = memo(({ content, isStreaming, citations, workspa
     () => hasCitations ? [...remarkPlugins, removeCitationMarkers] : remarkPlugins,
     [hasCitations],
   );
+  // Tool/text deltas rebuild the cell array. Identical path evidence must not
+  // rebuild the Markdown component types and remount existing paragraphs.
+  const filePathsKey = JSON.stringify(knownFilePaths);
   const components = useMemo(
-    () => mdComponents(resolved, scopeId, headingId, { workspaceRoot, conversationId }),
-    [resolved, scopeId, headingId, workspaceRoot, conversationId],
+    () => mdComponents(resolved, scopeId, headingId, { workspaceRoot, conversationId, knownFilePaths: filePathsKey ? JSON.parse(filePathsKey) : undefined }),
+    [resolved, scopeId, headingId, workspaceRoot, conversationId, filePathsKey],
   );
   headingId.reset();
   const prevStableRef = useRef("");

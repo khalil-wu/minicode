@@ -287,7 +287,7 @@ describe("handleNoticeEvent", () => {
     } as ServerEvent)).toBe(false);
   });
 
-  it("keeps the active conversation workspace in sync when workspace opens", () => {
+  it("refreshes workspace metadata without rewriting its conversation binding", () => {
     useAppStore.setState({
       conversationId: "conv-active",
       conversations: [{
@@ -295,8 +295,9 @@ describe("handleNoticeEvent", () => {
         title: "Active",
         updatedAt: "2026-05-28T00:00:00.000Z",
         workspaceRoot: "C:\\Desktop\\MiniCode",
+        worktreePath: "C:\\Desktop\\RAG",
       }],
-      workingDirectory: "C:\\Desktop\\MiniCode",
+      workingDirectory: "C:\\Desktop\\RAG",
     });
 
     expect(handlePeripheralEvent({
@@ -305,7 +306,8 @@ describe("handleNoticeEvent", () => {
 
     const state = useAppStore.getState();
     expect(state.workingDirectory).toBe("C:\\Desktop\\RAG");
-    expect(state.conversations[0].workspaceRoot).toBe("C:\\Desktop\\RAG");
+    expect(state.conversations[0].workspaceRoot).toBe("C:\\Desktop\\MiniCode");
+    expect(state.conversations[0].worktreePath).toBe("C:\\Desktop\\RAG");
     expect(sendClientCommand).toHaveBeenCalledTimes(4);
     expect(vi.mocked(sendClientCommand).mock.calls.map(([command]) => command.type)).toEqual([
       "diff.git_working_tree",
@@ -370,13 +372,13 @@ describe("handleNoticeEvent", () => {
     const state = useAppStore.getState();
     expect(state.workingDirectory).toBe("C:\\active");
     expect(state.conversations.find((conversation) => conversation.id === "conv-active")?.workspaceRoot).toBe("C:\\active");
-    expect(state.conversations.find((conversation) => conversation.id === "conv-other")?.workspaceRoot).toBe("C:\\other");
+    expect(state.conversations.find((conversation) => conversation.id === "conv-other")?.workspaceRoot).toBe("C:\\old");
     expect(state.inspectorEntries).toEqual([]);
     expect(sendClientCommand).not.toHaveBeenCalled();
     expect(pushToast).not.toHaveBeenCalled();
   });
 
-  it("hydrates a replayed active workspace without issuing fresh side effects", () => {
+  it("does not let a replayed workspace announcement replace authoritative session state", () => {
     useAppStore.setState({
       conversationId: "conv-active",
       conversations: [{ id: "conv-active", title: "Active", updatedAt: "2026-08-15T00:00:00Z" }],
@@ -394,9 +396,9 @@ describe("handleNoticeEvent", () => {
     } as unknown as ServerEvent)).toBe(true);
 
     const state = useAppStore.getState();
-    expect(state.workingDirectory).toBe("C:\\Desktop\\RAG");
-    expect(state.conversations[0].workspaceRoot).toBe("C:\\Desktop\\RAG");
-    expect(state.inspectorEntries[0]?.payload).toMatchObject({ replayed: true, index_truncated: true });
+    expect(state.workingDirectory).toBe("");
+    expect(state.conversations[0].workspaceRoot).toBeUndefined();
+    expect(state.inspectorEntries).toEqual([]);
     expect(sendClientCommand).not.toHaveBeenCalled();
     expect(pushToast).not.toHaveBeenCalled();
   });

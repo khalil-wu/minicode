@@ -51,13 +51,14 @@ def build_attachment_input_plan(
     attachment_store: Any | None = None,
     conversation_id: str = "",
     workspace_root: str = "",
+    retain_native_media: bool = False,
 ) -> AttachmentInputPlan:
     """Choose native multimodal payloads and cheap artifact fallbacks.
 
-    The policy mirrors MiniCode style attachment handling: send native
-    images/PDFs when the active wire format is known to support them, but keep
-    extracted document text addressable through scoped artifacts instead of
-    replaying large files into every prompt turn.
+    By default this is the active provider's input projection. Canonical
+    history uses retain_native_media so switching providers cannot discard
+    image/PDF bytes or persist a previous model's capability warning. Original
+    files and extracted text remain in the owner-scoped attachment store.
     """
 
     capability_llm = _primary_llm_adapter(llm)
@@ -134,13 +135,8 @@ def build_attachment_input_plan(
             metadata_hint = _attachment_source_hint(
                 artifact_id, fallback="the attachment metadata"
             )
-            if not _supports_native_images(mode, capability_llm):
-                hints.append(
-                    f"- {file_name}: the active model/API does not support native image input, "
-                    "so the image pixels were not sent to the model. "
-                    f"Only stored metadata is available via {metadata_hint}; "
-                    "switch to a vision-capable model to inspect the image itself."
-                )
+            if not retain_native_media and not _supports_native_images(mode, capability_llm):
+                hints.append(unsupported_image_hint(file_name, artifact_id))
             elif len(images) + len(documents) >= NATIVE_MEDIA_COUNT_LIMIT:
                 hints.append(
                     f"- {file_name}: native media input skipped because the request already contains "
@@ -154,13 +150,14 @@ def build_attachment_input_plan(
                     f"- {file_name}: native image input skipped because the file is too large; "
                     f"use {metadata_hint} for stored metadata if needed."
                 )
-        elif media_type == PDF_MEDIA_TYPE and data:
+        elif media_type == PDF_MEDIA_TYPE and (data or not _supports_native_pdf(mode, capability_llm)):
             text_hint = _attachment_source_hint(
                 artifact_id,
                 fallback="the extracted attachment text if available",
             )
             if (
-                _supports_native_pdf(mode, capability_llm)
+                data
+                and (retain_native_media or _supports_native_pdf(mode, capability_llm))
                 and _fits_limit(size_bytes, NATIVE_PDF_LIMIT_BYTES)
                 and (page_count <= 0 or page_count <= NATIVE_PDF_PAGE_LIMIT)
                 and len(images) + len(documents) < NATIVE_MEDIA_COUNT_LIMIT
@@ -199,7 +196,12 @@ def build_attachment_input_plan(
                 artifact_id,
                 fallback="the attachment diagnostic metadata",
             )
-            if used_native and media_type == PDF_MEDIA_TYPE:
+            if used_native and media_type == PDF_MEDIA_TYPE and retain_native_media:
+                hints.append(
+                    f"- {file_name}: text extraction failed; the original PDF is retained. "
+                    "Use its native contents only with a supported model instead of inferring from the title."
+                )
+            elif used_native and media_type == PDF_MEDIA_TYPE:
                 hints.append(
                     f"- {file_name}: text extraction failed, but the native PDF is attached for the model to read. "
                     "If the model cannot inspect the native PDF, say that the PDF body is unavailable instead of inferring from the title."
@@ -228,7 +230,7 @@ def build_attachment_input_plan(
         if artifact_id and kind != "image":
             if used_native and media_type == PDF_MEDIA_TYPE:
                 hints.append(
-                    f"- {file_name}: native PDF is attached; extracted text is available via "
+                    f"- {file_name}: {'original PDF is retained' if retain_native_media else 'native PDF is attached'}; extracted text is available via "
                     f"read_artifact('{artifact_id}')."
                 )
             else:
@@ -252,6 +254,16 @@ def build_attachment_input_plan(
         text_hints=_dedupe(hints),
         inlined_texts=inlined_texts,
         unavailable=unavailable,
+    )
+
+
+def unsupported_image_hint(file_name: str, artifact_id: str = "") -> str:
+    metadata_hint = _attachment_source_hint(artifact_id, fallback="the attachment metadata")
+    return (
+        f"- {file_name}: the active model/API does not support native image input, "
+        "so the image pixels were not sent to the model. "
+        f"Only stored metadata is available via {metadata_hint}; "
+        "switch to a vision-capable model to inspect the image itself."
     )
 
 
@@ -295,6 +307,11 @@ def _detect_llm_wire_mode(llm: Any | None) -> str:
         return "anthropic"
 
     return "auto"
+
+
+def supports_native_pdf_input(llm: Any | None) -> bool:
+    adapter = _primary_llm_adapter(llm)
+    return _supports_native_pdf(_detect_llm_wire_mode(adapter), adapter)
 
 
 def _supports_native_pdf(mode: str, llm: Any | None = None) -> bool:

@@ -36,8 +36,8 @@ export function TurnPlanProgress({ wide = false }: TurnPlanProgressProps = {}) {
   const visible = Boolean(progress);
 
   useEffect(() => {
-    if (!visible) setExpanded(false);
-  }, [visible, livePlan?.turnId]);
+    setExpanded(false);
+  }, [visible, livePlan?.threadId, livePlan?.turnId]);
 
   useEffect(() => {
     if (!expanded) return;
@@ -58,7 +58,8 @@ export function TurnPlanProgress({ wide = false }: TurnPlanProgressProps = {}) {
   if (!visible) return null;
 
   const ariaLabel = [
-    progress ? `第 ${progress.activeIndex} / ${progress.total} 步` : "",
+    progress ? `已完成 ${progress.completed} / ${progress.total} 项` : "",
+    progress?.activeStep,
   ].filter(Boolean).join(" · ");
 
   return (
@@ -82,13 +83,16 @@ export function TurnPlanProgress({ wide = false }: TurnPlanProgressProps = {}) {
         <span className="turn-plan-pill-icon" aria-hidden="true">
           {progress?.status === "completed"
             ? <Check size={14} />
-            : <LoaderCircle size={14} className="turn-plan-spinner" />}
+            : progress?.status === "running"
+              ? <LoaderCircle size={14} className="turn-plan-spinner" />
+              : <Circle size={14} />}
         </span>
         {progress && (
           <span className="turn-plan-pill-count">
-            第 {progress.activeIndex} / {progress.total} 步
+            已完成 {progress.completed} / {progress.total} 项
           </span>
         )}
+        {progress?.activeStep && <span className="turn-plan-pill-current">{progress.activeStep}</span>}
       </button>
       {expanded && steps.length > 0 && (
         <div
@@ -159,18 +163,18 @@ function planBelongsToCurrentTurn(
 
 function planProgress(steps: TurnPlanStep[]): {
   total: number;
-  activeIndex: number;
-  status: "running" | "completed";
+  completed: number;
+  activeStep?: string;
+  status: "pending" | "running" | "completed";
 } {
   const active = steps.findIndex((step) => visiblePlanStepStatus(step) === "in_progress");
-  const pending = steps.findIndex((step) => visiblePlanStepStatus(step) === "pending");
   const completed = steps.filter((step) => visiblePlanStepStatus(step) === "completed").length;
   const allCompleted = completed === steps.length;
-  const index = active >= 0 ? active : pending >= 0 ? pending : Math.max(0, steps.length - 1);
   return {
     total: steps.length,
-    activeIndex: allCompleted ? steps.length : index + 1,
-    status: allCompleted ? "completed" : "running",
+    completed,
+    activeStep: active >= 0 ? steps[active].step : undefined,
+    status: allCompleted ? "completed" : active >= 0 ? "running" : "pending",
   };
 }
 

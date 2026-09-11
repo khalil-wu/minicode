@@ -603,7 +603,9 @@ async def _purge_conversation_replay_state(
     return counts, errors
 
 
-async def handle_conversation_create(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+async def handle_conversation_create(
+    session: "WebSocketSession", data: dict[str, Any], *, command: str = "conversation.create",
+) -> bool:
     from backend.services.conversation_payload_service import (
         build_conversation_switched_payload,
         parse_conversation_create_request,
@@ -615,7 +617,7 @@ async def handle_conversation_create(session: "WebSocketSession", data: dict[str
 
         await emit_command_error(
             session,
-            "conversation.create",
+            command,
             request.error_event,
             data={"conversation_id": request.conversation_id or ""},
         )
@@ -624,11 +626,22 @@ async def handle_conversation_create(session: "WebSocketSession", data: dict[str
         from backend.ws.command_results import emit_command_error
         await emit_command_error(
             session,
-            "conversation.create",
+            command,
             request.workspace_required_error,
             data={"conversation_id": request.conversation_id or ""},
         )
         return True
+    workspace_root = request.workspace_root
+    if workspace_root:
+        from backend.services.workspace_service import parse_workspace_activation_request
+        from backend.ws.command_results import emit_command_error
+
+        workspace = parse_workspace_activation_request(workspace_root)
+        if workspace.error_event is not None:
+            await emit_command_error(session, command, workspace.error_event)
+            return True
+        workspace_root = str(workspace.project_path)
+    git_branch = await asyncio.to_thread(session.git_branch_for, Path(workspace_root)) if workspace_root and not request.git_isolated else ""
     created = session.conversation_repo.create_conversation(
         conversation_id=request.conversation_id,
         title=request.title,
@@ -637,7 +650,8 @@ async def handle_conversation_create(session: "WebSocketSession", data: dict[str
         permission_mode=request.permission_mode,
         summary="",
         context_snapshot={},
-        workspace_root=request.workspace_root,
+        workspace_root=workspace_root,
+        git_branch=git_branch,
         git_isolated=request.git_isolated,
     )
     if request.git_isolated:
@@ -649,21 +663,17 @@ async def handle_conversation_create(session: "WebSocketSession", data: dict[str
             # command.
             return True
         created = isolated
-    elif request.workspace_root:
-        created = session.conversation_repo.update_workspace_binding(
-            created.id,
-            workspace_root=request.workspace_root,
-            git_branch=session.git_branch_for(Path(request.workspace_root)),
-            worktree_path="",
-            git_isolated=False,
-        ) or created
     if request.activate:
-        session.active_conversation_id = created.id
-    if request.activate:
-        if request.workspace_root:
-            await session.switch_workspace_for_conversation(created, announce=False)
+        if workspace_root:
+            activated = await session.switch_workspace_for_conversation(
+                created, announce=False, wait_for_initialize=True, error_command=command,
+            )
+            if not activated:
+                session.conversation_repo.delete_conversation(created.id)
+                return True
         else:
             session.session_lifecycle.clear_workspace_runtime()
+        session.active_conversation_id = created.id
     is_hydrating = False
     if request.activate:
         is_hydrating = bool(
@@ -692,7 +702,7 @@ async def handle_conversation_create(session: "WebSocketSession", data: dict[str
             session.start_active_conversation_hydration(created.id)
     projection_errors = await _broadcast_conversation_lists(session)
     await session.emit_command_result(
-        "conversation.create",
+        command,
         (
             "Conversation created, but one or more windows need to resynchronize."
             if projection_errors
@@ -701,6 +711,7 @@ async def handle_conversation_create(session: "WebSocketSession", data: dict[str
         level="warning" if projection_errors else "success",
         data={
             "conversation_id": created.id,
+            "workspace_root": created.workspace_root,
             "conversation_type": created.conversation_type,
             "revision": int(getattr(created, "revision", 0) or 0),
             "created": True,

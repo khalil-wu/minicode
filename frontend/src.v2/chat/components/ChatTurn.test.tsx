@@ -304,6 +304,46 @@ describe("ChatTurn message interactions", () => {
 });
 
 describe("ChatTurn", () => {
+  it("keeps a completed open tool group settled while waiting for the model", () => {
+    const cells: ChatTurnState["committedCells"] = ["list", "search"].map((id) => ({
+      kind: "activity", id, activityKind: id === "list" ? "workspaceList" : "workspaceSearch",
+      title: id, status: "done", collapsed: true, startedAt: 1,
+      segment: 0, segmentClosed: false,
+    }));
+    const turn: ChatTurnState = {
+      id: "readme-turn", userCell: null, committedCells: cells,
+      activeCell: null, finalAnswerCell: null, status: "streaming", startedAt: 1,
+    };
+    const { container, rerender } = render(<ChatTurn turn={turn} />);
+    expect(container.querySelectorAll(".activity-cell-running")).toHaveLength(0);
+    expect(screen.getAllByRole("status", { name: "正在处理" })).toHaveLength(1);
+    rerender(<ChatTurn turn={{ ...turn, committedCells: [cells[0], { ...cells[1], kind: "activity", status: "running" }] }} />);
+    expect(container.querySelectorAll(".activity-cell-running")).toHaveLength(1);
+    expect(screen.queryByRole("status", { name: "正在处理" })).toBeNull();
+  });
+
+  it("opens a shortened file reference using the successful read in the owning turn", () => {
+    const root = "E:/记得日记";
+    const path = `${root}/remember-diary/src/backup/backupService.native.ts`;
+    const original = useAppStore.getState().openEditorFile;
+    const openEditorFile = vi.fn();
+    useAppStore.setState({ workingDirectory: root, openEditorFile });
+    try {
+      render(<ChatTurn workspaceRoot={root} turn={{
+        id: "nested-project", userCell: null, activeCell: null, status: "completed", startedAt: 1,
+        committedCells: [{
+          kind: "activity", id: "read", activityKind: "fileRead", title: "读取", status: "done", collapsed: true, startedAt: 1,
+          toolCallRecords: [{ id: "read", name: "read_file", args: { file_path: path }, status: "success" }],
+        }],
+        finalAnswerCell: { kind: "assistant_markdown", id: "answer", messageId: "answer", markdownSource: "依据 `src/backup/backupService.native.ts`。", copyable: true, createdAt: 2 },
+      }} />);
+      fireEvent.click(screen.getByRole("button", { name: "src/backup/backupService.native.ts" }));
+      expect(openEditorFile).toHaveBeenCalledWith(path, undefined, { line: undefined, column: undefined });
+    } finally {
+      useAppStore.setState({ openEditorFile: original });
+    }
+  });
+
   it("keeps one aggregate edit card after the final reply", () => {
     const turn: ChatTurnState = {
       id: "assistant-diff",

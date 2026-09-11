@@ -11,6 +11,15 @@ const conversation = (id: string, workspaceRoot: string): ConversationMeta & { s
 });
 
 describe("groupByWorkspace", () => {
+  it("keeps saved empty projects in stable order and distinguishes equal folder names", () => {
+    const paths = ["C:/client/app", "D:/internal/app"];
+    const before = groupByWorkspace([conversation("task", paths[1])], paths);
+    const after = groupByWorkspace([], paths);
+    expect([...before.keys()]).toEqual([...after.keys()]);
+    expect([...after.values()].map(group => [group.label, group.path, group.items.length])).toEqual([
+      ["app — client", paths[0], 0], ["app — internal", paths[1], 0],
+    ]);
+  });
   it("keeps workspace tasks separate from ordinary tasks", () => {
     expect(isWorkspaceConversation(conversation("workspace", "C:\\repo"))).toBe(true);
     expect(isWorkspaceConversation({ ...conversation("worktree", ""), worktreePath: "C:\\repo\\.minicode\\worktrees\\conv_ab_cd" })).toBe(true);

@@ -55,6 +55,7 @@ export type EnrichedConversation = ConversationMeta & {
 };
 
 export interface WorkspaceConversationGroup {
+  path: string;
   baseLabel: string;
   label: string;
   items: EnrichedConversation[];
@@ -112,16 +113,19 @@ const workspacePathParts = (path: string | null | undefined): string[] => {
   return canonical.split("/").filter(Boolean);
 };
 
-export function groupByWorkspace(conversations: (ConversationMeta & { sessionStatus: string })[]): Map<string, WorkspaceConversationGroup> {
+export function groupByWorkspace(conversations: (ConversationMeta & { sessionStatus: string })[], openedPaths: string[] = []): Map<string, WorkspaceConversationGroup> {
   const groups = new Map<string, WorkspaceConversationGroup>();
-  for (const c of conversations) {
-    const basePath = conversationWorkspacePath(c);
+  const addWorkspace = (basePath: string) => {
     const key = workspaceGroupIdentity(basePath);
     if (!groups.has(key)) {
       const label = workspaceDisplayName(basePath, "Computer");
-      groups.set(key, { baseLabel: label, label, items: [] });
+      groups.set(key, { path: basePath, baseLabel: label, label, items: [] });
     }
-    groups.get(key)!.items.push(c as EnrichedConversation);
+    return groups.get(key)!;
+  };
+  for (const path of openedPaths) addWorkspace(path);
+  for (const c of conversations) {
+    addWorkspace(conversationWorkspacePath(c)).items.push(c as EnrichedConversation);
   }
 
   const labelCounts = new Map<string, number>();
@@ -131,15 +135,13 @@ export function groupByWorkspace(conversations: (ConversationMeta & { sessionSta
   for (const [key, group] of groups) {
     if ((labelCounts.get(group.baseLabel) ?? 0) < 2) continue;
     const duplicateGroups = Array.from(groups.entries()).filter(([, candidate]) => candidate.baseLabel === group.baseLabel);
-    const first = group.items[0];
-    const parts = workspacePathParts(first ? conversationWorkspacePath(first) : "");
+    const parts = workspacePathParts(group.path);
     let qualifier = key;
     for (let depth = 1; depth < parts.length; depth += 1) {
       const candidateQualifier = parts.slice(Math.max(0, parts.length - 1 - depth), -1).join("/");
       const isUnique = duplicateGroups.every(([candidateKey, candidate]) => {
         if (candidateKey === key) return true;
-        const candidateFirst = candidate.items[0];
-        const candidateParts = workspacePathParts(candidateFirst ? conversationWorkspacePath(candidateFirst) : "");
+        const candidateParts = workspacePathParts(candidate.path);
         const otherQualifier = candidateParts.slice(Math.max(0, candidateParts.length - 1 - depth), -1).join("/");
         return otherQualifier !== candidateQualifier;
       });
@@ -163,6 +165,8 @@ export const ConversationsTab = ({
   onSetConfirmDialog: (dialog: { title: string; message: string; confirmLabel: string; danger?: boolean; onConfirm: () => void }) => void;
 }) => {
   const conversations = useAppStore((s) => s.conversations);
+  const recentWorkspaces = useAppStore((s) => s.recentWorkspaces);
+  const isConnected = useAppStore((s) => s.isConnected);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const conversationStreaming = useAppStore((s) => s.conversationStreaming);
   const conversationHydration = useAppStore((s) => s.conversationHydration);
@@ -182,6 +186,10 @@ export const ConversationsTab = ({
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(initialUiState.collapsedGroups);
   const listRef = useRef<HTMLDivElement | null>(null);
   const [menuFor, setMenuFor] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isConnected) wsOutbox.sendClientCommand({ type: "workspace.recent" });
+  }, [isConnected]);
 
   const collapsedGroupsRef = useRef(collapsedGroups);
   const pendingUiStateRef = useRef<ConversationUiState>({
@@ -274,7 +282,7 @@ export const ConversationsTab = ({
 
   const workspaceConversations = useMemo(() => filtered.filter(isWorkspaceConversation), [filtered]);
   const ordinaryConversations = useMemo(() => filtered.filter((conversation) => !isWorkspaceConversation(conversation)), [filtered]);
-  const projectGroups = useMemo(() => groupByWorkspace(workspaceConversations), [workspaceConversations]);
+  const projectGroups = useMemo(() => groupByWorkspace(workspaceConversations, recentWorkspaces.map((workspace) => workspace.path)), [workspaceConversations, recentWorkspaces]);
   const orderedProjectGroups = useMemo(() => (
     Array.from(projectGroups.entries(), ([projectKey, group]) => ({
       projectKey,
@@ -454,7 +462,7 @@ export const ConversationsTab = ({
   }, []);
 
   const startWorkspaceConversation = (projectKey: string, group: WorkspaceConversationGroup) => {
-    const workspaceRoot = conversationWorkspacePath(group.items[0]);
+    const workspaceRoot = group.path;
     if (!workspaceRoot) return;
     if (collapsedGroupsRef.current.has(projectKey)) {
       const next = new Set(collapsedGroupsRef.current);
@@ -514,7 +522,7 @@ export const ConversationsTab = ({
     startRename,
   ]);
 
-  if (filtered.length === 0) {
+  if (filtered.length === 0 && projectGroups.size === 0) {
     return (
       <EmptyState
         icon={<SquarePen size={22} />}

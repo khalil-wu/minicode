@@ -342,11 +342,13 @@ class SessionCommandHandlersMixin:
         *,
         announce: bool,
         wait_for_initialize: bool = False,
+        error_command: str | None = "workspace.activate",
     ) -> bool:
         return await self.session_lifecycle.switch_workspace_for_conversation(
             conversation,
             announce=announce,
             wait_for_initialize=wait_for_initialize,
+            error_command=error_command,
         )
 
     async def activate_workspace_path(

@@ -140,10 +140,14 @@ describe("GitPanel workspace workflows", () => {
     const buttons = await screen.findAllByRole("button", { name: "切换工作区" });
     fireEvent.click(buttons[1]);
 
-    expect(mocks.command).toHaveBeenCalledWith({ type: "workspace.set", path: linked }, "workspace.set");
+    expect(mocks.command).toHaveBeenCalledWith({ type: "workspace.set", path: linked, permission_mode: expect.any(String) }, "workspace.set");
     expect(useAppStore.getState().workingDirectory).toBe(root);
     expect((screen.getByRole("button", { name: "移除隔离工作区" }) as HTMLButtonElement).disabled).toBe(true);
-    await act(async () => activation.resolve({ type: "command.result", command: "workspace.set", level: "success", message: "Activated", data: { workspace_root: linked } }));
+    await act(async () => {
+      useAppStore.setState((state) => ({ conversations: [...state.conversations, { id: "new-worktree", title: "New chat", workspaceRoot: linked, updatedAt: "2026-09-10T00:00:00Z" }] }));
+      useAppStore.getState().applyConversationSwitched({ conversationId: "new-worktree" });
+      activation.resolve({ type: "command.result", command: "workspace.set", level: "success", message: "Activated", data: { workspace_root: linked } });
+    });
 
     expect(useAppStore.getState().workingDirectory).toBe(linked);
     expect(mocks.status).toHaveBeenLastCalledWith(linked);

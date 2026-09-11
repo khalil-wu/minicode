@@ -97,8 +97,8 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
           <span className="diff-cell-heading">
             <span className="diff-cell-title">{diffCellTitle(cell)} {cell.files.length} 个文件</span>
             <span className="diff-cell-stats diff-cell-header-stats">
-              <RollingNumber value={cell.summary.added} prefix="+" className="diff-cell-added" animateOnMount />
-              <RollingNumber value={cell.summary.deleted} prefix="-" className="diff-cell-removed" animateOnMount />
+              <RollingNumber value={cell.summary.added} prefix="+" className="diff-cell-added" />
+              <RollingNumber value={cell.summary.deleted} prefix="-" className="diff-cell-removed" />
             </span>
           </span>
         </div>
@@ -154,7 +154,7 @@ function DiffFileSection({ file, onOpen }: { file: DiffFileChange; onOpen?: () =
       {onOpen
         ? <button type="button" className="diff-cell-file-path" title={file.path} onClick={onOpen}>{displayPath}</button>
         : <span className="diff-cell-file-path" title={file.path}>{displayPath}</span>}
-      <span className="diff-cell-stats"><RollingNumber value={file.additions} prefix="+" className="diff-cell-added" animateOnMount /><RollingNumber value={file.deletions} prefix="-" className="diff-cell-removed" animateOnMount /></span>
+      <span className="diff-cell-stats"><RollingNumber value={file.additions} prefix="+" className="diff-cell-added" /><RollingNumber value={file.deletions} prefix="-" className="diff-cell-removed" /></span>
     </div>
   </section>;
 }

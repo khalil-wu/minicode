@@ -1151,9 +1151,13 @@
 .activity-cell-tool-detail-card .activity-cell-inline-output {
   max-height: min(260px, 34vh);
   margin: 0;
-  padding: 7px 8px 9px;
-  border-top: 1px solid var(--border-subtle);
+  padding: 2px;
   background: transparent;
+}
+
+.activity-cell-tool-record-target + .activity-cell-inline-output {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 7px;
 }
 
 .activity-cell-tool-icon {
@@ -1223,8 +1227,13 @@
   overflow: hidden;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  background: var(--surface-raised);
+  background: var(--workbench-tool);
   animation: expand-detail var(--duration-fast) cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.activity-cell-file-change-expanded,
+.activity-cell-artifact-gallery {
+  background: var(--surface-base);
 }
 
 .activity-cell-added {
@@ -1647,8 +1656,8 @@
 }
 
 .exec-cell-expanded {
-  margin: 6px 0 10px;
-  padding: 10px 12px;
+  margin: 4px 0 6px;
+  padding: 8px 10px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   background: var(--workbench-tool);
@@ -1709,7 +1718,7 @@
   padding: 0;
   overflow: hidden;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   background: var(--surface-base);
   box-shadow: none;
 }
@@ -1725,13 +1734,13 @@
 
 .exec-cell-output-toolbar {
   justify-content: space-between;
-  min-height: 28px;
-  margin-bottom: 8px;
+  min-height: 22px;
+  margin-bottom: 6px;
 }
 
 .exec-cell-output-status {
   justify-content: flex-end;
-  margin-top: 10px;
+  margin-top: 8px;
 }
 
 .exec-cell-output-status[data-status="failed"] {
@@ -1744,14 +1753,14 @@
 }
 
 .agent-loop-diff-area .diff-cell-header-row {
-  min-height: 76px;
-  padding: 14px 16px;
+  min-height: 68px;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--border-subtle);
 }
 
 .agent-loop-diff-area .diff-cell-icon-tile {
-  width: 42px;
-  height: 42px;
+  width: 40px;
+  height: 40px;
   border-radius: var(--radius-md);
   background: var(--surface-soft);
 }
@@ -2233,7 +2242,7 @@ button.diff-cell-file-path:hover {
    ════════════════════════════════════════════════════════ */
 
 .md-prose h1 {
-  margin-top: 1.44em;
+  margin-top: 1.2em;
   margin-bottom: 0.6em;
   font-size: var(--text-2xl);
   font-weight: var(--fw-bold);
@@ -2242,8 +2251,8 @@ button.diff-cell-file-path:hover {
 }
 
 .md-prose h2 {
-  margin-top: 1.26em;
-  margin-bottom: 0.5em;
+  margin-top: 1.05em;
+  margin-bottom: 0.4em;
   font-size: var(--text-xl);
   font-weight: var(--fw-semibold);
   line-height: var(--leading-tight);
@@ -2260,7 +2269,7 @@ button.diff-cell-file-path:hover {
 
 .md-prose p {
   margin-top: 0;
-  margin-bottom: 1em;
+  margin-bottom: 0.8em;
   line-height: var(--leading-relaxed);
 }
 
@@ -2291,12 +2300,12 @@ button.diff-cell-file-path:hover {
 
 .md-prose ul,
 .md-prose ol {
-  margin: 0.8em 0;
+  margin: 0.6em 0;
   padding-left: 1.6em;
 }
 
 .md-prose li {
-  margin-top: 0.4em;
+  margin-top: 0.25em;
   line-height: var(--leading-relaxed);
 }
 
@@ -2334,9 +2343,15 @@ button.diff-cell-file-path:hover {
   background: linear-gradient(to right, transparent, var(--border-subtle), transparent);
 }
 
-.md-prose table {
+.md-prose .md-table-wrap {
+  margin: 0.8em 0;
+  overflow-x: auto;
+  border-radius: var(--mc-control-radius);
+}
+
+.md-prose .md-table-wrap > table {
   width: 100%;
-  margin: 1.2em 0;
+  margin: 0;
   overflow: hidden;
   border-collapse: collapse;
   border-radius: var(--mc-control-radius);
@@ -2344,7 +2359,7 @@ button.diff-cell-file-path:hover {
 }
 
 .md-prose th {
-  padding: 12px 14px;
+  padding: 8px 12px;
   border-bottom: 0;
   background: var(--surface-soft);
   font-weight: var(--fw-semibold);
@@ -2352,7 +2367,7 @@ button.diff-cell-file-path:hover {
 }
 
 .md-prose td {
-  padding: 12px 14px;
+  padding: 8px 12px;
   border-bottom: 0;
 }
 

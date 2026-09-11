@@ -195,7 +195,7 @@ describe("AgentTimeline", () => {
     expect([...container.querySelectorAll(".agent-loop-process-cell")].map((node) => node.textContent)).toEqual(["list", "read", "latest"]);
   });
 
-  it("marks only the newest live row active so its details stay open while history remains collapsible", () => {
+  it("leaves execution status to each row instead of overriding the last row in an open group", () => {
     const activeIds: string[] = [];
     render(
       <AgentTimeline
@@ -208,7 +208,7 @@ describe("AgentTimeline", () => {
       />,
     );
 
-    expect(activeIds).toEqual(["latest"]);
+    expect(activeIds).toEqual([]);
   });
 
   it("folds settled work groups even when persisted segments lack a closing marker", () => {
