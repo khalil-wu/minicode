@@ -4,7 +4,25 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+from backend.conversations.repository import ConversationRepository
 from backend.ws.session_lifecycle import SessionLifecycle
+
+
+def _owner_session(repository: ConversationRepository, active_id: str, **extra):
+    """A session stub carrying exactly the collaborators SessionLifecycle reads.
+
+    ``workspace_path_for_conversation`` resolves the workspace from the
+    repository, so the stub owns the active conversation id and the repository
+    and nothing else. Omitting ``active_conversation`` is deliberate: if the
+    resolution ever goes back to reading that cached attribute, this stub fails
+    loudly instead of quietly taking a different path.
+    """
+
+    return SimpleNamespace(
+        active_conversation_id=active_id,
+        conversation_repo=repository,
+        **extra,
+    )
 
 
 def test_file_watcher_callback_uses_the_current_same_workspace_conversation(
@@ -37,27 +55,27 @@ def test_file_watcher_callback_uses_the_current_same_workspace_conversation(
         captured.append(dict(payload))
         return True
 
-    session = SimpleNamespace(
-        session_id="session-watcher-owner",
-        active_conversation_id="conversation-a",
-        active_conversation=SimpleNamespace(
+    repository = ConversationRepository(tmp_path / "conversations")
+    for conversation_id in ("conv-watcher-a", "conv-watcher-b"):
+        repository.create_conversation(
+            conversation_id=conversation_id,
+            title=conversation_id,
             workspace_root=str(root),
-            worktree_path="",
-        ),
+        )
+    session = _owner_session(
+        repository,
+        "conv-watcher-a",
+        session_id="session-watcher-owner",
         send_payload=send_payload,
     )
     lifecycle = SessionLifecycle(session)
     lifecycle.start_file_watcher()
     assert len(callbacks) == 1
 
-    session.active_conversation_id = "conversation-b"
-    session.active_conversation = SimpleNamespace(
-        workspace_root=str(root),
-        worktree_path="",
-    )
+    session.active_conversation_id = "conv-watcher-b"
     asyncio.run(callbacks[0](root / "src" / "app.py", "modified"))
 
-    assert captured[0]["conversation_id"] == "conversation-b"
+    assert captured[0]["conversation_id"] == "conv-watcher-b"
 
 
 def test_file_watcher_callback_drops_events_after_workspace_changes(
@@ -93,22 +111,26 @@ def test_file_watcher_callback_drops_events_after_workspace_changes(
         captured.append(dict(payload))
         return True
 
-    session = SimpleNamespace(
+    repository = ConversationRepository(tmp_path / "conversations")
+    repository.create_conversation(
+        conversation_id="conv-watcher-a",
+        title="conv-watcher-a",
+        workspace_root=str(first_root),
+    )
+    repository.create_conversation(
+        conversation_id="conv-watcher-b",
+        title="conv-watcher-b",
+        workspace_root=str(second_root),
+    )
+    session = _owner_session(
+        repository,
+        "conv-watcher-a",
         session_id="session-watcher-generation",
-        active_conversation_id="conversation-a",
-        active_conversation=SimpleNamespace(
-            workspace_root=str(first_root),
-            worktree_path="",
-        ),
         send_payload=send_payload,
     )
     lifecycle = SessionLifecycle(session)
     lifecycle.start_file_watcher()
-    session.active_conversation_id = "conversation-b"
-    session.active_conversation = SimpleNamespace(
-        workspace_root=str(second_root),
-        worktree_path="",
-    )
+    session.active_conversation_id = "conv-watcher-b"
 
     asyncio.run(callbacks[0](first_root / "app.py", "modified"))
     assert captured == []

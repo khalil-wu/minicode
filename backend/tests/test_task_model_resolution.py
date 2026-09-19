@@ -8,6 +8,7 @@ import pytest
 from backend.agent.message import AgentEvent
 from backend.agent.runtime import AgentRuntime
 from backend.agent.run_context import RunContext
+from backend.agent.model_execution import ModelExecutionSnapshot
 from backend.artifact.store import ArtifactStore
 from backend.config import (
     AgentSettings,
@@ -179,7 +180,7 @@ def _parent_run_context(
         parent_snapshot = metadata["_subagent_parent_runtime"]
     return RunContext(
         agent_runtime=agent_runtime,
-        subagent_parent_runtime=dict(parent_snapshot),
+        model_execution=ModelExecutionSnapshot(**parent_snapshot),
     )
 
 
@@ -207,15 +208,20 @@ def test_inherit_reuses_the_live_parent_adapter() -> None:
     async def run() -> None:
         parent, _runtime, config, metadata = _parent_fixture()
 
+        owner = _parent_run_context(metadata)
+
         resolution = await _resolve_subagent_llm(
             parent,
             parent_metadata=metadata,
-            run_context=_parent_run_context(metadata),
+            run_context=owner,
             agent_type="general-purpose",
         )
 
         assert resolution.llm is parent
-        assert resolution.config is config
+        assert resolution.config is owner.model_execution.config
+        assert resolution.config == config
+        config.permissions.auto_allow.append("later-host-tool")
+        assert "later-host-tool" not in resolution.config.permissions.auto_allow
         assert resolution.provider == "custom"
         assert resolution.model == "claude-sonnet-4-6"
         assert resolution.effort == "medium"
@@ -596,11 +602,21 @@ def test_successful_foreground_child_closes_only_its_fresh_adapter(
         children = _install_factory(monkeypatch, runtime_models)
 
         async def child_loop(**kwargs):
+            child_owner = kwargs["session_context"].run_context
+            assert child_owner.model_execution.model == "claude-opus-4-6"
+            assert child_owner.model_execution.llm is children[0]
+            assert child_owner.model_execution.config.token_budget.total == 64_000
+            inherited = await _resolve_subagent_llm(
+                parent, parent_metadata={}, run_context=child_owner, agent_type="general-purpose",
+            )
+            assert inherited.llm is children[0]
+            assert inherited.model == "claude-opus-4-6"
+            assert inherited.effort == "high"
             context = kwargs["context_builder"]
             history_start = context.history_length
             context.append_user(kwargs["user_message"])
             await kwargs["metadata"]["commit_turn_admission"](
-                boundary_input=SimpleNamespace(consumed_steer=None),
+                boundary_input=SimpleNamespace(consumed_steer=None, content=kwargs["user_message"]),
                 history_start=history_start,
                 history_end=context.history_length,
             )
@@ -644,3 +660,40 @@ def test_successful_foreground_child_closes_only_its_fresh_adapter(
         assert user_prompt["payload"]["reasoning_effort"] == "high"
 
     asyncio.run(run())
+
+
+def test_child_extension_followup_starts_an_owned_next_turn(monkeypatch, tmp_path):
+    async def scenario():
+        parent, _, _, metadata = _parent_fixture()
+        runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
+        runtime.start_run(run_id="parent-run", conversation_id="conversation-1")
+        owner = _parent_run_context(metadata, agent_runtime=runtime)
+        class Lifecycle:
+            def for_execution(self, context):
+                return self
+        owner.lifecycle_runtime = Lifecycle()
+        prompts = []
+        async def child_loop(**kwargs):
+            prompts.append(kwargs["user_message"])
+            builder = kwargs["context_builder"]
+            start = builder.history_length
+            builder.append_user(kwargs["user_message"])
+            await kwargs["metadata"]["commit_turn_admission"](
+                boundary_input=SimpleNamespace(content=kwargs["user_message"]), history_start=start, history_end=builder.history_length)
+            if len(prompts) == 1:
+                actions = kwargs["run_context"].extension_actions
+                actions.send_user_message("Complete the second instruction", {"deliverAs": "followUp"})
+                await actions.flush()
+            yield AgentEvent.agent_message_completed(f"Completed instruction {len(prompts)}")
+        monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", child_loop)
+        try:
+            result = await _task_tool(parent, tmp_path).execute(
+                {"description": "two instructions", "prompt": "Complete the first instruction"},
+                ToolExecutionContext(permission=PermissionContext(), workspace_root=tmp_path,
+                    metadata={"run_id": "parent-run"}, run_context=owner))
+            assert result.status == "completed", result.content
+            assert len(prompts) == 2 and prompts[-1] == "Complete the second instruction"
+            assert "Completed instruction 2" in result.content
+        finally:
+            runtime.close(release_lease=True)
+    asyncio.run(scenario())

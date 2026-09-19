@@ -320,6 +320,39 @@ def _sequence_fields(payload: dict[str, Any]) -> None:
         _non_negative_int(payload["replayed_events"], "replayed_events")
 
 
+# ── Replay persistence policy ─────────────────────────────────────────────
+#
+# The replay log is reconnect state, not the conversation transcript. An event
+# belongs in it only when a reconnecting renderer cannot rebuild its effect
+# from something the reconnect path already sends authoritatively. Streaming
+# deltas are the expensive case: they are the highest-count events in a turn,
+# and the replay store appends under a durability barrier, so persisting them
+# charges disk I/O per provider chunk for state that is already covered.
+#
+# Every entry names the mechanism that makes replay unnecessary. Removing an
+# entry requires replacing that mechanism first.
+LIVE_ONLY_EVENT_TYPES = frozenset({
+    # A reconnect receives the accumulated text of an in-flight assistant item
+    # from the `stream_resume` snapshot, which carries the ordered content
+    # blocks (ws/stream_state.py:get_stream_content_blocks) and is emitted
+    # unconditionally after replay (ws/handlers/session.py reemit_pending_state).
+    # The accumulated item itself still replays through `item.completed`.
+    "agent_message.delta",
+    # A process item's running `agent.item` snapshot precedes its deltas and
+    # its completed snapshot follows them; both replay. The `stream_resume`
+    # content blocks carry the accumulated running content on reconnect.
+    "agent.item.delta",
+    # Same snapshot covers buffered command output: `stream_resume` carries
+    # `tool_states`, and the durable tool result replays through `tool_result`.
+    "tool_output_delta",
+    # The renderer re-requests the palette on every transport connect and on
+    # every session recovery (frontend/src.v2/hooks/useWebSocket.ts), so a
+    # replayed copy is dead weight: it is re-sent before it can be used, and
+    # each copy is the full command catalog.
+    "commands.list",
+})
+
+
 # Canonical non-replayable event classification, shared by the staging gate
 # (ws.handler) and the session.replay contract validation below. cc keeps one
 # replay filter on its bridge; a single definition here prevents the three
@@ -336,7 +369,18 @@ NON_REPLAYABLE_EVENT_TYPES = frozenset({
     "session.synced",
     "stream_resume",
     "stream_event",
-})
+}) | LIVE_ONLY_EVENT_TYPES
+
+
+def is_live_only_event_type(event_type: object) -> bool:
+    """Whether an event is intentionally absent from the durable replay log.
+
+    Callers that compare a client cursor against the retained window need this
+    distinction: a live-only event leaves a hole in the *wire* sequence but not
+    in the *persisted* sequence, so it must not be reported as a replay gap.
+    """
+
+    return str(event_type or "").strip() in LIVE_ONLY_EVENT_TYPES
 
 
 def is_non_replayable_event_type(event_type: object) -> bool:
@@ -601,10 +645,12 @@ def validate_session_projection_payload(payload: dict[str, Any]) -> None:
 
 
 __all__ = [
+    "LIVE_ONLY_EVENT_TYPES",
     "NON_REPLAYABLE_EVENT_TYPES",
     "SESSION_PROJECTION_EVENT_TYPES",
     "SESSION_PROJECTION_EVENTS_WITH_VALIDATION",
     "SESSION_PROJECTION_EVENTS_WITHOUT_EXTRA_VALIDATION",
+    "is_live_only_event_type",
     "is_non_replayable_event_type",
     "validate_session_projection_payload",
 ]

@@ -9,6 +9,7 @@ currently published generation.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import math
@@ -60,6 +61,7 @@ from backend.llm.model_runtime_definitions import (
     _config_value_env_names,
     _config_value_is_configured,
     _declared_boolean,
+    _declared_optional_boolean,
     _declared_finite_number,
     _extension_model_extra,
     _finite_number,
@@ -110,8 +112,11 @@ class ModelRuntime:
         self._on_change = on_change
         self._active = True
         self._revision = 0
+        self._adapter_models: dict[tuple[str, str], ModelDefinition] = {}
+        self._adapter_model_source_ids: dict[str, str] = {}
         self._dynamic_refresh_epoch = 0
         self._dynamic_refresh_task: asyncio.Task[None] | None = None
+        self._dynamic_refresh_provider_generations: dict[str, int] = {}
         self._dynamic_refresh_guard = threading.RLock()
         self._errors: dict[str, str] = {}
         self._composition_errors: dict[str, str] = {}
@@ -165,6 +170,8 @@ class ModelRuntime:
 
     def retire(self) -> None:
         self._active = False
+        self._adapter_models.clear()
+        self._adapter_model_source_ids.clear()
         self._on_change = None
         self._resolved_api_key_auth.clear()
         self._api_key_auth_status.clear()
@@ -248,6 +255,7 @@ class ModelRuntime:
         clean_id = _clean_text(provider_id)
         generation = self._provider_generation(clean_id) + 1
         self._provider_generations[clean_id] = generation
+        self._dynamic_refresh_epoch += 1
         return generation
 
     def _assert_provider_generation(self, provider_id: str, generation: int) -> None:
@@ -256,6 +264,13 @@ class ModelRuntime:
             raise RuntimeError(
                 f'Provider "{_clean_text(provider_id)}" changed during an auth operation'
             )
+
+    def _invalidate_provider_auth(self, provider_id: str) -> None:
+        self._resolved_oauth_auth.pop(provider_id, None)
+        self._resolved_oauth_credential.pop(provider_id, None)
+        self._oauth_model_credentials.pop(provider_id, None)
+        self._resolved_api_key_auth.pop(provider_id, None)
+        self._api_key_auth_status.pop(provider_id, None)
 
     def _stored_credential(self, provider_id: str) -> dict[str, Any] | None:
         from backend.llm.provider_auth import ProviderCredentialCorruptError
@@ -424,6 +439,7 @@ class ModelRuntime:
         *,
         signal: Any | None = None,
         publish_snapshot: bool = True,
+        force: bool = False,
     ) -> None:
         """Resolve modern Pi API-key auth into a generation-owned request cache."""
 
@@ -446,6 +462,7 @@ class ModelRuntime:
         for clean_id in provider_ids:
             if _signal_is_aborted(signal):
                 return
+            provider_generation = self._provider_generation(clean_id)
             stored = self._stored_credential(clean_id)
             if isinstance(stored, Mapping) and stored.get("type") == "oauth":
                 # A stored credential owns the provider.  Resolve/refresh OAuth
@@ -455,9 +472,8 @@ class ModelRuntime:
                     clean_id,
                     signal=signal,
                     publish_snapshot=publish_snapshot,
+                    force=force,
                 )
-                self._resolved_api_key_auth.pop(clean_id, None)
-                self._api_key_auth_status.pop(clean_id, None)
                 continue
             self._resolved_oauth_auth.pop(clean_id, None)
             self._resolved_oauth_credential.pop(clean_id, None)
@@ -470,9 +486,12 @@ class ModelRuntime:
                     f'Provider "{clean_id}" API-key auth does not expose resolve'
                 )
             async with self._provider_lock(clean_id, oauth=False):
-                provider_generation = self._provider_generation(clean_id)
                 self._assert_provider_generation(clean_id, provider_generation)
+                if _signal_is_aborted(signal):
+                    return
                 stored = self._stored_credential(clean_id)
+                if stored is not None and stored.get("type") == "oauth":
+                    raise ProviderRegistrationError(f'Provider "{clean_id}" credential type changed while waiting for auth resolution')
                 credential = self._configured_api_key_credential(clean_id, stored)
                 explicit_env = (
                     credential.get("env")
@@ -490,24 +509,22 @@ class ModelRuntime:
                     if inspect.isawaitable(checked):
                         checked = await checked
                     self._assert_provider_generation(clean_id, provider_generation)
+                    if _signal_is_aborted(signal):
+                        return
                     status = _normalize_auth_check(checked)
-                    if status is None:
-                        self._resolved_api_key_auth[clean_id] = None
-                        self._api_key_auth_status[clean_id] = None
-                        continue
                 else:
                     status = None
-                resolved = resolve(input_value)
-                if inspect.isawaitable(resolved):
-                    resolved = await resolved
+                resolved = None
+                if not callable(check) or status is not None:
+                    resolved = resolve(input_value)
+                    if inspect.isawaitable(resolved):
+                        resolved = await resolved
                 self._assert_provider_generation(clean_id, provider_generation)
                 if _signal_is_aborted(signal):
                     return
-                normalized = self._normalize_api_key_result(
-                    clean_id,
-                    resolved,
-                    explicit_env,
-                )
+                if _provider_credential_payload(self._stored_credential(clean_id)) != _provider_credential_payload(stored):
+                    raise ProviderRegistrationError(f'Provider "{clean_id}" credential changed during auth resolution')
+                normalized = self._normalize_api_key_result(clean_id, resolved, explicit_env)
                 self._resolved_api_key_auth[clean_id] = normalized
                 if normalized is None:
                     self._api_key_auth_status[clean_id] = None
@@ -534,7 +551,8 @@ class ModelRuntime:
         clean_id = _clean_text(provider_id)
         if clean_id in self._resolved_api_key_auth:
             cached = self._resolved_api_key_auth[clean_id]
-            return dict(cached) if isinstance(cached, Mapping) else None
+            return deepcopy(cached) if isinstance(cached, Mapping) else None
+        provider_generation = self._provider_generation(clean_id)
         provider = self._api_key_provider(clean_id)
         if provider is None:
             return None
@@ -569,7 +587,7 @@ class ModelRuntime:
                     f'Provider "{clean_id}" requires asynchronous auth checking; '
                     "refresh provider auth before constructing its adapter"
                 )
-            self.assert_active()
+            self._assert_provider_generation(clean_id, provider_generation)
             status = _normalize_auth_check(checked)
             if status is None:
                 self._resolved_api_key_auth[clean_id] = None
@@ -584,7 +602,7 @@ class ModelRuntime:
                 f'Provider "{clean_id}" requires asynchronous auth resolution; '
                 "refresh provider auth before constructing its adapter"
             )
-        self.assert_active()
+        self._assert_provider_generation(clean_id, provider_generation)
         normalized = self._normalize_api_key_result(
             clean_id,
             resolved,
@@ -604,7 +622,7 @@ class ModelRuntime:
             if normalized is not None
             else None
         )
-        return dict(normalized) if isinstance(normalized, Mapping) else None
+        return deepcopy(normalized) if isinstance(normalized, Mapping) else None
 
     async def login_provider(
         self,
@@ -767,6 +785,7 @@ class ModelRuntime:
         *,
         signal: Any | None = None,
         publish_snapshot: bool = True,
+        force: bool = False,
     ) -> bool:
         self.assert_active()
         if _signal_is_aborted(signal):
@@ -795,7 +814,10 @@ class ModelRuntime:
                 expires = float(provider_credentials.get("expires") or 0)
             except (TypeError, ValueError, OverflowError):
                 expires = 0.0
-            if math.isfinite(expires) and time.time() * 1000 < expires:
+            # A queued 401 refresh must reuse a credential rotated by another
+            # caller while it waited for the existing storage transaction.
+            force_current = force and provider_credentials == _provider_credential_payload(credentials)
+            if not force_current and math.isfinite(expires) and time.time() * 1000 < expires:
                 return None
             if _signal_is_aborted(signal):
                 return None
@@ -819,12 +841,14 @@ class ModelRuntime:
             return False
         resolved_auth = await self._derive_oauth_auth(clean_id, provider, canonical)
         self._assert_provider_generation(clean_id, provider_generation)
+        if _signal_is_aborted(signal):
+            return refreshed
         latest = _provider_credential_payload(
             self._stored_credential(clean_id)
         )
         if latest != canonical:
-            self._resolved_oauth_auth.pop(clean_id, None)
-            self._resolved_oauth_credential.pop(clean_id, None)
+            # A later login/refresh may already have published the new
+            # credential. This older derivation owns no newer cache entry.
             return False
         self._resolved_oauth_auth[clean_id] = dict(resolved_auth)
         self._resolved_oauth_credential[clean_id] = dict(canonical)
@@ -957,7 +981,14 @@ class ModelRuntime:
         }
 
     def cache_identity(self, provider_id: str, model_id: str) -> tuple[Any, ...]:
-        return (id(self), self._revision, provider_id, model_id)
+        self.assert_active()
+        # Auth can change without a catalog change (ambient API-key resolve,
+        # OAuth to_auth before expiry). Keep the cache tied to resolved request
+        # material without exposing credentials in its identity.
+        spec = self.resolve_adapter_spec(provider_id, model_id)
+        auth = {"api_key": spec.api_key, "base_url": spec.base_url, "headers": spec.headers, "env": spec.env}
+        auth_identity = hashlib.sha256(json.dumps(auth, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        return (id(self), self._revision, provider_id, model_id, auth_identity)
 
 
     def _normalize_model_configs(
@@ -1191,6 +1222,11 @@ class ModelRuntime:
                     override["reasoning"],
                     field=f"Provider {provider_id}, model {model_id}: override reasoning",
                 )
+            if "parallel_tool_calls" in override:
+                _declared_optional_boolean(
+                    override["parallel_tool_calls"],
+                    field=f"Provider {provider_id}, model {model_id}: override parallel_tool_calls",
+                )
             _validate_thinking_level_map(
                 override.get("thinking_level_map"),
                 field=(
@@ -1256,6 +1292,14 @@ class ModelRuntime:
             and model_configs == self._model_configs
         ):
             return
+        changed_providers = {
+            provider for provider in self._base_providers.keys() | refreshed.keys() | self._model_configs.keys() | model_configs.keys()
+            if self._base_providers.get(provider) != refreshed.get(provider)
+            or self._model_configs.get(provider) != model_configs.get(provider)
+        }
+        for provider in changed_providers:
+            self._bump_provider_generation(provider)
+            self._invalidate_provider_auth(provider)
         self._base_providers = refreshed
         self._model_configs = model_configs
         self._changed(
@@ -1282,7 +1326,7 @@ class ModelRuntime:
             if pending is not None and pending.done():
                 pending = None
                 self._dynamic_refresh_task = None
-            if pending is not None and not force:
+            if pending is not None and not force and self._dynamic_refresh_provider_generations == self._provider_generations:
                 task = pending
             else:
 
@@ -1306,8 +1350,9 @@ class ModelRuntime:
                         signal=signal,
                     )
 
-                task = loop.create_task(queued_refresh(pending if force else None))
+                task = loop.create_task(queued_refresh(pending))
                 self._dynamic_refresh_task = task
+                self._dynamic_refresh_provider_generations = dict(self._provider_generations)
 
                 def clear_tracked(done: asyncio.Task[None]) -> None:
                     with self._dynamic_refresh_guard:
@@ -1340,6 +1385,8 @@ class ModelRuntime:
         self.refresh(publish_snapshot=False)
         self._dynamic_refresh_epoch += 1
         refresh_epoch = self._dynamic_refresh_epoch
+        if self._dynamic_refresh_task is asyncio.current_task():
+            self._dynamic_refresh_provider_generations = dict(self._provider_generations)
         provider_ids = tuple(
             dict.fromkeys(
                 [
@@ -1391,7 +1438,7 @@ class ModelRuntime:
                         return
                     auth_error = str(exc) or type(exc).__name__
                     self._errors[provider_id] = auth_error
-            if _signal_is_aborted(signal):
+            if _signal_is_aborted(signal) or refresh_epoch != self._dynamic_refresh_epoch:
                 # OAuth/API-key resolution owns the same refresh transaction.
                 # Once it observes cancellation, do not invoke extension code
                 # that could ignore the signal and mutate its model store.
@@ -1469,6 +1516,8 @@ class ModelRuntime:
                         return
                     if refreshed is None:
                         stored_models = await refresh_context.store.read()
+                        if refresh_epoch != self._dynamic_refresh_epoch or _signal_is_aborted(signal):
+                            return
                         refreshed = (
                             stored_models.get("models")
                             if isinstance(stored_models, Mapping)
@@ -1546,6 +1595,8 @@ class ModelRuntime:
         *,
         refresh_snapshot: bool = True,
     ) -> None:
+        self._adapter_models.clear()
+        self._adapter_model_source_ids.clear()
         if refresh_snapshot:
             # Registration/settings/auth mutations publish a callback-free
             # provisional view. Explicit auth/model refreshes then atomically
@@ -1746,6 +1797,10 @@ class ModelRuntime:
                 model.get("reasoning") if "reasoning" in model else None,
                 field=f"Provider {provider_id}, model {model_id}: reasoning",
             )
+            _declared_optional_boolean(
+                model.get("parallel_tool_calls"),
+                field=f"Provider {provider_id}, model {model_id}: parallel_tool_calls",
+            )
 
     def register_provider(self, provider_id: str, config: Any) -> None:
         self.assert_active()
@@ -1764,11 +1819,7 @@ class ModelRuntime:
         self._bump_provider_generation(clean_id)
         self._refreshed_extension_models.pop(clean_id, None)
         self._extension_providers[clean_id] = effective
-        self._resolved_oauth_auth.pop(clean_id, None)
-        self._resolved_oauth_credential.pop(clean_id, None)
-        self._oauth_model_credentials.pop(clean_id, None)
-        self._resolved_api_key_auth.pop(clean_id, None)
-        self._api_key_auth_status.pop(clean_id, None)
+        self._invalidate_provider_auth(clean_id)
         self._errors.pop(clean_id, None)
         self._composition_errors.pop(clean_id, None)
         self._changed(clean_id, "register")
@@ -1779,11 +1830,7 @@ class ModelRuntime:
         self._bump_provider_generation(clean_id)
         removed = self._extension_providers.pop(clean_id, None)
         self._refreshed_extension_models.pop(clean_id, None)
-        self._resolved_oauth_auth.pop(clean_id, None)
-        self._resolved_oauth_credential.pop(clean_id, None)
-        self._oauth_model_credentials.pop(clean_id, None)
-        self._resolved_api_key_auth.pop(clean_id, None)
-        self._api_key_auth_status.pop(clean_id, None)
+        self._invalidate_provider_auth(clean_id)
         self._oauth_refresh_locks.pop(clean_id, None)
         self._api_key_resolution_locks.pop(clean_id, None)
         self._errors.pop(clean_id, None)
@@ -1881,6 +1928,15 @@ class ModelRuntime:
                 if isinstance(raw_thinking_map, Mapping)
                 else None
             ),
+            supports_custom_tools=_declared_boolean(
+                definition.get("supports_custom_tools"), field=f"Model {model_id}: supports_custom_tools",
+            ),
+            responses_websocket=_declared_boolean(
+                definition.get("responses_websocket"), field=f"Model {model_id}: responses_websocket",
+            ),
+            native_compaction=_declared_optional_boolean(definition.get("native_compaction"), field=f"Model {model_id}: native_compaction"),
+            model_instructions=_clean_text(definition.get("model_instructions")),
+            parallel_tool_calls=_declared_optional_boolean(definition.get("parallel_tool_calls"), field=f"Model {model_id}: parallel_tool_calls"),
             input=input_types or ("text",),
             cost=(
                 dict(raw_cost)
@@ -2070,6 +2126,25 @@ class ModelRuntime:
                         else model.reasoning
                     ),
                     thinking_level_map=thinking_level_map,
+                    supports_custom_tools=_declared_boolean(
+                        override.get("supports_custom_tools"), field=f"Model {model.id}: supports_custom_tools",
+                        default=model.supports_custom_tools,
+                    ),
+                    responses_websocket=_declared_boolean(
+                        override.get("responses_websocket"), field=f"Model {model.id}: responses_websocket",
+                        default=model.responses_websocket,
+                    ),
+                    native_compaction=_declared_optional_boolean(
+                        override.get("native_compaction", model.native_compaction), field=f"Model {model.id}: native_compaction",
+                    ),
+                    model_instructions=(
+                        _clean_text(override["model_instructions"])
+                        if "model_instructions" in override else model.model_instructions
+                    ),
+                    parallel_tool_calls=_declared_optional_boolean(
+                        override.get("parallel_tool_calls", model.parallel_tool_calls),
+                        field=f"Model {model.id}: parallel_tool_calls",
+                    ),
                     input=input_types,
                     cost=_merge_model_cost(
                         model.cost,
@@ -2313,6 +2388,26 @@ class ModelRuntime:
                         defaults.default_reasoning_summary
                         if defaults is not None
                         else ""
+                    ),
+                    supports_custom_tools=_declared_boolean(
+                        model.get("supports_custom_tools"), field=f"Model {model_id}: supports_custom_tools",
+                        default=defaults.supports_custom_tools if defaults is not None else False,
+                    ),
+                    responses_websocket=_declared_boolean(
+                        model.get("responses_websocket"), field=f"Model {model_id}: responses_websocket",
+                        default=defaults.responses_websocket if defaults is not None else False,
+                    ),
+                    native_compaction=_declared_optional_boolean(
+                        model.get("native_compaction", defaults.native_compaction if defaults is not None else None),
+                        field=f"Model {model_id}: native_compaction",
+                    ),
+                    model_instructions=(
+                        _clean_text(model["model_instructions"]) if "model_instructions" in model
+                        else defaults.model_instructions if defaults is not None else ""
+                    ),
+                    parallel_tool_calls=_declared_optional_boolean(
+                        model.get("parallel_tool_calls", defaults.parallel_tool_calls if defaults is not None else None),
+                        field=f"Provider {provider_id}, model {model_id}: parallel_tool_calls",
                     ),
                     headers=headers,
                     extra=_extension_model_extra(model),
@@ -2754,6 +2849,10 @@ class ModelRuntime:
         provider = self.get_provider(clean_id)
         if provider is None:
             return None
+        return self._resolve_known_provider_auth(clean_id)
+
+    def _resolve_known_provider_auth(self, clean_id: str) -> dict[str, Any] | None:
+        """Resolve auth after the caller established the provider/model owner."""
         credentials = self._stored_credential(clean_id)
         oauth = self._oauth_provider(clean_id)
         if credentials is not None and credentials.get("type") == "oauth":
@@ -2932,12 +3031,38 @@ class ModelRuntime:
     ) -> ProviderAdapterSpec:
         self.assert_active()
         clean_provider = _clean_text(provider_id)
-        model = self.get_model(clean_provider, model_id)
+        source_values = (
+            self._base_providers.get(clean_provider),
+            self._model_configs.get(clean_provider),
+            self._extension_providers.get(clean_provider),
+        )
+        source_serialized = json.dumps(
+            source_values,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=repr,
+        )
+        source_signature = hashlib.sha256(source_serialized.encode("utf-8")).hexdigest()
+        previous_source_signature = self._adapter_model_source_ids.get(clean_provider)
+        if (
+            previous_source_signature is not None
+            and previous_source_signature != source_signature
+        ):
+            for cached_key in tuple(self._adapter_models):
+                if cached_key[0] == clean_provider:
+                    self._adapter_models.pop(cached_key, None)
+        self._adapter_model_source_ids[clean_provider] = source_signature
+        model_key = (clean_provider, _clean_text(model_id))
+        model = self._adapter_models.get(model_key)
+        if model is None:
+            model = self.get_model(*model_key)
         if model is None:
             raise ProviderRegistrationError(
                 f"Unknown model '{clean_provider}/{_clean_text(model_id)}'"
             )
-        provider_auth = self.resolve_provider_auth(clean_provider)
+        self._adapter_models[model_key] = model
+        provider_auth = self._resolve_known_provider_auth(clean_provider)
         auth = (
             dict(provider_auth.get("auth"))
             if isinstance(provider_auth, Mapping)
@@ -3058,6 +3183,11 @@ class ModelRuntime:
             max_output_tokens_verified=model.max_output_tokens_verified,
             default_reasoning_effort=model.default_reasoning_effort,
             default_reasoning_summary=model.default_reasoning_summary,
+            supports_custom_tools=model.supports_custom_tools,
+            responses_websocket=model.responses_websocket,
+            native_compaction=model.native_compaction,
+            model_instructions=model.model_instructions,
+            parallel_tool_calls=model.parallel_tool_calls,
             extension_defined=extension_defined,
         )
 

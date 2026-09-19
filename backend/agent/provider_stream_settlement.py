@@ -8,11 +8,28 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from backend.agent.message import AgentEvent
+from backend.agent.stream_attempt import StreamAttemptState, StreamTextState
+from backend.agent.tool_stream_tracker import StreamingToolTracker
 from backend.agent.stream_sanitizer import scrub_thinking_tags
 from backend.llm.base import UsageInfo
+from backend.agent.loop_runtime_helpers import epoch_ms
+from backend.agent.provider_protocol import add_usage
 
 
 ProviderStreamAction = Literal["proceed", "retry", "terminate"]
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderStreamResult:
+    action: ProviderStreamAction
+    stream_state: StreamAttemptState
+    stream_text: StreamTextState
+    tool_tracker: StreamingToolTracker
+    turn_usage: UsageInfo
+    usage: UsageInfo
+    finish_reason: str
+    response_phase: str
+    thinking_chars: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +71,7 @@ async def settle_provider_stream(
         # committed a more specific terminal reason; do not overwrite it with
         # the secondary transport symptom.
         and not state.stopped_reason
+        and not getattr(stream_state, "committed_tool_ids", ())
     )
     if retry_budget_boundary is not None:
         _, events = await budget_runtime.apply_boundary(retry_budget_boundary)
@@ -133,3 +151,36 @@ async def settle_provider_stream(
         turn_usage=turn_usage,
         finish_reason=finish_reason,
     )
+
+
+def record_provider_attempt_usage(*, llm, provider_attempt, stream_state, provider_raw_done,
+                                  budget_runtime, turn_usage, chain, raw=None) -> None:
+    """Account for one provider attempt exactly once, including failed attempts."""
+    if provider_attempt is None or provider_attempt.usage_settled:
+        return
+    from backend.llm.capabilities import capabilities_for_adapter
+    from backend.llm.cost_tracker import CostTracker
+
+    request_raw = raw if raw is not None else provider_raw_done
+    summary = request_raw.get("request_summary") or {}
+    capabilities = capabilities_for_adapter(llm)
+    model_id = str(summary.get("model") or request_raw.get("model") or capabilities.model or "")
+    request_usage = stream_state.usage
+    price_source = CostTracker.get_instance().record_usage_info(
+        request_usage,
+        model_id=model_id,
+        provider=str(request_raw.get("provider") or capabilities.provider),
+        session_id=budget_runtime.cost_session_id,
+        elapsed_sec=max(0.0, (epoch_ms() - provider_attempt.started_at) / 1000),
+        model_cost=getattr(llm, "_request_model_costs", {}).get(model_id),
+        usage_reported=provider_attempt.usage_reported,
+    )
+    provider_attempt.usage_settled = True
+    request_raw["price_source"] = price_source
+    request_raw.setdefault("model", model_id)
+    if "usage" in provider_raw_done:
+        request_raw.setdefault("usage", provider_raw_done["usage"])
+    provider_raw_done["price_source"] = price_source
+    add_usage(turn_usage, request_usage)
+    budget_runtime.record_provider_usage_total(turn_usage)
+    chain.record_usage(input_tokens=request_usage.input_tokens, output_tokens=request_usage.output_tokens)

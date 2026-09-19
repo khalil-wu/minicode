@@ -9,6 +9,7 @@ PowerShell. Callers can select an explicit host shell only outside the sandbox.
 from __future__ import annotations
 
 import base64
+import asyncio
 from dataclasses import replace
 from fnmatch import fnmatchcase
 import logging
@@ -21,6 +22,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from backend.artifact.store import ArtifactStore
+from backend.terminal.task_output import preview_text_output
+from backend.tools.output_limits import TASK_OUTPUT_DEFAULT_CHARS, TASK_OUTPUT_MAX_CHARS
 from backend.agent.tool_result_persistence import persist_tool_result
 from backend.sandbox import SandboxPolicy, SandboxRunner
 from backend.sandbox.runner import cleanup_captured_output, read_captured_output
@@ -54,6 +57,9 @@ from backend.tools.command_support import (
     _workspace_sandbox_policy,
     DEFAULT_TIMEOUT,
     MAX_TIMEOUT_SECONDS,
+    command_wait_ms,
+    command_sandbox_recovery_hint,
+    MAX_COMMAND_YIELD_MS,
 )
 from backend.tools.path_resolution import _is_bypass_mode
 
@@ -95,14 +101,22 @@ class RunCommandTool(BaseTool):
     workspace_path_fields = ("cwd",)
 
     def resolve_timeout(self, args: dict[str, Any]) -> float | None:
-        """Foreground commands get the default watchdog; background commands none."""
-        if _as_bool(args.get("run_in_background", False)):
-            return None
-        timeout = _coerce_timeout(args.get("timeout"))
-        return timeout if timeout is not None else DEFAULT_TIMEOUT
+        """The process owner enforces timeout; the tool waits by yield/deadline."""
+        # A second tool timer can cancel the wait before the process owner has
+        # recorded timeout/cleanup. SandboxRunner still bounds legacy calls.
+        return None
 
     def model_description(self) -> str:
-        return _model_shell_description()
+        return _model_shell_description() + (
+            " Managed commands wait up to yield_time_ms (default 10000 ms), then return a live command id. "
+            "A running result is not an exit: use monitor with that id to wait/read output/send stdin/cancel. "
+            "Continue independent work while it runs, but wait for completion before work that depends on its effects. "
+            "Use next_cursor for remaining captured output, or end_cursor to follow future output. Do not restart a command just because it yielded."
+            " Set max_chars to control the returned output length; the initial view keeps both the beginning and end. "
+            "The entire command output is retained, even when the preview is short. "
+            " Run tests directly: shell pipes to tail/grep can discard failures and replace the test exit code. "
+            "Use monitor with cursor=0 to reread captured output instead of rerunning tests to change the display."
+        )
 
     def model_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -112,6 +126,14 @@ class RunCommandTool(BaseTool):
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
+                    "max_chars": {
+                        "type": "integer", "minimum": 1, "maximum": TASK_OUTPUT_MAX_CHARS,
+                        "description": f"Output preview character budget, default {TASK_OUTPUT_DEFAULT_CHARS}. Preserves the beginning and end; full output remains readable with monitor. Use this instead of shell tail/grep filters.",
+                    },
+                    "yield_time_ms": {
+                        "type": "integer", "minimum": 0, "maximum": MAX_COMMAND_YIELD_MS,
+                        "description": "How long to wait before returning a live command id (default 10000 ms). Continue with monitor; this does not stop the process.",
+                    },
                     "cwd": {"type": "string"},
                     "env": {
                         "type": "object",
@@ -130,7 +152,7 @@ class RunCommandTool(BaseTool):
                         "type": "number",
                         "exclusiveMinimum": 0,
                         "maximum": MAX_TIMEOUT_SECONDS,
-                        "description": "Optional foreground timeout in seconds; defaults to 120, capped at 600.",
+                        "description": "Optional runtime limit for non-background commands, in seconds (max 600). Explicit background mode detaches this limit; yield_time_ms only limits waiting.",
                     },
                     "description": {
                         "type": "string",
@@ -254,6 +276,14 @@ class RunCommandTool(BaseTool):
                         "type": "string",
                         "description": "Shell command to execute.",
                     },
+                    "yield_time_ms": {
+                        "type": "integer", "minimum": 0, "maximum": MAX_COMMAND_YIELD_MS,
+                        "description": "Wait up to this many milliseconds, then return the owned command id if it is still running. Default 10000; use monitor to continue.",
+                    },
+                    "max_chars": {
+                        "type": "integer", "minimum": 1, "maximum": TASK_OUTPUT_MAX_CHARS,
+                        "description": f"Output preview character budget, default {TASK_OUTPUT_DEFAULT_CHARS}. Full output is retained; this does not change the command or exit code.",
+                    },
                     "cwd": {
                         "type": "string",
                         "description": "Working directory. Defaults to the active workspace root.",
@@ -267,7 +297,7 @@ class RunCommandTool(BaseTool):
                         "type": "number",
                         "exclusiveMinimum": 0,
                         "maximum": MAX_TIMEOUT_SECONDS,
-                        "description": "Optional foreground timeout in seconds; defaults to 120, capped at 600.",
+                        "description": "Optional runtime limit for non-background commands, in seconds (max 600). Explicit background mode detaches this limit; yield_time_ms only limits waiting.",
                     },
                     "run_in_background": {
                         "type": "boolean",
@@ -319,6 +349,7 @@ class RunCommandTool(BaseTool):
         run_in_background = _as_bool(args.get("run_in_background", False))
         try:
             timeout = _coerce_timeout(args.get("timeout"))
+            yield_ms = command_wait_ms(args.get("yield_time_ms"))
         except ValueError as exc:
             return self._error_result(str(exc))
         if timeout is None and not run_in_background:
@@ -397,6 +428,15 @@ class RunCommandTool(BaseTool):
                 env_overrides=env_overrides,
             )
 
+        if background_manager is not None and context is not None and context.command_scope_id:
+            return await self._execute_background(
+                command, effective_cwd, timeout if args.get("timeout") is not None else None, description, background_manager, context,
+                escalated=escalated or excluded, env_overrides=env_overrides, wait_ms=yield_ms,
+                max_chars=args.get("max_chars", TASK_OUTPUT_DEFAULT_CHARS),
+            )
+        if "yield_time_ms" in args:
+            return self._error_result("This session has no command manager for yielding a live process. Use the managed desktop session or omit yield_time_ms for a bounded foreground call.")
+
         return await self._execute_foreground(
             command,
             effective_cwd,
@@ -404,6 +444,7 @@ class RunCommandTool(BaseTool):
             context,
             escalated=escalated or excluded,
             env_overrides=env_overrides,
+            max_chars=args.get("max_chars"),
         )
 
     def _resolve_cwd(
@@ -445,9 +486,10 @@ class RunCommandTool(BaseTool):
         *,
         escalated: bool = False,
         env_overrides: dict[str, str] | None = None,
+        wait_ms: int | None = None,
+        max_chars: int = TASK_OUTPUT_DEFAULT_CHARS,
     ) -> ToolResult:
-        """Start a background command and immediately return its command id."""
-        del timeout  # Foreground wait limits end at background handoff.
+        """Start once under the process owner; wait or hand back its live handle."""
         if background_manager is None:
             return self._error_result(
                 "Background command execution is unavailable. Restart the backend session "
@@ -462,11 +504,11 @@ class RunCommandTool(BaseTool):
         # Claude Code clears the foreground timeout when a command becomes a
         # background task. The session-owned manager remains responsible for
         # cancellation, process-tree cleanup, output bounds, and completion.
-        background_timeout_ms = 0
+        background_timeout_ms = int(timeout * 1000) if wait_ms is not None and timeout is not None else 0
         base_policy = _workspace_sandbox_policy(
             workspace,
             context,
-            timeout=0,
+            timeout=timeout if wait_ms is not None and timeout is not None else 0,
             env_overrides=env_overrides,
         )
         policy = (
@@ -493,7 +535,7 @@ class RunCommandTool(BaseTool):
                 "description": description or command[:60],
                 "sandbox_policy": policy,
             }
-            conversation_id = str(getattr(context, "conversation_id", "") or "").strip()
+            conversation_id = context.command_scope_id if context is not None else ""
             if conversation_id:
                 background_kwargs["conversation_id"] = conversation_id
             context_metadata = getattr(context, "metadata", None)
@@ -506,9 +548,56 @@ class RunCommandTool(BaseTool):
                 background_kwargs["task_id"] = context_task_id
             bg_cmd = await background_manager.run_background(
                 **background_kwargs,
+                **({"backgrounded": False, "stream_callback": getattr(context, "stream_callback", None)}
+                   if wait_ms is not None else {}),
             )
         except RuntimeError as exc:
             return self._error_result(str(exc))
+
+        if wait_ms is not None:
+            from backend.tools.monitor_tool import MonitorTool
+
+            try:
+                await background_manager.wait(
+                    bg_cmd.command_id, conversation_id=conversation_id, wait_ms=wait_ms,
+                    cancel_event=getattr(context, "cancel_event", None),
+                )
+                await background_manager.detach(bg_cmd.command_id, conversation_id=conversation_id)
+            except asyncio.CancelledError:
+                await background_manager.cancel(bg_cmd.command_id, conversation_id=conversation_id)
+                raise
+            result = MonitorTool()._command_snapshot(
+                background_manager, bg_cmd.command_id, {"output_mode": "head_tail", "max_chars": max_chars}, conversation_id=conversation_id,
+            )
+            result.result_kind = "command"
+            result.is_error = bg_cmd.status in {"failed", "cancelled"}
+            if bg_cmd.lifecycle.error.get("kind") == "timeout":
+                result.status = "timeout"
+            elif bg_cmd.status == "cancelled":
+                result.status = "cancelled"
+            result.display_summary = (
+                f"Command running: {bg_cmd.command_id}"
+                if bg_cmd.status == "running" else f"Exit code: {bg_cmd.exit_code}"
+            )
+            result.runtime_metadata.update(command_id=bg_cmd.command_id, process_status=bg_cmd.status, exit_code=bg_cmd.exit_code)
+            if bg_cmd.status == "running":
+                result.content += (
+                    f"\nThe process is still running; do not restart it. Continue with monitor(action='status', "
+                    f"command_id='{bg_cmd.command_id}', cursor=<next_cursor>, yield_time_ms=10000). "
+                    "Use action='write_stdin' for input or action='cancel' to stop this process."
+                )
+            elif bg_cmd.exit_code is not None:
+                result.content = f"Exit code: {bg_cmd.exit_code}\n" + result.content
+                if bg_cmd.status == "failed" and not bg_cmd.cleanup_pending and bg_cmd.lifecycle.error.get("kind") != "timeout":
+                    result.content += command_sandbox_recovery_hint(
+                        bg_cmd.output, bg_cmd.exit_code,
+                        sandbox_active=capability.filesystem_isolated or capability.network_isolated,
+                        escalated=escalated, allow_unsandboxed=policy.allow_unsandboxed_commands,
+                    )
+                    hint = _windows_command_portability_hint(command, bg_cmd.output, bg_cmd.exit_code)
+                    if hint:
+                        result.content += "\n\n" + hint
+            return result
 
         sandbox_label = (
             "bypass execution"
@@ -528,6 +617,7 @@ class RunCommandTool(BaseTool):
             ),
             display_summary=f"Started in background: {self.display_label}",
             status="success",
+            runtime_metadata={"command_id": bg_cmd.command_id, "next_cursor": 0},
         )
 
     async def _execute_foreground(
@@ -539,6 +629,7 @@ class RunCommandTool(BaseTool):
         *,
         escalated: bool = False,
         env_overrides: dict[str, str] | None = None,
+        max_chars: int | None = None,
     ) -> ToolResult:
         """Execute a foreground shell command via SandboxRunner.
 
@@ -653,23 +744,12 @@ class RunCommandTool(BaseTool):
         # the model it may retry once with escalated permissions (user-approved).
         # Only when we actually ran sandboxed and the model hasn't already
         # escalated — never advertise escalation after it was granted.
-        escalation_hint = ""
-        if (
-            is_failed_exit
-            and not result.cancelled
-            and not result.timed_out
-            and sandbox_active
-            and not escalated
-            and policy.allow_unsandboxed_commands
-            and _looks_like_sandbox_denial(stderr, exit_code)
-        ):
-            escalation_hint = (
-                "\n\n[sandbox] This command ran in a restricted sandbox (no network, "
-                "writes limited to the workspace) and the failure looks sandbox-related. "
-                "If it needs network or access outside the workspace, retry the SAME command "
-                "with with_escalated_permissions=true and a one-line justification; the user "
-                "will be asked to approve. Do not escalate for ordinary command errors."
-            )
+        escalation_hint = (
+            command_sandbox_recovery_hint(
+                stderr, exit_code, sandbox_active=sandbox_active,
+                escalated=escalated, allow_unsandboxed=policy.allow_unsandboxed_commands,
+            ) if is_failed_exit and not result.cancelled and not result.timed_out else ""
+        )
         if escalation_hint:
             status = f"{status}{escalation_hint}"
 
@@ -688,7 +768,7 @@ class RunCommandTool(BaseTool):
                 status += f" Use monitor(action='cancel', command_id='{recovery_id}') to retry cleanup."
 
         truncation = truncate_text_tail(output)
-        if not truncation.truncated:
+        if not truncation.truncated and (max_chars is None or len(output) <= max_chars):
             cleanup_captured_output(*captured_paths)
             return ToolResult(
                 content=f"{status}\n\n{output}" if output else status,
@@ -742,13 +822,17 @@ class RunCommandTool(BaseTool):
                 f"Showing lines {start_line}-{truncation.total_lines} of {truncation.total_lines} "
                 f"({MAX_TOOL_RESULT_BYTES} byte limit)."
             )
+        preview = truncation.content
+        if max_chars is not None:
+            preview = preview_text_output(output, max_chars)
+            truncation_notice = f"Output view limited to {max_chars} characters plus omission marker; full output retained."
         if full_output_reference:
             truncation_notice += f" Full output: {full_output_reference}"
 
         return ToolResult(
             content=f"{status}\n\n[{truncation_notice}]",
             artifact_id=artifact_id or None,
-            artifact_preview=truncation.content,
+            artifact_preview=preview,
             is_error=is_failed_exit,
             status=result_status,
             cleanup_receipt=cleanup_receipt,
@@ -756,7 +840,7 @@ class RunCommandTool(BaseTool):
 
     async def _retain_cleanup(self, runner, command, cwd, context, reason) -> dict[str, Any]:
         manager = self._resolve_background_manager(context)
-        owner = str(getattr(context, "conversation_id", "") or "")
+        owner = context.command_scope_id if context is not None else ""
         process = runner.process
         receipt = {
             "resource_kind": "command",

@@ -104,6 +104,7 @@ def llm_model_updated_payload(
     models_source: str = "",
     provider_metadata: dict[str, Any] | None = None,
     settings_data: dict[str, Any] | None = None,
+    configured_reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     requested_provider = str(provider or "").strip() or "openai"
     extension_metadata = dict(provider_metadata or {})
@@ -247,11 +248,13 @@ def llm_model_updated_payload(
         default_reasoning_summary = str(
             payload_section.get("default_reasoning_summary") or ""
         )
-    configured_reasoning_effort = str(
-        payload_section.get("configured_reasoning_effort")
-        or payload_section.get("reasoning_effort")
-        or ""
-    ).strip().lower()
+    if configured_reasoning_effort is None:
+        configured_reasoning_effort = str(
+            payload_section.get("configured_reasoning_effort")
+            or payload_section.get("reasoning_effort")
+            or ""
+        )
+    configured_reasoning_effort = configured_reasoning_effort.strip().lower()
     reasoning_effort_supported = wire_api != "anthropic" and bool(reasoning_levels)
     effective_reasoning_effort = (
         normalize_reasoning_effort(

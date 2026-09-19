@@ -36,7 +36,7 @@ def _command_result_session(*, conversation_id: str, repository) -> SimpleNamesp
     return session
 
 
-def test_terminal_preview_scheduler_and_conversation_commands_share_lifecycle_domain() -> None:
+def test_terminal_preview_scheduler_and_conversation_commands_require_lifecycle_admission() -> None:
     for command in (
         "conversation.clear",
         "terminal.create",
@@ -46,15 +46,6 @@ def test_terminal_preview_scheduler_and_conversation_commands_share_lifecycle_do
     ):
         assert _is_conversation_lifecycle_command(command) is True
     assert _is_conversation_lifecycle_command("commands.list") is False
-
-    async def inspect() -> None:
-        manager = WebSocketManager()
-        first = manager.conversation_lifecycle_lock()
-        second = manager.conversation_lifecycle_lock()
-        assert first is second
-
-    asyncio.run(inspect())
-
 
 def test_delete_fence_resolves_implicit_and_global_lifecycle_targets() -> None:
     manager = WebSocketManager()
@@ -107,6 +98,7 @@ def test_command_ingress_rejects_mutation_while_delete_fence_is_held() -> None:
             active_conversation_id="conv-deleting",
             ws_manager=manager,
             connection_generation=1,
+            conversation_lifecycle_lock=lambda: asyncio.Lock(),
             event_outbox=SimpleNamespace(
                 bind_connection_generation=lambda _generation: contextlib.nullcontext(),
             ),

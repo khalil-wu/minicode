@@ -30,6 +30,7 @@ _CONTEXT_OVERFLOW_MARKERS = (
     "prompt too long",
     "context_length",
     "maximum context",
+    "exceed context limit",
     # Bare "context window" deliberately excluded (cc matches only the exact
     # 'prompt is too long' prefix): a random 500 mentioning the context window
     # must not consume the single reactive-compaction budget.

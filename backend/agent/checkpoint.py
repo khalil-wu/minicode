@@ -46,11 +46,14 @@ class CheckpointCorruptionError(CheckpointError):
     """Raised when checkpoint bytes cannot be trusted for recovery."""
 
 
-CHECKPOINT_SCHEMA_VERSION = 4
+CHECKPOINT_SCHEMA_VERSION = 10
+# v10 stores history only in context_snapshot; the reader derives messages.
+# v5 adds command_id/output_cursor to tool records. v4 records remain readable
+# through ToolCallRecord defaults; older readers must reject the new envelope.
 # The context payload has its own schema so the checkpoint envelope can evolve
-# independently from ContextBuilder's internal implementation.  A checkpoint
-# with no ``context_snapshot`` remains a valid legacy (history-only) payload.
-CONTEXT_SNAPSHOT_SCHEMA_VERSION = 1
+# independently from ContextBuilder's internal implementation. Both supported
+# envelope versions require a complete context snapshot and revision.
+CONTEXT_SNAPSHOT_SCHEMA_VERSION = 4
 MAX_RETAINED_CHECKPOINTS = 12
 MAX_STORAGE_ID_LENGTH = 128
 MAX_CHECKPOINT_HISTORY_MESSAGES = 160
@@ -269,7 +272,7 @@ def _fit_checkpoint_payload(
         # structure.  Never recursively truncate encrypted reasoning,
         # signatures, tool arguments, or message content here.  It either
         # fits as one JSON value or is omitted as a whole so recovery can
-        # reject the incomplete schema-4 checkpoint instead of accepting a
+        # reject the incomplete checkpoint instead of accepting a
         # syntactically valid but semantically corrupted continuation.
         if field == "context_snapshot":
             if authoritative_snapshot:
@@ -390,8 +393,8 @@ class AgentCheckpoint:
     conversation_id: str = ""
     checkpoint_type: str = "run_checkpoint"
     resume_payload: dict[str, Any] | None = None
-    # Canonical ContextBuilder snapshot.  ``messages`` remains as a legacy
-    # compatibility projection for schema <= 3 callers and files.
+    # Canonical ContextBuilder snapshot. For v10, ``messages`` is an in-memory
+    # compatibility projection derived from this snapshot when loading.
     context_snapshot: dict[str, Any] = field(default_factory=dict)
     context_revision: str = ""
     schema_version: int = CHECKPOINT_SCHEMA_VERSION
@@ -544,7 +547,7 @@ def save_checkpoint(
             "user_message": str(user_message or ""),
             "iterations": iterations,
             "reply": str(reply or ""),
-            "messages": messages,
+            "messages": [],
             "tool_calls": tool_calls,
             "active_skills": active_skills,
             "disabled_tools": disabled_tools,
@@ -561,6 +564,7 @@ def save_checkpoint(
             "sequence": sequence,
             "checksum": "",
         }, authoritative_snapshot=authoritative_snapshot)
+        payload.pop("messages")
         _refresh_context_snapshot_revision(payload)
         payload["checksum"] = _compute_checksum(payload)
 
@@ -610,6 +614,8 @@ def save_run_checkpoint(
 
 def _checkpoint_from_dict(data: dict[str, Any]) -> AgentCheckpoint:
     data = dict(data)
+    if int(data["schema_version"]) >= 10:
+        data["messages"] = data["context_snapshot"]["history"]
     known = {item.name for item in AgentCheckpoint.__dataclass_fields__.values()}  # type: ignore[attr-defined]
     unknown = sorted(set(data) - known)
     if unknown:
@@ -634,7 +640,7 @@ def _verify_checkpoint_payload(data: dict[str, Any], path: Path) -> bool:
     except (TypeError, ValueError):
         logger.warning("Rejecting checkpoint with invalid schema version %s", path)
         return False
-    if schema_version != CHECKPOINT_SCHEMA_VERSION:
+    if schema_version not in (4, 5, 6, 7, 8, 9, CHECKPOINT_SCHEMA_VERSION):
         logger.warning(
             "Rejecting checkpoint with unsupported schema version %s: %s",
             path,
@@ -644,7 +650,7 @@ def _verify_checkpoint_payload(data: dict[str, Any], path: Path) -> bool:
     if not (
         isinstance(snapshot, dict) and snapshot
     ):
-        logger.warning("Rejecting schema-4 checkpoint without context snapshot %s", path)
+        logger.warning("Rejecting checkpoint without context snapshot %s", path)
         return False
     if isinstance(snapshot, dict) and snapshot:
         expected_revision = str(
@@ -657,7 +663,7 @@ def _verify_checkpoint_payload(data: dict[str, Any], path: Path) -> bool:
             logger.warning("Rejecting checkpoint with bad context revision %s", path)
             return False
         if not expected_revision:
-            logger.warning("Rejecting schema-4 checkpoint without context revision %s", path)
+            logger.warning("Rejecting checkpoint without context revision %s", path)
             return False
     return True
 

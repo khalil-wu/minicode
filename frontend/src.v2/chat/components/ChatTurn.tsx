@@ -1,4 +1,5 @@
-import { memo, useCallback, useMemo } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
+import { loadEarlierToolItems } from "../historyPagination";
 import type {
   ChatTurnState,
   HistoryCellState,
@@ -21,6 +22,7 @@ import {
 import { useAppStore } from "../../stores";
 import { sendClientCommand } from "../../protocol/ws-outbox";
 import { buildInterruptCommand } from "../../lib/interrupt-command";
+import { knownFilePathsForCell } from "../cells/activityCellHelpers";
 
 // ── ChatTurn ────────────────────────────────────────────────────────
 
@@ -44,6 +46,7 @@ export const ChatTurn = memo(function ChatTurn({
   workspaceRoot?: string;
 }) {
   const committedCells = turn.committedCells;
+  const [loadingTools, setLoadingTools] = useState(false);
   const processDetailMode = useAppStore((state) => state.viewMode);
   const stopActiveRun = useCallback(() => {
     const state = useAppStore.getState();
@@ -54,15 +57,8 @@ export const ChatTurn = memo(function ChatTurn({
     () => projectChatTurnToAgentLoop(turn, committedCells, processDetailMode),
     [turn, committedCells, processDetailMode],
   );
-  const knownFilePaths = useMemo(() => [...new Set(agentTurn.processCells.flatMap((cell) => {
-    if (cell.kind === "diff") return cell.files.filter((file) => file.changeType !== "deleted").map((file) => file.path);
-    if (cell.kind !== "activity") return [];
-    return (cell.toolCallRecords ?? []).filter((record) => record.status === "success").flatMap((record) => [
-      ...(typeof record.args.file_path === "string" ? [record.args.file_path] : []),
-      ...(record.diff?.files ?? []).filter((file) => file.status !== "deleted").map((file) => file.path),
-      ...(record.outputFiles ?? []).map((file) => file.path),
-    ]);
-  }))], [agentTurn.processCells]);
+  const resourceKey = turn.resourceKey ?? agentTurn.processCells;
+  const knownFilePaths = useMemo(() => [...new Set(agentTurn.processCells.flatMap(knownFilePathsForCell))], [resourceKey]);
   const renderCell = useCallback(
     ({ key, cell, isActive = false, className, afterContent }: RenderAgentCellArgs) => (
       <div key={key} className={className} style={{ position: "relative" }}>
@@ -87,6 +83,16 @@ export const ChatTurn = memo(function ChatTurn({
       wide={wide}
       renderCell={renderCell}
       defaultProcessExpanded={defaultProcessExpanded}
+      loadedToolItems={turn.toolPage ? turn.toolPage.total - turn.toolPage.remaining : undefined}
+      historyControl={turn.toolPage?.remaining && conversationId ? (
+        <button type="button" className="agent-loop-timeline-group-title" disabled={loadingTools}
+          onClick={() => {
+            setLoadingTools(true);
+            void loadEarlierToolItems(conversationId, turn.id).finally(() => setLoadingTools(false));
+          }}>
+          {loadingTools ? "正在加载更早的步骤…" : `加载更早的工具步骤（${turn.toolPage.remaining}）`}
+        </button>
+      ) : undefined}
     />
   );
 });

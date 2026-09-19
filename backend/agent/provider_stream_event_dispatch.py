@@ -67,6 +67,7 @@ async def dispatch_provider_event(
     awaiting_trailing_tool_done: bool,
     visible_text_sanitizer: Any,
     thinking_chars: int,
+    close_stream: Any | None = None,
 ) -> AsyncIterator[AgentEvent | ProviderDispatchResult]:
     """Observe, project and transition one provider event."""
 
@@ -123,6 +124,7 @@ async def dispatch_provider_event(
         async for steer_update in apply_provider_chunk_steer(
             steer_eligible=bool(
                 text_projection is not None and text_projection.steer_eligible
+                and not stream_state.committed_tool_ids
             ),
             turn_kernel=turn_kernel,
             context_builder=context_builder,
@@ -131,6 +133,7 @@ async def dispatch_provider_event(
             tool_tracker=tool_tracker,
             stream_iter=stream_iter,
             provider_attempt=provider_attempt,
+            close_stream=close_stream,
         ):
             if isinstance(steer_update, ProviderSteerResult):
                 steer_result = steer_update

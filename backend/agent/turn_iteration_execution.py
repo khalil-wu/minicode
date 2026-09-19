@@ -6,7 +6,7 @@ import asyncio
 from contextlib import aclosing
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
 
 from backend.agent.final_answer_orchestrator import (
     FinalAnswerOutcome,
@@ -22,6 +22,7 @@ from backend.agent.provider_stream_runtime import (
     stream_provider_response,
 )
 from backend.agent.stream_attempt import StreamTextState
+from backend.agent.streaming_tool_execution import StreamingToolExecution
 from backend.agent.stream_sanitizer import scrub_thinking_tags
 from backend.agent.terminal_projection import TurnTerminalProjection
 from backend.agent.swarm_store import MAILBOX_MESSAGE_LEASE_MS
@@ -32,9 +33,30 @@ from backend.agent.turn_recovery_runtime import (
 )
 
 
+
+if TYPE_CHECKING:
+    from backend.agent.answer_committer import AnswerCommitter
+    from backend.agent.context import ContextBuilder
+    from backend.agent.error_withholding import ErrorWithholdingController
+    from backend.agent.policies.stream_retry import StreamRetryPolicy
+    from backend.agent.provider_completion import ProviderCompletionCoordinator
+    from backend.agent.query_chain import QueryChainTracking
+    from backend.agent.runtime import AgentRuntime
+    from backend.agent.runtime_records import AgentRunRecord
+    from backend.agent.state import AgentState
+    from backend.agent.turn_budget import TurnBudgetController, TurnDeadlineController
+    from backend.agent.turn_budget_runtime import TurnBudgetRuntime
+    from backend.agent.turn_kernel import TurnKernel
+    from backend.config import AgentSettings
+    from backend.llm.base import LLMAdapter, LLMMessage, UsageInfo
+    from backend.permissions.checker import PermissionChecker
+    from backend.permissions.context import PermissionContext, ToolExecutionContext
+    from backend.skills.manager import SkillManager
+    from backend.tools.registry import ToolRegistry
+
 @dataclass(slots=True)
 class IterationExecutionState:
-    turn_usage: Any
+    turn_usage: UsageInfo
     tool_batch_count: int
     degraded_reason: str
     stream_text: StreamTextState
@@ -57,33 +79,33 @@ class TurnIterationExecutor:
     def __init__(
         self,
         *,
-        llm: Any,
+        llm: LLMAdapter,
         llm_request_metadata: dict[str, Any],
-        provider_completion: Any,
-        state: Any,
-        context_builder: Any,
-        turn_kernel: Any,
-        budget_runtime: Any,
-        settings: Any,
-        tool_registry: Any,
-        permission_checker: Any,
-        effective_permission_context: Any,
-        tool_context: Any,
+        provider_completion: ProviderCompletionCoordinator,
+        state: AgentState,
+        context_builder: ContextBuilder,
+        turn_kernel: TurnKernel,
+        budget_runtime: TurnBudgetRuntime,
+        settings: AgentSettings,
+        tool_registry: ToolRegistry,
+        permission_checker: PermissionChecker,
+        effective_permission_context: PermissionContext,
+        tool_context: ToolExecutionContext,
         turn_start_tool_call_count: int,
         turn_started_at: float,
-        stream_retry_policy: Any,
-        error_controller: Any,
+        stream_retry_policy: StreamRetryPolicy,
+        error_controller: ErrorWithholdingController,
         user_message: str,
-        chain: Any,
+        chain: QueryChainTracking,
         approval_handler: Any,
-        skill_manager: Any,
-        runtime: Any,
-        run_record: Any,
+        skill_manager: SkillManager | None,
+        runtime: AgentRuntime,
+        run_record: AgentRunRecord,
         metadata: dict[str, Any],
-        deadline_controller: Any,
-        answer_committer: Any,
+        deadline_controller: TurnDeadlineController,
+        answer_committer: AnswerCommitter,
         emit_event: Any,
-        turn_budget_controller: Any,
+        turn_budget_controller: TurnBudgetController,
     ) -> None:
         self.llm = llm
         self.llm_request_metadata = llm_request_metadata
@@ -189,7 +211,7 @@ class TurnIterationExecutor:
     async def execute(
         self,
         *,
-        messages: list[Any],
+        messages: list[LLMMessage],
         tool_schemas: list[dict[str, Any]],
         prompt_cache_safe_params: dict[str, Any],
         iteration_id: str,
@@ -197,6 +219,7 @@ class TurnIterationExecutor:
     ) -> AsyncIterator[AgentEvent | TurnTerminalProjection | IterationExecutionResult]:
         stream_text = StreamTextState(iteration_id=iteration_id)
         execution_state.stream_text = stream_text
+        streaming_tools = StreamingToolExecution(self, iteration_id)
         provider_stream_result = None
         lease_stop = asyncio.Event()
         lease_task = asyncio.create_task(
@@ -204,7 +227,7 @@ class TurnIterationExecutor:
             name=f"mailbox-claim-heartbeat-{iteration_id}",
         )
         try:
-            async with aclosing(stream_provider_response(
+            async with aclosing(streaming_tools.project(stream_provider_response(
                 llm=self.llm,
                 messages=messages,
                 tool_schemas=tool_schemas,
@@ -232,7 +255,8 @@ class TurnIterationExecutor:
                 stream_text=stream_text,
                 degrade_and_finish=degrade_and_finish,
                 recover_withheld_error=recover_withheld_error,
-            )) as owned_events:
+                tool_stream=streaming_tools,
+            ))) as owned_events:
                 async for update in owned_events:
                     if isinstance(update, ProviderStreamResult):
                         provider_stream_result = update
@@ -246,6 +270,7 @@ class TurnIterationExecutor:
             raise RuntimeError("provider stream runtime returned without a result")
 
         execution_state.turn_usage = provider_stream_result.turn_usage
+        self.llm = self.tool_context.llm
         stream_state = provider_stream_result.stream_state
         stream_text = provider_stream_result.stream_text
         execution_state.stream_text = stream_text
@@ -359,6 +384,7 @@ class TurnIterationExecutor:
             budget_runtime=self.budget_runtime,
             deadline_controller=self.deadline_controller,
             record_tool_call=self.chain.record_tool_call,
+            streamed_execution=streaming_tools if streaming_tools.started else None,
         )) as owned_events:
             async for update in owned_events:
                 if isinstance(update, ToolTurnResult):

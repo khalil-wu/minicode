@@ -7,7 +7,10 @@ from typing import Any, Literal
 
 from backend.agent.message import AgentEvent
 from backend.agent.provider_protocol import usage_terminal_projection
-from backend.agent.response_utils import append_assistant_history
+from backend.agent.response_utils import (
+    append_assistant_history,
+    provider_items_for_final_answer,
+)
 from backend.agent.turn_kernel import _set_terminal_reason
 from backend.agent.terminal_projection import TurnTerminalProjection
 
@@ -125,7 +128,7 @@ async def accept_completed_stream_steer(
             context_builder,
             candidate_text,
             phase=provider_phase or "final_answer",
-            provider_items=provider_items,
+            provider_items=provider_items_for_final_answer(provider_items),
         )
     await turn_kernel.accept_turn_steer(queued_steer)
     state.mark_transition(

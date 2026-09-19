@@ -15,7 +15,10 @@ from typing import Any, Callable
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from backend.agent.turn_state import content_from_blocks
-from backend.atomic_io import atomic_write_text
+from backend.atomic_io import atomic_write_text, file_mutation_locks
+from backend.conversations.context_delta import apply_context_snapshot_delta, compose_context_snapshot_deltas
+from backend.conversations.projection_log import append_projection, read_projection
+from backend.conversations.transcript_index import TranscriptIndexError, encode_transcript, read_page as read_transcript_page, read_message as read_indexed_message
 from backend.config import DATA_ROOT
 from backend.encoding_repair import repair_mojibake_payload
 
@@ -34,6 +37,9 @@ from .public_projection import (
     project_public_conversation,
     project_public_transcript,
     project_public_transcript_message,
+    project_transcript_page,
+    project_tool_window,
+    project_tool_items,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,7 +49,7 @@ _CONVERSATION_ID_PATTERN = re.compile(
     r"^(?:conv|side|local)_[A-Za-z0-9_-]{6,80}$|^(?:conv|side)-[A-Za-z0-9_-]{6,80}$"
 )
 _STORAGE_MANIFEST_SCHEMA = "minicode.conversation.manifest"
-_STORAGE_MANIFEST_VERSION = 1
+_STORAGE_MANIFEST_VERSION = 8
 
 
 class ConversationWriteConflict(RuntimeError):
@@ -79,6 +85,7 @@ class ConversationRepository:
         self._record_cache: OrderedDict[str, ConversationRecord] = OrderedDict()
         self._record_cache_stamps: dict[str, tuple[tuple[int, int], ...]] = {}
         self._manifest_cache: dict[str, tuple[tuple[int, int], dict[str, Any]]] = {}
+        self._partial_projection_cache: OrderedDict[str, tuple[int, int, tuple[int, int], dict[str, Any]]] = OrderedDict()
 
     def create_conversation(
         self,
@@ -103,6 +110,7 @@ class ConversationRepository:
         parent_message_index: int | None = None,
         fork_id: str = "",
         branch_kind: str = "",
+        model_selection: dict[str, str] | None = None,
     ) -> ConversationRecord:
         requested_id = str(conversation_id or "").strip()
         initial_transcript = project_public_transcript(transcript or [])
@@ -124,12 +132,12 @@ class ConversationRepository:
             conversation_type=normalized_conversation_type,
             polluted=is_memory_polluted,
         )
+        candidate_id = (
+            requested_id if requested_id and _CONVERSATION_ID_PATTERN.fullmatch(requested_id)
+            else f"conv_{uuid.uuid4().hex[:12]}"
+        )
+        # Creation owns ID allocation, including replacement of an occupied ID.
         with self._store_lock():
-            candidate_id = (
-                requested_id
-                if requested_id and _CONVERSATION_ID_PATTERN.fullmatch(requested_id)
-                else f"conv_{uuid.uuid4().hex[:12]}"
-            )
             # A delete tombstone permanently reserves the old lifecycle id.
             # Reusing it would let delayed events, uploads, or detached writers
             # from the deleted lifecycle attach to an unrelated new record.
@@ -160,13 +168,14 @@ class ConversationRepository:
                 parent_message_index=parent_message_index,
                 fork_id=str(fork_id or ""),
                 branch_kind=str(branch_kind or ""),
+                model_selection=dict(model_selection or {}),
             )
             self._commit_record(record)
             self._cache_record(record)
             return record
 
     def get_conversation(self, conversation_id: str) -> ConversationRecord | None:
-        with self._store_lock():
+        with self._store_lock(conversation_id):
             cached = self._record_cache.get(conversation_id)
             if cached is not None and self._record_cache_stamps.get(conversation_id) == self._record_disk_stamp(conversation_id):
                 return copy.deepcopy(cached)
@@ -174,6 +183,94 @@ class ConversationRepository:
             if record is not None:
                 self._cache_record(record)
             return copy.deepcopy(record) if record is not None else None
+
+    def get_conversation_summary(self, conversation_id: str) -> ConversationSummary | None:
+        with self._store_lock(conversation_id):
+            cached = self._record_cache.get(conversation_id)
+            if cached is not None and self._record_cache_stamps.get(conversation_id) == self._record_disk_stamp(conversation_id):
+                return cached.to_summary()
+            return self._load_summary(conversation_id)
+
+    def get_transcript_page(
+        self, conversation_id: str, *, limit: int = 80, before_message_id: str = "",
+    ) -> dict[str, Any] | None:
+        view = self.get_conversation_view(conversation_id, limit=limit, before_message_id=before_message_id)
+        if view is None:
+            return None
+        return {"conversation_id": conversation_id, "revision": view["revision"],
+                "transcript": view["transcript"], "transcript_page": view["transcript_page"]}
+
+    def get_conversation_view(
+        self, conversation_id: str, *, limit: int = 80, before_message_id: str = "",
+    ) -> dict[str, Any] | None:
+        """Read a UI page without loading the private provider checkpoint."""
+        with self._store_lock(conversation_id):
+            record = self._record_cache.get(conversation_id)
+            if record is not None and self._record_cache_stamps.get(conversation_id) == self._record_disk_stamp(conversation_id):
+                return {**project_public_conversation(record, include_transcript=False),
+                        **project_transcript_page(record.transcript, limit=limit, before_message_id=before_message_id)}
+            manifest = self._read_manifest(conversation_id, log_errors=False)
+            if manifest is not None and self._manifest_is_deleted(manifest):
+                return None
+            try:
+                if manifest is not None:
+                    meta_path, transcript_path, _ = self._generation_paths(conversation_id, manifest["current_generation"])
+                    metadata = self._read_generation_metadata(conversation_id, manifest["current_generation"])
+                    if metadata.get("transcript_index_version") == 1:
+                        projection = self._load_partial_projection(conversation_id, manifest)
+                        snapshot = dict(metadata["public_context_snapshot"])
+                        delta = projection.get("context_delta", {})
+                        snapshot.update(delta.get("set", {}))
+                        for key in delta.get("removed", []): snapshot.pop(key, None)
+                        current = {**metadata, **manifest.get("metadata", {}), "context_snapshot": snapshot}
+                        page = read_transcript_page(transcript_path, metadata["transcript_index"], limit=limit,
+                                                    before_message_id=before_message_id, replacement=projection.get("assistant_message"))
+                        # Indexed generations already contain normalized public messages.
+                        # Project only the displayed tool window, not every stored block.
+                        page["transcript"] = [project_tool_window(message) for message in page["transcript"]]
+                        view = project_public_conversation(current, include_transcript=False)
+                        view.update(page)
+                        view["message_count"] = page["transcript_page"]["total_messages"]
+                        return view
+            except (ConversationStorageCorruptError, OSError, json.JSONDecodeError, UnicodeDecodeError, TranscriptIndexError):
+                # Use the existing generation recovery reader for damaged files;
+                # a missing page cursor remains a caller-visible conflict.
+                logger.warning("Indexed history read failed for %s; loading the committed generation", conversation_id, exc_info=True)
+            # Legacy generations have no byte index. They keep their existing
+            # reader and acquire an index on the next normal checkpoint write.
+            if record is None or self._record_cache_stamps.get(conversation_id) != self._record_disk_stamp(conversation_id):
+                record = self._load_record(conversation_id)
+                if record is None:
+                    return None
+                self._cache_record(record)
+            return {**project_public_conversation(record, include_transcript=False),
+                    **project_transcript_page(record.transcript, limit=limit, before_message_id=before_message_id)}
+
+    def get_message_tool_items(
+        self, conversation_id: str, message_id: str, *, before: int, limit: int = 40, revision: str = "",
+    ) -> dict[str, Any] | None:
+        with self._store_lock(conversation_id):
+            cached = self._record_cache.get(conversation_id)
+            if cached is not None and self._record_cache_stamps.get(conversation_id) == self._record_disk_stamp(conversation_id):
+                message = next((item for item in cached.transcript if item["id"] == message_id), None)
+            else:
+                manifest = self._read_manifest(conversation_id, log_errors=False)
+                if manifest is not None and self._manifest_is_deleted(manifest):
+                    return None
+                try:
+                    metadata = self._read_generation_metadata(conversation_id, manifest["current_generation"]) if manifest else {}
+                    if metadata.get("transcript_index_version") == 1:
+                        message = self._load_partial_projection(conversation_id, manifest).get("assistant_message")
+                        if message is None or message.get("id") != message_id:
+                            path = self._generation_paths(conversation_id, manifest["current_generation"])[1]
+                            message = read_indexed_message(path, metadata["transcript_index"], message_id)
+                    else:
+                        record = self._load_record(conversation_id)
+                        message = next((item for item in record.transcript if item["id"] == message_id), None) if record else None
+                except (ConversationStorageCorruptError, OSError, UnicodeDecodeError, json.JSONDecodeError, TranscriptIndexError):
+                    record = self._load_record(conversation_id)
+                    message = next((item for item in record.transcript if item["id"] == message_id), None) if record else None
+            return project_tool_items(message, before=before, limit=limit, revision=revision) if message is not None else None
 
     def clone_conversation(
         self,
@@ -189,7 +286,7 @@ class ConversationRepository:
         clone can therefore be resumed safely without allowing either session
         to delete the same worktree.
         """
-        with self._store_lock():
+        with self._store_lock(conversation_id):
             source = self._load_record_for_mutation(conversation_id)
             if source is None:
                 return None
@@ -205,6 +302,10 @@ class ConversationRepository:
             clone.parent_message_index = len(source.transcript) - 1 if source.transcript else None
             clone.fork_id = f"fork_{uuid.uuid4().hex[:16]}"
             clone.branch_kind = branch_kind
+            from backend.agent.extension_history import DELIVERY_KEYS
+            for key in DELIVERY_KEYS:
+                clone.context_snapshot.get("extension_state", {}).pop(key, None)
+            clone.context_snapshot.pop("extension_cursor", None)
             clone.merged_into_conversation_id = ""
             clone.merged_at = ""
 
@@ -256,7 +357,7 @@ class ConversationRepository:
         already equals the complete source transcript); otherwise the caller
         receives a conflict and no record is modified.
         """
-        with self._store_lock():
+        with self._store_lock(source_conversation_id, target_conversation_id):
             source = self._load_record_for_mutation(source_conversation_id)
             target = self._load_record_for_mutation(target_conversation_id)
             if source is None or target is None:
@@ -366,7 +467,7 @@ class ConversationRepository:
         }
 
     def save_conversation(self, record: ConversationRecord) -> ConversationRecord:
-        with self._store_lock():
+        with self._store_lock(record.id):
             record.updated_at = utc_now_iso()
             record.message_count = len(record.transcript)
             self._commit_record(record)
@@ -429,7 +530,7 @@ class ConversationRepository:
         return conversations
 
     def delete_conversation(self, conversation_id: str) -> bool:
-        with self._store_lock():
+        with self._store_lock(conversation_id):
             safe_id = self._safe_id(conversation_id)
             manifest_path = self._manifest_path_for(conversation_id)
             manifest = self._read_manifest(conversation_id, log_errors=False)
@@ -444,6 +545,7 @@ class ConversationRepository:
             paths.update(self._base_dir.glob(f"{safe_id}.g*.meta.json"))
             paths.update(self._base_dir.glob(f"{safe_id}.g*.transcript.jsonl"))
             paths.update(self._base_dir.glob(f"{safe_id}.g*.snapshot.json"))
+            paths.update(self._base_dir.glob(f"{safe_id}.g*.projection.jsonl"))
             if not manifest_path.exists() and not any(path.exists() for path in paths):
                 return False
 
@@ -489,11 +591,13 @@ class ConversationRepository:
                 (manifest_stat.st_mtime_ns, manifest_stat.st_size),
                 tombstone,
             )
-            self._record_cache.pop(conversation_id, None)
-            self._record_cache_stamps.pop(conversation_id, None)
-            if self._summary_index is not None:
-                self._summary_index.pop(conversation_id, None)
-            self._summary_index_stamps.pop(conversation_id, None)
+            with self._process_lock:
+                self._record_cache.pop(conversation_id, None)
+                self._partial_projection_cache.pop(conversation_id, None)
+                self._record_cache_stamps.pop(conversation_id, None)
+                if self._summary_index is not None:
+                    self._summary_index.pop(conversation_id, None)
+                self._summary_index_stamps.pop(conversation_id, None)
 
             for path in paths:
                 if path.exists():
@@ -513,7 +617,7 @@ class ConversationRepository:
     def append_transcript_message(
         self, conversation_id: str, message: dict[str, Any]
     ) -> ConversationRecord | None:
-        with self._store_lock():
+        with self._store_lock(conversation_id):
             record = self._load_record_for_mutation(conversation_id)
             if record is None:
                 return None
@@ -560,7 +664,7 @@ class ConversationRepository:
         and terminal boundaries. This keeps completed process work after an app
         restart without creating duplicate assistant messages.
         """
-        with self._store_lock():
+        with self._store_lock(conversation_id):
             record = self._load_record_for_mutation(conversation_id)
             if record is None:
                 return None
@@ -595,10 +699,13 @@ class ConversationRepository:
         conversation_id: str,
         *,
         assistant_message: dict[str, Any] | None,
-        context_snapshot: dict[str, Any],
+        context_snapshot: dict[str, Any] | None = None,
         summary: str | None = None,
         expected_revision: int | None = None,
-    ) -> ConversationRecord | None:
+        context_delta: dict[str, Any] | None = None,
+        partial: bool = False,
+        return_record: bool = True,
+    ) -> ConversationRecord | ConversationSummary | None:
         """Atomically publish one terminal conversation projection.
 
         The execution journal remains the recovery source of truth. This
@@ -607,8 +714,11 @@ class ConversationRepository:
         paired with the previous context snapshot (or vice versa).
         """
 
-        with self._store_lock():
-            record = self._load_record_for_mutation(conversation_id)
+        if partial and (assistant_message is None or context_delta is None):
+            raise ValueError("Partial projections require an assistant message and context delta")
+
+        with self._store_lock(conversation_id):
+            record = self._load_record_for_mutation(conversation_id, copy_history=return_record)
             if record is None:
                 return None
             projected_message = (
@@ -634,13 +744,20 @@ class ConversationRepository:
                 if (
                     projected_message is not None
                     and existing_message == projected_message
+                    and (context_delta is None or apply_context_snapshot_delta(record.context_snapshot, context_delta) == record.context_snapshot)
                 ):
                     return record
-                raise ConversationWriteConflict(
-                    conversation_id,
-                    expected=expected_revision,
-                    current=current_revision,
-                )
+                manifest = self._read_manifest(conversation_id, log_errors=False) or {}
+                projection_revision = int(manifest.get("projection_revision") or manifest.get("current_generation") or current_revision)
+                # Renaming/archiving while a turn streams does not change its
+                # input history. Preserve that newer metadata and commit the
+                # projection only when its context checkpoint is still current.
+                if expected_revision < projection_revision or expected_revision > current_revision:
+                    raise ConversationWriteConflict(
+                        conversation_id,
+                        expected=expected_revision,
+                        current=current_revision,
+                    )
             if assistant_message is not None:
                 next_message = projected_message or {}
                 message_id = str(next_message.get("id") or "").strip()
@@ -659,14 +776,21 @@ class ConversationRepository:
                     record.transcript[replace_index] = next_message
                 else:
                     record.transcript.append(next_message)
-            record.context_snapshot = copy.deepcopy(dict(context_snapshot or {}))
+            record.context_snapshot = (
+                apply_context_snapshot_delta(record.context_snapshot, context_delta)
+                if context_delta is not None
+                else copy.deepcopy(dict(context_snapshot or {}))
+            )
             if summary is not None:
                 record.summary = str(summary)
             record.message_count = len(record.transcript)
             record.updated_at = utc_now_iso()
-            self._commit_record(record)
-            self._cache_record(record)
-            return record
+            if context_delta is not None:
+                self._commit_metadata(record, assistant_message=projected_message, context_delta=context_delta)
+            else:
+                self._commit_record(record)
+            self._cache_record(record, copy_record=return_record)
+            return record if return_record else record.to_summary()
 
     def commit_turn_admission(
         self,
@@ -678,7 +802,7 @@ class ConversationRepository:
     ) -> ConversationRecord | None:
         """Atomically admit one canonical user item and its typed context."""
 
-        with self._store_lock():
+        with self._store_lock(conversation_id):
             record = self._load_record_for_mutation(conversation_id)
             if record is None:
                 return None
@@ -748,7 +872,7 @@ class ConversationRepository:
                 if str(source or "").strip()
             )
         )
-        with self._store_lock():
+        with self._store_lock(conversation_id):
             record = self._load_record_for_mutation(conversation_id)
             if record is None:
                 return None
@@ -777,7 +901,7 @@ class ConversationRepository:
     def replace_transcript(
         self, conversation_id: str, transcript: list[dict[str, Any]]
     ) -> ConversationRecord | None:
-        with self._store_lock():
+        with self._store_lock(conversation_id):
             record = self._load_record_for_mutation(conversation_id)
             if record is None:
                 return None
@@ -803,7 +927,7 @@ class ConversationRepository:
         completed command.
         """
 
-        with self._store_lock():
+        with self._store_lock(conversation_id):
             record = self._load_record_for_mutation(conversation_id)
             if record is None:
                 return None
@@ -904,7 +1028,7 @@ class ConversationRepository:
         conversation_ids = [item.id for item in self.list_conversations()]
         conversations_reset = 0
         notes_removed = 0
-        with self._store_lock():
+        with self._store_lock(*conversation_ids):
             for conversation_id in conversation_ids:
                 record = self._load_record_for_mutation(conversation_id)
                 if record is None:
@@ -1018,6 +1142,28 @@ class ConversationRepository:
 
         return self._mutate_meta(conversation_id, mutate)
 
+    def update_model_selection(
+        self, conversation_id: str, *, provider: str, model: str,
+        reasoning_effort: str | None = None,
+        only_if_unset: bool = False,
+    ) -> ConversationRecord | None:
+        with self._store_lock(conversation_id):
+            record = self._load_record_for_mutation(conversation_id)
+            if record is None:
+                return None
+            if only_if_unset and record.model_selection:
+                return record
+            selection = {**record.model_selection, "provider": provider, "model": model}
+            if reasoning_effort is not None:
+                selection["reasoning_effort"] = reasoning_effort
+            if record.model_selection == selection:
+                return record
+            record.model_selection = selection
+            record.updated_at = utc_now_iso()
+            self._commit_metadata(record)
+            self._cache_record(record)
+            return record
+
     def update_compaction(
         self,
         conversation_id: str,
@@ -1040,7 +1186,7 @@ class ConversationRepository:
         expected_revision: int | None = None,
     ) -> ConversationRecord | None:
         """Commit the compacted context and its metadata as one generation."""
-        with self._store_lock():
+        with self._store_lock(conversation_id):
             record = self._load_record_for_mutation(conversation_id)
             if record is None:
                 return None
@@ -1062,7 +1208,7 @@ class ConversationRepository:
     def save_context_snapshot(
         self, conversation_id: str, context_snapshot: dict[str, Any]
     ) -> ConversationRecord | None:
-        with self._store_lock():
+        with self._store_lock(conversation_id):
             record = self._load_record_for_mutation(conversation_id)
             if record is None:
                 return None
@@ -1080,7 +1226,7 @@ class ConversationRepository:
         revision: int | None = None,
         revision_key: str = "_snapshot_patch_revision",
     ) -> ConversationRecord | None:
-        with self._store_lock():
+        with self._store_lock(conversation_id):
             record = self._load_record_for_mutation(conversation_id)
             if record is None:
                 return None
@@ -1105,27 +1251,73 @@ class ConversationRepository:
         conversation_id: str,
         mutate: Callable[[ConversationRecord], None],
     ) -> ConversationRecord | None:
-        with self._store_lock():
+        with self._store_lock(conversation_id):
             record = self._load_record_for_mutation(conversation_id)
             if record is None:
                 return None
             mutate(record)
             record.updated_at = utc_now_iso()
             record.message_count = len(record.transcript)
-            self._commit_record(record)
+            self._commit_metadata(record)
             self._cache_record(record)
             return record
 
-    def _cache_record(self, record: ConversationRecord) -> None:
-        self._record_cache[record.id] = copy.deepcopy(record)
-        self._record_cache_stamps[record.id] = self._record_disk_stamp(record.id)
-        self._record_cache.move_to_end(record.id)
-        while len(self._record_cache) > self._MAX_RECORD_CACHE:
-            removed_id, _ = self._record_cache.popitem(last=False)
-            self._record_cache_stamps.pop(removed_id, None)
-        if self._summary_index is not None:
-            self._summary_index[record.id] = record.to_summary()
-            self._summary_index_stamps[record.id] = self._summary_disk_stamp(record.id)
+    def _commit_metadata(
+        self, record: ConversationRecord, *,
+        assistant_message: dict[str, Any] | None = None,
+        context_delta: dict[str, Any] | None = None,
+    ) -> None:
+        """Publish metadata without rewriting the immutable transcript checkpoint."""
+        manifest = self._read_manifest(record.id, log_errors=False)
+        if manifest is None or record.revision != self._manifest_revision(manifest):
+            # Legacy storage and recovery from a damaged checkpoint need a new
+            # complete checkpoint before metadata can refer to it.
+            self._commit_record(record)
+            return
+        revision = record.revision + 1
+        metadata = {**record.to_meta_dict(), "revision": revision}
+        payload = {**manifest, "version": _STORAGE_MANIFEST_VERSION, "revision": revision, "metadata": metadata}
+        if context_delta is not None:
+            metadata["content_revision"] = revision
+            metadata["content_updated_at"] = record.updated_at
+            generation = manifest["current_generation"]
+            previous = self._load_partial_projection(record.id, manifest)
+            pointer = manifest.get("projection_log")
+            partial_projection_state = {
+                "assistant_message": assistant_message if assistant_message is not None else previous.get("assistant_message"),
+                "context_delta": compose_context_snapshot_deltas(previous.get("context_delta", {}), context_delta),
+            }
+            position = append_projection(
+                self._partial_projection_path(record.id, generation),
+                committed_bytes=pointer["bytes"] if pointer else 0, revision=revision,
+                previous=previous, current=partial_projection_state,
+                seed_revision=(manifest.get("projection_revision", record.revision) if previous and pointer is None else None),
+            )
+            payload.pop("partial_projection", None)
+            payload["projection_log"] = {"generation": generation, "bytes": position, "revision": revision}
+            payload["projection_revision"] = revision
+        self._advance_store_revision_unlocked()
+        self._safe_write_text(
+            self._manifest_path_for(record.id),
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+        record.revision = revision
+        record.content_revision = metadata["content_revision"]
+        record.content_updated_at = metadata["content_updated_at"]
+        if context_delta is not None:
+            self._cache_partial_projection(record.id, payload["projection_log"], partial_projection_state)
+
+    def _cache_record(self, record: ConversationRecord, *, copy_record: bool = True) -> None:
+        with self._process_lock:
+            self._record_cache[record.id] = copy.deepcopy(record) if copy_record else record
+            self._record_cache_stamps[record.id] = self._record_disk_stamp(record.id)
+            self._record_cache.move_to_end(record.id)
+            while len(self._record_cache) > self._MAX_RECORD_CACHE:
+                removed_id, _ = self._record_cache.popitem(last=False)
+                self._record_cache_stamps.pop(removed_id, None)
+            if self._summary_index is not None:
+                self._summary_index[record.id] = record.to_summary()
+                self._summary_index_stamps[record.id] = self._summary_disk_stamp(record.id)
 
     def _record_disk_stamp(self, conversation_id: str) -> tuple[tuple[int, int], ...]:
         paths = [
@@ -1139,6 +1331,9 @@ class ConversationRepository:
         if manifest is not None:
             for generation in self._manifest_generations(manifest):
                 paths.extend(self._generation_paths(conversation_id, generation))
+            for key in ("projection_log", "previous_projection_log"):
+                if key in manifest:
+                    paths.append(self._partial_projection_path(conversation_id, manifest[key]["generation"]))
         stamps: list[tuple[int, int]] = []
         for path in paths:
             try:
@@ -1168,6 +1363,10 @@ class ConversationRepository:
             if generation > 0 and generation not in generations:
                 generations.append(generation)
         return tuple(generations)
+
+    @staticmethod
+    def _manifest_revision(manifest: dict[str, Any]) -> int:
+        return int(manifest.get("revision") or manifest.get("current_generation") or 0)
 
     @staticmethod
     def _manifest_is_deleted(manifest: dict[str, Any]) -> bool:
@@ -1201,7 +1400,7 @@ class ConversationRepository:
                 raise ValueError("manifest must be an object")
             if payload.get("schema") != _STORAGE_MANIFEST_SCHEMA:
                 raise ValueError("unsupported manifest schema")
-            if int(payload.get("version") or 0) != _STORAGE_MANIFEST_VERSION:
+            if int(payload.get("version") or 0) not in {1, 2, 3, 4, 5, 6, 7, _STORAGE_MANIFEST_VERSION}:
                 raise ValueError("unsupported manifest version")
             if str(payload.get("conversation_id") or "") != self._safe_id(conversation_id):
                 raise ValueError("manifest conversation id mismatch")
@@ -1218,6 +1417,41 @@ class ConversationRepository:
             generations = self._manifest_generations(payload)
             if not generations or generations[0] != int(payload.get("current_generation") or 0):
                 raise ValueError("manifest has no valid current generation")
+            if "metadata" in payload:
+                metadata = payload["metadata"]
+                revision = payload.get("revision")
+                if not isinstance(metadata, dict) or metadata.get("id") != conversation_id:
+                    raise ValueError("manifest metadata conversation id mismatch")
+                if isinstance(revision, bool) or not isinstance(revision, int) or revision < generations[0]:
+                    raise ValueError("manifest metadata revision is invalid")
+                if metadata.get("revision") != revision:
+                    raise ValueError("manifest metadata revision mismatch")
+            if "previous_metadata" in payload:
+                metadata = payload["previous_metadata"]
+                if not isinstance(metadata, dict) or metadata.get("id") != conversation_id:
+                    raise ValueError("previous metadata conversation id mismatch")
+                revision = metadata.get("revision")
+                if isinstance(revision, bool) or not isinstance(revision, int) or not 0 < revision < generations[0]:
+                    raise ValueError("previous metadata revision is invalid")
+            if "partial_projection" in payload:
+                revision = payload.get("projection_revision")
+                if isinstance(revision, bool) or not isinstance(revision, int) or not generations[0] <= revision <= self._manifest_revision(payload):
+                    raise ValueError("partial projection revision is invalid")
+            for key, generation_key, revision_limit in (
+                ("projection_log", "current_generation", self._manifest_revision(payload)),
+                ("previous_projection_log", "previous_generation", generations[0] - 1),
+            ):
+                if key not in payload:
+                    continue
+                pointer = payload[key]
+                if not isinstance(pointer, dict) or any(
+                    isinstance(pointer.get(field), bool) or not isinstance(pointer.get(field), int)
+                    for field in ("generation", "bytes", "revision")
+                ):
+                    raise ValueError("invalid projection log pointer")
+                if (pointer["generation"] != payload.get(generation_key) or pointer["bytes"] <= 0
+                        or not pointer["generation"] <= pointer["revision"] <= revision_limit):
+                    raise ValueError("projection log does not address its generation")
             self._manifest_cache[conversation_id] = (stamp, payload)
             return payload
         except Exception as exc:
@@ -1240,7 +1474,10 @@ class ConversationRepository:
         # execution-recovery journal. Enforce the same allowlist for every
         # write path, including imports, clones, branch merges, and detached
         # ConversationRecord callers that bypass append/upsert helpers.
-        record.transcript = project_public_transcript(record.transcript)
+        record.transcript = _normalize_loaded_transcript(record.transcript)
+        for index, message in enumerate(record.transcript):
+            if not message["id"]:
+                message["id"] = f"legacy-message-{index}"
         record.message_count = len(record.transcript)
         manifest = self._read_manifest(record.id, log_errors=False)
         if manifest is not None and self._manifest_is_deleted(manifest):
@@ -1251,8 +1488,10 @@ class ConversationRepository:
             )
         known_generations = list(self._manifest_generations(manifest or {}))
         current_generation = known_generations[0] if known_generations else 0
+        current_revision = self._manifest_revision(manifest or {})
         expected_revision = max(0, int(getattr(record, "revision", 0) or 0))
-        # Validate every referenced generation before choosing the fallback.
+        # Validate the current checkpoint, using its cached disk identity when
+        # available. Only read an older checkpoint when recovery needs it.
         # A reader may have returned ``previous_generation`` because the
         # manifest's current generation is damaged.  That is a recoverable
         # storage state: publish a new generation from the readable record
@@ -1260,9 +1499,15 @@ class ConversationRepository:
         # other revision mismatch remains a real write conflict.
         readable_generations: list[int] = []
         generation_errors: list[tuple[int, ConversationStorageCorruptError]] = []
+        cached = self._record_cache.get(record.id)
+        cache_is_current = (
+            cached is not None and cached.revision == current_revision
+            and self._record_cache_stamps.get(record.id) == self._record_disk_stamp(record.id)
+        )
         for generation in known_generations:
             try:
-                self._read_generation(record.id, generation, log_errors=False)
+                if not (generation == current_generation and cache_is_current):
+                    self._read_generation(record.id, generation, log_errors=False)
             except ConversationStorageCorruptError as exc:
                 generation_errors.append((generation, exc))
                 logger.warning(
@@ -1273,6 +1518,7 @@ class ConversationRepository:
                 )
             else:
                 readable_generations.append(generation)
+                break
 
         if known_generations and not readable_generations:
             detail = "; ".join(
@@ -1287,13 +1533,19 @@ class ConversationRepository:
         current_generation_corrupt = bool(
             current_generation and current_generation not in readable_generations
         )
-        if expected_revision != current_generation and not (
-            current_generation_corrupt and expected_revision in readable_generations
+        previous_metadata = (manifest or {}).get("previous_metadata")
+        recovered_revision = (
+            int(previous_metadata["revision"])
+            if isinstance(previous_metadata, dict)
+            else readable_generations[0] if readable_generations else 0
+        )
+        if expected_revision != current_revision and not (
+            current_generation_corrupt and expected_revision == recovered_revision
         ):
             raise ConversationWriteConflict(
                 record.id,
                 expected=expected_revision,
-                current=current_generation,
+                current=current_revision,
             )
 
         previous_generation: int | None = (
@@ -1316,7 +1568,15 @@ class ConversationRepository:
                 self._write_generation(legacy, previous_generation)
                 known_generations.append(previous_generation)
 
-        next_generation = max(known_generations, default=0) + 1
+        next_generation = max([current_revision, *known_generations]) + 1
+        previous_record = cached if cache_is_current else self._load_record_for_mutation(record.id)
+        previous_content_version = (record.content_revision, record.content_updated_at)
+        if previous_record is None or previous_record.transcript != record.transcript:
+            record.content_revision = next_generation
+            record.content_updated_at = record.updated_at
+        else:
+            record.content_revision = previous_record.content_revision
+            record.content_updated_at = previous_record.content_updated_at
         record.revision = next_generation
         # Advance before publishing the record. A crash can leave a harmless
         # gap in the global inventory sequence, but can never publish a record
@@ -1327,7 +1587,25 @@ class ConversationRepository:
             "conversation_id": record.id,
             "current_generation": next_generation,
             "previous_generation": previous_generation,
+            "revision": next_generation,
+            "metadata": record.to_meta_dict(),
         }
+        if manifest is not None:
+            previous_metadata = manifest.get(
+                "metadata" if previous_generation == current_generation else "previous_metadata"
+            )
+            if isinstance(previous_metadata, dict):
+                manifest_payload["previous_metadata"] = previous_metadata
+            previous_projection = manifest.get(
+                "partial_projection" if previous_generation == current_generation else "previous_projection"
+            )
+            if previous_projection is not None:
+                manifest_payload["previous_projection"] = previous_projection
+            previous_log = manifest.get(
+                "projection_log" if previous_generation == current_generation else "previous_projection_log"
+            )
+            if previous_log is not None:
+                manifest_payload["previous_projection_log"] = previous_log
         manifest_path = self._manifest_path_for(record.id)
         try:
             self._advance_store_revision_unlocked()
@@ -1349,6 +1627,8 @@ class ConversationRepository:
                 if published_generations and published_generations[0] == next_generation
                 else expected_revision
             )
+            if record.revision != next_generation:
+                record.content_revision, record.content_updated_at = previous_content_version
             raise
         manifest_stat = manifest_path.stat()
         self._manifest_cache[record.id] = (
@@ -1371,16 +1651,15 @@ class ConversationRepository:
 
     def _write_generation(self, record: ConversationRecord, generation: int) -> None:
         meta_path, transcript_path, snapshot_path = self._generation_paths(record.id, generation)
+        transcript_text, transcript_index = encode_transcript(record.transcript)
+        metadata = {**record.to_meta_dict(), "transcript_index_version": 1,
+                    "transcript_index": transcript_index,
+                    "public_context_snapshot": project_public_conversation(record, include_transcript=False)["context_snapshot"]}
         self._safe_write_text(
             meta_path,
-            json.dumps(record.to_meta_dict(), ensure_ascii=False, indent=2),
+            json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",
         )
-        transcript_text = ""
-        if record.transcript:
-            transcript_text = "\n".join(
-                json.dumps(item, ensure_ascii=False) for item in record.transcript
-            ) + "\n"
         self._safe_write_text(transcript_path, transcript_text, encoding="utf-8")
         self._safe_write_text(
             snapshot_path,
@@ -1399,13 +1678,7 @@ class ConversationRepository:
         try:
             if not meta_path.exists() or not transcript_path.exists() or not snapshot_path.exists():
                 raise FileNotFoundError(f"generation {generation} is incomplete")
-            meta_payload = repair_mojibake_payload(
-                json.loads(self._safe_read_text(meta_path, encoding="utf-8"))
-            )
-            if not isinstance(meta_payload, dict):
-                raise ValueError("generation meta must be an object")
-            if str(meta_payload.get("id") or "") != conversation_id:
-                raise ValueError("generation meta conversation id mismatch")
+            meta_payload = self._read_generation_metadata(conversation_id, generation)
             transcript = self._read_transcript_path(transcript_path, strict=True, repair_encoding=False)
             snapshot = self._read_snapshot_path(snapshot_path, strict=True, repair_encoding=False)
             if "message_count" in meta_payload and int(meta_payload["message_count"]) != len(transcript):
@@ -1431,10 +1704,20 @@ class ConversationRepository:
                 f"Conversation '{conversation_id}' generation {generation} is corrupt: {exc}"
             ) from exc
 
+    def _read_generation_metadata(self, conversation_id: str, generation: int) -> dict[str, Any]:
+        path = self._generation_paths(conversation_id, generation)[0]
+        try:
+            value = repair_mojibake_payload(json.loads(self._safe_read_text(path)))
+            if not isinstance(value, dict) or value.get("id") != conversation_id:
+                raise ValueError("generation metadata owner mismatch")
+            return value
+        except (OSError, ValueError) as exc:
+            raise ConversationStorageCorruptError(f"Conversation metadata is unreadable: {conversation_id}") from exc
+
     def _cleanup_generations(self, conversation_id: str, *, keep: set[int]) -> None:
         safe_id = self._safe_id(conversation_id)
         pattern = re.compile(
-            rf"^{re.escape(safe_id)}\.g(\d+)\.(?:meta\.json|transcript\.jsonl|snapshot\.json)$"
+            rf"^{re.escape(safe_id)}\.g(\d+)\.(?:meta\.json|transcript\.jsonl|snapshot\.json|projection\.jsonl)$"
         )
         for path in self._base_dir.glob(f"{safe_id}.g*"):
             match = pattern.fullmatch(path.name)
@@ -1446,7 +1729,11 @@ class ConversationRepository:
                 logger.warning("Failed to remove stale conversation generation %s: %s", path, exc)
 
     @contextmanager
-    def _store_lock(self):
+    def _store_lock(self, *conversation_ids: str):
+        if conversation_ids:
+            with file_mutation_locks(self._manifest_path_for(cid) for cid in conversation_ids):
+                yield
+            return
         with self._process_lock:
             try:
                 with self._store_file_lock.acquire(timeout=5.0):
@@ -1514,16 +1801,17 @@ class ConversationRepository:
         return instance_id
 
     def _advance_store_revision_unlocked(self) -> int:
-        revision = self._read_store_revision_unlocked() + 1
-        self._safe_write_text(
-            self._store_revision_path,
-            f"{revision}\n",
-            encoding="utf-8",
-        )
-        return revision
+        with self._store_lock():
+            revision = self._read_store_revision_unlocked() + 1
+            self._safe_write_text(
+                self._store_revision_path,
+                f"{revision}\n",
+                encoding="utf-8",
+            )
+            return revision
 
     def _load_record_for_mutation(
-        self, conversation_id: str
+        self, conversation_id: str, *, copy_history: bool = True,
     ) -> ConversationRecord | None:
         cached = self._record_cache.get(conversation_id)
         if (
@@ -1531,9 +1819,24 @@ class ConversationRepository:
             and self._record_cache_stamps.get(conversation_id)
             == self._record_disk_stamp(conversation_id)
         ):
-            return copy.deepcopy(cached)
+            if copy_history:
+                return copy.deepcopy(cached)
+            record = copy.copy(cached)
+            record.transcript = cached.transcript.copy()
+            return record
         loaded = self._load_record(conversation_id)
         return copy.deepcopy(loaded) if loaded is not None else None
+
+    def get_projection_context(self, conversation_id: str) -> tuple[int, dict[str, Any]] | None:
+        """Read the owned context as an immutable delta base; callers never mutate it."""
+        with self._store_lock(conversation_id):
+            cached = self._record_cache.get(conversation_id)
+            if cached is None or self._record_cache_stamps.get(conversation_id) != self._record_disk_stamp(conversation_id):
+                cached = self._load_record(conversation_id)
+                if cached is None:
+                    return None
+                self._cache_record(cached, copy_record=False)
+            return cached.revision, cached.context_snapshot
 
     def _load_record(self, conversation_id: str) -> ConversationRecord | None:
         if self._manifest_path_for(conversation_id).exists():
@@ -1558,7 +1861,25 @@ class ConversationRepository:
                         generation,
                         log_errors=attempt > 0,
                     )
-                except ConversationStorageCorruptError as exc:
+                    metadata = manifest.get("metadata" if index == 0 else "previous_metadata")
+                    if isinstance(metadata, dict):
+                        record = ConversationRecord.from_dict({
+                            **metadata,
+                            "transcript": record.transcript,
+                            "context_snapshot": record.context_snapshot,
+                        })
+                    projection = self._load_partial_projection(conversation_id, manifest, previous=index > 0)
+                    if projection:
+                        record.context_snapshot = apply_context_snapshot_delta(record.context_snapshot, projection["context_delta"])
+                        if projection.get("assistant_message") is not None:
+                            message = project_public_transcript_message(projection["assistant_message"])
+                            found = next((i for i, item in enumerate(record.transcript) if item.get("id") == message.get("id")), None)
+                            if found is None:
+                                record.transcript.append(message)
+                            else:
+                                record.transcript[found] = message
+                            record.message_count = len(record.transcript)
+                except (ConversationStorageCorruptError, ValueError, TypeError, KeyError) as exc:
                     generation_errors.append(str(exc))
                     continue
                 if index > 0:
@@ -1662,8 +1983,13 @@ class ConversationRepository:
 
     def _load_summary(self, conversation_id: str) -> ConversationSummary | None:
         if self._manifest_path_for(conversation_id).exists():
-            record = self._load_committed_record(conversation_id)
-            return record.to_summary() if record is not None else None
+            manifest = self._read_manifest(conversation_id)
+            if self._manifest_is_deleted(manifest):
+                return None
+            metadata = manifest.get("metadata")
+            if metadata is None:
+                metadata = self._read_generation_metadata(conversation_id, manifest["current_generation"])
+            return ConversationSummary.from_dict(metadata)
         meta_path = self._meta_path_for(conversation_id)
         if meta_path.exists():
             try:
@@ -1799,6 +2125,43 @@ class ConversationRepository:
     def _legacy_path_for(self, conversation_id: str) -> Path:
         return self._base_dir / f"{self._safe_id(conversation_id)}.json"
 
+    def _partial_projection_path(self, conversation_id: str, generation: int) -> Path:
+        return self._base_dir / f"{self._safe_id(conversation_id)}.g{generation}.projection.jsonl"
+
+    def _cache_partial_projection(
+        self, conversation_id: str, pointer: dict[str, int], projection: dict[str, Any],
+    ) -> None:
+        stat = self._partial_projection_path(conversation_id, pointer["generation"]).stat()
+        with self._process_lock:
+            self._partial_projection_cache[conversation_id] = (
+                pointer["generation"], pointer["bytes"], (stat.st_mtime_ns, stat.st_size), projection,
+            )
+            self._partial_projection_cache.move_to_end(conversation_id)
+            while len(self._partial_projection_cache) > self._MAX_RECORD_CACHE:
+                self._partial_projection_cache.popitem(last=False)
+
+    def _load_partial_projection(
+        self, conversation_id: str, manifest: dict[str, Any], *, previous: bool = False,
+    ) -> dict[str, Any]:
+        pointer = manifest.get("previous_projection_log" if previous else "projection_log")
+        if pointer is None:
+            return manifest.get("previous_projection" if previous else "partial_projection") or {}
+        path = self._partial_projection_path(conversation_id, pointer["generation"])
+        try:
+            stat = path.stat()
+            cached = self._partial_projection_cache.get(conversation_id)
+            if cached is not None and cached[:3] == (
+                pointer["generation"], pointer["bytes"], (stat.st_mtime_ns, stat.st_size),
+            ):
+                return cached[3]
+            projection = read_projection(path, committed_bytes=pointer["bytes"], revision=pointer["revision"])
+            self._cache_partial_projection(conversation_id, pointer, projection)
+            return projection
+        except (OSError, UnicodeDecodeError, ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+            raise ConversationStorageCorruptError(
+                f"Conversation projection for '{conversation_id}' is corrupt: {exc}"
+            ) from exc
+
     def _manifest_path_for(self, conversation_id: str) -> Path:
         return self._base_dir / f"{self._safe_id(conversation_id)}.manifest.json"
 
@@ -1923,7 +2286,11 @@ def _normalize_loaded_transcript(
     # Legacy generations may predate the public transcript boundary. Project
     # on every load so hydration/export cannot re-expose raw provider frames,
     # credentials, runtime ownership fences, or arbitrary extension metadata.
-    return project_public_transcript(normalized)
+    projected = project_public_transcript(normalized)
+    for index, message in enumerate(projected):
+        if not message["id"]:
+            message["id"] = f"legacy-message-{index}"
+    return projected
 
 
 def _is_legacy_raw_provider_reasoning_block(block: Any) -> bool:

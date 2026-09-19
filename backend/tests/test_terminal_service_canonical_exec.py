@@ -87,3 +87,16 @@ async def test_terminal_exec_fails_closed_without_canonical_approval(tmp_path) -
     assert tool.executed == []
     assert payload["exit_code"] == -1
     assert "requires approval" in payload["output"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_exec_does_not_invent_exit_zero_for_a_yielded_process(tmp_path) -> None:
+    class YieldedCommand(_RecordingCommandTool):
+        async def execute(self, args, context=None):
+            return ToolResult(content="Background command bg_live (running)\nnext_cursor: 0")
+    checker = PermissionChecker(PermissionSettings(), tmp_path)
+    context = _context(tmp_path, checker)
+    context.permission = checker.build_context(mode="bypass", source="test")
+    payload = await run_terminal_exec_command("long build", str(tmp_path), tool=YieldedCommand(), context=context, conversation_id="conversation-test")
+    assert "exit_code" not in payload
+    assert "bg_live" in payload["output"]

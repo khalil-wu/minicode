@@ -533,7 +533,7 @@ def test_checkpoint_corruption_blocks_stale_fallback(tmp_path: Path) -> None:
     )
     assert path.name.count("-") >= 1
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 10
     assert payload["sequence"] >= 1
     assert payload["checksum"]
 

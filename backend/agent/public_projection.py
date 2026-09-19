@@ -328,6 +328,7 @@ def project_public_swarm_message(value: Any) -> dict[str, Any]:
         "conversation_id",
         "team_name",
         "task_id",
+        "summary",
     ):
         if key in source:
             projected[key] = public_text(

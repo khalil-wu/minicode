@@ -627,6 +627,7 @@ def test_conversation_runtime_purge_bounds_cancellation_resistant_ui_state_task(
             ws_manager=None,
             cleanup_tasks=cleanup_tasks,
             _ui_agent_state_tasks={owner: ui_task},
+            conversation_runtime=SimpleNamespace(forget_code_store=lambda _owner: 0),
             _ui_agent_state_pending={owner: {}},
             _ui_agent_state_cache={owner: {}},
             _conversation_streams={owner: object()},
@@ -642,12 +643,12 @@ def test_conversation_runtime_purge_bounds_cancellation_resistant_ui_state_task(
             diagnostic_store=SimpleNamespace(delete_for_conversation=lambda _owner: 0),
         )
 
-        result = await conversation_handlers._purge_conversation_runtime_state(
-            session,
-            owner,
-        )
-        release.set()
-        await asyncio.wait_for(ui_task, timeout=1)
+        try:
+            result = await conversation_handlers._purge_conversation_runtime_state(session, owner)
+        finally:
+            release.set()
+            await asyncio.wait_for(ui_task, timeout=1)
+            await asyncio.gather(*cleanup_tasks)
         return result
 
     counts, errors = asyncio.run(scenario())

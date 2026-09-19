@@ -1389,6 +1389,71 @@ export const ProviderTab = ({
         </SelectMenu>
       </Section>
 
+      {modelName && !isDraftModelId(modelName) && (
+        <Section title="当前模型行为" description={`选择默认模型；下方行为设置仅应用于 ${modelName}，随提供商配置保存。`}>
+          <SelectMenu ariaLabel="默认模型" value={modelName} onValueChange={selectModel} disabled={busy}>
+            {configuredModelList.map((id) => <option key={id} value={id}>{id}</option>)}
+          </SelectMenu>
+          {effectiveWireApi === "responses" && (
+            <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+              <input
+                type="checkbox"
+                disabled={busy}
+                checked={modelMetadata[modelName]?.supports_custom_tools === true}
+                onChange={(event) => {
+                  const enabled = event.target.checked;
+                  setModelMetadata((previous) => ({ ...previous, [modelName]: { ...previous[modelName], supports_custom_tools: enabled } }));
+                }}
+              />
+              <span>原生补丁输入（需要模型及接口支持 custom tools）</span>
+            </label>
+          )}
+          {effectiveWireApi === "responses" && (
+            <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+              <input
+                type="checkbox"
+                disabled={busy}
+                checked={modelMetadata[modelName]?.responses_websocket === true}
+                onChange={(event) => {
+                  const enabled = event.target.checked;
+                  setModelMetadata((previous) => ({ ...previous, [modelName]: { ...previous[modelName], responses_websocket: enabled } }));
+                }}
+              />
+              <span>WebSocket 增量传输（接口支持时启用）</span>
+            </label>
+          )}
+          {effectiveWireApi === "responses" && (
+            <label style={{ display: "grid", gap: 6, marginBottom: 12 }}>
+              <span>上下文压缩方式</span>
+              <SelectMenu ariaLabel="上下文压缩方式" disabled={busy}
+                value={modelMetadata[modelName]?.native_compaction == null ? "auto" : modelMetadata[modelName]?.native_compaction ? "native" : "local"}
+                onValueChange={(value) => setModelMetadata((previous) => ({ ...previous, [modelName]: {
+                  ...previous[modelName], native_compaction: value === "auto" ? null : value === "native",
+                } }))}>
+                <option value="auto">自动选择</option>
+                <option value="native">提供商原生压缩</option>
+                <option value="local">文本摘要</option>
+              </SelectMenu>
+              <small>原生压缩需要接口支持；生成的加密上下文需继续使用同一提供商的 Responses 接口。</small>
+            </label>
+          )}
+          <label style={{ display: "grid", gap: 6 }}>
+            <span>模型附加指令</span>
+            <textarea
+              rows={4}
+              disabled={busy}
+              value={modelMetadata[modelName]?.model_instructions ?? ""}
+              onChange={(event) => {
+                const instructions = event.target.value;
+                setModelMetadata((previous) => ({ ...previous, [modelName]: { ...previous[modelName], model_instructions: instructions } }));
+              }}
+              placeholder="留空使用 MiniCode 默认指令；填写该模型需要的补充指导。"
+              style={{ ...inputStyle, width: "100%", resize: "vertical" }}
+            />
+          </label>
+        </Section>
+      )}
+
       {responsesCachingEnabled && (
         <Section title="Responses 提示词缓存" description="仅 Responses API 使用；Chat Completions 与 Anthropic Messages 不发送这个字段。">
           <SettingSelect

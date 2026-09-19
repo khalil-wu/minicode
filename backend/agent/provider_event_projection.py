@@ -13,7 +13,7 @@ from pydantic_core import from_json
 from backend.agent.message import AgentEvent
 from backend.agent.stream_attempt import StreamAttemptState, StreamTextState
 from backend.agent.tool_events import tool_call_pending_event
-from backend.llm.base import StreamEvent, StreamEventType
+from backend.llm.base import StreamEvent, StreamEventType, ToolCallStartEvent
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +85,7 @@ async def project_non_text_provider_event(
         yield ProviderProjectionResult(True)
         return
     if event.type == StreamEventType.PROVIDER_ACTIVITY:
+        stream_state.saw_provider_activity = True
         activity = stream_state.accept_provider_activity(event.provider_activity)
         if activity is not None and activity.message:
             status = str(activity.status or "info").strip().lower()
@@ -190,14 +191,12 @@ async def project_non_text_provider_event(
     stream_text.reclassify_unphased_as_process()
 
     tool_only_batch = bool(
-        event.tool_calls_final and not stream_text.agent_message_started
+        (event.tool_calls_final or event.tool_calls_committed) and not stream_text.agent_message_started
     )
 
-    if event.tool_calls_final and stream_text.agent_message_started:
-        # Partial tool frames are transport detail, not an assistant-item
-        # boundary. Tool execution is intentionally deferred until the final
-        # assistant item is settled, so retries and length-truncated responses
-        # cannot leak side effects.
+    if (event.tool_calls_final or event.tool_calls_committed) and stream_text.agent_message_started:
+        # A committed native tool item closes its preceding narration before
+        # execution. Uncommitted previews still wait for the final batch.
         completed = stream_text.complete_active_agent_message(
             stream_text.active_agent_message_text,
             # An unphased provisional item is narration once a tool boundary
@@ -216,7 +215,7 @@ async def project_non_text_provider_event(
                     "name": str(tool_call.name or ""),
                     "arguments": dict(tool_call.arguments or {}),
                 }
-                for tool_call in stream_state.tool_calls
+                for tool_call in (event.tool_calls if event.tool_calls_committed else stream_state.tool_calls)
                 if str(tool_call.id or "").strip()
             ]
             yield completed
@@ -242,10 +241,22 @@ async def project_non_text_provider_event(
             sdk_only=True,
         )
 
+    if event.tool_calls_committed:
+        for call in event.tool_calls:
+            if call.id not in stream_state.partial_tool_names:
+                stream_state.partial_tool_names[call.id] = call.name
+                pending_event = tool_call_pending_event(
+                    ToolCallStartEvent(id=call.id, name=call.name),
+                    started_at=int(time.time() * 1000), iteration_id=stream_text.iteration_id,
+                    tool_registry=tool_registry,
+                )
+                if isinstance(call.arguments, dict):
+                    pending_event.data["args"] = dict(call.arguments)
+                yield pending_event
     tool_tracker.add_tools(list(outcome.complete_tool_calls))
     await asyncio.sleep(0)
     pending = stream_state.tool_calls
-    if event.tool_calls_final and pending:
+    if (event.tool_calls_final or event.tool_calls_committed) and pending:
         source = stream_text.process_text_source
         if live_text_streaming and source != "model_preamble_retracted":
             projected = stream_text.maybe_stream_process_text(

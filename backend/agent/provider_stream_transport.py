@@ -22,9 +22,14 @@ from backend.agent.provider_stream_failures import (
     recover_provider_failure,
     recover_stream_timeout,
 )
+from backend.agent.policies.stream_retry import (
+    StreamRetryState,
+    plan_connection_retry,
+)
 from backend.llm.base import UsageInfo
 from backend.llm.errors import (
     classify_llm_error,
+    is_connection_not_established,
     llm_error_status_code,
     retry_after_seconds,
 )
@@ -67,6 +72,7 @@ async def handle_provider_transport_failure(
     progress_id: str = "",
     max_retries: int | None = None,
     close_stream: Callable[[], Awaitable[None]] | None = None,
+    switch_transport: Callable[[], bool] | None = None,
 ) -> AsyncIterator[AgentEvent | ProviderTransportFailureResult]:
     """Retry a replay-safe transport failure or finish through typed recovery."""
 
@@ -84,24 +90,58 @@ async def handle_provider_transport_failure(
     if status_code is not None:
         error_parts.append(f"status={status_code}")
     error_message = " ".join(error_parts)
+    # Text is speculative until the attempt is accepted. Only committed tool
+    # effects and non-text results prevent replay; visible text is retracted by
+    # reset_for_provider_retry before the next attempt is exposed.
     safe_to_replay = (
-        not stream_text.full_text
-        and not pending_tool_calls
-        and not stream_state.saw_partial_tool_call
+        not stream_state.committed_tool_ids
         and not stream_state.has_non_text_result
     )
-    new_attempt, retry_delay = (
-        plan_stream_retry(
-            stream_retry_policy,
-            error_message,
-            stream_attempt,
-            query_source=query_source,
-            retry_state=retry_state,
-        )
-        if safe_to_replay
-        else (stream_attempt, None)
+    connection_retry_state = retry_state if retry_state is not None else StreamRetryState()
+    # A connect-phase failure is waited out instead of budgeted. Nothing reached
+    # the provider, so reissuing the same attempt cannot replay a poisoned
+    # request, and the cause is almost always the user's network coming back.
+    # This is decided before the request retry policy so the two budgets stay
+    # independent: only the unconnectable case is unbounded.
+    connection_retry = bool(
+        safe_to_replay
+        and not is_timeout
+        and getattr(settings, "stream_connection_retries_enabled", True)
+        and is_connection_not_established(cause)
     )
+    if connection_retry:
+        retry_delay = plan_connection_retry(connection_retry_state)
+        # The request's retry ordinal does not advance: no request-level retry
+        # was spent, so the UI must not advertise a count it did not consume.
+        new_attempt = stream_attempt
+    else:
+        new_attempt, retry_delay = (
+            plan_stream_retry(
+                stream_retry_policy,
+                error_message,
+                stream_attempt,
+                query_source=query_source,
+                retry_state=retry_state,
+            )
+            if safe_to_replay
+            else (stream_attempt, None)
+        )
     if safe_to_replay and retry_delay is not None:
+        # Reserve the last existing retry for HTTP when WS repeatedly fails.
+        # This does not extend the retry budget or replay committed effects.
+        retry_limit = max_retries if max_retries is not None else settings.stream_max_attempts
+        if (
+            not connection_retry
+            and new_attempt > 1
+            and new_attempt == retry_limit
+            and switch_transport is not None
+            and switch_transport()
+        ):
+            yield AgentEvent.progress(
+                "WebSocket 持续中断，改用 HTTPS 重试。",
+                stage="status", status="running", phase="recover", label="provider",
+                provider_state="reconnecting", id=progress_id or provider_progress_id(iteration_id_value),
+            )
         if not is_timeout:
             provider_retry_after = retry_after_seconds(cause)
             if provider_retry_after > 0:
@@ -130,34 +170,51 @@ async def handle_provider_transport_failure(
             project_progress=False,
         )
         emit_runtime_span = getattr(turn_kernel, "emit_runtime_span", None)
+        # A connect-phase wait does not advance the request retry ordinal, so
+        # its own counter keeps each attempt's span and row distinct instead of
+        # collapsing them onto the unchanged ordinal.
+        retry_marker = (
+            f"net{connection_retry_state.connection_retries}"
+            if connection_retry
+            else str(new_attempt)
+        )
+        span_summary = (
+            "Model transport unreachable; waiting for network"
+            if connection_retry
+            else "Model stream timed out; reconnecting"
+            if is_timeout
+            else "Model stream disconnected; reconnecting"
+        )
         if emit_runtime_span is not None:
             await emit_runtime_span(
                 "recovery.retry.started",
                 span_id=(
-                    f"recovery:{provider_attempt.span_id}:{new_attempt}"
+                    f"recovery:{provider_attempt.span_id}:{retry_marker}"
                     if getattr(provider_attempt, "span_id", "")
-                    else f"recovery:{iteration_id_value}:{new_attempt}"
+                    else f"recovery:{iteration_id_value}:{retry_marker}"
                 ),
                 iteration_id=iteration_id_value,
                 phase="recovery",
                 status="running",
                 label="recovery",
-                summary=(
-                    "Model stream timed out; reconnecting"
-                    if is_timeout
-                    else "Model stream disconnected; reconnecting"
-                ),
+                summary=span_summary,
                 data={
-                    "stream_attempt": new_attempt,
-                    "retry_attempt": new_attempt,
-                    "max_retries": max(
-                        0,
-                        int(
-                            max_retries
-                            if max_retries is not None
-                            else getattr(settings, "stream_max_attempts", 0) or 0
-                        ),
+                    "stream_attempt": stream_attempt,
+                    "retry_attempt": None if connection_retry else new_attempt,
+                    "max_retries": (
+                        None
+                        if connection_retry
+                        else max(
+                            0,
+                            int(
+                                max_retries
+                                if max_retries is not None
+                                else getattr(settings, "stream_max_attempts", 0) or 0
+                            ),
+                        )
                     ),
+                    "connection_retry": connection_retry,
+                    "connection_retries": connection_retry_state.connection_retries,
                     "provider_error_type": provider_error_type,
                     "error_type": error_type,
                 },
@@ -170,27 +227,35 @@ async def handle_provider_transport_failure(
                 else getattr(settings, "stream_max_attempts", 0) or 0
             ),
         )
-        retry_label = (
-            f"第 {new_attempt}/{effective_max_retries} 次"
-            if effective_max_retries > 0
-            else f"第 {new_attempt} 次"
-        )
+        if connection_retry:
+            # No ordinal: the wait is unbounded, so advertising N/M would claim
+            # a budget that is not being spent.
+            progress_message = "无法连接提供商，正在等待网络恢复"
+            progress_summary = span_summary
+            progress_retry_attempt = None
+            progress_max_retries = None
+        else:
+            retry_label = (
+                f"第 {new_attempt}/{effective_max_retries} 次"
+                if effective_max_retries > 0
+                else f"第 {new_attempt} 次"
+            )
+            progress_message = f"连接中断，正在重连（{retry_label}）"
+            progress_summary = span_summary
+            progress_retry_attempt = new_attempt
+            progress_max_retries = effective_max_retries
         yield AgentEvent.progress(
-            f"连接中断，正在重连（{retry_label}）",
+            progress_message,
             stage="status",
             status="running",
             id=progress_id or provider_progress_id(iteration_id_value),
             phase="recover",
             label="provider",
-            count=new_attempt,
+            count=None if connection_retry else new_attempt,
             detail=f"{error_message[:320]} · {retry_delay:.1f} 秒后重试",
-            summary=(
-                "Model stream timed out; reconnecting"
-                if is_timeout
-                else "Model stream disconnected; reconnecting"
-            ),
-            retry_attempt=new_attempt,
-            max_retries=effective_max_retries,
+            summary=progress_summary,
+            retry_attempt=progress_retry_attempt,
+            max_retries=progress_max_retries,
             retry_after_ms=max(0, int(round(retry_delay * 1000))),
             error_message=error_message[:320],
             operation_id=progress_id,

@@ -1030,6 +1030,7 @@ def test_send_event_with_complete_owners_reaches_state_hooks_and_wire(
     session.send_payload.assert_awaited_once_with(
         sent_payload,
         log_context="event:workspace.imported",
+        wait_for_delivery=False,
     )
 
 
@@ -1348,7 +1349,7 @@ def test_replay_persistence_repairs_a_failed_sequence_from_the_staged_prefix() -
             {"type": "done", "seq": 2},
         ]
         owner._pending_persistence = deque()
-        await EventOutbox._persist_event(owner, owner._events[-1], None)
+        await EventOutbox._persist_batch(owner, [owner._events[-1]], None)
         assert not owner._persistence_failed_seqs
         return store
 

@@ -251,6 +251,29 @@ def test_main_responses_request_uses_minicode_session_identity_and_cache_clamp()
     assert request["parallel_tool_calls"] is True
 
 
+def test_responses_omits_parallel_execution_when_selected_model_disables_it() -> None:
+    adapter = OpenAIAdapter(
+        LLMSettings(
+            provider="openai", api_key="test-key", model="gateway-model",
+            wire_api="responses", parallel_tool_calls=False,
+        ),
+        http_client=_ResponsesCreate([_completed_response()]),
+    )
+
+    async def run():
+        events = await _collect(
+            adapter.stream_chat(
+                [LLMMessage(role="user", content="hello")],
+                metadata={"session_id": "session", "thread_id": "thread", "turn_id": "turn"},
+            )
+        )
+        assert events[-1].type == StreamEventType.DONE
+
+    asyncio.run(run())
+    request = adapter._http_client.requests[0]
+    assert request["parallel_tool_calls"] is False
+
+
 def test_raw_responses_transport_projects_minicode_body_extensions_directly() -> None:
     responses = _StrictResponsesCreate([_completed_response()])
     adapter = OpenAIAdapter(

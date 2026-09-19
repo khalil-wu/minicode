@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,19 @@ class SkillManager:
         self._loader.set_project_root(project_root)
         self._discovered = False
         self.discover()
+
+    def snapshot(self, project_root: Path | str | None = None) -> SkillManager:
+        """Capture discovery for a task without rebinding the window's loader."""
+        loader = deepcopy(self._loader)
+        snapshot = SkillManager(loader)
+        snapshot._discovered = self._discovered
+        if isinstance(loader, SkillLoader) and project_root is not None:
+            root = Path(project_root).expanduser().resolve()
+            if root != loader._project_root:
+                snapshot.set_project_root(root)
+        if not snapshot._discovered:
+            snapshot.discover()
+        return snapshot
 
     def _resolve_invocation_meta(self, skill_name: str) -> SkillMeta | None:
         """Resolve a name while keeping lightweight loader doubles compatible."""

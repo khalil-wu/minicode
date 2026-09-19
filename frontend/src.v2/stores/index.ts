@@ -100,13 +100,15 @@ useAppStore.subscribe(
     if (!evict.length) return;
 
     const next = { ...state.conversationMessages };
+    const historyPages = { ...useAppStore.getState().conversationHistoryPages };
     for (const id of evict) {
       delete next[id];
+      delete historyPages[id];
       conversationTranscriptAccess.delete(id);
     }
     pruningConversationTranscripts = true;
     try {
-      useAppStore.setState({ conversationMessages: next });
+      useAppStore.setState({ conversationMessages: next, conversationHistoryPages: historyPages });
     } finally {
       pruningConversationTranscripts = false;
     }

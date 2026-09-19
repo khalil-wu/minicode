@@ -371,3 +371,27 @@ def test_provider_metadata_preserves_max_reasoning_effort():
         reasoning_effort_levels=("max",),
     )
     assert request["reasoning"] == {"effort": "max"}
+
+
+def test_streaming_sanitizer_never_withholds_prose_that_merely_starts_like_a_tag() -> None:
+    from backend.agent.stream_sanitizer import ThinkingStreamSanitizer
+
+    for text in (
+        "In F# use `f <| x` for backward pipe. The rest of the answer follows.",
+        "I <think the loop is fine. Here is the rest of the answer.",
+        "trailing <thi",
+    ):
+        for size in (1, 3, 50):
+            sanitizer = ThinkingStreamSanitizer()
+            out = "".join(sanitizer.feed(text[i : i + size]) for i in range(0, len(text), size))
+            out += sanitizer.finish()
+            assert out == text, (size, text)
+
+
+def test_streaming_sanitizer_still_removes_real_reasoning_blocks() -> None:
+    from backend.agent.stream_sanitizer import ThinkingStreamSanitizer
+
+    text = "<think>\nhidden\n</think>\nshown"
+    sanitizer = ThinkingStreamSanitizer()
+    out = "".join(sanitizer.feed(c) for c in text) + sanitizer.finish()
+    assert out == "\nshown"

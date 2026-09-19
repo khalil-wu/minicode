@@ -2745,6 +2745,7 @@ class AgentRuntime:
         team_name: str = "",
         task_id: str = "",
         message_id: str = "",
+        summary: str = "",
         sender_mailbox_epoch: int | None = None,
         recipient_mailbox_epoch: int | None = None,
     ) -> SwarmMessageRecord:
@@ -2825,11 +2826,17 @@ class AgentRuntime:
         broadcast_epochs: dict[str, int] = {}
         if effective_recipient_id in {"all", "*"}:
             for participant_id, participant in self._subagents.items():
+                if str(participant.status or "") != "running":
+                    continue
                 parent = self._runs.get(str(participant.parent_run_id or "").strip())
                 participant_conversation = str(getattr(parent, "conversation_id", "") or "")
                 if conversation_id and participant_conversation != conversation_id:
                     continue
+                if team_name and str(participant.team_name or "") != str(team_name):
+                    continue
                 broadcast_epochs[participant_id] = int(participant.mailbox_epoch or 0)
+            if not broadcast_epochs:
+                raise ValueError("broadcast has no running recipients in this conversation")
         record = _swarm_message_from_dict(
             self._swarm_store.append_message({
                 "sender_id": sender_id,
@@ -2838,6 +2845,7 @@ class AgentRuntime:
                 "conversation_id": conversation_id,
                 "team_name": team_name,
                 "task_id": task_id,
+                "summary": summary,
                 "message_id": message_id,
                 "sender_mailbox_epoch": resolved_sender_epoch,
                 "recipient_mailbox_epoch": resolved_recipient_epoch,
@@ -2849,6 +2857,22 @@ class AgentRuntime:
         activity_ids = [sender_id]
         if effective_recipient_id == "parent" and virtual_parent_run_id:
             activity_ids.append(virtual_parent_run_id)
+            # A leader that is idle has no iteration boundary at which to read
+            # its mailbox. The durable outbox is the only wake signal the
+            # session watches, so a child->leader message leaves a marker
+            # there; the mailbox itself remains the source of the content.
+            parent_run = self.get_run(virtual_parent_run_id)
+            enqueue_parent_notification(
+                parent_run_id=virtual_parent_run_id,
+                conversation_id=str(getattr(parent_run, "conversation_id", "") or conversation_id),
+                session_id=str(getattr(parent_run, "session_id", "") or ""),
+                subagent_id=sender_id,
+                payload={"message_id": record.message_id},
+                kind="mailbox_wake",
+                idempotency_key=f"mailbox_wake:{record.message_id}",
+                base_dir=self._outbox_root,
+                mailbox_epoch=resolved_sender_epoch,
+            )
         elif effective_recipient_id not in {"", "all", "*"}:
             activity_ids.append(effective_recipient_id)
         self._record_agent_activity(
@@ -3179,6 +3203,26 @@ class AgentRuntime:
         for record in records:
             self._swarm_teams[record.team_name] = record
         return records
+
+    def running_team_members(
+        self,
+        *,
+        team_name: str,
+        conversation_id: str = "",
+    ) -> list[SubagentRunRecord]:
+        """Teammates of *team_name* that are still running."""
+        members: list[SubagentRunRecord] = []
+        for record in self._subagents.values():
+            if str(record.team_name or "") != str(team_name or ""):
+                continue
+            if str(record.status or "") != "running":
+                continue
+            if conversation_id:
+                parent = self._runs.get(str(record.parent_run_id or "").strip())
+                if str(getattr(parent, "conversation_id", "") or "") != str(conversation_id):
+                    continue
+            members.append(record)
+        return members
 
     def delete_swarm_team(
         self,

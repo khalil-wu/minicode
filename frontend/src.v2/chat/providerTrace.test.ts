@@ -805,3 +805,17 @@ describe("providerTrace helpers", () => {
     expect(providerTracePayloadFromExport({ kind: "unknown" })).toBeNull();
   });
 });
+
+
+it("shows actual WebSocket delta delivery separately from prompt caching", () => {
+  const raw: ProviderRawMetadata = { request_summary: { wire_api: "responses", request_params: { store: false },
+    input_items_logical_len: 2003, input_items_sent_len: 1,
+    transport: { mode: "websocket", incremental: true, connection_reused: true,
+      input_items_logical_len: 2003, input_items_sent_len: 1, request_json_bytes: 850 } } };
+  expect(providerRequestModeSummary(raw)).toBe("responses · WebSocket delta 1/2003 items · retention off · store false");
+  expect(providerSafeRequestPackage(raw).transport).toEqual(raw.request_summary?.transport);
+  expect(providerCurlSkeleton(raw)).toContain("full input");
+  expect(providerCurlSkeleton(raw)).toContain("items=2003");
+  expect(providerRequestModeSummary({ request_summary: { wire_api: "responses", transport: { mode: "http", fallback_status: 426 } } }))
+    .toContain("HTTP after upgrade 426");
+});

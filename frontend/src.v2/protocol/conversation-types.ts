@@ -268,6 +268,7 @@ export interface ConversationSummaryPayload {
 }
 
 export interface ConversationRecordPayload extends ConversationSummaryPayload {
+  transcript_page?: { before_message_id: string; has_more: boolean; total_messages: number };
   permission_deny_rules?: string[];
   permission_overrides?: Record<string, string>;
   compaction_summary?: string | null;
@@ -293,12 +294,14 @@ export interface ConversationSwitchedEvent {
   conversation_id?: string | null;
   conversation?: ConversationRecordPayload | null;
   is_hydrating?: boolean;
+  context_pending?: boolean;
   session?: RuntimeSessionSnapshot | null;
   snapshot_at?: string;
 }
 
 export interface LlmModelUpdatedEvent {
   type: "llm.model.updated";
+  conversation_id?: string | null;
   model?: string | null;
   current_model?: string | null;
   provider?: string | null;
@@ -518,11 +521,13 @@ export interface ConversationGoalSetCommand {
 
 export interface LlmModelSetCommand {
   type: "llm.model.set";
+  conversation_id?: string;
   model: string;
 }
 
 export interface LlmConfigSetCommand {
   type: "llm.config.set";
+  conversation_id?: string;
   provider: string;
   api_key?: string;
   base_url?: string;

@@ -367,3 +367,17 @@ def test_done_and_error_project_terminal_stream_status() -> None:
     failed = create_stream_state("conv-1", "assistant-2")
     _project(failed, "error", {"message": "provider failed"})
     assert failed["status"] == "failed"
+
+
+def test_agent_item_delta_extends_the_running_process_block() -> None:
+    state = create_stream_state("conv-1", "assistant-1")
+    _project(state, "agent.item", {
+        "id": "it:model-output:commentary", "kind": "process_text", "content": "first",
+        "status": "running", "source": "commentary",
+    })
+    _project(state, "agent.item.delta", {"item_id": "it:model-output:commentary", "delta": " second"})
+    blocks = [b for b in state["content_blocks"] if b.get("type") == "process"]
+    assert [b["content"] for b in blocks] == ["first second"]
+    # A delta for an unknown item is ignored rather than inventing a block.
+    _project(state, "agent.item.delta", {"item_id": "unknown", "delta": "x"})
+    assert len([b for b in state["content_blocks"] if b.get("type") == "process"]) == 1

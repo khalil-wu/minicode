@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
+const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
@@ -249,6 +250,35 @@ test("packaged Windows app boots renderer, preload, IPC, and managed Python side
   const nestedFile = path.join(userDataDir, "记得日记", "remember-diary", "src", "backup", "backupService.native.ts");
   fs.mkdirSync(path.dirname(nestedFile), { recursive: true });
   fs.writeFileSync(nestedFile, "export const backupFormat = 'JSON';\n", "utf8");
+  const wave = Buffer.alloc(1644);
+  wave.write("RIFF"); wave.writeUInt32LE(1636, 4); wave.write("WAVEfmt ", 8);
+  wave.writeUInt32LE(16, 16); wave.writeUInt16LE(1, 20); wave.writeUInt16LE(1, 22);
+  wave.writeUInt32LE(8000, 24); wave.writeUInt32LE(16000, 28);
+  wave.writeUInt16LE(2, 32); wave.writeUInt16LE(16, 34); wave.write("data", 36); wave.writeUInt32LE(1600, 40);
+  let providerCalls = 0;
+  let firstUserInput = null;
+  const provider = http.createServer(async (request, response) => {
+    if (request.method === "GET") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [{ id: "smoke-model", object: "model" }] }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const mainRequest = payload.tools?.some(tool => tool.function?.name === "tool_exec") === true;
+    if (mainRequest) {
+      providerCalls += 1;
+      if (providerCalls === 1) firstUserInput = payload.messages.filter(message => message.role === "user").at(-1).content;
+    }
+    const toolReply = mainRequest && providerCalls === 1;
+    const delta = toolReply ? { tool_calls: [{ index: 0, id: "audio-code", type: "function",
+      function: { name: "tool_exec", arguments: JSON.stringify({ code: `audio({data:${JSON.stringify(wave.toString("base64"))},media_type:"audio/wav"});` }) } }] }
+      : { content: "The audio fixture is ready for playback." };
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: toolReply ? "tool_calls" : "stop" }] })}\n\ndata: [DONE]\n\n`);
+  });
+  await new Promise(resolve => provider.listen(0, "127.0.0.1", resolve));
   const childEnv = { ...process.env };
   for (const name of [
     "ELECTRON_RUN_AS_NODE",
@@ -270,7 +300,7 @@ test("packaged Windows app boots renderer, preload, IPC, and managed Python side
     MINICODE_USER_DATA_DIR: userDataDir,
     LLM_PROVIDER: "custom",
     CUSTOM_API_KEY: "packaged-smoke-placeholder-no-generation",
-    CUSTOM_BASE_URL: "http://127.0.0.1:1/v1",
+    CUSTOM_BASE_URL: `http://127.0.0.1:${provider.address().port}/v1`,
     CUSTOM_MODEL: "smoke-model",
     CUSTOM_WIRE_API: "chat",
   });
@@ -400,6 +430,71 @@ test("packaged Windows app boots renderer, preload, IPC, and managed Python side
       assert.ok(projects.some(project => project.path === alpha));
       const savedProjects = JSON.parse(fs.readFileSync(path.join(userDataDir, "data", "recent_projects.json"), "utf8"));
       assert.ok(savedProjects.some(project => project.path === alpha), "Archiving the last task removed its saved project.");
+
+      const audioConversation = second.data.conversation_id;
+      const memoryMode = await command({ type: "conversation.memory_mode.set", conversation_id: audioConversation, memory_mode: "disabled" });
+      assert.equal(memoryMode.data.memory_mode, "disabled");
+      const completion = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`Audio query did not complete: ${JSON.stringify(events.slice(-4))}`)), 30000);
+        const receive = event => {
+          const value = JSON.parse(event.data);
+          if (value.type !== "done" || value.conversation_id !== audioConversation) return;
+          clearTimeout(timer); socket.removeEventListener("message", receive); resolve(value);
+        };
+        socket.addEventListener("message", receive);
+      });
+      socket.send(JSON.stringify({ type: "user_message", content: "Create the audio playback fixture.", conversation_id: audioConversation }));
+      const done = await completion;
+      assert.equal(done.status, "completed", JSON.stringify(done));
+      const audio = events.find(event => event.type === "artifact.preview" && event.media_type === "audio/wav");
+      assert.ok(audio, "Selected code audio did not produce a preview artifact.");
+      assert.equal(providerCalls, 2);
+      assert.ok(Array.isArray(firstUserInput), "Runtime context and the real request were flattened into one text block.");
+      assert.equal(firstUserInput.at(-1).text, "Create the audio playback fixture.");
+      const switched = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Audio conversation did not reload")), 10000);
+        const receive = event => {
+          const value = JSON.parse(event.data);
+          if (value.type !== "conversation.switched" || value.conversation_id !== audioConversation) return;
+          clearTimeout(timer); socket.removeEventListener("message", receive); resolve(value);
+        };
+        socket.addEventListener("message", receive);
+        socket.send(JSON.stringify({ type: "conversation.switch", conversation_id: audioConversation }));
+      });
+      const restored = switched.conversation;
+      assert.ok(restored.transcript.some(message => message.artifacts?.some(artifact => artifact.artifactId === audio.artifact_id)),
+        "Audio artifact was not retained in the conversation transcript.");
+      await command({ type: "read_artifact", artifact_id: audio.artifact_id, conversation_id: audioConversation });
+      const content = events.filter(event => event.type === "artifact_content").at(-1);
+      assert.equal(content.content, "");
+      assert.equal(content.url, undefined);
+
+      await evaluate(cdp, `(() => {
+        const store = window.__zustandStore;
+        store.getState().ensureCodeLayout();
+        store.setState({ previewOwnerConversationId: ${JSON.stringify(audioConversation)}, rightPanelOpen: true });
+        store.getState().setConversationPreviewArtifact(${JSON.stringify(audioConversation)}, {
+          artifactId: ${JSON.stringify(audio.artifact_id)}, name: "audio-smoke.wav", content: "", mediaType: "audio/wav", source: "artifact"
+        });
+        store.getState().setRightStackTab("preview");
+      })()`);
+      const playback = await evaluate(cdp, `(async () => {
+        const deadline = Date.now() + 10000;
+        while (!document.querySelector("audio") && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+        const audio = document.querySelector("audio");
+        if (!audio) throw new Error("Audio player was not rendered");
+        if (audio.error) throw new Error("Audio decode failed: " + audio.error.code);
+        if (audio.readyState < 1) await new Promise((resolve, reject) => {
+          audio.addEventListener("loadedmetadata", resolve, { once: true });
+          audio.addEventListener("error", () => reject(new Error("Audio decode failed: " + audio.error?.code)), { once: true });
+        });
+        audio.muted = true; await audio.play(); audio.pause(); audio.currentTime = 0.05;
+        return { duration: audio.duration, currentTime: audio.currentTime, controls: audio.controls, source: audio.src, error: audio.error?.code || null };
+      })()`);
+      assert.equal(playback.controls, true);
+      assert.equal(playback.error, null);
+      assert.ok(playback.duration > 0 && playback.currentTime > 0);
+      assert.ok(playback.source.includes("/api/artifacts/raw"));
     } finally {
       socket.close();
     }
@@ -443,5 +538,6 @@ test("packaged Windows app boots renderer, preload, IPC, and managed Python side
       terminateProcessTree(Number(pythonProcess.ProcessId));
     }
     fs.rmSync(userDataDir, { recursive: true, force: true });
+    await new Promise(resolve => provider.close(resolve));
   }
 });

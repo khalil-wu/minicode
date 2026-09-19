@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Any
+from urllib.parse import urlparse
 from backend.config import LLMSettings, normalize_custom_wire_api
 from backend.llm.reasoning_effort import normalize_reasoning_effort, reasoning_effort_levels
 
@@ -47,6 +48,7 @@ class ProviderCapabilities:
     image_generation: bool | None = None
     prompt_caching: bool | None = None
     native_cache_editing: bool | None = None
+    native_compaction: bool = False
     cache_deleted_usage: bool | None = None
     confidence: str = "unknown"
     limitations: tuple[str, ...] = ()
@@ -152,7 +154,10 @@ def capabilities_from_openai_settings(
         base_url=base_url,
         streaming=False if dedicated_image_model else True,
         tool_calling=tool_calling,
-        parallel_tool_calls=False if dedicated_image_model else None,
+        parallel_tool_calls=(
+            False if dedicated_image_model
+            else getattr(settings, "parallel_tool_calls", None)
+        ),
         json_mode=False if dedicated_image_model else None,
         reasoning_effort=False if dedicated_image_model else bool(effort_levels),
         reasoning_effort_levels=() if dedicated_image_model else effort_levels,
@@ -197,6 +202,12 @@ def capabilities_from_openai_settings(
         vision=False if dedicated_image_model else None,
         native_pdf=False if dedicated_image_model else None,
         image_generation=True if dedicated_image_model else None,
+        native_compaction=(
+            wire_api == "responses" and not dedicated_image_model and (
+                settings.native_compaction if settings.native_compaction is not None
+                else urlparse(base_url or "https://api.openai.com/v1").hostname == "api.openai.com"
+            )
+        ),
         prompt_caching=False if dedicated_image_model else None,
         confidence=(
             "known"
@@ -208,6 +219,10 @@ def capabilities_from_openai_settings(
 def capabilities_from_anthropic_adapter(adapter: Any) -> ProviderCapabilities:
     model = str(getattr(adapter, "_model", "") or "").strip()
     base_url = str(getattr(adapter, "_base_url", "") or "").strip()
+    configured_effort = getattr(adapter, "_configured_reasoning_effort", "")
+    effective_effort = getattr(adapter, "_reasoning_effort", "")
+    declared_efforts = getattr(adapter, "_reasoning_effort_levels", ())
+    effort_control = bool(configured_effort or declared_efforts)
     cache_editing = bool(
         getattr(adapter, "_cache_editing_beta_header", "")
         and not getattr(adapter, "_cache_editing_disabled_reason", "")
@@ -222,11 +237,11 @@ def capabilities_from_anthropic_adapter(adapter: Any) -> ProviderCapabilities:
         tool_calling=True,
         parallel_tool_calls=True,
         json_mode=False,
-        reasoning_effort=bool(getattr(adapter, "_thinking_budget", None)),
-        reasoning_effort_levels=(),
-        configured_reasoning_effort="",
-        effective_reasoning_effort="",
-        reasoning_effort_supported=False,
+        reasoning_effort=bool(getattr(adapter, "_thinking_budget", None) or effective_effort),
+        reasoning_effort_levels=adapter.supported_reasoning_efforts() if effort_control else (),
+        configured_reasoning_effort=configured_effort,
+        effective_reasoning_effort=effective_effort,
+        reasoning_effort_supported=effort_control,
         context_window=max(0, getattr(adapter, "_context_window", 0) or 0),
         context_window_source=(
             "provider" if getattr(adapter, "_context_window", 0) else ""

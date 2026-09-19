@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import Context
 from typing import Any
 
 from backend.async_cleanup import cancel_and_drain, cancel_and_drain_receipt
@@ -22,9 +23,10 @@ async def wait_for_provider_event(
     timeout_seconds: float | None,
     cancel_event: asyncio.Event | None,
     owner: set[asyncio.Task[Any]],
+    read_context: Context | None = None,
 ) -> Any:
     """Wait for one provider event with bounded cancellation cleanup."""
-    event_task = asyncio.create_task(stream_iter.__anext__())
+    event_task = asyncio.create_task(stream_iter.__anext__(), context=read_context)
     cancel_task = (
         asyncio.create_task(cancel_event.wait())
         if cancel_event is not None

@@ -152,6 +152,36 @@ async def test_structured_mcp_result_survives_sdk_and_tool_projection():
     assert result.runtime_metadata["mcp"]["_meta"] == {"ui/resourceUri": "ui://result"}
 
 
+def test_unchanged_tool_contract_reuses_derivation_and_changes_invalidate(monkeypatch):
+    from copy import deepcopy
+    from unittest.mock import Mock
+    import backend.agent.tool_schema_derivation as module
+    from backend.permissions.context import PermissionContext
+    from backend.tools.toolsets import ToolsetPolicy
+
+    registry = ToolRegistry()
+    registry.register(ToolSearchTool(registry))
+    registry.register(MCPToolProxy("demo", MCPToolDef("old", "old"), None))
+    build = Mock(wraps=module.build_deferred_tools_prompt_block)
+    monkeypatch.setattr(module, "build_deferred_tools_prompt_block", build)
+    schemas = registry.get_schemas()
+    first = derive_turn_tool_schema_state(base_tool_schemas=schemas, mcp_instructions={}, tool_registry=registry)
+    same = derive_turn_tool_schema_state(base_tool_schemas=deepcopy(schemas), mcp_instructions={}, tool_registry=registry, previous=first)
+    assert same is first
+    assert build.call_count == 1
+    changed = deepcopy(schemas)
+    changed[0]["function"]["description"] += " updated contract"
+    updated = derive_turn_tool_schema_state(base_tool_schemas=changed, mcp_instructions={}, tool_registry=registry, previous=first)
+    assert updated is not first
+    assert "updated contract" in updated.tool_schemas[0]["function"]["description"]
+    mode = derive_turn_tool_schema_state(base_tool_schemas=schemas, mcp_instructions={}, tool_registry=registry,
+                                         permission_context=PermissionContext(mode="plan"), previous=first)
+    assert mode is not first
+    policy = derive_turn_tool_schema_state(base_tool_schemas=schemas, mcp_instructions={}, tool_registry=registry,
+                                           toolset_policy=ToolsetPolicy(include_deferred_directly=True), previous=first)
+    assert policy is not first
+
+
 def test_instructions_and_deferred_catalog_are_rederived():
     schema = {"type": "function", "function": {"name": "mcp__demo__act", "description": "act", "parameters": {"type": "object"}}}
     first = derive_turn_tool_schema_state(base_tool_schemas=[schema], mcp_instructions={"demo": "old instructions"})

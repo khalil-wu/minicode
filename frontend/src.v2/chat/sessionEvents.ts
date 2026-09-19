@@ -893,6 +893,16 @@ const hydrateActiveConversation = (
     );
   }
   const transcript = conversation?.messages ?? conversation?.transcript ?? fallbackMessages;
+  if (conversation && (!staleSnapshot || !useAppStore.getState().conversationHistoryPages[conversationId])) {
+    const page = conversation.transcript_page;
+    useAppStore.setState((state) => ({
+      conversationHistoryPages: { ...state.conversationHistoryPages, [conversationId]: {
+        beforeMessageId: page?.before_message_id ?? "",
+        hasMore: page?.has_more ?? false,
+        loading: false,
+      } },
+    }));
+  }
   if (transcript) {
     const cachedMessages = useAppStore.getState().conversationMessages[conversationId]
       ?? (useAppStore.getState().conversationId === conversationId ? useAppStore.getState().messages : []);
@@ -1100,6 +1110,7 @@ export const handleSessionEvent = (
     }
     case "llm.model.updated": {
       const ev = e as LlmModelUpdatedEvent;
+      if (ev.conversation_id !== undefined && (ev.conversation_id || null) !== (s.conversationId || null)) return true;
       const model = stringValue(ev.current_model) || stringValue(ev.model);
       if (model) s.setCurrentModel(model);
       if (ev.provider) s.setCurrentProvider(ev.provider);
@@ -1421,6 +1432,9 @@ export const handleSessionEvent = (
             conversationMessages: Object.fromEntries(
               Object.entries(state.conversationMessages).filter(([id]) => knownConversationIds.has(id)),
             ),
+            conversationHistoryPages: Object.fromEntries(
+              Object.entries(state.conversationHistoryPages).filter(([id]) => knownConversationIds.has(id)),
+            ),
             conversationStreaming: Object.fromEntries(
               Object.entries(state.conversationStreaming).filter(([id]) => knownConversationIds.has(id)),
             ),
@@ -1547,7 +1561,7 @@ export const handleSessionEvent = (
         });
       }
       applyRuntimeSessionSnapshot(ev.session);
-      if (!isReplayedEvent(e)) {
+      if (!isReplayedEvent(e) && !ev.context_pending) {
         // Extension/project commands are conversation-scoped. A switch must
         // replace the palette even when the transport itself did not reconnect.
         sendClientCommand({ type: "commands.list" });

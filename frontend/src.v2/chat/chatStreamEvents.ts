@@ -10,7 +10,7 @@ import { isReplayedEvent as isReplayedChatEvent } from "../protocol/events";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { applyUserMessageQueueUpdate } from "./sessionEvents";
 import type { StreamBuffer } from "../lib/stream-buffer";
-import { getToolCallsFromMessage } from "../lib/content-blocks";
+import { getToolCallsFromMessage, messageIndices, toolCallLocations } from "../lib/content-blocks";
 import {
   isCommandToolRecord,
   isTerminalToolCallStatus,
@@ -182,6 +182,7 @@ const CHAT_SCOPED_EVENT_TYPES = new Set<string>([
   "tool_result",
   "permission.decision",
   "agent.item",
+  "agent.item.delta",
   "done",
   "stream_resume",
 ]);
@@ -303,7 +304,7 @@ const messagesForConversation = (conversationId?: string, messageId?: string): C
       ? state.messages
       : state.sideChats[targetId]?.messages ?? state.conversationMessages[targetId] ?? [];
   const targetMessageId = messageId?.trim();
-  return targetMessageId ? messages.filter((message) => message.id === targetMessageId) : messages;
+  return targetMessageId ? messageIndices(messages, targetMessageId).map((index) => messages[index]) : messages;
 };
 
 const hasStreamingAssistantForConversation = (conversationId?: string, messageId?: string): boolean =>
@@ -346,9 +347,7 @@ const resolveToolCall = (
   const allMessages = targetId === state.conversationId
       ? state.messages
       : state.sideChats[targetId]?.messages ?? state.conversationMessages[targetId] ?? [];
-  const messages = messageId ? allMessages.filter((message) => message.id === messageId) : allMessages;
-  const candidates = messages.flatMap((message) => getToolCallsFromMessage(message))
-    .filter((candidate) => candidate.id === id);
+  const candidates = toolCallLocations(allMessages, id, messageId).map(({ record }) => record);
   if (candidates.length === 0) return { reason: "tool_call_not_found" };
   const freshCandidates = incomingSeq === undefined
     ? candidates
@@ -884,6 +883,7 @@ export const handleChatStreamEvent = (
           inputSummary: e.input_summary ?? existing.inputSummary,
           resultKind: e.result_kind ?? existing.resultKind,
           activityKind: e.activity_kind ?? existing.activityKind,
+          callSource: e.call_source ?? existing.callSource,
           visibility: e.visibility ?? existing.visibility,
           groupId: e.group_id ?? existing.groupId,
           stepId: e.step_id ?? existing.stepId,
@@ -983,9 +983,17 @@ export const handleChatStreamEvent = (
         ? commandResolution?.record
         : latestRunningCommandTool(conversationId, messageId);
       if (commandTool && ev.content) {
+        const seq = finiteEventSeq(ev);
         s.updateToolCall(
           commandTool.id,
-          outputPreviewUpdates(commandTool, ev.content, ev.stream),
+          {
+            ...outputPreviewUpdates(commandTool, ev.content, ev.stream),
+            ...(seq !== undefined ? { seq } : {}),
+            ...(commandResolution?.migrated ? {
+              ...scope,
+              scopeMigrationCount: (commandTool.scopeMigrationCount ?? 0) + 1,
+            } : {}),
+          },
           conversationId,
           // With no tool_call_id the selected latest running command is the
           // compatibility identity.  Its persisted record may predate the
@@ -1161,6 +1169,15 @@ export const handleChatStreamEvent = (
           projected: Boolean(existing),
           ...(resolution.reason ? { projection_reason: resolution.reason } : {}),
         });
+      }
+      return true;
+    }
+    case "agent.item.delta": {
+      const ev = e as unknown as { item_id?: string; delta?: string };
+      const messageId = eventMessageId(e);
+      if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
+      if (ev.item_id && ev.delta) {
+        s.appendProcessItemDelta(ev.item_id, ev.delta, conversationId, messageId);
       }
       return true;
     }

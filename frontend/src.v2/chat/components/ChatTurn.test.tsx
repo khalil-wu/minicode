@@ -142,13 +142,13 @@ describe("ChatTurn live answer", () => {
       finalAnswerCell: { kind: "assistant_markdown", id: "answer", messageId: "answer", markdownSource: "Done", phase: "final", copyable: true, createdAt: 2 },
     };
     render(<ChatTurn turn={turn} />);
-    const group = screen.getByRole("button", { name: "读取了文件" });
+    const group = screen.getByRole("button", { name: "读取了文件 · 2 项" });
     expect(group.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(group);
     expect(screen.getByText("first.md")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
-    expect(screen.getByRole("button", { name: "读取了文件" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByRole("button", { name: "读取了文件 · 2 项" }).getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByText("first.md")).toBeNull();
     useAppStore.setState({ viewMode: previousMode });
   });

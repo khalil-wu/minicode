@@ -13,6 +13,26 @@ logger = logging.getLogger(__name__)
 CANCELLATION_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
+async def to_thread_cancel_safe(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+    """Keep ownership of a blocking operation until its worker has finished."""
+    inner = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    try:
+        return await asyncio.shield(inner)
+    except asyncio.CancelledError:
+        while not inner.done():
+            try:
+                await asyncio.shield(inner)
+            except asyncio.CancelledError:
+                continue
+        try:
+            inner.result()
+        except BaseException:
+            # Cancellation remains the caller's outcome; consume the worker
+            # failure only after it can no longer mutate owned state.
+            pass
+        raise
+
+
 @dataclass(frozen=True, slots=True)
 class CleanupReceipt:
     """Durable-shaped evidence for one cancellation/cleanup attempt.

@@ -977,7 +977,8 @@ class SessionLifecycle:
         return None
 
     def workspace_path_for_conversation(self, conversation: Any | None = None) -> str:
-        target = conversation if conversation is not None else self._session.active_conversation
+        owner = self._session.active_conversation_id
+        target = conversation if conversation is not None else self._session.conversation_repo.get_conversation_summary(owner) if owner else None
         if target is None:
             return ""
         return str(target.worktree_path or target.workspace_root or "").strip()
@@ -1320,6 +1321,7 @@ class SessionLifecycle:
         except Exception:
             logger.debug("Failed to close session LLM adapters", exc_info=True)
         try:
+            await self._session.event_outbox.drain_delivery()
             await self._session.event_outbox.drain_persistence()
             await self._session.artifact_store.flush()
             self._session.artifact_store.shutdown()

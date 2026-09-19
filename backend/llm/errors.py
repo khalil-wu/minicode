@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from enum import StrEnum
 from typing import Any
 
 
@@ -75,6 +76,9 @@ _NETWORK_KEYWORDS = (
     "service unavailable",
     "gateway timeout",
     "connection error",
+    "server_error",
+    "internal_error",
+    "server had an error",
     "connection reset",
     "connection refused",
     "connection aborted",
@@ -108,12 +112,54 @@ _NETWORK_KEYWORDS = (
 _HTTP_STATUS_PATTERN = re.compile(r"(?:\bhttp\s*|\bstatus(?:_code)?\s*[=:]\s*)(\d{3})\b", re.IGNORECASE)
 
 
+class LLMErrorType(StrEnum):
+    """Stable semantic categories emitted with a normalized model failure."""
+
+    API = "api"
+    AUTH = "auth"
+    BILLING = "billing"
+    BLOCKED = "blocked"
+    MODEL = "model"
+    PROVIDER_CAPABILITY = "provider_capability"
+    PROVIDER_PROTOCOL = "provider_protocol"
+    MEDIA_SIZE = "media_size"
+    PROMPT_TOO_LONG = "prompt_too_long"
+    TIMEOUT = "timeout"
+
+
+class ProviderErrorType(StrEnum):
+    """Provider-facing reason used to choose user messaging and recovery."""
+
+    UNKNOWN = "unknown"
+    PROTOCOL = "protocol"
+    AUTH = "auth"
+    BILLING = "billing"
+    CONTENT_FILTER = "content_filter"
+    BLOCKED = "blocked"
+    MODEL = "model"
+    UNSUPPORTED_CAPABILITY = "unsupported_capability"
+    RATE_LIMIT = "rate_limit"
+    BUSY = "busy"
+    NETWORK = "network"
+    MEDIA_SIZE = "media_size"
+    PROMPT_TOO_LONG = "prompt_too_long"
+    PROXY = "proxy"
+
+
 @dataclass(frozen=True)
 class LLMErrorClassification:
     fatal: bool
     retryable: bool
-    error_type: str
-    provider_error_type: str = "unknown"
+    error_type: LLMErrorType
+    provider_error_type: ProviderErrorType = ProviderErrorType.UNKNOWN
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "error_type", LLMErrorType(self.error_type))
+        object.__setattr__(
+            self,
+            "provider_error_type",
+            ProviderErrorType(self.provider_error_type),
+        )
 
 
 def classify_llm_error(message: str | BaseException | None) -> LLMErrorClassification:
@@ -260,6 +306,7 @@ def classify_llm_error(message: str | BaseException | None) -> LLMErrorClassific
             "context_length",
             "maximum context",
             "context window",
+            "exceed context limit",
             "request_too_large",
             "request entity too large",
             "request body too large",
@@ -285,6 +332,61 @@ def is_retryable_llm_error(message: str | BaseException | None) -> bool:
     return classify_llm_error(message).retryable
 
 
+# ── Connect-phase failures ────────────────────────────────────────────────────
+#
+# "The provider was never reached" is a different failure class from "the stream
+# broke": nothing was sent, so replaying the identical request can never be
+# poisoned, however long the network stays down. The distinction is a property
+# of the transport error, and httpx names it directly — `ConnectError` and
+# `ConnectTimeout` cover the connection attempt, while `RemoteProtocolError`
+# and the `Read*`/`Write*` family only occur after it succeeded. The SDK wraps
+# the original without discarding it, so `_error_chain` still reaches it.
+#
+# Matching the class matters: the keyword list above can only see the rendered
+# type name, so it cannot tell a connect failure from a message that merely
+# mentions one.
+_CONNECT_PHASE_ERROR_TYPES = frozenset(
+    {
+        "ConnectError",
+        "ConnectTimeout",
+        "ConnectionRefusedError",
+        "NetworkUnreachableError",
+        "NewConnectionError",
+        "gaierror",
+    }
+)
+
+# Failures that prove the request had already left the client. They must never
+# be read as connect-phase even when a wrapper carries a connect-ish name.
+_IN_FLIGHT_ERROR_TYPES = frozenset(
+    {
+        "RemoteProtocolError",
+        "ReadError",
+        "ReadTimeout",
+        "WriteError",
+        "WriteTimeout",
+        "IncompleteReadError",
+    }
+)
+
+
+def is_connection_not_established(message: str | BaseException | None) -> bool:
+    """Whether this failure happened before the provider was reached.
+
+    The caller uses this to pick the connect-phase retry track, which waits for
+    the network instead of spending the request's retry budget.
+    """
+
+    names = {
+        type(item).__name__
+        for item in _error_chain(message)
+        if isinstance(item, BaseException)
+    }
+    if names & _IN_FLIGHT_ERROR_TYPES:
+        return False
+    return bool(names & _CONNECT_PHASE_ERROR_TYPES)
+
+
 def llm_error_status_code(message: str | BaseException | None) -> int | None:
     """Return the first structured HTTP status carried by an LLM failure."""
 
@@ -300,6 +402,27 @@ def llm_error_status_code(message: str | BaseException | None) -> int | None:
                 continue
     codes = sorted(_extract_status_codes(message))
     return codes[0] if codes else None
+
+
+_RETRY_AFTER_MESSAGE_RE = re.compile(
+    r"try again in\s*(\d+(?:\.\d+)?)\s*(ms|seconds?|s)\b",
+    re.IGNORECASE,
+)
+
+
+def retry_after_from_message(text: str | None, *, maximum: float = 60.0) -> float:
+    """Parse the delay a provider states in prose, e.g. ``try again in 11.05s``.
+
+    OpenAI's token/request rate limits carry the reset time only in the error
+    message, never in a ``Retry-After`` header.
+    """
+    match = _RETRY_AFTER_MESSAGE_RE.search(str(text or ""))
+    if match is None:
+        return 0.0
+    value = float(match.group(1))
+    if match.group(2).lower() == "ms":
+        value /= 1000.0
+    return max(0.0, min(value, max(0.0, float(maximum))))
 
 
 def retry_after_seconds(
@@ -347,6 +470,14 @@ def retry_after_seconds(
                 return max(0.0, min(delay, limit))
             except (TypeError, ValueError, OverflowError):
                 continue
+    for item in _error_chain(message):
+        body = _provider_response_body(item) if isinstance(item, BaseException) else str(item or "")
+        stated = retry_after_from_message(
+            _provider_error_body_details(body).get("message") or body,
+            maximum=limit,
+        )
+        if stated > 0:
+            return stated
     return 0.0
 
 
@@ -445,6 +576,8 @@ def _structured_provider_error_signal(
             return LLMErrorClassification(True, False, "billing", "billing")
         if any(token in signal for token in ("rate_limit", "rate_limited", "too_many_requests")):
             return LLMErrorClassification(False, True, "api", "rate_limit")
+        if any(token in signal for token in ("server_error", "internal_error", "service_unavailable")):
+            return LLMErrorClassification(False, True, "api", "network")
         if any(token in signal for token in ("model_not_found", "invalid_model")):
             return LLMErrorClassification(True, False, "model", "model")
         if any(token in signal for token in ("content_filter", "safety_filter")):
@@ -472,6 +605,10 @@ def llm_error_raw(exc: BaseException, provider: str) -> dict[str, Any]:
         "provider_error_type": classification.provider_error_type,
         "error_type": classification.error_type,
     }
+    # The exception chain is discarded once this event is emitted, so the
+    # connect-phase verdict must travel with it for the retry ladder.
+    if is_connection_not_established(exc):
+        raw["connect_phase"] = True
     status = llm_error_status_code(exc)
     if status is not None:
         raw["status_code"] = status

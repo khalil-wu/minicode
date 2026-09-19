@@ -2,6 +2,8 @@
 
 MiniCode 是一个本地运行的 AI 编程助手，包含 Python 后端、React + Vite 前端和 Electron 桌面端。它提供工作区管理、代码编辑、终端、预览以及多模型对话能力。
 
+![MiniCode 桌面端：带来源面板的联网问答](docs/assets/screenshot-chat.png)
+
 ## 环境要求
 
 - Python 3.11 或更高版本

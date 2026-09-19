@@ -110,6 +110,7 @@ class TurnToolSchemaDerivation:
     tool_names: list[str]
     runtime_guidance: str
     deferred_tools_prompt_block: str = ""
+    derivation_key: tuple[Any, ...] = ()
 
 
 def derive_turn_tool_schema_state(
@@ -123,6 +124,15 @@ def derive_turn_tool_schema_state(
     previous: TurnToolSchemaDerivation | None = None,
 ) -> TurnToolSchemaDerivation:
     permission_key = permission_context_cache_key(permission_context)
+    derivation_key = (
+        id(tool_registry), tool_registry.version if tool_registry is not None else None,
+        toolset_policy.cache_key() if toolset_policy is not None else "",
+        id(permission_checker), tuple(sorted(mcp_instructions.items())),
+    )
+    if (previous is not None and previous.permission_key == permission_key
+            and previous.derivation_key == derivation_key
+            and previous.tool_schemas == base_tool_schemas):
+        return previous
     canonical_base_schemas = canonicalize_tool_schemas(
         base_tool_schemas,
         tool_registry=tool_registry,
@@ -147,4 +157,5 @@ def derive_turn_tool_schema_state(
         tool_names=names,
         runtime_guidance=build_tool_runtime_guidance(canonical_base_schemas, mcp_instructions),
         deferred_tools_prompt_block=deferred,
+        derivation_key=derivation_key,
     )

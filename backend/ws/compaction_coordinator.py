@@ -11,6 +11,7 @@ from uuid import uuid4
 from backend.agent.context import clone_context_builder
 from backend.agent.conversation_query_guard import conversation_query_guards
 from backend.conversations.repository import ConversationWriteConflict
+from backend.conversations.context_delta import rebase_turn_admissions
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,13 +44,17 @@ def _publish_snapshot_to_live_builder(
 
 
 def _common_history_suffix_length(
-    before_history: list[Any],
-    after_history: list[Any],
+    before_history: list[dict[str, Any]],
+    after_history: list[dict[str, Any]],
 ) -> int:
     limit = min(len(before_history), len(after_history))
     matched = 0
     while matched < limit:
-        if before_history[-(matched + 1)] != after_history[-(matched + 1)]:
+        before = before_history[-(matched + 1)]
+        after = after_history[-(matched + 1)]
+        # Loading a legacy admission annotates user origin without changing
+        # the retained provider item or its admission boundary.
+        if (before | {"is_user_input": None}) != (after | {"is_user_input": None}):
             break
         matched += 1
     return matched
@@ -70,19 +75,12 @@ def rebase_turn_admissions_after_compaction(
     suffix_length = _common_history_suffix_length(before_history, after_history)
     removed_prefix = len(before_history) - suffix_length
     inserted_prefix = len(after_history) - suffix_length
-    retained: dict[str, dict[str, Any]] = {}
-    for message_id, raw_boundary in raw_admissions.items():
-        if not isinstance(raw_boundary, dict):
-            continue
-        history_start = int(raw_boundary.get("history_start") or 0)
-        history_end = int(raw_boundary.get("history_end") or 0)
-        if history_start < removed_prefix or history_end < removed_prefix:
-            continue
-        retained[str(message_id)] = {
-            **deepcopy(raw_boundary),
-            "history_start": inserted_prefix + history_start - removed_prefix,
-            "history_end": inserted_prefix + history_end - removed_prefix,
-        }
+    normalized = {
+        str(message_id): {**deepcopy(boundary), "history_start": int(boundary.get("history_start") or 0),
+                          "history_end": int(boundary.get("history_end") or 0)}
+        for message_id, boundary in raw_admissions.items() if isinstance(boundary, dict)
+    }
+    retained = rebase_turn_admissions(normalized, removed_prefix=removed_prefix, inserted_prefix=inserted_prefix)
     if retained:
         after_snapshot["turn_admissions"] = retained
     else:

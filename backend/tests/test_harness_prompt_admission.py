@@ -53,9 +53,10 @@ def session(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("behavior", ["follow_up", "steer"])
-def test_queued_prompt_settings_do_not_reconfigure_the_current_turn(session, tmp_path, behavior):
-    next_workspace = tmp_path / "next-workspace"
-    next_workspace.mkdir()
+@pytest.mark.parametrize("different_workspace", [False, True])
+def test_queued_prompt_settings_do_not_reconfigure_the_current_turn(session, tmp_path, behavior, different_workspace):
+    next_workspace = tmp_path / "next-workspace" if different_workspace else tmp_path
+    next_workspace.mkdir(exist_ok=True)
     conversation_id = session.active_conversation_id
 
     async def scenario():
@@ -87,9 +88,15 @@ def test_queued_prompt_settings_do_not_reconfigure_the_current_turn(session, tmp
             queued.data["_queued_user_message_dispatch"] = True
             await session.command_dispatcher._handle_command_inner(queued)
             current = session.conversation_repo.get_conversation(conversation_id)
+            if different_workspace:
+                assert current.permission_mode == "confirm"
+                assert current.workspace_root == str(tmp_path)
+                session.start_agent_run.assert_not_awaited()
+                assert any(call.args[0].data.get("error_code") == "workspace_owner_mismatch" for call in session.send_event.await_args_list)
+                return
             assert current.permission_mode == "bypass"
             assert current.workspace_root == str(next_workspace)
-            session.activate_workspace_path.assert_awaited_once()
+            session.activate_workspace_path.assert_not_awaited()
             session.start_agent_run.assert_awaited_once()
             session.run_manager.finish_user_message_dispatch(conversation_id, queued, succeeded=True)
         finally:
@@ -101,7 +108,7 @@ def test_queued_prompt_settings_do_not_reconfigure_the_current_turn(session, tmp
     asyncio.run(scenario())
 
 
-def test_accepted_same_workspace_steer_applies_its_permission_mode(session, tmp_path):
+def test_same_profile_steer_reaches_current_turn_without_changing_permissions(session, tmp_path):
     conversation_id = session.active_conversation_id
 
     async def scenario():
@@ -111,11 +118,11 @@ def test_accepted_same_workspace_steer_applies_its_permission_mode(session, tmp_
         try:
             await session.command_dispatcher._handle_command_inner(UserCommand(type="user_message", data={
                 "content": "redirect this turn", "conversation_id": conversation_id,
-                "permission_mode": "bypass", "workspace_root": str(tmp_path), "streaming_behavior": "steer",
+                "permission_mode": "confirm", "workspace_root": str(tmp_path), "streaming_behavior": "steer",
             }))
             assert turn_inputs.pending_count() == 1
             assert session.run_manager.queued_user_messages(conversation_id) == []
-            assert session.conversation_repo.get_conversation(conversation_id).permission_mode == "bypass"
+            assert session.conversation_repo.get_conversation(conversation_id).permission_mode == "confirm"
             session.activate_workspace_path.assert_not_awaited()
             session.start_agent_run.assert_not_awaited()
         finally:

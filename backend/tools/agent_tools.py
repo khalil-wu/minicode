@@ -26,6 +26,7 @@ from backend.agent.provider_protocol import provider_raw_from_event_data
 from backend.agent.prompt_cache import prompt_cache_fork_diagnostic
 from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
 from backend.agent.run_context import RunContext
+from backend.agent.model_execution import ModelExecutionSnapshot
 from backend.agent.runtime_records import new_run_id
 from backend.agent.rollout_budget import RolloutBudget
 from backend.agent.execution_journal import (
@@ -391,13 +392,9 @@ class TaskTool(BaseTool):
         parallel_tasks = args.get("parallel_tasks")
         parent_metadata = self._metadata_from_context(context)
         run_context = context.run_context if context is not None else None
-        parent_runtime = (
-            run_context.subagent_parent_runtime
-            if run_context is not None
-            else {}
-        )
+        parent_model = context.model_execution if context is not None else None
         llm = (
-            parent_runtime.get("llm")
+            (parent_model.llm if parent_model is not None else None)
             or (context.llm if context is not None else None)
             or self._resolve_llm()
         )
@@ -1479,7 +1476,7 @@ class TaskTool(BaseTool):
         parent_metadata = self._metadata_from_context(context)
         run_context = context.run_context if context is not None else None
         inherited_llm = (
-            (run_context.subagent_parent_runtime.get("llm") if run_context else None)
+            (context.model_execution.llm if context is not None and context.model_execution is not None else None)
             or (context.llm if context is not None else None)
             or self._resolve_llm()
         )
@@ -1488,6 +1485,7 @@ class TaskTool(BaseTool):
             inherited_llm,
             parent_metadata=parent_metadata,
             run_context=run_context,
+            model_execution=context.model_execution if context is not None else None,
             agent_type=agent_type,
             model_override=str(requested.get("model") or ""),
             provider_override=str(requested.get("provider") or ""),
@@ -2727,10 +2725,21 @@ class TaskTool(BaseTool):
                 approval_handler=subagent_approval_handler,
             )
 
+            child_model_snapshot = ModelExecutionSnapshot(
+                config=llm_resolution.config, llm=llm,
+                provider=llm_resolution.provider, model=llm_resolution.model,
+                thinking_level=llm_resolution.effort,
+                model_runtime=(context.model_execution.model_runtime if context.model_execution is not None else None),
+                model_info=(context.model_execution.model_runtime.get_model(llm_resolution.provider, llm_resolution.model)
+                    if context.model_execution is not None and context.model_execution.model_runtime is not None else None),
+            )
+
+            pending_extension_followup_id = ""
+
             async def _run_query_turn(turn_prompt: str, turn_state: AgentState) -> None:
                 nonlocal last_tool_name, terminal_status, terminal_reason
                 nonlocal terminal_usage, terminal_provider_raw, last_error
-                nonlocal current_turn_metadata, cumulative_iterations, cumulative_tool_calls
+                nonlocal current_turn_metadata, cumulative_iterations, cumulative_tool_calls, child_model_snapshot
 
                 turn_run_id = new_run_id()
                 terminal_status = "completed"
@@ -2747,24 +2756,36 @@ class TaskTool(BaseTool):
                         history_start: int,
                         history_end: int,
                     ) -> None:
-                        del boundary_input, history_end
+                        nonlocal pending_extension_followup_id
+                        del history_end
+                        admitted_content = boundary_input.content
+                        if pending_extension_followup_id:
+                            sub_context_builder.extension_state["followups"].pop(0)
+                            child_run_context.extension_actions.changed({"fields": {"followups": {
+                                "value": list(sub_context_builder.extension_state["followups"])}}, "remove": []})
                         snapshot = sub_context_builder.export_snapshot()
                         event_id = "user_prompt_" + hashlib.sha256(
                             (
-                                f"{subagent_id}\0{max(0, int(history_start))}\0"
-                                f"{turn_prompt}"
+                                f"{subagent_id}\0{turn_run_id}\0{max(0, int(history_start))}\0"
+                                f"{admitted_content}"
                             ).encode("utf-8")
                         ).hexdigest()
                         journal.append_once(
                             "user_prompt",
                             {
                                 **journal_user_metadata,
-                                "content": turn_prompt,
-                                "provider_content": turn_prompt,
+                                "run_id": turn_run_id,
+                                "content": admitted_content,
+                                "provider_content": admitted_content,
+                                "provider": child_model_snapshot.provider, "model": child_model_snapshot.model,
+                                "reasoning_effort": child_model_snapshot.thinking_level,
                                 "context_snapshot": snapshot,
                             },
                             event_id=event_id,
                         )
+                        pending_extension_followup_id = ""
+                        if child_run_context.extension_actions is not None:
+                            await child_run_context.extension_actions.flush()
                         journal_events[:] = [
                             event.to_dict() for event in journal.read_events()
                         ]
@@ -2803,11 +2824,12 @@ class TaskTool(BaseTool):
                 # per-event tasks can otherwise reorder durable projections.
                 child_run_context = RunContext(
                     lifecycle_runtime=parent_run_context.lifecycle_runtime,
+                    retain_model=parent_run_context.retain_model,
+                    refresh_model_auth=parent_run_context.refresh_model_auth,
                     execution_journal=journal,
                     mcp_manager=parent_run_context.mcp_manager,
                     mcp_owner_session_id=parent_run_context.mcp_owner_session_id,
-                    subagent_parent_runtime=parent_run_context.subagent_parent_runtime,
-                    turn_model_snapshot=parent_run_context.turn_model_snapshot,
+                    model_execution=child_model_snapshot,
                     agent_runtime=runtime,
                     hook_manager=parent_run_context.hook_manager,
                     workspace_context=parent_run_context.workspace_context,
@@ -3182,6 +3204,9 @@ class TaskTool(BaseTool):
                         if child_run_context.llm_turn_context is not None
                         else UsageInfo(cost_usd=0.0)
                     )
+                    child_model_snapshot = child_run_context.model_execution
+                    child_agent_session.llm = child_model_snapshot.llm
+                    child_agent_session.token_budget = child_model_snapshot.config.token_budget
                     add_usage(cumulative_usage, turn_usage)
                     terminal_usage = asdict(cumulative_usage)
                     cumulative_iterations += turn_state.iterations
@@ -3193,6 +3218,12 @@ class TaskTool(BaseTool):
                     exit_decision = await lifecycle_owner.after_subagent_stop(
                         sub_state
                     )
+                    followups = sub_context_builder.extension_state.get("followups", [])
+                    if (terminal_status == "completed" and followups and exit_decision.action == "terminal"
+                            and not sub_state.prompt_context.get("subagent_stop_prevented_continuation")):
+                        command = followups[0]
+                        pending_extension_followup_id = command["user_message_id"]
+                        exit_decision = replace(exit_decision, action="continue", gate="extension_followup", prompt=command["content"])
                     if exit_decision.action == "terminal":
                         break
                     if exit_decision.action != "continue":
@@ -3231,6 +3262,11 @@ class TaskTool(BaseTool):
                     exit_decision = await lifecycle_owner.after_subagent_stop(
                         sub_state
                     )
+                    followups = sub_context_builder.extension_state.get("followups", [])
+                    if terminal_status == "completed" and followups and exit_decision.action == "idle":
+                        command = followups[0]
+                        pending_extension_followup_id = command["user_message_id"]
+                        exit_decision = replace(exit_decision, action="continue", gate="extension_followup", prompt=command["content"])
                     if exit_decision.action == "terminal":
                         terminal_reason = exit_decision.prompt or exit_decision.gate
                         break
@@ -3432,7 +3468,7 @@ class TaskTool(BaseTool):
                                     == int(subagent_fence.get("mailbox_epoch") or 0)
                                     and str(payload.get("request_id") or "").strip()
                                     and str(payload.get("from") or "").strip()
-                                    == parent_run_id
+                                    in {parent_run_id, "team-lead"}
                                 ),
                                 None,
                             )
@@ -3504,6 +3540,7 @@ class TaskTool(BaseTool):
                                     else str(selected_message.sender_id or "unknown")
                                 ),
                                 str(selected_message.content or ""),
+                                summary=str(getattr(selected_message, "summary", "") or ""),
                             )
                             runtime.ack_swarm_message_claims([selected_claim])
                             remaining = [

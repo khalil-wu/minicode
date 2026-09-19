@@ -167,3 +167,63 @@ def test_external_oracle_keeps_test_changes_observable_without_failing_a_complet
     assert summary["test_integrity"]["modified"] == ["test_original.py"]
     assert summary["test_integrity_enforced"] is protect
     assert summary["turn_elapsed_ms"] >= 0
+
+
+def test_eval_managed_commands_emit_intervals_and_close_processes(tmp_path, monkeypatch, capsys):
+    import shlex
+    import sys
+    from backend.tools.command_tool import RunCommandTool
+
+    code = "import time; print('CAPTURED_DIAGNOSTIC', flush=True); time.sleep(30)"
+    command = ("& '" + sys.executable.replace("'", "''") + "' -u -c '" + code.replace("'", "''") + "'") if sys.platform == "win32" else shlex.quote(sys.executable) + " -u -c " + shlex.quote(code)
+    owners = []
+    command_ids = []
+    execute = RunCommandTool.execute
+
+    async def observe(self, args, context=None):
+        owners.append(context.background_manager)
+        result = await execute(self, args, context)
+        command_ids.append(result.runtime_metadata["command_id"])
+        return result
+
+    class FixtureLLM(LLMAdapter):
+        calls = 0
+        async def stream_chat(self, messages, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=[
+                    ToolCallEvent(id="launch", name="run_command", arguments={"command": command, "yield_time_ms": 0}),
+                ])
+            elif self.calls == 2:
+                yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=[
+                    ToolCallEvent(id="read-output", name="monitor", arguments={"command_id": command_ids[0], "cursor": 0, "yield_time_ms": 10000}),
+                ])
+            else:
+                yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="Observed the live command output.")
+            yield StreamEvent(type=StreamEventType.DONE)
+        async def simple_chat(self, messages):
+            return "Observed."
+
+    monkeypatch.setenv("MINICODE_EVAL_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("MINICODE_EVAL_API_KEY", "local-eval-fixture")
+    monkeypatch.setenv("MINICODE_EVAL_MODEL", "fixture")
+    monkeypatch.setenv("MINICODE_EVAL_TASK_ID", "managed-command-test")
+    monkeypatch.setenv("MINICODE_EVAL_EXTERNAL_SANDBOX", "true")
+    monkeypatch.setenv("MINICODE_EVAL_COMMAND_OUTPUT_DIR", str(tmp_path / "captured"))
+    monkeypatch.setattr(driver, "build_wire_adapter", lambda *_args, **_kwargs: FixtureLLM())
+    monkeypatch.setattr(driver, "ArtifactStore", lambda: ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    monkeypatch.setattr(RunCommandTool, "execute", observe)
+    assert asyncio.run(driver._run("Start and observe the diagnostic command.")) == 0
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    spans = [r["data"] for r in records if r["type"] == "runtime.span"]
+    starts = {s["span_id"]: s for s in spans if s["event"] == "tool.started"}
+    ends = [s for s in spans if s["event"] == "tool.completed"]
+    assert len(ends) == 2
+    for span in ends:
+        assert span["started_at"] == starts[span["span_id"]]["started_at"]
+        assert span["duration_ms"] == span["ended_at"] - span["started_at"]
+    summary = next(r["data"] for r in records if r["type"] == "eval.driver.summary")
+    assert summary["tool_occupied_ms"] > 0
+    assert "CAPTURED_DIAGNOSTIC" in (tmp_path / "captured" / f"{command_ids[0]}.log").read_text(encoding="utf-8")
+    assert owners[0].list_commands(include_completed=True, conversation_id="eval-managed-command-test") == []
+    assert not owners[0]._processes

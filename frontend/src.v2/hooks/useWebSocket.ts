@@ -208,8 +208,17 @@ const browserSessionId = rendererSessionId(
 );
 const RECENT_INBOUND_EVENT_IDS_MAX = 1024;
 const MAX_RECOVERY_BUFFERED_EVENTS = 1000;
+// Mirrors backend/ws/payload_contracts.py NON_REPLAYABLE_EVENT_TYPES (which
+// includes LIVE_ONLY_EVENT_TYPES). An event the backend never stages into the
+// replay log carries a wire seq but no durable link; if the renderer moved
+// its cursor on it, the next durable event's previous_replay_seq would not
+// match and every later durable event would be dropped as a replay hole.
+// scripts/check-protocol-sync.py keeps the two sets identical.
 const NON_REPLAYABLE_CURSOR_EVENT_TYPES = new Set<string>([
+  "agent_message.delta",
+  "agent.item.delta",
   "artifact_content",
+  "commands.list",
   "conversation.list",
   "conversation.switched",
   "llm.model.updated",
@@ -220,6 +229,7 @@ const NON_REPLAYABLE_CURSOR_EVENT_TYPES = new Set<string>([
   "session.synced",
   "stream_event",
   "stream_resume",
+  "tool_output_delta",
 ]);
 
 const recentInboundEventIds: string[] = [];
@@ -1184,7 +1194,7 @@ type ServerEventDispatcher = (e: ServerEvent, cid: string | undefined) => boolea
 const CHAT_STREAM_EVENT_TYPES = new Set<string>([
   "thinking_delta", "thinking", "item.started", "agent_message.delta",
   "item.completed", "image_chunk", "tool_call", "tool_output_delta",
-  "command_output_chunk", "tool_result", "permission.decision", "agent.item",
+  "command_output_chunk", "tool_result", "permission.decision", "agent.item", "agent.item.delta",
   "done", "error", "stream_resume",
 ]);
 const RUNTIME_EVENT_TYPES = new Set<string>([

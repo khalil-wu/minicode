@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import type { HistoryCellState } from "../../chat/cells/cellTypes";
 import type { AgentLoopTurnProjection } from "../projection/project-turn";
@@ -21,11 +21,15 @@ export const AgentTurn = memo(function AgentTurn({
   wide = false,
   renderCell,
   defaultProcessExpanded,
+  historyControl,
+  loadedToolItems,
 }: {
   turn: AgentLoopTurnProjection;
   wide?: boolean;
   renderCell: RenderAgentCell;
   defaultProcessExpanded?: boolean;
+  historyControl?: React.ReactNode;
+  loadedToolItems?: number;
 }) {
   // Incomplete, interrupted, failed, or answer-less turns are evidence, not a
   // disclosure preference. They stay visible until a complete final answer
@@ -90,9 +94,9 @@ export const AgentTurn = memo(function AgentTurn({
   // A settled file mutation is an outcome, not another activity row. Keep it
   // in the authoritative process projection for metrics, but render it after
   // the reply so the user sees the complete change set at the end of the turn.
-  const timelineCells = turn.processCells.filter((cell) => cell.kind !== "diff");
-  const diffCells = turn.processCells.filter((cell) => cell.kind === "diff");
-  const hasTimelineItems = turn.processCells.length > 0;
+  const timelineCells = useMemo(() => turn.processCells.filter((cell) => cell.kind !== "diff"), [turn.processCells]);
+  const diffCells = useMemo(() => turn.processCells.filter((cell) => cell.kind === "diff"), [turn.processCells]);
+  const hasTimelineItems = turn.processCells.length > 0 || Boolean(historyControl);
   const hasActiveTimelineItem = timelineCells.some((cell) => {
     if (cell.kind === "activity") return cell.status === "running";
     if (cell.kind === "exec") {
@@ -152,9 +156,11 @@ export const AgentTurn = memo(function AgentTurn({
           aria-label="Agent 处理进度"
         >
           {turn.status !== "running" && processSummary}
+          {processExpanded && historyControl}
 
           {showProcessStack && (
             <AgentTimeline
+              loadedToolItems={loadedToolItems}
               cells={timelineCells}
               renderCell={renderCell}
               isRunning={turn.status === "running"}

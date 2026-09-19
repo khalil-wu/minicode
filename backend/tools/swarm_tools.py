@@ -95,6 +95,38 @@ def _conversation_id(context: ToolExecutionContext | None) -> str:
     return str(getattr(context, "conversation_id", "") or "").strip()
 
 
+async def _notify_assignee(
+    runtime: AgentRuntime,
+    context: ToolExecutionContext | None,
+    task: Any,
+    assignee: str,
+) -> None:
+    """Tell a teammate it now owns a task; an idle teammate wakes on this."""
+    recipient = runtime.resolve_subagent_name(assignee) or assignee
+    record = runtime.get_subagent(recipient)
+    if record is None or str(record.status or "") != "running":
+        return
+    description = str(getattr(task, "description", "") or "").strip()
+    body = f"You have been assigned task {task.task_id}: {task.title}"
+    if description:
+        body += f"\n{description}"
+    try:
+        await _runtime_call(
+            runtime,
+            "send_swarm_message",
+            sender_id=_actor_id(context),
+            recipient_id=recipient,
+            content=body,
+            conversation_id=_conversation_id(context),
+            team_name=str(getattr(task, "team_name", "") or getattr(record, "team_name", "") or ""),
+            task_id=str(task.task_id),
+            sender_mailbox_epoch=_actor_mailbox_epoch(context),
+            recipient_mailbox_epoch=int(record.mailbox_epoch or 0),
+        )
+    except ValueError:
+        return
+
+
 def _task_lines(tasks: list[dict[str, Any]]) -> str:
     if not tasks:
         return "No shared swarm tasks matched."
@@ -171,7 +203,7 @@ class SendMessageTool(_AgentCoordinationTool):
                 "properties": {
                     "recipient": {
                         "type": "string",
-                        "description": "Target teammate name/agent_type, agent id, subagent id, or 'parent'.",
+                        "description": "Target teammate name/agent_type, agent id, subagent id, 'parent', or '*' to broadcast to every running teammate you own (optionally narrowed by team_name).",
                     },
                     "message": {
                         "type": "string",
@@ -214,7 +246,11 @@ class SendMessageTool(_AgentCoordinationTool):
 
         runtime = _runtime(context)
         control = AgentControlPlane(context, runtime=runtime)
-        if recipient == "parent":
+        if recipient in {"*", "all"}:
+            recipient = "*"
+            if control.actor_is_subagent:
+                return self._error_result("Only the leader can broadcast to the whole team")
+        elif recipient == "parent":
             if not control.can_message_parent():
                 return self._error_result("Parent mailbox is not available to the current task")
         else:
@@ -249,8 +285,8 @@ class SendMessageTool(_AgentCoordinationTool):
         summary = str(args.get("summary") or "").strip()
         if explicit_sender and explicit_sender != derived_sender:
             return self._error_result("Sender must match the current task identity")
-        recipient_record = runtime.get_subagent(recipient)
-        if recipient_record is None:
+        recipient_record = runtime.get_subagent(recipient) if recipient != "*" else None
+        if recipient_record is None and recipient != "*":
             load_persisted = getattr(runtime, "load_persisted_subagent", None)
             recipient_record = (
                 load_persisted(recipient) if callable(load_persisted) else None
@@ -307,14 +343,13 @@ class SendMessageTool(_AgentCoordinationTool):
                 conversation_id=conversation_id,
                 team_name=str(args.get("team_name") or "").strip(),
                 task_id=str(args.get("task_id") or "").strip(),
+                summary=summary,
                 sender_mailbox_epoch=_actor_mailbox_epoch(context),
                 recipient_mailbox_epoch=recipient_epoch,
             )
         except ValueError as exc:
             return self._error_result(str(exc))
         payload = record.public_dict()
-        if summary:
-            payload["summary"] = summary
         await _emit_swarm_event(
             context,
             subagent_id=recipient if recipient != "parent" else sender,
@@ -323,6 +358,8 @@ class SendMessageTool(_AgentCoordinationTool):
 
         if recipient == "parent":
             delivery = "parent"
+        elif recipient == "*":
+            delivery = f"broadcast:{len(record.recipient_mailbox_epochs)}"
         elif recipient_record is not None and (
             str(getattr(recipient_record, "teammate_name", "") or "").strip()
             or str(getattr(recipient_record, "team_name", "") or "").strip()
@@ -585,8 +622,22 @@ class TeamDeleteTool(_AgentCoordinationTool):
         team_name = str(args.get("team_name") or "").strip()
         if not team_name:
             return self._error_result("Missing team_name argument")
+        runtime = _runtime(context)
+        running = runtime.running_team_members(
+            team_name=team_name,
+            conversation_id=_conversation_id(context),
+        )
+        if running:
+            names = ", ".join(
+                str(record.teammate_name or record.subagent_id) for record in running
+            )
+            return self._error_result(
+                f"Cannot delete team {team_name} with {len(running)} running member(s): {names}. "
+                "Send each one a shutdown_request first "
+                '(send_message with message {"type":"shutdown_request","request_id":"<id>","from":"team-lead"}).'
+            )
         team = await _runtime_call(
-            _runtime(context),
+            runtime,
             "delete_swarm_team",
             conversation_id=_conversation_id(context),
             team_name=team_name,
@@ -883,6 +934,9 @@ class TaskUpdateTool(_AgentCoordinationTool):
         )
         if task is None:
             return self._error_result(f"Shared swarm task changed before update: {task_id}")
+        new_assignee = str(patch.get("assignee") or "").strip()
+        if new_assignee and new_assignee != str(existing.assignee or ""):
+            await _notify_assignee(runtime, context, task, new_assignee)
         payload = task.to_dict()
         await _emit_swarm_event(
             context,

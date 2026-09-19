@@ -27,8 +27,17 @@ from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 
 import httpx
+from websockets.exceptions import InvalidStatus
 
 from backend.config import LLMSettings
+from backend.llm.responses_websocket import (
+    ResponsesWebSocketPool, ResponsesWebSocketRequest, WEBSOCKET_BETA,
+    TURN_STATE_HEADER,
+)
+from backend.llm.native_compaction import (
+    NATIVE_COMPACTION_TYPE, native_compaction_windows, require_native_context_origin,
+    responses_context_origin, validate_compaction_window,
+)
 from backend.agent.lifecycle_errors import LifecycleStaleError
 from backend.agent.provider_lifecycle import LIFECYCLE_RUNTIME_METADATA_KEY
 from backend.agent.prompting import (
@@ -37,6 +46,7 @@ from backend.agent.prompting import (
 )
 from backend.llm.errors import (
     classify_llm_error,
+    retry_after_from_message,
     llm_error_raw as _adapter_error_raw,
     _provider_error_body_details,
     _provider_response_body,
@@ -46,6 +56,7 @@ from backend.llm.base import (
     emit_provider_lifecycle_request,
     LLMAdapter,
     LLMSideCallContext,
+    LLMTurnContext,
     LLMMessage,
     ProviderActivityEvent,
     SideQueryOptions,
@@ -1319,6 +1330,9 @@ def _responses_error_event_raw(
         raw["provider_error_schema_type"] = provider_error_schema_type
     if message:
         raw["provider_error_message"] = message
+        stated_delay = retry_after_from_message(message)
+        if stated_delay > 0:
+            raw["retry_after_seconds"] = stated_delay
     raw["provider_error"] = details
     return message, raw
 
@@ -1356,20 +1370,23 @@ def _responses_provider_item_from_output(item: Any) -> dict[str, Any] | None:
         if isinstance(detached_summary, list) and detached_summary:
             result["summary"] = detached_summary
         return result
-    if item_type == "function_call":
+    if item_type in {"function_call", "custom_tool_call"}:
         call_id = str(_get_attr_or_item(item, "call_id", "") or item_id).strip()
         name = str(_get_attr_or_item(item, "name", "") or "").strip()
-        arguments = _get_attr_or_item(item, "arguments", "")
+        input_field = "input" if item_type == "custom_tool_call" else "arguments"
+        arguments = _get_attr_or_item(item, input_field, "")
         if not call_id or not name or not isinstance(arguments, str):
+            if item_type == "custom_tool_call":
+                raise ValueError("provider_error_type=protocol: Invalid Responses custom tool input")
             return None
         result = {
-            "type": "function_call",
+            "type": item_type,
             "id": item_id or call_id,
             "call_id": call_id,
             "name": name,
-            "arguments": arguments,
+            input_field: arguments,
         }
-        if status:
+        if status and item_type == "function_call":
             result["status"] = status
         return result
     return None
@@ -1389,10 +1406,20 @@ def _responses_provider_items_from_response(response: Any) -> list[dict[str, Any
 
 def _responses_tool_calls_from_provider_items(
     provider_items: list[dict[str, Any]],
+    custom_fields: dict[str, str] | None = None,
 ) -> list[ToolCallEvent]:
     """Recover the authoritative final Responses function-call batch."""
     tool_calls: list[ToolCallEvent] = []
     for item in provider_items:
+        if item.get("type") == "custom_tool_call":
+            name = item["name"]
+            if not custom_fields or name not in custom_fields:
+                raise ValueError("provider_error_type=protocol: Responses custom tool was not offered")
+            tool_calls.append(ToolCallEvent(
+                id=item["call_id"], name=name,
+                arguments={custom_fields[name]: item["input"]},
+            ))
+            continue
         if str(item.get("type") or "") != "function_call":
             continue
         call_id = str(item.get("call_id") or item.get("id") or "").strip()
@@ -1780,14 +1807,14 @@ def _extract_response_output_items(response: Any) -> list[dict[str, Any]]:
         status = str(_get_attr_or_item(item, "status", "") or "").strip()
         if status:
             entry["status"] = status
-        if item_type == "function_call":
+        if item_type in {"function_call", "custom_tool_call"}:
             call_id = str(_get_attr_or_item(item, "call_id", "") or "").strip()
             name = str(_get_attr_or_item(item, "name", "") or "").strip()
             if call_id:
                 entry["call_id"] = call_id
             if name:
                 entry["name"] = name
-            arguments = _get_attr_or_item(item, "arguments", "")
+            arguments = _get_attr_or_item(item, "input" if item_type == "custom_tool_call" else "arguments", "")
             if isinstance(arguments, str):
                 entry["arguments_chars"] = len(arguments)
         elif item_type == "message":
@@ -1836,7 +1863,9 @@ def _response_output_item_activity_metadata(item: Any) -> dict[str, Any]:
     return metadata
 
 
-def _unsupported_response_output_item_types(response: Any) -> list[str]:
+def _unsupported_response_output_item_types(
+    response: Any, custom_fields: dict[str, str] | None = None,
+) -> list[str]:
     output = _get_attr_or_item(response, "output", []) or []
     if not isinstance(output, list):
         return []
@@ -1844,7 +1873,8 @@ def _unsupported_response_output_item_types(response: Any) -> list[str]:
     for item in output:
         item_type = str(_get_attr_or_item(item, "type", "") or "").strip()
         if (
-            item_type in _OPENAI_UNSUPPORTED_EXECUTABLE_OUTPUT_ITEMS
+            (item_type in _OPENAI_UNSUPPORTED_EXECUTABLE_OUTPUT_ITEMS
+             or (item_type == "custom_tool_call" and _get_attr_or_item(item, "name", "") not in (custom_fields or {})))
             and item_type not in unsupported
         ):
             unsupported.append(item_type)
@@ -1960,7 +1990,6 @@ _OPENAI_OUTPUT_ITEM_ACTIVITY_PREFIXES = {
 _OPENAI_UNSUPPORTED_EXECUTABLE_OUTPUT_ITEMS = frozenset(
     {
         "computer_call",
-        "custom_tool_call",
         "local_shell_call",
         "mcp_approval_request",
     }
@@ -1980,8 +2009,6 @@ _OPENAI_UNSUPPORTED_RESPONSE_STREAM_EVENTS = frozenset(
         "response.audio.done",
         "response.audio.transcript.delta",
         "response.audio.transcript.done",
-        "response.custom_tool_call_input.delta",
-        "response.custom_tool_call_input.done",
     }
 )
 
@@ -1998,6 +2025,8 @@ _OPENAI_RESPONSE_STREAM_EVENT_TYPES = (
             "response.failed",
             "response.function_call_arguments.delta",
             "response.function_call_arguments.done",
+            "response.custom_tool_call_input.delta",
+            "response.custom_tool_call_input.done",
             "response.image_generation_call.partial_image",
             "response.incomplete",
             "response.output_item.added",
@@ -2298,13 +2327,15 @@ class OpenAIAdapter(LLMAdapter):
         }
         self._owns_http_client = http_client is None
         self._closed = False
+        self._responses_websocket = ResponsesWebSocketPool()
+        self._responses_turn_states: dict[tuple[str, ...], str] = {}
         self._http_client: httpx.AsyncClient | None = http_client
         # Optional chat fields this gateway answered 400 for. Remembered so the
         # rejection is paid once per adapter, not on every turn.
         self._chat_unsupported_fields: set[str] = set()
         if http_client is None:
             proxy_url = _proxy_url_for_base_url(
-                settings.base_url,
+                _normalized_openai_base_url(settings.base_url),
                 str(getattr(settings, "proxy_mode", "inherit") or "inherit"),
             )
             if proxy_url:
@@ -2312,6 +2343,12 @@ class OpenAIAdapter(LLMAdapter):
             else:
                 http_client = httpx.AsyncClient(trust_env=False)
             self._http_client = http_client
+
+    def try_fallback_transport(self) -> bool:
+        if self._settings.wire_api != "responses" or not self._settings.responses_websocket or self._responses_websocket.http_only:
+            return False
+        self._responses_websocket.fallback_to_http = True
+        return True
 
     async def aclose(self) -> None:
         """Close adapter-owned network resources exactly once.
@@ -2322,6 +2359,8 @@ class OpenAIAdapter(LLMAdapter):
         if self._closed:
             return
         self._closed = True
+        self._responses_turn_states.clear()
+        await self._responses_websocket.aclose()
         if not self._owns_http_client:
             return
         http_client = self._http_client
@@ -2344,6 +2383,49 @@ class OpenAIAdapter(LLMAdapter):
             reasoning_effort_levels=policy.wire_levels,
         )
 
+    def validate_context(self, messages: list[LLMMessage]) -> None:
+        origin = responses_context_origin(_normalized_openai_base_url(self._settings.base_url)) if self._settings.wire_api == "responses" else ""
+        require_native_context_origin(messages, origin)
+
+    async def compact_context(
+        self, messages: list[LLMMessage], *, turn_context: LLMTurnContext | None = None,
+    ) -> LLMMessage:
+        self.validate_context(messages)
+        if not self.capabilities.native_compaction:
+            raise ValueError("Native compaction is not enabled for this Responses provider")
+        # Capture request choices once. A later policy/model selection cannot
+        # change the model, endpoint or headers between retries of this call.
+        settings = self._settings
+        instructions, input_messages = _split_responses_instructions(messages)
+        payload: dict[str, Any] = {"model": settings.model, "input": self._build_responses_input(input_messages)}
+        if instructions:
+            payload["instructions"] = instructions
+        base_url = _normalized_openai_base_url(settings.base_url)
+        headers = self._responses_headers()
+        options = SideQueryOptions(operation="compact", enable_prompt_cache=False, max_retries=2, query_source="compact")
+
+        async def complete(_messages: list[LLMMessage], *, context: LLMSideCallContext) -> LLMMessage:
+            self.annotate_side_call(context, provider=settings.provider, model_id=settings.model)
+            metadata = context.request_metadata()
+            sent, request_headers = await self._prepare_http_request(payload, metadata=metadata, base_headers=headers)
+            async with _openai_http_stream(self._http_client, "POST", f"{base_url}/responses/compact", headers=request_headers, json_payload=sent) as response:
+                await emit_provider_lifecycle_response(metadata, response.status_code, response.headers)
+                await self._responses_http_raise_for_status(response)
+                await response.aread()
+                data = response.json()
+            self.record_non_stream_usage(
+                data.get("usage"), model_id=str(sent["model"]), provider=settings.provider,
+                input_includes_cache_read=True, input_includes_cache_write=True, context=context,
+            )
+            window = validate_compaction_window({
+                "type": NATIVE_COMPACTION_TYPE, "origin": responses_context_origin(base_url),
+                "model": str(sent["model"]), "response_id": data.get("id", ""), "output": data.get("output"),
+            })
+            context.record["compaction_output_items"] = len(window["output"])
+            return LLMMessage(role="assistant", provider_items=[window])
+
+        return await self._run_auxiliary_call(messages, options=options, turn_context=turn_context, complete=complete)
+
     async def stream_chat(
         self,
         messages: list[LLMMessage],
@@ -2353,15 +2435,18 @@ class OpenAIAdapter(LLMAdapter):
         """
         流式调用 LLM。根据 wire_api 路由到对应 API。
         """
+        self.validate_context(messages)
         if is_gpt_image_model(self._settings.model):
             async for event in self._stream_images_api(messages, metadata=metadata):
                 yield event
             return
         if self._settings.wire_api == "responses":
-            async for event in self._stream_responses_api(
-                messages, tools, metadata=metadata
-            ):
-                yield event
+            stream = self._stream_responses_api(messages, tools, metadata=metadata)
+            try:
+                async for event in stream:
+                    yield event
+            finally:
+                await _close_async_iterator(stream)
         else:
             async for event in self._stream_chat_completions(
                 messages, tools, metadata=metadata
@@ -2400,6 +2485,7 @@ class OpenAIAdapter(LLMAdapter):
         max_tokens: int | None,
         context: LLMSideCallContext | None,
     ) -> str:
+        self.validate_context(messages)
         side_options = context.options if context is not None else None
         side_model = (
             self.small_fast_model_id()
@@ -2437,12 +2523,18 @@ class OpenAIAdapter(LLMAdapter):
         *,
         metadata: dict[str, Any] | None = None,
         wire_payload_sink: dict[str, Any] | None = None,
+        websocket_request: ResponsesWebSocketRequest | None = None,
     ) -> Any:
         cleaned_kwargs = _strip_openai_unsupported_fields(kwargs)
         kwargs.clear()
         kwargs.update(cleaned_kwargs)
         hook_kwargs = {"metadata": metadata} if metadata is not None else {}
         if kwargs.get("stream"):
+            if websocket_request is not None:
+                return self._emit_responses_websocket_events(
+                    kwargs, request=websocket_request,
+                    metadata=metadata, wire_payload_sink=wire_payload_sink,
+                )
             return self._emit_responses_http_stream_events(
                 kwargs,
                 wire_payload_sink=wire_payload_sink,
@@ -2466,6 +2558,40 @@ class OpenAIAdapter(LLMAdapter):
         headers = self._openai_transport_headers()
         headers.update(self._default_headers)
         return headers
+
+    @staticmethod
+    def _responses_turn_owner(metadata: dict[str, Any] | None) -> tuple[str, ...] | None:
+        if not isinstance(metadata, dict):
+            return None
+        session = str(metadata.get("session_id") or "").strip()
+        thread = str(metadata.get("thread_id") or metadata.get("conversation_id") or "").strip()
+        turn = str(metadata.get("run_id") or metadata.get("turn_id") or "").strip()
+        source = str(metadata.get("query_source") or "user").strip()
+        if not (session or thread or turn):
+            return None
+        return (session, thread, turn, source)
+
+    def _remember_responses_turn_state(
+        self, metadata: dict[str, Any] | None, headers: Any,
+    ) -> None:
+        owner = self._responses_turn_owner(metadata)
+        if owner is None or headers is None:
+            return
+        value = ""
+        if hasattr(headers, "get"):
+            value = str(headers.get(TURN_STATE_HEADER) or "").strip()
+        if value:
+            self._responses_turn_states[owner] = value
+
+    def _apply_responses_turn_state(
+        self, metadata: dict[str, Any] | None, headers: dict[str, Any],
+    ) -> None:
+        owner = self._responses_turn_owner(metadata)
+        if owner is None:
+            return
+        token = self._responses_turn_states.get(owner)
+        if token:
+            headers[TURN_STATE_HEADER] = token
 
     def _images_headers(self) -> dict[str, str]:
         headers = self._openai_transport_headers()
@@ -2500,6 +2626,7 @@ class OpenAIAdapter(LLMAdapter):
         headers: dict[str, Any] = dict(base_headers)
         if isinstance(extra_headers, dict):
             headers.update({str(key): value for key, value in extra_headers.items()})
+        self._apply_responses_turn_state(metadata, headers)
         headers = await emit_provider_lifecycle_headers(metadata, headers)
         return _strip_openai_unsupported_fields(request_payload), headers
 
@@ -2779,6 +2906,7 @@ class OpenAIAdapter(LLMAdapter):
             headers=headers,
             json_payload=sent_payload,
         ) as response:
+            self._remember_responses_turn_state(metadata, getattr(response, "headers", None))
             await emit_provider_lifecycle_response(
                 metadata,
                 int(getattr(response, "status_code", 200) or 200),
@@ -2795,11 +2923,12 @@ class OpenAIAdapter(LLMAdapter):
         *,
         metadata: dict[str, Any] | None = None,
         wire_payload_sink: dict[str, Any] | None = None,
+        prepared: tuple[dict[str, Any], dict[str, Any]] | None = None,
     ) -> AsyncIterator[Any]:
         if self._http_client is None:
             raise RuntimeError("Responses HTTP client is not initialized")
 
-        sent_payload, headers = await self._prepare_http_request(
+        sent_payload, headers = prepared or await self._prepare_http_request(
             payload,
             metadata=metadata,
             base_headers=self._responses_headers(),
@@ -2814,6 +2943,7 @@ class OpenAIAdapter(LLMAdapter):
             headers=headers,
             json_payload=sent_payload,
         ) as response:
+            self._remember_responses_turn_state(metadata, getattr(response, "headers", None))
             await emit_provider_lifecycle_response(
                 metadata,
                 response.status_code,
@@ -2844,11 +2974,101 @@ class OpenAIAdapter(LLMAdapter):
     #  Responses API 实现（wire_api="responses"）
     # ══════════════════════════════════════════════════════════════
 
+    async def _emit_responses_websocket_events(
+        self, payload: dict[str, Any], *, request: ResponsesWebSocketRequest,
+        metadata: dict[str, Any] | None, wire_payload_sink: dict[str, Any] | None,
+    ) -> AsyncIterator[Any]:
+        base_headers = self._responses_headers()
+        if not self._responses_websocket.http_only:
+            base_headers.setdefault("OpenAI-Beta", WEBSOCKET_BETA)
+        sent_payload, headers = await self._prepare_http_request(
+            payload, metadata=metadata, base_headers=base_headers,
+        )
+        url = urlparse(self._responses_url())
+        ws_url = url._replace(scheme="wss" if url.scheme == "https" else "ws").geturl()
+        async def handshake(status: int, response_headers: dict[str, str]) -> None:
+            self._remember_responses_turn_state(metadata, response_headers)
+            await emit_provider_lifecycle_response(metadata, status, response_headers)
+        if not self._responses_websocket.http_only:
+            events = request.events(
+                sent_payload, url=ws_url, headers=headers,
+                proxy=_proxy_url_for_base_url(self._responses_url(), self._settings.proxy_mode) or None,
+                wire_payload_sink=wire_payload_sink, on_handshake=handshake,
+            )
+            try:
+                async for event in events:
+                    yield _json_to_namespace(event)
+                return
+            except InvalidStatus as exc:
+                status = exc.response.status_code
+                await handshake(status, dict(exc.response.headers))
+                if status not in {200, 404, 405, 426, 501}:
+                    response = httpx.Response(status, headers=dict(exc.response.headers),
+                                              request=httpx.Request("GET", self._responses_url()))
+                    response.raise_for_status()
+                    raise
+                # No response.create was sent: switching to HTTP cannot
+                # repeat model generation or a committed tool operation.
+                self._responses_websocket.unavailable_status = status
+            finally:
+                await _close_async_iterator(events)
+        if headers.get("OpenAI-Beta") == WEBSOCKET_BETA:
+            headers = {key: value for key, value in headers.items() if key != "OpenAI-Beta"}
+        request.info.update({
+            "mode": "http", "fallback_status": self._responses_websocket.unavailable_status,
+            "fallback_reason": "websocket_retries" if self._responses_websocket.fallback_to_http else "handshake",
+            "input_items_logical_len": len(sent_payload.get("input", [])),
+            "input_items_sent_len": len(sent_payload.get("input", [])),
+        })
+        stream = self._emit_responses_http_stream_events(
+            sent_payload, metadata=metadata, wire_payload_sink=wire_payload_sink,
+            prepared=(sent_payload, headers),
+        )
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await _close_async_iterator(stream)
+
     async def _stream_responses_api(
+        self, messages: list[LLMMessage], tools: list[dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        request = None
+        if self._settings.responses_websocket:
+            routing = metadata or {}
+            thread_id = str(routing.get("thread_id") or routing.get("conversation_id") or "")
+            owner = (str(routing.get("session_id") or ""), thread_id,
+                     str(routing.get("run_id") or routing.get("turn_id") or ""),
+                     str(routing.get("query_source") or "user")) if thread_id else None
+            request = self._responses_websocket.request(owner)
+        stream = self._stream_responses_events(messages, tools, metadata=metadata, websocket_request=request)
+        try:
+            async for event in stream:
+                if request is not None:
+                    if event.type == StreamEventType.DONE:
+                        request.accepted = event.finish_reason == "completed" and bool(request.info.get("response_items_complete"))
+                        summary = event.raw["request_summary"]
+                        summary["transport"] = dict(request.info)
+                        for key in ("input_items_logical_len", "input_items_sent_len"):
+                            if key in request.info:
+                                summary[key] = request.info[key]
+                    elif event.type == StreamEventType.ERROR:
+                        event.raw.setdefault("request_summary", {})["transport"] = dict(request.info)
+                yield event
+        finally:
+            try:
+                await _close_async_iterator(stream)
+            finally:
+                if request is not None:
+                    await request.aclose()
+
+    async def _stream_responses_events(
         self,
         messages: list[LLMMessage],
         tools: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
+        websocket_request: ResponsesWebSocketRequest | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """
         使用 Responses API 流式调用。
@@ -2885,14 +3105,21 @@ class OpenAIAdapter(LLMAdapter):
         has_response_tools = False
         responses_tools: list[dict[str, Any]] = []
         if tools:
-            responses_tools = self._convert_tools_to_responses_format(tools)
+            responses_tools = self._convert_tools_to_responses_format(
+                tools, supports_custom_tools=self._settings.supports_custom_tools,
+            )
             has_response_tools = bool(responses_tools)
+        custom_fields = {
+            tool["function"]["name"]: tool["_minicode_freeform"]["input_field"]
+            for tool in (tools or [])
+            if self._settings.supports_custom_tools and "_minicode_freeform" in tool
+        }
         prompt_cache_retention = _prompt_cache_retention_request(self._settings)
         configured_max_output = _clamped_responses_max_output_tokens(
             value=self._settings.max_tokens,
             context_window=self._settings.context_window,
             messages=messages,
-            tools=tools,
+            tools=responses_tools,
         )
         reasoning_request = _responses_reasoning_request(
             self._settings,
@@ -2932,7 +3159,7 @@ class OpenAIAdapter(LLMAdapter):
         # MiniCode always runs the full coding shape).
         kwargs["tools"] = responses_tools
         kwargs["tool_choice"] = "auto"
-        kwargs["parallel_tool_calls"] = True
+        kwargs["parallel_tool_calls"] = self.capabilities.parallel_tool_calls is not False
         if configured_max_output is not None:
             kwargs["max_output_tokens"] = configured_max_output
 
@@ -2944,12 +3171,10 @@ class OpenAIAdapter(LLMAdapter):
         if include_request:
             kwargs["include"] = include_request
 
-        lifecycle_metadata = (
-            metadata
-            if isinstance(metadata, dict)
-            and metadata.get(LIFECYCLE_RUNTIME_METADATA_KEY) is not None
-            else None
-        )
+        # Keep routing metadata through the concrete transport even when no
+        # lifecycle hook is installed. It owns turn-scoped sticky state as
+        # well as extension callbacks.
+        lifecycle_metadata = metadata if isinstance(metadata, dict) else None
         wire_request_payload: dict[str, Any] = {}
 
         def build_responses_request_summary(
@@ -2986,6 +3211,7 @@ class OpenAIAdapter(LLMAdapter):
                 payload,
                 metadata=lifecycle_metadata,
                 wire_payload_sink=wire_request_payload,
+                **({"websocket_request": websocket_request} if websocket_request is not None else {}),
             )
 
         try:
@@ -3012,16 +3238,17 @@ class OpenAIAdapter(LLMAdapter):
         response_message_phases: dict[str, str] = {}
         usage: UsageInfo | None = None
         provider_timeline: list[dict[str, Any]] = []
-        summary_payload = wire_request_payload or kwargs
+        request_summary_ready = False
         raw_done: dict[str, Any] = {
             "provider": "openai_responses",
-            "model": str(summary_payload.get("model") or self._settings.model),
-            "request_summary": build_responses_request_summary(summary_payload),
+            "model": self._settings.model,
+            "request_summary": {},
             "safety": _provider_trace_safety(),
             "provider_timeline": provider_timeline,
         }
         finish_reason = ""
         completed_response_provider_items: list[dict[str, Any]] = []
+        closed_response_items: list[dict[str, Any]] = []
         terminal_tool_calls: list[ToolCallEvent] = []
         completed_response_message_phase = ""
         saw_terminal_response_event = False
@@ -3088,9 +3315,17 @@ class OpenAIAdapter(LLMAdapter):
                     item_id=item_id,
                     call_id=call_id,
                 )
-            arguments_value = _get_attr_or_item(value, "arguments", None)
-            if arguments_value is None or arguments_value == "":
-                arguments_value = slot.get("arguments") or "{}"
+            is_custom = (
+                _get_attr_or_item(value, "type", "") == "custom_tool_call"
+                or event_type.startswith("response.custom_tool_call_input.")
+            )
+            if is_custom and name not in custom_fields:
+                return None, _responses_tool_protocol_error(
+                    "unoffered_custom_tool", event_type=event_type, call_id=call_id,
+                )
+            arguments_value = _get_attr_or_item(value, "input" if is_custom else "arguments", None)
+            if arguments_value is None or (not is_custom and arguments_value == ""):
+                arguments_value = slot.get("arguments", "") if is_custom else slot.get("arguments") or "{}"
             if not isinstance(arguments_value, str):
                 return None, _responses_tool_protocol_error(
                     "invalid_function_arguments",
@@ -3100,13 +3335,16 @@ class OpenAIAdapter(LLMAdapter):
                 )
 
             arguments_repaired = False
-            try:
-                arguments = json.loads(arguments_value)
-            except (json.JSONDecodeError, TypeError):
-                from backend.llm.json_repair import repair_tool_json
+            if is_custom:
+                arguments = {custom_fields[name]: arguments_value}
+            else:
+                try:
+                    arguments = json.loads(arguments_value)
+                except (json.JSONDecodeError, TypeError):
+                    from backend.llm.json_repair import repair_tool_json
 
-                arguments = repair_tool_json(arguments_value)
-                arguments_repaired = True
+                    arguments = repair_tool_json(arguments_value)
+                    arguments_repaired = True
             if not isinstance(arguments, dict):
                 return None, _responses_tool_protocol_error(
                     "invalid_function_arguments",
@@ -3589,6 +3827,13 @@ class OpenAIAdapter(LLMAdapter):
 
         try:
             async for event in stream:
+                if not request_summary_ready:
+                    # The transport has now applied hooks and selected full
+                    # input or a delta. Summarize those actual bytes once.
+                    sent_payload = wire_request_payload or kwargs
+                    raw_done["model"] = str(sent_payload.get("model") or self._settings.model)
+                    raw_done["request_summary"] = build_responses_request_summary(sent_payload)
+                    request_summary_ready = True
                 event_type = str(getattr(event, "type", "") or "")
                 response_usage = _get_attr_or_item(_get_attr_or_item(event, "response", None), "usage", None)
                 if response_usage is not None:
@@ -3637,7 +3882,9 @@ class OpenAIAdapter(LLMAdapter):
                         **_response_timeline_fields(str(event_type), event),
                     )
 
-                if event_type in _OPENAI_UNSUPPORTED_RESPONSE_STREAM_EVENTS:
+                if event_type in _OPENAI_UNSUPPORTED_RESPONSE_STREAM_EVENTS or (
+                    event_type.startswith("response.custom_tool_call_input.") and not custom_fields
+                ):
                     feature = (
                         "audio_output"
                         if event_type.startswith("response.audio.")
@@ -3994,7 +4241,9 @@ class OpenAIAdapter(LLMAdapter):
                         response_output_item_metadata[
                             f"output_index:{output_index_value}"
                         ] = item_metadata
-                    if item_type in _OPENAI_UNSUPPORTED_EXECUTABLE_OUTPUT_ITEMS:
+                    if item_type in _OPENAI_UNSUPPORTED_EXECUTABLE_OUTPUT_ITEMS or (
+                        item_type == "custom_tool_call" and _get_attr_or_item(item, "name", "") not in custom_fields
+                    ):
                         yield StreamEvent(
                             type=StreamEventType.ERROR,
                             content=(
@@ -4038,7 +4287,7 @@ class OpenAIAdapter(LLMAdapter):
                             content_kind="text",
                             lifecycle="start",
                         )
-                    elif item_type == "function_call":
+                    elif item_type in {"function_call", "custom_tool_call"}:
                         item_id = str(_get_attr_or_item(item, "id", "") or "").strip()
                         call_id = str(
                             _get_attr_or_item(item, "call_id", "") or item_id
@@ -4066,7 +4315,7 @@ class OpenAIAdapter(LLMAdapter):
                                 call_id=call_id or item_id,
                             )
                             return
-                        initial_arguments = _get_attr_or_item(item, "arguments", "")
+                        initial_arguments = _get_attr_or_item(item, "input" if item_type == "custom_tool_call" else "arguments", "")
                         slot = existing_slot or {
                             "id": call_id or item_id,
                             "item_id": item_id,
@@ -4101,12 +4350,17 @@ class OpenAIAdapter(LLMAdapter):
 
                 elif event_type == "response.output_item.done":
                     item = _get_attr_or_item(event, "item", None)
+                    closed_item = _responses_provider_item_from_output(item)
+                    if closed_item is not None:
+                        closed_response_items.append(closed_item)
                     item_type = str(_get_attr_or_item(item, "type", "") or "").strip()
                     output_index = _get_attr_or_item(event, "output_index", None)
                     output_index_value = (
                         output_index if isinstance(output_index, int) else None
                     )
-                    if item_type in _OPENAI_UNSUPPORTED_EXECUTABLE_OUTPUT_ITEMS:
+                    if item_type in _OPENAI_UNSUPPORTED_EXECUTABLE_OUTPUT_ITEMS or (
+                        item_type == "custom_tool_call" and _get_attr_or_item(item, "name", "") not in custom_fields
+                    ):
                         yield StreamEvent(
                             type=StreamEventType.ERROR,
                             content=(
@@ -4133,7 +4387,7 @@ class OpenAIAdapter(LLMAdapter):
                             type=StreamEventType.PROVIDER_ACTIVITY,
                             provider_activity=activity,
                         )
-                    if item_type == "function_call":
+                    if item_type in {"function_call", "custom_tool_call"}:
                         tool_call, protocol_error = finalize_response_function_call(
                             item,
                             event_type=event_type,
@@ -4143,11 +4397,17 @@ class OpenAIAdapter(LLMAdapter):
                             return
                         if tool_call is not None:
                             pending_tool_calls.append(tool_call)
-                            prefetch_event = _prefetch_tool_call_event([tool_call])
-                            if prefetch_event is not None:
-                                yield prefetch_event
+                        else:
+                            call_id = str(_get_attr_or_item(item, "call_id", "") or _get_attr_or_item(item, "id", ""))
+                            tool_call = next((call for call in pending_tool_calls if call.id == call_id), None)
+                        if tool_call is not None:
+                            yield StreamEvent(
+                                type=StreamEventType.TOOL_CALL, tool_calls=[tool_call],
+                                tool_calls_final=False, tool_calls_committed=True,
+                                provider_items=list(closed_response_items),
+                            )
 
-                elif event_type == "response.function_call_arguments.delta":
+                elif event_type in {"response.function_call_arguments.delta", "response.custom_tool_call_input.delta"}:
                     event_call_id = str(getattr(event, "call_id", "") or "").strip()
                     item_id = str(getattr(event, "item_id", "") or "").strip()
                     call_id = event_call_id or item_id
@@ -4189,16 +4449,26 @@ class OpenAIAdapter(LLMAdapter):
                             if item_id and item_id != call_id:
                                 response_tool_items[item_id] = slot
                         slot["arguments"] += delta
+                        partial_arguments = slot["arguments"]
+                        if event_type == "response.custom_tool_call_input.delta":
+                            if slot["name"] not in custom_fields:
+                                yield _responses_tool_protocol_error(
+                                    "unoffered_custom_tool", event_type=event_type, call_id=call_id,
+                                )
+                                return
+                            # The UI and tool preflight consume canonical object
+                            # arguments even when the provider streams raw text.
+                            partial_arguments = json.dumps({custom_fields[slot["name"]]: partial_arguments}, ensure_ascii=False)
                         yield StreamEvent(
                             type=StreamEventType.TOOL_CALL_DELTA,
                             tool_call_delta=ToolCallDeltaEvent(
                                 id=slot.get("id") or call_id,
-                                partial_arguments=slot["arguments"],
+                                partial_arguments=partial_arguments,
                             ),
                         )
 
                 # 函数调用
-                elif event_type == "response.function_call_arguments.done":
+                elif event_type in {"response.function_call_arguments.done", "response.custom_tool_call_input.done"}:
                     tool_call, protocol_error = finalize_response_function_call(
                         event,
                         event_type=event_type,
@@ -4268,7 +4538,7 @@ class OpenAIAdapter(LLMAdapter):
                         return
                     saw_terminal_response_event = True
                     unsupported_items = _unsupported_response_output_item_types(
-                        response_obj
+                        response_obj, custom_fields
                     )
                     if unsupported_items:
                         yield StreamEvent(
@@ -4311,7 +4581,7 @@ class OpenAIAdapter(LLMAdapter):
                         _responses_provider_items_from_response(response_obj)
                     )
                     terminal_tool_calls = _responses_tool_calls_from_provider_items(
-                        completed_response_provider_items
+                        completed_response_provider_items, custom_fields
                     )
                     completed_response_message_phase = (
                         _responses_message_phase_from_response(response_obj)
@@ -4356,7 +4626,7 @@ class OpenAIAdapter(LLMAdapter):
                 elif event_type == "response.incomplete":
                     response_obj = getattr(event, "response", None)
                     unsupported_items = _unsupported_response_output_item_types(
-                        response_obj
+                        response_obj, custom_fields
                     )
                     if unsupported_items:
                         yield StreamEvent(
@@ -4395,7 +4665,7 @@ class OpenAIAdapter(LLMAdapter):
                             _responses_provider_items_from_response(response_obj)
                         )
                         terminal_tool_calls = _responses_tool_calls_from_provider_items(
-                            completed_response_provider_items
+                            completed_response_provider_items, custom_fields
                         )
                         completed_response_message_phase = (
                             _responses_message_phase_from_response(response_obj)
@@ -4578,10 +4848,15 @@ class OpenAIAdapter(LLMAdapter):
                 tool_calls=final_tool_calls,
             )
 
-        raw_done["request_summary"] = build_responses_request_summary(
-            wire_request_payload or kwargs,
-        )
-
+        if websocket_request is not None and websocket_request.response:
+            output = websocket_request.response.get("output")
+            # SSE-compatible gateways may omit terminal message items after
+            # streaming their text. Such a response can finish the turn, but
+            # cannot certify the server-side prefix for previous_response_id.
+            websocket_request.info["response_items_complete"] = isinstance(output, list) and full_text == "".join(
+                _responses_message_text_from_item(item)
+                for item in output if _get_attr_or_item(item, "type", "") == "message"
+            )
         yield StreamEvent(
             type=StreamEventType.DONE,
             usage=usage,
@@ -4669,7 +4944,7 @@ class OpenAIAdapter(LLMAdapter):
         # projected. Several Responses-compatible coding gateways require it.
         kwargs["tools"] = responses_tools
         kwargs["tool_choice"] = "auto"
-        kwargs["parallel_tool_calls"] = True
+        kwargs["parallel_tool_calls"] = self.capabilities.parallel_tool_calls is not False
         kwargs["client_metadata"] = client_metadata
         if prompt_cache_key:
             kwargs["prompt_cache_key"] = prompt_cache_key
@@ -4832,18 +5107,24 @@ class OpenAIAdapter(LLMAdapter):
         self, messages: list[LLMMessage]
     ) -> list[dict[str, Any]]:
         """将 LLMMessage 列表转换为 Responses API 的 input 格式。"""
+        self.validate_context(messages)
         result: list[dict[str, Any]] = []
-
+        custom_call_ids: set[str] = set()
         for msg in messages:
+            windows = native_compaction_windows(msg)
+            if windows:
+                for window in windows:
+                    result.extend(window["output"])
+                    custom_call_ids.update(item["call_id"] for item in window["output"] if item["type"] == "custom_tool_call")
+                continue
             role = str(msg.role or "").strip().lower()
             if role in {"system", "developer"}:
                 continue
             elif role == "user":
-                if msg.images or msg.documents:
+                text_parts = msg.user_text_parts()
+                if msg.images or msg.documents or len(text_parts) > 1:
                     parts: list[dict[str, Any]] = []
-                    content_text = _message_content_text(msg.content)
-                    if content_text:
-                        parts.append({"type": "input_text", "text": content_text})
+                    parts.extend({"type": "input_text", "text": text} for text in text_parts)
                     for img in msg.images:
                         media_type = img.get("media_type") or "image/png"
                         data = img.get("data") or ""
@@ -4871,7 +5152,7 @@ class OpenAIAdapter(LLMAdapter):
                     result.append(
                         {
                             "role": "user",
-                            "content": parts or content_text,
+                            "content": parts,
                         }
                     )
                 else:
@@ -4886,13 +5167,17 @@ class OpenAIAdapter(LLMAdapter):
                     dict(item)
                     for item in (msg.provider_items or [])
                     if isinstance(item, dict)
-                    and str(item.get("type") or "") in {"reasoning", "function_call"}
+                    and (str(item.get("type") or "") in {"reasoning", "function_call"}
+                         or (self._settings.supports_custom_tools and item.get("type") == "custom_tool_call"))
                 ]
                 provider_function_call_ids = {
                     str(item.get("call_id") or item.get("id") or "")
                     for item in provider_items
-                    if item.get("type") == "function_call"
+                    if item.get("type") in {"function_call", "custom_tool_call"}
                 }
+                custom_call_ids.update(
+                    item["call_id"] for item in provider_items if item.get("type") == "custom_tool_call"
+                )
                 for item in provider_items:
                     if item.get("type") == "reasoning":
                         result.append(item)
@@ -4907,7 +5192,7 @@ class OpenAIAdapter(LLMAdapter):
                         assistant_item["phase"] = phase[:40]
                     result.append(assistant_item)
                 for item in provider_items:
-                    if item.get("type") == "function_call":
+                    if item.get("type") in {"function_call", "custom_tool_call"}:
                         result.append(item)
                 if msg.tool_calls:
                     # Responses represents assistant text and function calls as
@@ -4917,19 +5202,29 @@ class OpenAIAdapter(LLMAdapter):
                         if tc.id not in provider_function_call_ids:
                             result.append(_responses_function_call_input_item(tc))
             elif role == "tool":
-                result.append(_responses_function_call_output_item(msg))
+                output_item = _responses_function_call_output_item(msg)
+                if msg.tool_call_id in custom_call_ids:
+                    output_item["type"] = "custom_tool_call_output"
+                    output_item.pop("status", None)
+                result.append(output_item)
 
         return result
 
     @staticmethod
     def _convert_tools_to_responses_format(
         tools: list[dict[str, Any]],
+        *, supports_custom_tools: bool = False,
     ) -> list[dict[str, Any]]:
         """将 OpenAI function-calling 格式转换为 Responses API 格式。"""
         tools = canonicalize_tool_schemas(tools)
         result = []
         for tool in tools:
             func = tool.get("function", {})
+            if supports_custom_tools and "_minicode_freeform" in tool:
+                native = tool["_minicode_freeform"]
+                result.append({"type": "custom", "name": func["name"],
+                               "description": native["description"], "format": native["format"]})
+                continue
             strict = bool(func.get("strict", False))
             parameters = _normalize_schema_for_openai(func.get("parameters", {}))
             if strict:
@@ -4960,6 +5255,7 @@ class OpenAIAdapter(LLMAdapter):
         normalized_tools: list[dict[str, Any]] = []
         for tool in tools:
             normalized_tool = dict(tool)
+            normalized_tool.pop("_minicode_freeform", None)
             function_def = dict(normalized_tool.get("function", {}))
             # Preserve the tool's strict flag so OpenAI structured outputs are
             # requested for tools that declare strict=True (matching cc's
@@ -5263,6 +5559,7 @@ class OpenAIAdapter(LLMAdapter):
                             else _prefetch_tool_call_event(prefetch_calls)
                         )
                         if prefetch_event is not None:
+                            prefetch_event.tool_calls_committed = True
                             yield prefetch_event
                             tool_prefetch_emitted = True
                     continue

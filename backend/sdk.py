@@ -10,11 +10,15 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, get_args, get_origin, get_type_hints
 from uuid import uuid4
 
-from backend.agent.context import ContextBuilder, clone_context_builder
+from backend.agent.code_execution_store import CodeExecutionStore
+from backend.agent.context import ContextBuilder
 from backend.agent.conversation_query_guard import conversation_query_guards
 from backend.agent.loop import AgentLoopSessionContext
 from backend.agent.message import AgentEvent
+from backend.agent.model_execution import ModelExecutionSnapshot
+from backend.agent.run_context import RunContext
 from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
+from backend.terminal.manager import BackgroundCommandManager
 from backend.agent.execution_journal import ExecutionJournal, execution_journal_owner
 from backend.agent.state import AgentState
 from backend.agent.tool_batch_execution import execute_tool_batch
@@ -137,6 +141,18 @@ class SDKSession:
             configured_workspace if configured_workspace is not None else Path.cwd()
         ).expanduser().resolve()
         self._active_query = False
+        self._code_stores: dict[str, CodeExecutionStore] = {}
+        self._commands = BackgroundCommandManager(session_id=session_id)
+
+    async def aclose(self) -> None:
+        await self._commands.shutdown()
+        self._code_stores.clear()
+
+    async def __aenter__(self) -> SDKSession:
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        await self.aclose()
 
     async def query(self, message: str, **overrides: Any) -> AsyncIterator[AgentEvent]:
         if self._active_query:
@@ -151,6 +167,9 @@ class SDKSession:
         metadata.update(run_kwargs.pop("metadata", {}) or {})
         session_id = str(run_kwargs.pop("session_id", self.session_id))
         context_builder = run_kwargs.pop("context_builder", self.context_builder)
+        run_kwargs.setdefault("background_manager", self._commands)
+        code_owner = str(metadata.get("conversation_id") or session_id)
+        run_kwargs.setdefault("code_store", self._code_stores.setdefault(code_owner, CodeExecutionStore()))
         stream = query(
             message,
             session_id=session_id,
@@ -246,6 +265,8 @@ async def query(
     state: AgentState | None = None,
     context_builder: ContextBuilder | None = None,
     session_id: str = "sdk",
+    background_manager: BackgroundCommandManager | None = None,
+    code_store: CodeExecutionStore | None = None,
     workspace_root: str | Path | None = None,
     max_iterations: int | None = None,
     metadata: dict[str, Any] | None = None,
@@ -304,6 +325,8 @@ async def query(
             state=state,
             context_builder=context_builder,
             session_id=session_id,
+            background_manager=background_manager,
+            code_store=code_store,
             workspace_root=workspace_root,
             max_iterations=max_iterations,
             metadata=effective_metadata,
@@ -334,6 +357,8 @@ async def _query_unclaimed(
     state: AgentState | None = None,
     context_builder: ContextBuilder | None = None,
     session_id: str = "sdk",
+    background_manager: BackgroundCommandManager | None = None,
+    code_store: CodeExecutionStore | None = None,
     workspace_root: str | Path | None = None,
     max_iterations: int | None = None,
     metadata: dict[str, Any] | None = None,
@@ -431,16 +456,21 @@ async def _query_unclaimed(
             agent_settings=agent_settings,
             token_budget=token_budget,
             context_builder=context_builder,
+            code_store=code_store or CodeExecutionStore(),
         ),
         state=state,
         runtime=AgentLoopSessionContext(
             permission_context=permission_context,
             workspace_root=resolved_workspace_root,
             session_id=session_id,
+            background_manager=background_manager,
             metadata=effective_metadata,
+            run_context=RunContext(model_execution=ModelExecutionSnapshot.capture(
+                replace(config, agent=agent_settings, token_budget=token_budget), llm,
+            )),
         ),
     )
-    async with aclosing(QueryEngine().submit(submission)) as stream:
+    async with aclosing(submission.session), aclosing(QueryEngine().submit(submission)) as stream:
         async for event in stream:
             yield event
 
@@ -465,7 +495,7 @@ def _schema_from_callable(func: ToolCallable) -> JsonSchema:
 
 
 def _clone_context_builder(builder: ContextBuilder) -> ContextBuilder:
-    return clone_context_builder(builder)
+    return builder.fork_from(-1)
 
 
 def _mcp_callable_for_tool(

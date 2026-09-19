@@ -1,4 +1,5 @@
 import type { ChatMessage, ContentBlock } from "../stores/types";
+import { acknowledgeMessageUpdate, messageTopologyKey, streamingMessageUpdate } from "../lib/message-changes";
 import {
   getContentBlocks,
   isFinalAnswerBlock,
@@ -7,6 +8,8 @@ import {
 import {
   activityKindFromToolRecord,
   activityStatusFromToolRecords,
+  projectProgressBlock,
+  projectToolBlock,
   projectTurn,
   type TurnActivityItem,
 } from "../lib/turn-projection";
@@ -28,7 +31,7 @@ import type {
 } from "./cells/cellTypes";
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
 import { shallow } from "zustand/shallow";
-import { recordInputTarget, recordOutcomeMeta } from "./cells/activityCellHelpers";
+import { knownFilePathsForCell, recordInputTarget, recordOutcomeMeta } from "./cells/activityCellHelpers";
 import { readableToolLabel } from "./toolDisplayName";
 import { purifyToolErrorText } from "./errorMessages";
 import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
@@ -133,6 +136,7 @@ const execCell = (record: ToolCallRecord, item?: TurnActivityItem): ExecCellStat
     kind: "exec",
     id: record.id,
     command: commandFor(record),
+    callSource: record.callSource,
     cwd: typeof record.args?.cwd === "string" ? record.args.cwd : undefined,
     background: record.args?.run_in_background === true,
     status: record.status === "running" || record.status === "pending"
@@ -635,9 +639,11 @@ function buildTurn(
 
   return {
     id: assistantMessage.id,
+    resourceKey: {},
+    toolPage: assistantMessage.toolPage,
     turnId: assistantMessage.turnId,
     userCell: userCell(userMessage),
-    committedCells,
+    committedCells: assistantMessage.toolPage?.remaining ? committedCells.filter((cell) => cell.kind !== "diff") : committedCells,
     activeCell: liveTail(blocks, assistantMessage),
     finalAnswerCell,
     status: assistantMessage.isStreaming
@@ -732,6 +738,67 @@ type TurnCacheEntry = {
 };
 
 const turnProjectionCache = new WeakMap<object, TurnCacheEntry[]>();
+const cellPositions = new WeakMap<CommittedCellState[], Map<string, number>>();
+
+function positionsForCells(cells: CommittedCellState[]): Map<string, number> {
+  let positions = cellPositions.get(cells);
+  if (!positions) {
+    positions = new Map();
+    cells.forEach((cell, index) => positions!.set(cell.id, positions!.has(cell.id) ? -1 : index));
+    cellPositions.set(cells, positions);
+  }
+  return positions;
+}
+
+function updateTurnCells(base: ChatTurnState, message: ChatMessage): ChatTurnState | null {
+  const update = streamingMessageUpdate(message)!;
+  const positions = positionsForCells(base.committedCells);
+  let committedCells = base.committedCells;
+  let activeCell = base.activeCell;
+  let resourceKey = base.resourceKey;
+  const replaceCell = (index: number, cell: CommittedCellState) => {
+    if (committedCells === base.committedCells) committedCells = committedCells.slice();
+    committedCells[index] = cell;
+  };
+  for (const [blockIndex, kind] of update.changes) {
+    const block = message.blocks![blockIndex];
+    if (kind === "thinking" && block.type === "thinking") {
+      const index = positions.get(`thinking-${blockIndex}`);
+      if (index === -1) return null;
+      if (index !== undefined) replaceCell(index, { ...base.committedCells[index], content: block.content } as ThinkingCellState);
+    } else if (kind === "progress" && block.type === "progress") {
+      const index = positions.get(block.id);
+      if (index === -1) return null;
+      if (index !== undefined) {
+        const previous = base.committedCells[index];
+        if (previous.kind !== "activity") return null;
+        replaceCell(index, { ...activityCell(projectProgressBlock(block), message), segment: previous.segment, segmentClosed: previous.segmentClosed });
+      }
+    } else if ((kind === "tool_output" || kind === "tool") && block.type === "tool_call") {
+      const index = positions.get(block.record.id);
+      // Collaboration may project several rows, and file changes own an
+      // aggregate diff. Those use the full projection with its grouping rules.
+      if (index === undefined || index < 0) return null;
+      const previous = base.committedCells[index];
+      if (previous.kind !== "activity" && previous.kind !== "exec") return null;
+      const item = { ...projectToolBlock(block, previous.segment ?? 0), segmentClosed: previous.segmentClosed };
+      const projected = projectProcessItem(item, message);
+      if (projected.diff || projected.cells.length !== 1 || projected.cells[0].id !== previous.id) return null;
+      replaceCell(index, projected.cells[0]);
+      if (kind === "tool" && !shallow(knownFilePathsForCell(previous), knownFilePathsForCell(projected.cells[0]))) resourceKey = {};
+    } else if (kind === "text" && block.type === "text") {
+      const index = positions.get(block.itemId || "");
+      if (index === -1) return null;
+      if (index !== undefined) {
+        if (base.committedCells[index].kind !== "thinking") return null;
+        replaceCell(index, { ...base.committedCells[index], content: block.content } as ThinkingCellState);
+      }
+      activeCell = liveTail([block], message) ?? activeCell;
+    }
+  }
+  cellPositions.set(committedCells, positions);
+  return { ...base, committedCells, activeCell, resourceKey };
+}
 
 function buildTurnMemoized(
   userMessage: ChatMessage | null,
@@ -749,13 +816,20 @@ function buildTurnMemoized(
         && entry.workspaceRoot === workspaceRoot,
     );
     if (cached) return cached.turn;
-    const turn = buildTurn(userMessage, assistantMessage, workspaceRoot, isStreaming && !assistantMessage);
+    const update = assistantMessage && streamingMessageUpdate(assistantMessage);
+    const incremental = update && assistantMessage && isStreaming
+      ? updateTurnCells(buildTurnMemoized(userMessage, update.base, isStreaming, workspaceRoot), assistantMessage)
+      : null;
+    const turn = incremental ?? buildTurn(userMessage, assistantMessage, workspaceRoot, isStreaming && !assistantMessage);
     if (turn.status === "streaming" && !isStreaming) turn.status = "completed";
     entries.push({ userMessage, assistantMessage, isStreaming, workspaceRoot, turn });
     // A message normally has at most two states (live and settled). Bound the
     // cache defensively if a caller toggles streaming repeatedly.
     if (entries.length > 3) entries.splice(0, entries.length - 3);
     turnProjectionCache.set(anchor, entries);
+    // The cached turn now owns this result. The next receipt starts here,
+    // rather than replaying every changed tool since the start of the turn.
+    if (assistantMessage) acknowledgeMessageUpdate(assistantMessage);
     return turn;
   }
   return buildTurn(userMessage, assistantMessage, workspaceRoot, isStreaming && !assistantMessage);
@@ -852,21 +926,13 @@ const projectedTurnStarts = (messages: ChatMessage[]): number[] => {
   return starts;
 };
 
-type TopologyAnchor = {
-  index: number;
-  message: ChatMessage;
-};
-
 export interface RecentTurnProjectionCache {
   cacheKey: string;
   recentTurnLimit: number;
   messageCount: number;
   sourceMessages: ChatMessage[] | null;
-  firstMessage: ChatMessage | null;
+  topologyKey: object | null;
   windowStart: number;
-  prefixBoundary: ChatMessage | null;
-  prefixAnchors: TopologyAnchor[];
-  recentTopology: string[];
   totalTurnCount: number;
 }
 
@@ -875,45 +941,10 @@ export const createRecentTurnProjectionCache = (): RecentTurnProjectionCache => 
   recentTurnLimit: 0,
   messageCount: 0,
   sourceMessages: null,
-  firstMessage: null,
+  topologyKey: null,
   windowStart: 0,
-  prefixBoundary: null,
-  prefixAnchors: [],
-  recentTopology: [],
   totalTurnCount: 0,
 });
-
-const messageTopology = (message: ChatMessage | undefined): string => {
-  if (!message) return "";
-  return [
-    message.id,
-    message.role,
-    message.queueState ?? "",
-    isQuietSystemNotice(message) ? "quiet" : "visible",
-  ].join("\u0000");
-};
-
-const prefixTopologyAnchors = (
-  messages: ChatMessage[],
-  windowStart: number,
-): TopologyAnchor[] => {
-  if (windowStart <= 1) return [];
-  // A transcript reload/rewind replaces the full prefix and is caught by the
-  // first/boundary guards.  These evenly distributed identities additionally
-  // invalidate a cache when an older middle record is replaced while the
-  // recent streaming tail remains unchanged, without re-walking thousands of
-  // historical messages for every token.
-  const anchorCount = Math.min(32, windowStart - 1);
-  const anchors: TopologyAnchor[] = [];
-  for (let offset = 1; offset <= anchorCount; offset += 1) {
-    const index = Math.floor((offset * (windowStart - 1)) / (anchorCount + 1));
-    const message = messages[index];
-    if (message && !anchors.some((anchor) => anchor.index === index)) {
-      anchors.push({ index, message });
-    }
-  }
-  return anchors;
-};
 
 const canReuseRecentTurnProjection = (
   cache: RecentTurnProjectionCache,
@@ -929,26 +960,9 @@ const canReuseRecentTurnProjection = (
     || cache.messageCount !== messages.length
     || cache.windowStart < 0
     || cache.windowStart >= messages.length
-    || cache.firstMessage !== (messages[0] ?? null)
   ) return false;
   if (cache.sourceMessages === messages) return true;
-  // Outside a live stream, transcript mutations are infrequent and should be
-  // rebuilt exactly.  The fast path is reserved for the high-frequency case
-  // where only the current assistant record is replaced per delta.
-  if (!isStreaming) return false;
-  if (cache.windowStart > 0 && cache.prefixBoundary !== messages[cache.windowStart - 1]) {
-    return false;
-  }
-  if (cache.prefixAnchors.some((anchor) => messages[anchor.index] !== anchor.message)) {
-    return false;
-  }
-  if (cache.recentTopology.length !== messages.length - cache.windowStart) return false;
-  for (let index = cache.windowStart; index < messages.length; index += 1) {
-    if (cache.recentTopology[index - cache.windowStart] !== messageTopology(messages[index])) {
-      return false;
-    }
-  }
-  return true;
+  return cache.topologyKey === messageTopologyKey(messages);
 };
 
 export function projectRecentMessagesToTurns(
@@ -984,7 +998,7 @@ export function projectRecentMessagesToTurns(
       recentTurnLimit: limit,
       messageCount: messages.length,
       sourceMessages: messages,
-      firstMessage: messages[0] ?? null,
+      topologyKey: messageTopologyKey(messages),
       totalTurnCount,
     });
     return {
@@ -1000,11 +1014,8 @@ export function projectRecentMessagesToTurns(
     recentTurnLimit: limit,
     messageCount: messages.length,
     sourceMessages: messages,
-    firstMessage: messages[0] ?? null,
+    topologyKey: messageTopologyKey(messages),
     windowStart,
-    prefixBoundary: windowStart > 0 ? messages[windowStart - 1] : null,
-    prefixAnchors: prefixTopologyAnchors(messages, windowStart),
-    recentTopology: messages.slice(windowStart).map(messageTopology),
     totalTurnCount,
   });
   return {

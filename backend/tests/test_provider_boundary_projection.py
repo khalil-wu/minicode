@@ -6,13 +6,45 @@ import httpx
 import pytest
 
 from backend.artifact.store import ArtifactStore
+from backend.agent.provider_stream_error_event import provider_error_details
 from backend.llm.anthropic_adapter import (
     _anthropic_declared_error_event,
     _anthropic_exception_error_event,
 )
-from backend.llm.errors import classify_llm_error
+from backend.llm.base import StreamEvent, StreamEventType
+from backend.llm.errors import classify_llm_error, llm_error_raw, sanitize_llm_error_message
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.tools.web_tools import WebFetchTool
+
+
+def test_structured_provider_kind_survives_event_reclassification() -> None:
+    request = httpx.Request("POST", "https://gateway.example/v1/responses")
+    response = httpx.Response(
+        503,
+        request=request,
+        json={
+            "error": {
+                "code": "model_not_found",
+                "message": "model is unavailable",
+            }
+        },
+    )
+    error = httpx.HTTPStatusError("service unavailable", request=request, response=response)
+    initial = classify_llm_error(error)
+    event = StreamEvent(
+        type=StreamEventType.ERROR,
+        content=sanitize_llm_error_message(error, initial),
+        raw=llm_error_raw(error, "openai_responses"),
+    )
+
+    _, projected, _ = provider_error_details(event)
+
+    assert initial.error_type == "model"
+    assert initial.provider_error_type == "model"
+    assert projected.error_type == "model"
+    assert projected.provider_error_type == "model"
+    assert projected.fatal is True
+    assert projected.retryable is False
 
 
 def test_anthropic_messages_exception_preserves_safe_provider_diagnostics() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from concurrent.futures import ThreadPoolExecutor
 
 from backend.agent.runtime import AgentRuntime
@@ -799,3 +800,148 @@ async def _test_swarm_team_create_rejects_second_team_for_same_leader(tmp_path) 
     teams = runtime.list_swarm_teams(conversation_id="conversation-1")
     assert len(teams) == 1
     assert teams[0].members[0].id == "team-lead@audit"
+
+
+def test_child_to_leader_message_leaves_a_durable_wake_marker(tmp_path) -> None:
+    from backend.agent.mailbox_delivery import inject_parent_notifications, inject_subagent_mailbox_updates
+
+    runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
+    runtime.start_run(run_id="parent-run", conversation_id="conversation-1")
+    child = runtime.start_subagent(
+        subagent_id="subagent-w", parent_run_id="parent-run", agent_type="general-purpose",
+        teammate_name="w", team_name="team-a",
+    )
+    runtime.send_swarm_message(
+        sender_id=child.subagent_id, recipient_id="parent", content="done with part 1",
+        conversation_id="conversation-1", team_name="team-a", sender_mailbox_epoch=child.mailbox_epoch,
+    )
+    wakes = [
+        item for item in runtime.list_parent_notifications(parent_run_id="parent-run", conversation_id="conversation-1")
+        if item["kind"] == "mailbox_wake"
+    ]
+    assert len(wakes) == 1 and wakes[0]["status"] == "pending"
+
+    async def leader_turn():
+        ctx = ContextBuilder()
+        state = AgentState(user_message="")
+        metadata = {"run_id": "parent-run"}
+        run_context = RunContext(agent_runtime=runtime)
+        injected = await inject_subagent_mailbox_updates(
+            ctx=ctx, state=state, metadata=metadata, conversation_id="conversation-1", run_context=run_context,
+        )
+        notified = await inject_parent_notifications(
+            ctx=ctx, state=state, metadata=metadata, runtime=runtime, run_context=run_context,
+            parent_run_id="parent-run", conversation_id="conversation-1",
+        )
+        return injected, notified, [m.content for m in ctx._history]
+
+    injected, notified, history = asyncio.run(leader_turn())
+    assert injected == 1 and notified == 0
+    assert any("done with part 1" in text for text in history)
+    # The marker is consumed by the turn it started; it is not rendered as text.
+    assert not any("mailbox_wake" in text for text in history)
+    remaining = runtime.list_parent_notifications(parent_run_id="parent-run", conversation_id="conversation-1")
+    assert all(item["status"] == "acked" for item in remaining if item["kind"] == "mailbox_wake")
+
+
+def test_leader_mailbox_hides_protocol_payloads_and_collapses_idle_notices(tmp_path) -> None:
+    from backend.agent.mailbox_delivery import inject_subagent_mailbox_updates
+
+    runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
+    runtime.start_run(run_id="parent-run", conversation_id="conversation-1")
+    child = runtime.start_subagent(
+        subagent_id="subagent-w", parent_run_id="parent-run", agent_type="general-purpose",
+        teammate_name="w", team_name="team-a",
+    )
+
+    def send(payload):
+        runtime.send_swarm_message(
+            sender_id=child.subagent_id, recipient_id="parent", content=json.dumps(payload),
+            conversation_id="conversation-1", team_name="team-a", sender_mailbox_epoch=child.mailbox_epoch,
+        )
+
+    for index in range(3):
+        send({"type": "idle_notification", "from": "w", "timestamp": f"t{index}", "idleReason": "available", "summary": f"idle {index}"})
+    send({"type": "shutdown_response", "request_id": "s1", "from": "w", "approve": True})
+
+    async def leader_turn():
+        ctx = ContextBuilder()
+        count = await inject_subagent_mailbox_updates(
+            ctx=ctx, state=AgentState(user_message=""), metadata={"run_id": "parent-run"},
+            conversation_id="conversation-1", run_context=RunContext(agent_runtime=runtime),
+        )
+        return count, "\n".join(str(m.content) for m in ctx._history)
+
+    count, text = asyncio.run(leader_turn())
+    assert count == 1
+    assert "shutdown_response" not in text
+    assert text.count("is idle and available") == 1 and "idle 2" in text and "idle 0" not in text
+    # Every claim was settled: nothing is re-delivered next iteration.
+    assert runtime.claim_swarm_messages(participant_id="parent", mailbox_epoch=0, conversation_id="conversation-1", since_seq=0, limit=100) == []
+
+
+def test_task_assignment_notifies_the_assignee_and_team_delete_refuses_live_members(tmp_path) -> None:
+    runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
+    runtime.start_run(run_id="parent-run", conversation_id="conversation-1")
+    context, _events = _context(runtime)
+    child = runtime.start_subagent(
+        subagent_id="subagent-w", parent_run_id="parent-run", agent_type="general-purpose",
+        teammate_name="w", team_name="team-a",
+    )
+
+    async def scenario():
+        await TeamCreateTool().execute({"team_name": "team-a", "members": [{"id": "w", "role": "impl"}]}, context=context)
+        created = await TaskCreateTool().execute({"title": "Fix parser", "description": "see failing test"}, context=context)
+        task_id = runtime.list_swarm_tasks(conversation_id="conversation-1")[0].task_id
+        await TaskUpdateTool().execute({"task_id": task_id, "assignee": "w"}, context=context)
+        claims = runtime.claim_swarm_messages(
+            participant_id=child.subagent_id, mailbox_epoch=child.mailbox_epoch,
+            conversation_id="conversation-1", since_seq=0, limit=10,
+        )
+        assert len(claims) == 1 and "Fix parser" in claims[0].message.content
+        assert claims[0].message.task_id == task_id
+        delete = await TeamDeleteTool().execute({"team_name": "team-a"}, context=context)
+        assert delete.is_error and "running member" in delete.content
+        assert runtime.list_swarm_teams(conversation_id="conversation-1")
+
+    asyncio.run(scenario())
+
+
+def test_leader_broadcast_reaches_every_running_teammate_and_summary_is_kept(tmp_path) -> None:
+    runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
+    runtime.start_run(run_id="parent-run", conversation_id="conversation-1")
+    context, _events = _context(runtime)
+    workers = [
+        runtime.start_subagent(
+            subagent_id=f"subagent-{name}", parent_run_id="parent-run", agent_type="general-purpose",
+            teammate_name=name, team_name="team-a",
+        )
+        for name in ("a", "b")
+    ]
+    finished = runtime.start_subagent(
+        subagent_id="subagent-done", parent_run_id="parent-run", agent_type="general-purpose",
+        teammate_name="done", team_name="team-a",
+    )
+    runtime.complete_subagent(finished.subagent_id, status="completed", **_subagent_fence(runtime, finished.subagent_id))
+
+    async def scenario():
+        result = await SendMessageTool().execute(
+            {"recipient": "*", "message": "stop editing main.py", "summary": "freeze main.py"},
+            context=context,
+        )
+        assert not result.is_error, result.content
+        assert result.runtime_metadata["delivery"] == "broadcast:2"
+        for worker in workers:
+            claims = runtime.claim_swarm_messages(
+                participant_id=worker.subagent_id, mailbox_epoch=worker.mailbox_epoch,
+                conversation_id="conversation-1", since_seq=0, limit=10,
+            )
+            assert [claim.message.content for claim in claims] == ["stop editing main.py"]
+            assert claims[0].message.summary == "freeze main.py"
+        # A sealed teammate is not a broadcast target.
+        assert runtime.claim_swarm_messages(
+            participant_id=finished.subagent_id, mailbox_epoch=finished.mailbox_epoch + 1,
+            conversation_id="conversation-1", since_seq=0, limit=10,
+        ) == []
+
+    asyncio.run(scenario())

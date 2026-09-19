@@ -131,10 +131,12 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
     set({ agentMode: m });
   },
   setEffortLevel: (e) => {
+    const before = get();
     void reportCommandOutcome(
       sendClientCommandAwaitResult({
         type: "llm.config.set",
-        provider: get().currentProvider || "openai",
+        provider: before.currentProvider || "openai",
+        ...(before.conversationId ? { conversation_id: before.conversationId } : {}),
         reasoning_effort: e,
         source: "frontend.footer",
       }, "effort"),

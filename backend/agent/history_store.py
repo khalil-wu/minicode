@@ -12,21 +12,33 @@ keeps session storage as separate components.
 from __future__ import annotations
 
 import time
+from collections import Counter, deque
+from itertools import islice
 from copy import deepcopy
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
-from backend.llm.base import LLMMessage, ToolCallEvent
+from backend.llm.base import LLMMessage, ToolCallEvent, estimate_llm_message_tokens, estimate_text_tokens
+from backend.agent.context_ledger import estimate_native_attachments
+
+
+class _HistoryAccounting(NamedTuple):
+    category: str
+    source: str
+    tokens: int
+    attachment_tokens: int
+    attachment_count: int
+    attachment_sources: tuple[str, ...]
 
 MessageEstimator = Callable[[LLMMessage, Any | None], int]
 
 
 def _estimate_content_tokens(content: Any) -> int:
-    """Estimate tokens with the provider-neutral ``chars / 4`` heuristic."""
+    """Use the shared model-visible text estimate."""
     if isinstance(content, str):
-        return (len(content) + 3) // 4
+        return estimate_text_tokens(content)
     if content is None:
         return 0
-    return (len(str(content)) + 3) // 4
+    return estimate_text_tokens(str(content))
 
 
 def estimate_message_tokens(
@@ -34,7 +46,7 @@ def estimate_message_tokens(
     tool_calls: list[ToolCallEvent] | None = None,
 ) -> int:
     """Rough per-message token estimate used by the history token cache."""
-    return _estimate_content_tokens(content) + (len(tool_calls or []) * 20)
+    return estimate_llm_message_tokens(LLMMessage(role="assistant", content=str(content or ""), tool_calls=tool_calls))
 
 
 def repair_tool_messages(
@@ -184,14 +196,52 @@ class ConversationHistory:
         self.frozen_metadata_present = False
         self.pending_hydration_frozen_prefix_count = 0
         self.last_message_timestamp_ms = 0
-        self._estimator = estimator or (
-            lambda message, raw_content: estimate_message_tokens(
-                raw_content if raw_content is not None else message.content,
-                message.tool_calls,
-            )
-        )
+        self._estimator = estimator or estimate_llm_message_tokens
         self._token_estimates: list[int] = []
         self._tokens_total = 0
+        self.revision = 0
+        self._changes: deque[tuple[int, int]] = deque(maxlen=256)
+        self._accounting: list[_HistoryAccounting] = []
+        self._ledger = {key: {"tokens": 0, "items": 0, "sources": Counter()} for key in ("history", "tool_results", "files_attachments")}
+
+    @staticmethod
+    def _account(message: LLMMessage, estimate: int) -> _HistoryAccounting:
+        tokens, count, sources = estimate_native_attachments(message.images, message.documents)
+        return _HistoryAccounting(
+            "tool_results" if message.role == "tool" else "history",
+            str(message.name or "tool") if message.role == "tool" else str(message.role or "message"),
+            max(0, estimate - tokens), tokens, count, tuple(sources),
+        )
+
+    def _add_account(self, entry: _HistoryAccounting, sign: int) -> None:
+        for category, tokens, count, sources in (
+            (entry.category, entry.tokens, 1, (entry.source,)),
+            ("files_attachments", entry.attachment_tokens, entry.attachment_count, entry.attachment_sources),
+        ):
+            row = self._ledger[category]
+            row["tokens"] += sign * tokens
+            row["items"] += sign * count
+            for source in sources:
+                row["sources"][source] += sign
+                if row["sources"][source] == 0:
+                    del row["sources"][source]
+
+    def ledger_categories(self) -> dict[str, dict[str, Any]]:
+        return {key: {"tokens": row["tokens"], "items": row["items"],
+                      "source_count": len(row["sources"]), "sources": list(islice(row["sources"], 12))}
+                for key, row in self._ledger.items()}
+
+    def _changed(self, index: int) -> None:
+        self.revision += 1
+        self._changes.append((self.revision, index))
+
+    def changed_since(self, revision: int) -> int:
+        """Earliest changed message, or a full replacement after cursor expiry."""
+        if revision == self.revision:
+            return len(self.messages)
+        if not self._changes or revision < self._changes[0][0] - 1:
+            return 0
+        return min(index for version, index in self._changes if version > revision)
 
     # ── queries ──
 
@@ -223,9 +273,13 @@ class ConversationHistory:
             int(message.timestamp_ms or 1),
         )
         self.messages.append(message)
+        self._changed(len(self.messages) - 1)
         estimate = int(self._estimator(message, raw_content))
         self._token_estimates.append(estimate)
         self._tokens_total += estimate
+        accounting = self._account(message, estimate)
+        self._accounting.append(accounting)
+        self._add_account(accounting, 1)
 
     def prepend(self, messages: list[LLMMessage]) -> None:
         """Prepend hydrated prefix messages, adjusting the frozen boundary."""
@@ -251,12 +305,15 @@ class ConversationHistory:
 
     def clear(self) -> None:
         self.messages.clear()
+        self._changed(0)
         self.frozen_count = 0
         self.frozen_metadata_present = False
         self.pending_hydration_frozen_prefix_count = 0
         self.last_message_timestamp_ms = 0
         self._token_estimates.clear()
         self._tokens_total = 0
+        self._accounting.clear()
+        self._ledger = {key: {"tokens": 0, "items": 0, "sources": Counter()} for key in self._ledger}
 
     # ── derived state ──
 
@@ -279,9 +336,30 @@ class ConversationHistory:
             current = max(current, int(message.timestamp_ms or 1))
         self.last_message_timestamp_ms = max(self.last_message_timestamp_ms, current)
 
-    def rebuild_token_cache(self) -> None:
-        self._token_estimates = [int(self._estimator(message, message.content)) for message in self.messages]
-        self._tokens_total = sum(self._token_estimates)
+    def rebuild_token_cache(self, *, changed_from: int = 0) -> None:
+        self._changed(changed_from)
+        estimates = [int(self._estimator(message, message.content)) for message in self.messages[changed_from:]]
+        self._tokens_total += sum(estimates) - sum(self._token_estimates[changed_from:])
+        self._token_estimates[changed_from:] = estimates
+        for entry in self._accounting[changed_from:]: self._add_account(entry, -1)
+        entries = [self._account(message, estimate) for message, estimate in zip(self.messages[changed_from:], estimates)]
+        self._accounting[changed_from:] = entries
+        for entry in entries: self._add_account(entry, 1)
+
+    def refresh_message_estimate(self, message: LLMMessage) -> None:
+        index = next(i for i, stored in enumerate(self.messages) if stored is message)
+        self._changed(index)
+        estimate = int(self._estimator(message, message.content))
+        self._tokens_total += estimate - self._token_estimates[index]
+        self._token_estimates[index] = estimate
+        previous = self._accounting[index]
+        current = self._account(message, estimate)
+        if (previous.category, previous.source, previous.attachment_count, previous.attachment_sources) == (current.category, current.source, current.attachment_count, current.attachment_sources):
+            self._ledger[current.category]["tokens"] += current.tokens - previous.tokens
+            self._ledger["files_attachments"]["tokens"] += current.attachment_tokens - previous.attachment_tokens
+            self._accounting[index] = current
+        else:
+            self.rebuild_token_cache()
 
     def repair(self) -> int:
         """Repair dangling/orphan tool messages in place.
@@ -314,4 +392,6 @@ class ConversationHistory:
         cloned.last_message_timestamp_ms = self.last_message_timestamp_ms
         cloned._token_estimates = list(self._token_estimates)
         cloned._tokens_total = self._tokens_total
+        cloned._accounting = list(self._accounting)
+        cloned._ledger = deepcopy(self._ledger)
         return cloned

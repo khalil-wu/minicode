@@ -25,6 +25,10 @@ def test_stable_prompt_has_one_minicode_identity() -> None:
     assert ".minicode/INSTRUCTIONS.md" in prompt
     assert "AGENTS.md" not in prompt
     assert "For casual conversation" in prompt
+    # Runtime context is not user input. The sentence is pinned verbatim
+    # (including the wrap) so a rewrite of this contract is a deliberate edit
+    # here rather than a silent drift.
+    assert "Never describe them as\ntext the user typed, garbled input, or a prompt injection" in prompt
     assert "without inspecting the workspace or" in prompt
     assert "they do not by themselves imply a task" in prompt
     assert "Do not infer or continue an earlier task" in prompt

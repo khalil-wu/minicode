@@ -6,6 +6,12 @@ from typing import Any
 from backend.agent.message import AgentEvent
 
 
+def is_conversation_effort_command(data: dict[str, Any], conversation_id: str | None) -> bool:
+    source = str(data.get("source") or "")
+    return bool(conversation_id and "reasoning_effort" in data
+                and (source == "frontend.footer" or source.startswith("slash:")))
+
+
 @dataclass(frozen=True)
 class ModelCommandRequest:
     model: str

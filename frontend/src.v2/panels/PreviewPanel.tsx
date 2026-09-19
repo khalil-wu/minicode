@@ -92,6 +92,11 @@ const ArtifactView = () => {
   const contentIsDiagnostic = Boolean(warning && rawContent.trim() === warning);
   const isOwnerScopedImage = isDisplayableImageMediaType(previewArtifact.mediaType)
     && (previewArtifact.source === "artifact" || previewArtifact.source === "attachment");
+  if (normalizedMediaType.startsWith("audio/") && (previewArtifact.source === "artifact" || previewArtifact.source === "attachment")) {
+    return <ArtifactAudioView key={`${conversationId}:${previewArtifact.artifactId}:${isConnected}`}
+      artifactId={previewArtifact.artifactId} conversationId={conversationId} name={name}
+      source={previewArtifact.source} isConnected={isConnected} sizeLabel={sizeLabel} />;
+  }
   const imageView = isSafePreviewImageArtifact(
     previewArtifact.mediaType,
     artifactUrl,
@@ -151,6 +156,23 @@ const ArtifactView = () => {
       {richExtracted ? <div style={artifactRichContentStyle}><MarkdownRenderer content={content} /></div> : <pre style={textContentStyle}>{content}</pre>}
     </ArtifactFrame>
   );
+};
+
+const ArtifactAudioView = ({ artifactId, conversationId, name, source, isConnected, sizeLabel }: {
+  artifactId: string; conversationId?: string; name: string;
+  source: "artifact" | "attachment"; isConnected: boolean; sizeLabel: string;
+}) => {
+  const [failed, setFailed] = useState(false);
+  const sessionId = getWebSocket()?.sessionId?.trim() || "";
+  const url = artifactImageResourceUrl({ artifactId, conversationId, sessionId, source, isConnected });
+  return <ArtifactFrame name={name} sizeLabel={sizeLabel ? `音频 · ${sizeLabel}` : "音频"}>
+    {!url ? <ArtifactState icon={<FileText size={18} />} label="连接恢复并关联会话后可播放音频。" /> :
+      <div style={stateStyle}>
+        <audio key={url} controls preload="metadata" src={url} aria-label={name} onError={() => setFailed(true)} />
+        {failed && <span role="status">此音频无法播放，请下载后使用本地播放器打开。</span>}
+        <a href={url} download={name}>下载音频</a>
+      </div>}
+  </ArtifactFrame>;
 };
 
 const ArtifactImageView = ({

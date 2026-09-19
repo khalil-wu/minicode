@@ -38,8 +38,8 @@ class ToolTransitionController:
 
     The provider loop only consumes the resulting event iterator. This keeps
     model-history safety and live permission changes in one transition
-    boundary. Provider streaming never executes tools; the batch runner below
-    is the single post-settlement execution path.
+    boundary. Settled responses and committed streamed items share
+    ToolBatchRunner for authorization, execution and result persistence.
     """
 
     def __init__(

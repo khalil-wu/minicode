@@ -7,7 +7,10 @@ from typing import Any, Literal
 
 from backend.agent.loop_preflight import hook_manager_has_hooks
 from backend.agent.message import AgentEvent
-from backend.agent.response_utils import append_assistant_history
+from backend.agent.response_utils import (
+    append_assistant_history,
+    provider_items_for_final_answer,
+)
 from backend.hooks.manager import HookEvent
 
 
@@ -84,7 +87,7 @@ async def apply_stop_hook_policy(
         context_builder,
         candidate_text,
         phase=provider_phase or "final_answer",
-        provider_items=provider_items,
+        provider_items=provider_items_for_final_answer(provider_items),
     )
     context_builder.append_user(feedback)
     stream_text.reset_for_retry()

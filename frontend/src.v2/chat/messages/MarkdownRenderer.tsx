@@ -1,5 +1,6 @@
-import { Children, isValidElement, lazy, memo, Suspense, useState, useCallback, useEffect, useId, useMemo, useRef } from "react";
+import { Children, isValidElement, lazy, memo, Suspense, useState, useCallback, useEffect, useId, useMemo, useRef, createContext, useContext, useDeferredValue } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import { StreamingMarkdownPartition, type MarkdownPart } from "./streamingMarkdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -160,7 +161,7 @@ const LazyCodeHighlighter = lazy(async () => {
         <SyntaxHighlighter
           language={normalizeHighlightLanguage(language)}
           style={codeStyle}
-          PreTag="div"
+          PreTag="pre"
           showLineNumbers
           wrapLongLines
           customStyle={codeBlockStyle(hasLanguage)}
@@ -595,10 +596,8 @@ const PlainCodeBlock = ({ hasLanguage, text }: { hasLanguage: boolean; text: str
   const lines = text.split("\n");
   return (
     <pre
-      style={{
-        borderRadius: hasLanguage ? "0 0 var(--radius-sm, 6px) var(--radius-sm, 6px)" : "var(--radius-sm, 6px)",
-      }}
-      className="m-0 p-3 bg-[var(--surface-soft)] border border-[var(--border-subtle)] text-[var(--text-sm)] font-[var(--font-mono)] leading-[1.5] overflow-x-auto"
+      style={codeBlockStyle(hasLanguage)}
+      className="overflow-x-auto"
     >
       <code>
         {lines.map((line, index) => (
@@ -1327,11 +1326,12 @@ const MarkdownImage = ({ workspaceRoot, conversationId, ...props }: React.ImgHTM
   ) : image;
 };
 
+const MarkdownResourceContext = createContext<MessageResourceScope>({});
+
 const mdComponents = (
   resolvedTheme: ResolvedTheme,
   scopeId: string,
   headingId: ReturnType<typeof createMarkdownHeadingIdAssigner>,
-  resourceScope: MessageResourceScope,
 ): MarkdownComponents => {
   const heading = (level: 1 | 2 | 3) => ({ node, ...props }: MarkdownPositionedProps<React.HTMLAttributes<HTMLHeadingElement>>) => {
     const base = markdownHeadingSlug(textFromReactNode(props.children));
@@ -1342,10 +1342,12 @@ const mdComponents = (
       : level === 2
         ? "text-[length:var(--text-xl)] font-semibold mt-5 mb-2 first:mt-0"
         : "text-[length:var(--text-lg)] font-semibold mt-4 mb-1.5 first:mt-0";
-    return <Tag {...props} id={id} tabIndex={-1} className={className} style={{ scrollMarginTop: 16, ...props.style }} />;
+    return <Tag {...props} id={id} data-markdown-heading={base} tabIndex={-1} className={className} style={{ scrollMarginTop: 16, ...props.style }} />;
   };
   return ({
+  pre: ({ children }) => <div className="my-4">{children}</div>,
   code({ className, children, node }: MarkdownCodeProps) {
+    const resourceScope = useContext(MarkdownResourceContext);
     const text = String(children).replace(/\n$/, "");
     const match = /language-(\w+)/.exec(className ?? "");
     const language = match?.[1]?.toLowerCase() ?? "";
@@ -1409,6 +1411,7 @@ const mdComponents = (
     );
   },
   a: ({ node: _node, ...props }: MarkdownElementProps<React.AnchorHTMLAttributes<HTMLAnchorElement>>) => {
+    const resourceScope = useContext(MarkdownResourceContext);
     const href = typeof props.href === "string" ? props.href : "";
     const childrenText = textFromReactNode(props.children);
     if (href.startsWith("#")) {
@@ -1420,7 +1423,12 @@ const mdComponents = (
           className="text-[var(--accent-primary)] underline"
           onClick={(event) => {
             event.preventDefault();
-            const element = document.getElementById(targetId);
+            const slug = markdownHeadingSlug(decodeMarkdownFragment(href.slice(1)));
+            const headings = [...(document.getElementById(scopeId)?.querySelectorAll<HTMLElement>("[data-markdown-heading]") ?? [])];
+            const numbered = /^(.*)-(\d+)$/.exec(slug);
+            const element = document.getElementById(targetId)
+              ?? headings.find((heading) => heading.dataset.markdownHeading === slug)
+              ?? (numbered ? headings.filter((heading) => heading.dataset.markdownHeading === numbered[1])[Number(numbered[2]) - 1] : undefined);
             element?.scrollIntoView({ behavior: "smooth", block: "start" });
             element?.focus({ preventScroll: true });
           }}
@@ -1512,6 +1520,7 @@ const mdComponents = (
   h3: heading(3),
   hr: () => <hr className="border-0 h-px my-4 bg-gradient-to-r from-transparent via-[var(--border-subtle)] to-transparent" />,
   img: ({ node: _node, ...props }: MarkdownElementProps<React.ImgHTMLAttributes<HTMLImageElement>>) => {
+    const resourceScope = useContext(MarkdownResourceContext);
     return <MarkdownImage {...props} workspaceRoot={resourceScope.workspaceRoot} conversationId={resourceScope.conversationId} />;
   },
   });
@@ -1601,40 +1610,6 @@ function scanFences(content: string): FenceScanResult {
   };
 }
 
-/** Return whether a Markdown heading exists outside a fenced code block. */
-function hasMarkdownHeading(content: string): boolean {
-  let open: { marker: "`" | "~"; length: number } | null = null;
-  let lineStart = 0;
-
-  while (lineStart <= content.length) {
-    const newline = content.indexOf("\n", lineStart);
-    const lineEnd = newline >= 0 ? newline : content.length;
-    const line = content.slice(lineStart, lineEnd).replace(/\r$/, "");
-
-    if (open) {
-      const close = /^ {0,3}(`+|~+)[\t ]*$/.exec(line);
-      if (close && close[1][0] === open.marker && close[1].length >= open.length) {
-        open = null;
-      }
-    } else {
-      const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-      if (opening) {
-        open = {
-          marker: opening[1][0] as "`" | "~",
-          length: opening[1].length,
-        };
-      } else if (/^ {0,3}#{1,6}(?:[\t ]+|$)/.test(line)) {
-        return true;
-      }
-    }
-
-    if (newline < 0) break;
-    lineStart = newline + 1;
-  }
-
-  return false;
-}
-
 export function findStableSplitPoint(content: string): number {
   const fenceScan = scanFences(content);
   const openFenceStart = fenceScan.unclosedStart;
@@ -1715,123 +1690,50 @@ const StableMarkdown = memo(({ content, components, plugins }: { content: string
 });
 StableMarkdown.displayName = "StableMarkdown";
 
-const StreamingTailMarkdown = memo(({ content, components, plugins }: { content: string; components: MarkdownComponents; plugins: MarkdownRemarkPlugins }) => {
-  // Plain-text fast path for the streaming tail too — short tails like
-  // a few words being typed don't need the full markdown pipeline.
-  if (!hasMarkdownSyntax(content)) {
-    return <PlainText content={content} />;
-  }
-  // An unclosed fence means a code block is still streaming. Sending it through
-  // react-markdown re-runs the syntax highlighter over the whole block on every
-  // token, which is the dominant cost of a long streamed code block. Render the
-  // open fence as unhighlighted text until it closes; the closed block then
-  // moves into the stable (memoized, highlighted) prefix on the next split.
-  const openFence = scanFences(content).unclosedStart;
-  if (openFence >= 0) {
-    const before = content.slice(0, openFence);
-    const fenceBody = content.slice(openFence);
-    const newlineIdx = fenceBody.indexOf("\n");
-    const openingLine = (newlineIdx >= 0 ? fenceBody.slice(0, newlineIdx) : fenceBody)
-      .replace(/\r$/, "");
-    const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(openingLine);
-    const infoString = opening?.[2].trim() ?? "";
-    const codeText = newlineIdx >= 0 ? fenceBody.slice(newlineIdx + 1) : "";
-    return (
-      <>
-        {before.trim() && (
-            <ReactMarkdown remarkPlugins={plugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
-            {before}
-          </ReactMarkdown>
-        )}
-        <PlainCodeBlock hasLanguage={Boolean(infoString)} text={codeText} />
-      </>
-    );
-  }
-  return (
-    <ReactMarkdown remarkPlugins={plugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
-      {content}
-    </ReactMarkdown>
-  );
-});
-StreamingTailMarkdown.displayName = "StreamingTailMarkdown";
+export const MarkdownRenderer = memo(StreamingMarkdownView);
 
-export const MarkdownRenderer = memo(({ content, isStreaming, citations, workspaceRoot, conversationId, knownFilePaths }: Props) => {
-  const resolved = useResolvedTheme();
-  const rawScopeId = useId();
-  const scopeId = useMemo(() => `md-${rawScopeId.replace(/[^a-zA-Z0-9_-]/g, "")}`, [rawScopeId]);
-  const headingId = useMemo(() => createMarkdownHeadingIdAssigner(scopeId), [scopeId]);
-  const displayContent = useMemo(
-    () => preserveWindowsMarkdownFileLinks(normalizeLatexDelimiters(content)),
-    [content],
-  );
-  const hasCitations = Boolean(citations?.length);
-  const plugins = useMemo<MarkdownRemarkPlugins>(
-    () => hasCitations ? [...remarkPlugins, removeCitationMarkers] : remarkPlugins,
-    [hasCitations],
-  );
-  // Tool/text deltas rebuild the cell array. Identical path evidence must not
-  // rebuild the Markdown component types and remount existing paragraphs.
-  const filePathsKey = JSON.stringify(knownFilePaths);
-  const components = useMemo(
-    () => mdComponents(resolved, scopeId, headingId, { workspaceRoot, conversationId, knownFilePaths: filePathsKey ? JSON.parse(filePathsKey) : undefined }),
-    [resolved, scopeId, headingId, workspaceRoot, conversationId, filePathsKey],
-  );
+const MarkdownPiece = memo(({ part, scopeId, resources, resolved, plugins, openFence = -1 }: {
+  part: MarkdownPart; scopeId: string; resources: MessageResourceScope; resolved: ResolvedTheme; plugins: MarkdownRemarkPlugins; openFence?: number;
+}) => {
+  const headingId = useMemo(() => createMarkdownHeadingIdAssigner(`${scopeId}-p${part.start}`), [scopeId, part.start]);
+  const components = useMemo(() => mdComponents(resolved, scopeId, headingId), [resolved, scopeId, headingId]);
+  const content = useMemo(() => preserveWindowsMarkdownFileLinks(normalizeLatexDelimiters(part.content)), [part.content]);
   headingId.reset();
-  const prevStableRef = useRef("");
-
-  // Plain-text fast path: skip react-markdown entirely for content with
-  // no markdown syntax. This is the single biggest render-cost win for
-  // short replies and process narration text.
-  const isPlainText = !hasMarkdownSyntax(displayContent);
-
-  // During streaming, split content into stable prefix + streaming tail
-  if (isStreaming && displayContent.length > 200) {
-    const splitIdx = findStableSplitPoint(displayContent);
-    if (splitIdx > 0) {
-      const stableContent = displayContent.slice(0, splitIdx);
-      if (!prevStableRef.current || !stableContent.startsWith(prevStableRef.current)) {
-        prevStableRef.current = stableContent;
-      } else if (stableContent.length > prevStableRef.current.length) {
-        prevStableRef.current = stableContent;
-      }
-      const stable = prevStableRef.current;
-      const tail = displayContent.slice(stable.length);
-      if (!hasMarkdownHeading(tail)) {
-        return (
-          <div className="md-body">
-            <StableMarkdown content={stable} components={components} plugins={plugins} />
-            {tail && <StreamingTailMarkdown content={tail} components={components} plugins={plugins} />}
-          </div>
-        );
-      }
-    }
+  if (openFence === 0) {
+    const newline = part.content.indexOf("\n");
+    const openingLine = newline < 0 ? part.content : part.content.slice(0, newline);
+    const language = /^ {0,3}(?:`{3,}|~{3,})(.*)/.exec(openingLine)?.[1].trim();
+    return <PlainCodeBlock hasLanguage={Boolean(language)} text={newline < 0 ? "" : part.content.slice(newline + 1)} />;
   }
-
-  // Not streaming or content too short: full render.
-  prevStableRef.current = "";
-
-  // Plain-text fast path: skip the full react-markdown pipeline
-  if (isPlainText) {
-    return (
-      <div className="md-body">
-        <PlainText content={displayContent} />
-      </div>
-    );
-  }
-
-  // A stream that starts with a code fence has no stable prefix yet. It still
-  // needs the unhighlighted tail path instead of re-highlighting on each delta.
-  if (isStreaming) {
-    return <div className="md-body"><StreamingTailMarkdown content={displayContent} components={components} plugins={plugins} /></div>;
-  }
-
-  return (
-    <div className="md-body">
-      <ReactMarkdown remarkPlugins={plugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
-        {displayContent}
-      </ReactMarkdown>
-    </div>
-  );
+  return <StableMarkdown content={content} components={components} plugins={plugins} />;
 });
+
+const CommittedMarkdown = memo(({ parts, count, ...props }: {
+  parts: MarkdownPart[]; count: number; scopeId: string; resources: MessageResourceScope; resolved: ResolvedTheme; plugins: MarkdownRemarkPlugins;
+}) => <>{parts.slice(0, count).map((part) => <MarkdownPiece key={part.start} part={part} {...props} />)}</>);
+
+function StreamingMarkdownView({ content, isStreaming, citations, workspaceRoot, conversationId, knownFilePaths }: Props) {
+  const resolved = useResolvedTheme();
+  const rawId = useId();
+  const scopeId = useMemo(() => `md-${rawId.replace(/[^a-zA-Z0-9_-]/g, "")}`, [rawId]);
+  const partition = useRef(new StreamingMarkdownPartition());
+  const initiallySettled = useRef(!isStreaming);
+  const view = useMemo(() => initiallySettled.current
+    ? { parts: [], tail: { start: 0, content }, openFence: -1, wholeDocument: true }
+    : partition.current.push(content), [content]);
+  // Large semantic blocks remain whole; defer their parsing so input and
+  // process updates can paint first. Settlement always consumes exact text.
+  const deferredTail = useDeferredValue(view.tail);
+  const tail = isStreaming && view.tail.content.length > 8192 ? deferredTail : view.tail;
+  const pathsKey = JSON.stringify(knownFilePaths);
+  const resources = useMemo(() => ({ workspaceRoot, conversationId, knownFilePaths: pathsKey ? JSON.parse(pathsKey) : undefined }), [workspaceRoot, conversationId, pathsKey]);
+  const hasCitations = Boolean(citations?.length);
+  const plugins = useMemo<MarkdownRemarkPlugins>(() => hasCitations ? [...remarkPlugins, removeCitationMarkers] : remarkPlugins, [hasCitations]);
+  const shared = { scopeId, resources, resolved, plugins };
+  return <MarkdownResourceContext.Provider value={resources}><div id={scopeId} className="md-body">
+    {!view.wholeDocument && <CommittedMarkdown parts={view.parts} count={view.parts.length} {...shared} />}
+    {tail.content.trim() && <MarkdownPiece key={tail.start} part={tail} openFence={isStreaming ? view.openFence : -1} {...shared} />}
+  </div></MarkdownResourceContext.Provider>;
+}
 
 MarkdownRenderer.displayName = "MarkdownRenderer";

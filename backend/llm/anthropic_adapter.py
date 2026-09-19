@@ -134,17 +134,27 @@ class AnthropicAdapter(LLMAdapter):
         default_headers: Mapping[str, str] | None = None,
         provider_id: str = "anthropic",
         proxy_mode: str = "inherit",
+        model_instructions: str = "",
+        reasoning_effort: str = "",
+        reasoning_effort_levels: tuple[str, ...] = (),
     ) -> None:
         self._api_key = api_key
         self._provider_id = str(provider_id or "anthropic").strip() or "anthropic"
         self._proxy_mode = normalize_provider_proxy_mode(proxy_mode)
         self._model = model
+        self._model_instructions = model_instructions
         self._small_fast_model = str(small_fast_model or "").strip()
         self._base_url = base_url
         self._max_tokens = max(1, max_tokens or 8_000)
         self._context_window = context_window
         self._thinking_budget = thinking_budget
         self._configured_thinking_budget = thinking_budget
+        self._configured_reasoning_effort = reasoning_effort.strip().lower()
+        self._reasoning_effort = self._configured_reasoning_effort
+        self._reasoning_effort_levels = reasoning_effort_levels
+        if self._reasoning_effort == "off":
+            self._reasoning_effort = ""
+            self._thinking_budget = None
         self._use_auth_token = use_auth_token
         self._default_headers = {
             str(key): str(value)
@@ -170,6 +180,10 @@ class AnthropicAdapter(LLMAdapter):
         return self.supports_hosted_web_search()
 
     def supported_reasoning_efforts(self) -> tuple[str, ...]:
+        if self._reasoning_effort_levels:
+            return tuple(dict.fromkeys(("off", *self._reasoning_effort_levels)))
+        if self._configured_reasoning_effort:
+            return tuple(dict.fromkeys(("off", "high", self._configured_reasoning_effort)))
         return ("off", "high")
 
     def apply_reasoning_policy(self, policy: ReasoningPolicy) -> None:
@@ -179,6 +193,8 @@ class AnthropicAdapter(LLMAdapter):
             if policy.level not in {"", "off"}
             else None
         )
+        if self._configured_reasoning_effort or self._reasoning_effort_levels:
+            self._reasoning_effort = policy.wire_level if policy.level not in {"", "off"} else ""
 
     async def aclose(self) -> None:
         self._cache_editing_states.clear()
@@ -431,6 +447,12 @@ class AnthropicAdapter(LLMAdapter):
                 ]
                 extra_headers["anthropic-beta"] = ",".join(dict.fromkeys(beta_values))
                 kwargs["extra_headers"] = extra_headers
+
+        if (
+            self._reasoning_effort and model == self._model
+            and not (side_options is not None and side_options.disable_reasoning)
+        ):
+            kwargs.setdefault("output_config", {})["effort"] = self._reasoning_effort
 
         if tools and cached_tools:
             kwargs["tools"] = cached_tools
@@ -1076,6 +1098,7 @@ class AnthropicAdapter(LLMAdapter):
                                             ) + fragment
 
                         elif event_type == "content_block_stop":
+                            completed_tool = None
                             raw_received_index = event.get("index")
                             received_index = (
                                 raw_received_index
@@ -1159,11 +1182,7 @@ class AnthropicAdapter(LLMAdapter):
                                         arguments_repaired=arguments_repaired,
                                     )
                                 )
-                                yield StreamEvent(
-                                    type=StreamEventType.TOOL_CALL,
-                                    tool_calls=[pending_tool_calls[-1]],
-                                    tool_calls_final=False,
-                                )
+                                completed_tool = pending_tool_calls[-1]
                                 current_tool_id = ""
                                 current_tool_name = ""
                                 current_tool_args = ""
@@ -1211,6 +1230,13 @@ class AnthropicAdapter(LLMAdapter):
                                         )
                                 provider_content_blocks.append(
                                     current_provider_block
+                                )
+                            if completed_tool is not None:
+                                yield StreamEvent(
+                                    type=StreamEventType.TOOL_CALL,
+                                    tool_calls=[completed_tool], tool_calls_final=False,
+                                    tool_calls_committed=True,
+                                    provider_items=_anthropic_provider_message_item(provider_content_blocks),
                                 )
                             current_provider_block = None
                             current_provider_input_json = ""
@@ -1780,6 +1806,8 @@ class AnthropicAdapter(LLMAdapter):
           3. tool_result 以 user 角色发送，紧跟 assistant(tool_use)
           4. 连续多条 tool_result 需合并为一条 user 消息
         """
+        from backend.llm.native_compaction import require_native_context_origin
+        require_native_context_origin(messages)
         system_parts: list[str] = []
         raw_messages: list[dict[str, Any]] = []
 
@@ -1791,10 +1819,10 @@ class AnthropicAdapter(LLMAdapter):
                 continue
 
             if msg.role == "user":
-                if msg.images or msg.documents:
+                text_parts = msg.user_text_parts()
+                if msg.images or msg.documents or len(text_parts) > 1:
                     parts: list[dict[str, Any]] = []
-                    if msg.content:
-                        parts.append({"type": "text", "text": msg.content})
+                    parts.extend({"type": "text", "text": text} for text in text_parts)
                     for img in msg.images:
                         media_type = img.get("media_type") or "image/png"
                         data = img.get("data") or ""

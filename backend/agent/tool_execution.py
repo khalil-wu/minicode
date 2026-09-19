@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from copy import deepcopy
 import inspect
 import difflib
@@ -9,11 +10,12 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from backend.atomic_io import canonical_file_path_key, canonical_path_mapping_key
+from backend.artifact.media import AUDIO_MEDIA_EXTENSIONS
 from backend.agent.context import ContextBuilder
 from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.lifecycle_observer import resolve_lifecycle_runtime
@@ -1079,6 +1081,18 @@ async def run_tool(
             return pre_result
     hook_mgr = _tool_hook_manager(tool_ctx)
 
+    gate = tool_ctx.run_context.tool_execution_gate if tool_ctx.run_context is not None else None
+    tool = tool_registry.get_tool(tc.name)
+    if gate is not None and (tool is None or not tool.orchestrates_tools):
+        async with gate.hold(read_only=_tool_call_is_read_only(tc, tool_registry)):
+            return await _run_authorized_tool(tc, tool_registry, tool_ctx, initial_permission, hook_mgr)
+    return await _run_authorized_tool(tc, tool_registry, tool_ctx, initial_permission, hook_mgr)
+
+
+async def _run_authorized_tool(
+    tc: ToolCallEvent, tool_registry: ToolRegistry, tool_ctx: ToolExecutionContext,
+    initial_permission: PermissionContext, hook_mgr: Any,
+) -> ToolResult:
     snapshot_error = await snapshot_before_write(tc, tool_ctx, tool_registry)
     if snapshot_error:
         return ToolResult(
@@ -1261,6 +1275,7 @@ async def run_tool(
                 logger.warning("file_changed hook failed: %s", exc)
 
     return result
+
 
 
 def _remember_hook_model_context(tc: ToolCallEvent, hook_result: Any) -> None:
@@ -1747,6 +1762,16 @@ def _tool_runtime_span_event(
     payload_data = dict(data or {})
     if detail:
         payload_data["detail"] = detail
+    observed_at = int(time.time() * 1000)
+    started_at = ended_at = None
+    if event == "tool.started":
+        started_at = observed_at
+        tool_ctx.tool_span_started_at[tc.id] = started_at
+    elif event == "tool.completed":
+        started_at = tool_ctx.tool_span_started_at.pop(tc.id, observed_at)
+        ended_at = max(started_at, observed_at)
+        payload_data["service_duration_ms"] = duration_ms
+        duration_ms = ended_at - started_at
     return runtime_span_from_tool_context(
         event,
         span_id=f"tool:{tc.id}",
@@ -1761,6 +1786,8 @@ def _tool_runtime_span_event(
         waiting_on=waiting_on,
         blocking_reason=blocking_reason,
         ui_visible=ui_visible,
+        started_at=started_at,
+        ended_at=ended_at,
         duration_ms=duration_ms,
         data=payload_data or None,
     )
@@ -1874,6 +1901,7 @@ def tool_context_with_live_output(
     call_context = replace(
         tool_ctx,
         tool_call_id=tc.id,
+        iteration_id=iteration_id,
         metadata=call_metadata,
     )
     if not _tool_streams_output(tc.name, tool_registry):
@@ -2038,13 +2066,17 @@ def store_result(
                     + "\n\n".join(context_parts)
                 ),
             )
-    (append_context_result or ctx.append_tool_result)(
-        tc.id,
-        tc.name,
-        context_result,
-        conversation_id=str(getattr(tool_ctx, "conversation_id", "") or ""),
-        workspace_root=getattr(tool_ctx, "workspace_root", None),
-    )
+    if tool_ctx is not None and tool_ctx.result_sink is not None:
+        # Code-mode consumes the actual tool output; only the script's chosen
+        # output enters the model transcript. State/UI/artifact effects below
+        # still use the normal bounded representation.
+        tool_ctx.result_sink(tc, replace(context_result, content=result_for_issue.content))
+    else:
+        (append_context_result or ctx.append_tool_result)(
+            tc.id, tc.name, context_result,
+            conversation_id=str(getattr(tool_ctx, "conversation_id", "") or ""),
+            workspace_root=getattr(tool_ctx, "workspace_root", None),
+        )
     state.record_tool_call(
         tc.name,
         tc.arguments,
@@ -2072,7 +2104,12 @@ def store_result(
         artifact_kind=truncated.artifact_kind,
         artifact_media_type=truncated.artifact_media_type,
         artifact_bytes=truncated.artifact_bytes,
+        command_id=str(truncated.runtime_metadata.get("command_id") or ""),
+        output_cursor=truncated.runtime_metadata.get("next_cursor"),
+        call_source=asdict(tool_ctx.source_for_call(tc.id)) if tool_ctx is not None and tool_ctx.source_for_call(tc.id).kind != "direct" else None,
     )
+    if tool_ctx is not None and tool_ctx.run_context is not None and tool_ctx.run_context.tool_execution_gate is not None:
+        tool_ctx.run_context.tool_execution_gate.complete(tc.id)
     if truncated.evidence_type:
         state.evidence_records.append(
             EvidenceRecord(
@@ -2142,6 +2179,32 @@ def store_result_events(
     tool_registry: ToolRegistry | None = None,
     append_context_result: Callable[..., None] | None = None,
 ) -> list[AgentEvent]:
+    audio_events: list[AgentEvent] = []
+    # Nested code-mode calls keep their raw audio for selection by audio().
+    # Direct calls and selected cell outputs share this persistence boundary.
+    if result.audios and tool_ctx is not None and tool_ctx.result_sink is None:
+        from backend.tools.base import artifact_owner_workspace_root
+
+        references = []
+        for audio in result.audios:
+            media_type = audio["media_type"].lower()
+            if media_type not in AUDIO_MEDIA_EXTENSIONS:
+                raise ValueError(f"Unsupported audio output media type: {media_type}")
+            body = base64.b64decode(audio["data"], validate=True)
+            artifact_id = tool_ctx.artifact_store.save(audio["data"], source=tc.name, type="audio",
+                media_type=media_type, conversation_id=tool_ctx.conversation_id,
+                workspace_root=artifact_owner_workspace_root(tool_ctx))
+            references.append(f"{artifact_id} ({media_type}, {len(body)} bytes)")
+            audio_events.append(AgentEvent("artifact.preview", {
+                "artifact_id": artifact_id, "conversation_id": tool_ctx.conversation_id,
+                "message_id": str(tool_ctx.metadata.get("assistant_message_id") or ""),
+                "kind": "file", "media_type": media_type, "summary": "音频输出", "bytes": len(body),
+            }))
+        first = audio_events[0].data
+        result = replace(result, content=result.content + "\n\nAudio outputs available for playback (not transcribed):\n" + "\n".join(references),
+            artifact_id=result.artifact_id or first["artifact_id"],
+            artifact_kind=result.artifact_kind or "file", artifact_media_type=result.artifact_media_type or first["media_type"],
+            artifact_bytes=result.artifact_bytes if result.artifact_bytes is not None else first["bytes"])
     event = store_result(
         tc,
         result,
@@ -2166,7 +2229,7 @@ def store_result_events(
                 image_events.append(AgentEvent.image_chunk(image_data, media_type))
     # Keep the terminal tool_result last because runtime-span settlement reads
     # the final emitted event as the authoritative tool completion record.
-    return [*image_events, event]
+    return [*audio_events, *image_events, event]
 
 
 def _resolve_workspace_path_for_diff(

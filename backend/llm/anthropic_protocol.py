@@ -1074,6 +1074,27 @@ def _anthropic_input_size_summary(messages: list[dict[str, Any]]) -> dict[str, A
             else ""
         )
         role = str(message.get("role") or "message")[:80]
+        provenance: dict[str, Any] = {}
+        content = message.get("content")
+        if role == "user" and isinstance(content, list):
+            text_blocks = [
+                str(block.get("text") or "")
+                for block in content
+                if isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+            ]
+            if len(text_blocks) >= 2 and text_blocks[0].lstrip().startswith(
+                "<system-reminder>\n<environment_context>"
+            ):
+                runtime_text = text_blocks[0]
+                user_text = text_blocks[-1]
+                provenance = {
+                    "runtime_context_chars": len(runtime_text),
+                    "runtime_context_content_hash": _json_fingerprint(runtime_text),
+                    "user_input_chars": len(user_text),
+                    "user_input_content_hash": _json_fingerprint(user_text),
+                }
         largest.append(
             {
                 "index": index,
@@ -1081,6 +1102,7 @@ def _anthropic_input_size_summary(messages: list[dict[str, Any]]) -> dict[str, A
                 "role": role,
                 "chars": chars,
                 **({"content_hash": content_hash} if content_hash else {}),
+                **provenance,
             }
         )
         if content_hash:

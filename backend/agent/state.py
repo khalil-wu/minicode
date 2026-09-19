@@ -58,6 +58,9 @@ class ToolCallRecord:
     artifact_kind: str | None = None
     artifact_media_type: str | None = None
     artifact_bytes: int | None = None
+    command_id: str = ""
+    output_cursor: int | None = None
+    call_source: dict[str, str] = field(default_factory=dict)
 
 
 # Terminal-reason vocabulary for run termination.
@@ -93,6 +96,7 @@ TerminalReason = Literal[
     "max_retries",
     "invalid_model_action",
     "runtime_error",
+    "code_cells_pending",
     "billing",
     "model",
     "unknown",
@@ -279,6 +283,9 @@ class AgentState:
         artifact_kind: str | None = None,
         artifact_media_type: str | None = None,
         artifact_bytes: int | None = None,
+        command_id: str = "",
+        output_cursor: int | None = None,
+        call_source: dict[str, str] | None = None,
     ) -> None:
         """记录一次工具调用。"""
         resolved_status: ToolCallStatus
@@ -313,6 +320,9 @@ class AgentState:
                 artifact_kind=str(artifact_kind or "").strip() or None,
                 artifact_media_type=str(artifact_media_type or "").strip() or None,
                 artifact_bytes=(max(0, int(artifact_bytes)) if artifact_bytes is not None else None),
+                command_id=command_id,
+                output_cursor=output_cursor,
+                call_source=dict(call_source or {}),
             )
         )
         if artifact_id:

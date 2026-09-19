@@ -175,3 +175,7 @@ pelican-bike.html
 /js_files.txt
 /RELEASE-READINESS-AUDIT-*.md
 /desktop/.audit-*-dump.txt
+
+# Local audit artifacts and tool state
+engineering/
+frontend/.playwright-cli/

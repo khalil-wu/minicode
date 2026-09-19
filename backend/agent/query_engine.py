@@ -7,6 +7,7 @@ from contextlib import AsyncExitStack, aclosing
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any, cast
+from uuid import uuid4
 
 from backend.agent.context import ContextBuilder
 from backend.agent.event_envelope import EventEnvelope
@@ -21,6 +22,7 @@ from backend.agent.query_journal import (
     terminal_journal_failure_event,
 )
 from backend.agent.run_events import should_emit_event
+from backend.agent.code_execution_store import CodeExecutionStore
 from backend.agent.runtime import (
     AgentRuntime,
     TerminalCommitError,
@@ -34,6 +36,7 @@ from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.turn_input import TurnInputQueue
 from backend.agent.turn_kernel import TurnKernel
 from backend.artifact.store import ArtifactStore
+from backend.async_cleanup import to_thread_cancel_safe
 from backend.config import AgentSettings, TokenBudget
 from backend.agent.lifecycle_observer import (
     LifecycleObserverOwner,
@@ -44,6 +47,7 @@ from backend.llm.base import LLMAdapter, LLMTurnContext
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
 from backend.tools.registry import ToolRegistry
+from backend.terminal.manager import BackgroundCommandManager
 
 
 logger = logging.getLogger(__name__)
@@ -65,6 +69,19 @@ class AgentSession:
     lifecycle_runtime: Any | None = None
     active_turn: bool = False
     active_tool_names: tuple[str, ...] | None = None
+    code_store: CodeExecutionStore = field(default_factory=CodeExecutionStore)
+    command_session_id: str = field(default_factory=lambda: f"agent-{uuid4().hex}", init=False)
+    _owned_commands: BackgroundCommandManager | None = field(default=None, init=False, repr=False)
+
+    def command_manager(self, session_id: str) -> BackgroundCommandManager:
+        if self._owned_commands is None:
+            self._owned_commands = BackgroundCommandManager(session_id=session_id)
+        return self._owned_commands
+
+    async def aclose(self) -> None:
+        """Release commands created by this session; injected host services are borrowed."""
+        if self._owned_commands is not None:
+            await self._owned_commands.shutdown()
 
 
 @dataclass(slots=True)
@@ -281,6 +298,34 @@ class QueryEngine:
         lifecycle = LifecycleObserverOwner()
         runner_scope = AsyncExitStack()
         terminal_event: AgentEvent | None = None
+        nested_events = None
+        if session.tool_registry.get_tool("tool_exec") is not None or turn_ctx.run_context.extension_actions is not None:
+            from backend.agent.nested_tool_events import NestedToolEvents
+            nested_events = NestedToolEvents(journal)
+            turn_ctx.run_context.publish_nested_event = nested_events.publish
+        async def observe_with_events(operation):
+            from backend.agent.nested_tool_events import CallbackCompleted
+            if nested_events is None:
+                error = await operation
+                if error is not None:
+                    await to_thread_cancel_safe(journal.record_event, error)
+                    yield error
+                return
+            async with aclosing(nested_events.run_callback(operation)) as updates:
+                async for update in updates:
+                    if isinstance(update, CallbackCompleted):
+                        if update.result is not None:
+                            await to_thread_cancel_safe(journal.record_event, update.result)
+                            yield update.result
+                        continue
+                    terminal.observe_runner_event(update)
+                    if not should_emit_event(update):
+                        continue
+                    async with aclosing(observe_with_events(lifecycle.observe(update))) as nested_updates:
+                        async for nested_update in nested_updates:
+                            yield nested_update
+                    yield update
+
         try:
             try:
                 deadline = submission.runtime.deadline_controller.turn_deadline
@@ -298,14 +343,13 @@ class QueryEngine:
                     run_context=turn_ctx.run_context,
                     images=turn_ctx.state.attachments or None,
                 )
-                journal.record_turn_started()
-                observer_error = await await_preflight(
+                await to_thread_cancel_safe(journal.record_turn_started)
+                async with aclosing(observe_with_events(await_preflight(
                     lifecycle.start(), deadline=deadline, cancel_event=turn_ctx.cancel_event,
-                )
-                if observer_error is not None:
-                    journal.record_event(observer_error)
-                    envelope.stamp(observer_error)
-                    yield observer_error
+                ))) as startup_observer_events:
+                    async for observer_event in startup_observer_events:
+                        envelope.stamp(observer_event)
+                        yield observer_event
                 runner = await runner_scope.enter_async_context(
                     aclosing(self._create_runner(turn_ctx, submission))
                 )
@@ -362,8 +406,13 @@ class QueryEngine:
                 # is suspended at a tool event. Close that execution scope
                 # before the exception path commits its terminal state.
                 async with runner_scope:
-                    async for event in runner:
-                        journal.record_event(event)
+                    if nested_events is not None:
+                        event_stream = await runner_scope.enter_async_context(aclosing(nested_events.stream(runner)))
+                    else:
+                        event_stream = runner
+                    async for event in event_stream:
+                        if nested_events is None:
+                            await to_thread_cancel_safe(journal.record_event, event)
                         terminal.observe_runner_event(event)
                         if event.type in {
                             "agent.run.started",
@@ -373,11 +422,11 @@ class QueryEngine:
                             continue
                         if not should_emit_event(event):
                             continue
-                        observer_error = await lifecycle.observe(event)
-                        if observer_error is not None:
-                            journal.record_event(observer_error)
-                            envelope.stamp(observer_error)
-                            yield observer_error
+                        if lifecycle.observer is not None:
+                            async with aclosing(observe_with_events(lifecycle.observe(event))) as observer_events:
+                                async for observer_event in observer_events:
+                                    envelope.stamp(observer_event)
+                                    yield observer_event
                         if event.type == "done":
                             terminal_event = terminal.accept_done(event)
                             continue
@@ -431,7 +480,7 @@ class QueryEngine:
                 await runner_scope.aclose()
             finally:
                 if not terminal.finalized:
-                    closed = terminal.commit(
+                    closed = await terminal.commit(
                         AgentEvent.done(
                             status="cancelled",
                             reason="consumer_closed",
@@ -443,9 +492,14 @@ class QueryEngine:
                         reason=closed.reason,
                     )
                     if observer_error is not None:
-                        terminal.record_post_commit_event(observer_error)
+                        await to_thread_cancel_safe(terminal.record_post_commit_event, observer_error)
                 if submission.runtime.metadata is not None:
                     submission.runtime.metadata.update(turn_ctx.metadata)
+                if turn_ctx.run_context.extension_actions is not None:
+                    try:
+                        await turn_ctx.run_context.extension_actions.flush()
+                    finally:
+                        turn_ctx.run_context.extension_actions.close()
 
     def _setup_failure_events(
         self,
@@ -551,7 +605,7 @@ class QueryEngine:
         leading_events: tuple[AgentEvent, ...] = (),
         validate: bool,
     ) -> AsyncIterator[AgentEvent]:
-        result = terminal.commit(terminal_event, validate=validate)
+        result = await terminal.commit(terminal_event, validate=validate)
         observer_error = await lifecycle.finish(
             status=result.status,
             reason=result.reason,
@@ -559,7 +613,7 @@ class QueryEngine:
         events = [*leading_events, *result.evidence_events]
         if observer_error is not None:
             events.append(observer_error)
-            journal_error = terminal.record_post_commit_event(observer_error)
+            journal_error = await to_thread_cancel_safe(terminal.record_post_commit_event, observer_error)
             if journal_error is not None:
                 events.append(journal_error)
         if result.completion_event is not None:
@@ -590,10 +644,13 @@ class QueryEngine:
         # Unpack session_context — the loop kernel no longer needs to do this.
         skill_manager = sc.skill_manager
         permission_context = sc.permission_context
-        session_id = sc.session_id
+        session_id = sc.session_id or session.command_session_id
         task_id = sc.task_id
         task_manager = sc.task_manager
-        background_manager = sc.background_manager
+        background_manager = (
+            sc.background_manager if sc.background_manager is not None
+            else session.command_manager(session_id)
+        )
         cancel_event = sc.cancel_event
         stream_callback = sc.stream_callback
         emit_event = sc.emit_event
@@ -601,6 +658,12 @@ class QueryEngine:
         # Build metadata from session_context.
         metadata: dict[str, Any] = dict(sc.metadata or {})
         run_context = sc.run_context or RunContext()
+        run_context.model_owner_task = asyncio.current_task()
+        run_context.active_model_execution = run_context.model_execution
+        run_context.active_tool_registry = None
+        if run_context.retain_model is not None:
+            run_context.retain_model(session.llm, asyncio.current_task())
+        run_context.code_store = session.code_store
         runtime_value = run_context.agent_runtime
         if runtime_value is None:
             runtime_value = AgentRuntime()
@@ -617,6 +680,9 @@ class QueryEngine:
         )
         if lifecycle_runtime is None:
             lifecycle_runtime = session.lifecycle_runtime
+        bind_execution = getattr(lifecycle_runtime, "for_execution", None)
+        if bind_execution is not None:
+            lifecycle_runtime = bind_execution(run_context)
         run_context.lifecycle_runtime = lifecycle_runtime
         # Mutable turn-owned sink.  The loop and adapters share this exact list
         # through copied metadata so side calls remain observable after submit.
@@ -643,6 +709,9 @@ class QueryEngine:
             raw_cancel = metadata.get("cancel_event")
             if isinstance(raw_cancel, asyncio.Event):
                 cancel_event = raw_cancel
+        if cancel_event is None:
+            cancel_event = asyncio.Event()
+        run_context.cancel_event = cancel_event
 
         # Resolve settings from the session/config snapshot.
         settings = session.agent_settings or AgentSettings()
@@ -673,6 +742,14 @@ class QueryEngine:
             state.workspace_root = sc.workspace_root
         else:
             sc.workspace_root = state.workspace_root
+
+        # Selection, readable roots and model discovery share one turn snapshot.
+        from backend.skills.manager import SkillManager
+
+        skill_manager = skill_manager or ctx.skill_manager
+        if isinstance(skill_manager, SkillManager):
+            ctx.bind_skill_manager(skill_manager, sc.workspace_root)
+            skill_manager = ctx.skill_manager
 
         # Clear per-turn ephemeral state in the lifecycle owner. Only touch
         # real AgentState instances; compatibility tests may pass mock objects.
@@ -777,11 +854,12 @@ class QueryEngine:
                 max_iterations_budget=max_iterations_limit,
                 current_run_id=run_record.run_id,
                 skill_manager=skill_manager,
+                execution_journal=run_context.execution_journal,
             )
             if recovery.restored or metadata.get("_turn_admission_restored"):
                 turn_kernel.discard_scheduled_user_input()
 
-            return QueryTurnContext(
+            turn_context = QueryTurnContext(
                 user_message=submission.user_message,
                 session=session,
                 state=state,
@@ -806,6 +884,10 @@ class QueryEngine:
                 ),
                 run_context=run_context,
             )
+            if bind_execution is not None:
+                from backend.agent.extension_actions import ExtensionExecutionActions
+                run_context.extension_actions = ExtensionExecutionActions(turn_context)
+            return turn_context
         except Exception as exc:
             # The durable run crossed the running boundary before recovery and
             # context preparation.  Close it on every setup failure so startup

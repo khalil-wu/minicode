@@ -12,15 +12,21 @@ dependencies = [
   "pydantic>=2.0,<3.0",
   "jsonschema>=4.23,<5.0",
   "httpx>=0.28,<1.0",
+  "websockets>=15,<18",
   "psutil>=6.0,<8.0",
   "pathspec>=0.12,<1.0",
   "PyYAML>=6.0,<7.0",
   "tzdata>=2025.2",
+  "tzlocal>=5.2,<6.0",
   "defusedxml>=0.7,<1.0",
   "keyring>=25,<26",
   "filelock>=3.16,<4.0",
   "regex>=2024.11,<2027",
   "watchdog>=6.0,<7.0",
+  "mini-racer==0.14.1",
+  "tree-sitter>=0.25,<0.27",
+  "tree-sitter-bash>=0.23,<0.26",
+  "tree-sitter-powershell>=0.25,<0.27",
 ]
 
 
@@ -29,10 +35,14 @@ where = ["."]
 include = ["backend*"]
 exclude = ["frontend*", "desktop*", "node_modules*", "data*", "skills*"]
 
+[tool.setuptools.package-data]
+"backend.agent" = ["*.js"]
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8.3,<9.0",
   "pytest-asyncio>=0.25,<1.0",
+  "lark>=1.2,<2.0",
 ]
 docparse = [
   "pymupdf>=1.24,<2.0",

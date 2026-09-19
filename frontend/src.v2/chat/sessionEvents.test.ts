@@ -77,6 +77,20 @@ describe("handleSessionEvent", () => {
     });
   });
 
+  it("initializes a first history cursor even when inventory metadata has a newer revision", () => {
+    useAppStore.setState({
+      conversationHistoryPages: {},
+      conversations: [{ id: "conv-paged", title: "Latest title", createdAt: "2026-09-11T00:00:00Z", updatedAt: "2026-09-11T00:00:00Z", revision: 9 }],
+    });
+    const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+    handleSessionEvent({ type: "conversation.switched", conversation_id: "conv-paged", context_pending: true, is_hydrating: true,
+      conversation: { id: "conv-paged", title: "Stored title", revision: 8, transcript: [{ id: "older-first", role: "user", content: "retained history" }],
+        transcript_page: { before_message_id: "older-first", has_more: true, total_messages: 200 } },
+    } as unknown as ServerEvent, buffers);
+    expect(useAppStore.getState().conversationHistoryPages["conv-paged"]).toMatchObject({ beforeMessageId: "older-first", hasMore: true });
+    expect(sendClientCommand).not.toHaveBeenCalledWith({ type: "commands.list" });
+  });
+
   it("stores provider OAuth authorization state by owner and only toasts the active live owner", () => {
     const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
     const activeEvent = {
@@ -249,6 +263,19 @@ describe("handleSessionEvent", () => {
       reasoning_effort_supported: true,
     } as unknown as ServerEvent, buffers)).toBe(true);
     expect(useAppStore.getState().effortLevel).toBe("focused");
+  });
+
+  it("keeps late model selection results scoped to their conversation", () => {
+    const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+    useAppStore.setState({ conversationId: "current-task", currentModel: "current-model", effortLevel: "low" });
+    handleSessionEvent({ type: "llm.model.updated", conversation_id: "previous-task",
+      current_model: "stale-model", effective_reasoning_effort: "high" } as ServerEvent, buffers);
+    expect(useAppStore.getState().currentModel).toBe("current-model");
+    expect(useAppStore.getState().effortLevel).toBe("low");
+    handleSessionEvent({ type: "llm.model.updated", conversation_id: "current-task",
+      current_model: "selected-model", effective_reasoning_effort: "high" } as ServerEvent, buffers);
+    expect(useAppStore.getState().currentModel).toBe("selected-model");
+    expect(useAppStore.getState().effortLevel).toBe("high");
   });
 
   it("records the backend hydration phase from conversation switched events", () => {

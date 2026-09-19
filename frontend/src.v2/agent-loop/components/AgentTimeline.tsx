@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import type React from "react";
 import { ChevronDown, ChevronRight, PencilLine, TerminalSquare } from "lucide-react";
 import type { AgentLoopProcessCell } from "../projection/project-turn";
@@ -21,6 +21,24 @@ type TimelineGroup = {
   segment?: number;
   closed: boolean;
 };
+
+const needsAttention = (cell: AgentLoopProcessCell): boolean => {
+  if (cell.kind === "error") return true;
+  if (cell.kind === "thinking") return Boolean(cell.isStreaming);
+  return "status" in cell && ["running", "pending", "pending_approval", "failed", "partial", "blocked", "timeout"].includes(cell.status);
+};
+
+function visibleAttention(cells: AgentLoopProcessCell[]): Set<AgentLoopProcessCell> {
+  const visible = new Set<AgentLoopProcessCell>();
+  let failures = 0;
+  for (let index = cells.length - 1; index >= 0; index--) {
+    const cell = cells[index];
+    if (!needsAttention(cell)) continue;
+    const active = cell.kind === "thinking" || ("status" in cell && ["running", "pending", "pending_approval"].includes(cell.status));
+    if (active || failures++ < 4) visible.add(cell);
+  }
+  return visible;
+}
 
 const timelineGroupKind = (cell: AgentLoopProcessCell): TimelineGroupKind => {
   if (cell.kind === "thinking") {
@@ -90,6 +108,7 @@ const timelineGroupTitle = (group: TimelineGroup): string => {
   if (labels.length === 1 && labels[0] === "运行了命令" && group.cells.length > 1) {
     return `运行了 ${group.cells.length} 条命令`;
   }
+  if (labels.length === 1 && group.cells.length > 1) return `${labels[0]} · ${group.cells.length} 项`;
   return labels.join("并");
 };
 
@@ -118,6 +137,16 @@ const latestWorkGlyph = (cell: AgentLoopProcessCell | undefined): React.ReactNod
 };
 
 function WorkGroup({ group, renderCell, expandWorkGroups, isRunning }: { group: TimelineGroup; renderCell: RenderAgentCell; expandWorkGroups: boolean; isRunning: boolean }) {
+  const [visibleCount, setVisibleCount] = useState(40);
+  const previousWindow = useRef({ first: group.cells[0]?.id, count: group.cells.length });
+  useEffect(() => {
+    const previous = previousWindow.current;
+    if (previous.first !== group.cells[0]?.id && group.cells.length > previous.count) {
+      setVisibleCount((count) => count + group.cells.length - previous.count);
+      setExpanded(true);
+    }
+    previousWindow.current = { first: group.cells[0]?.id, count: group.cells.length };
+  }, [group.cells]);
   const containsScreenshot = group.cells.some((cell) => (
     cell.kind === "activity"
     && cell.toolCallRecords?.some((record) => Boolean(record.artifactId) && isBrowserScreenshotRecord(record))
@@ -146,7 +175,11 @@ function WorkGroup({ group, renderCell, expandWorkGroups, isRunning }: { group: 
             ? <ToolGlyph kind={firstActivity.activityKind} size={15} />
             : <TerminalSquare size={15} />;
         })();
-  const keyed = withStableRenderKeys(group.cells);
+  const attention = useMemo(() => visibleAttention(group.cells), [group.cells]);
+  const visibleCells = group.cells.filter((cell, index) => index >= group.cells.length - visibleCount || attention.has(cell));
+  const hiddenCount = group.cells.length - visibleCells.length;
+  const hiddenFailures = group.cells.filter((cell, index) => index < group.cells.length - visibleCount && !attention.has(cell) && needsAttention(cell)).length;
+  const keyed = withStableRenderKeys(visibleCells);
   return (
     <section className={`agent-loop-timeline-group agent-loop-timeline-group-work${liveGroup ? " agent-loop-open-work-group" : ""}`} data-group-kind="work" data-group-open={liveGroup} data-group-expanded={expanded} aria-label={title}>
       <button type="button" className="agent-loop-timeline-group-title" data-group-kind="work" aria-expanded={expanded} aria-controls={detailId} onClick={() => {
@@ -161,6 +194,7 @@ function WorkGroup({ group, renderCell, expandWorkGroups, isRunning }: { group: 
       </button>
       {expanded && (
         <div id={detailId} className="agent-loop-timeline-group-items">
+          {hiddenCount > 0 && <button type="button" className="agent-loop-timeline-group-title" onClick={() => setVisibleCount((count) => count + 40)}>显示更早的操作（{hiddenCount}{hiddenFailures > 0 ? `，含 ${hiddenFailures} 项失败` : ""}）</button>}
           {keyed.map(({ cell, key }) => renderCell({ key, cell, className: "chat-turn-process-cell agent-loop-process-cell" }))}
         </div>
       )}
@@ -193,11 +227,26 @@ function CollapsibleThinkingCell({ cell, renderCell }: { cell: Extract<AgentLoop
   );
 }
 
-export function AgentTimeline({ cells, renderCell, showAllOpenWork = false, expandWorkGroups = false, isRunning = false }: { cells: AgentLoopProcessCell[]; renderCell: RenderAgentCell; showAllOpenWork?: boolean; expandWorkGroups?: boolean; isRunning?: boolean }) {
-  const groups = groupTimelineCells(cells);
+export const AgentTimeline = memo(function AgentTimeline({ cells, renderCell, showAllOpenWork = false, expandWorkGroups = false, isRunning = false, loadedToolItems }: { cells: AgentLoopProcessCell[]; renderCell: RenderAgentCell; showAllOpenWork?: boolean; expandWorkGroups?: boolean; isRunning?: boolean; loadedToolItems?: number }) {
+  const groups = useMemo(() => groupTimelineCells(cells), [cells]);
+  const [visibleGroupCount, setVisibleGroupCount] = useState(40);
+  const previouslyLoaded = useRef(loadedToolItems);
+  useEffect(() => {
+    if (loadedToolItems !== undefined && previouslyLoaded.current !== undefined && loadedToolItems > previouslyLoaded.current) {
+      const added = loadedToolItems - previouslyLoaded.current;
+      setVisibleGroupCount((count) => count + added);
+    }
+    previouslyLoaded.current = loadedToolItems;
+  }, [loadedToolItems]);
+  const attention = useMemo(() => visibleAttention(cells), [cells]);
+  const visibleGroups = groups.filter((group, index) => index >= groups.length - visibleGroupCount || group.cells.some((cell) => attention.has(cell)));
+  const hiddenGroupCount = groups.length - visibleGroups.length;
+  const hiddenFailures = groups.filter((group, index) => index < groups.length - visibleGroupCount && !group.cells.some((cell) => attention.has(cell)))
+    .reduce((sum, group) => sum + group.cells.filter(needsAttention).length, 0);
   return (
     <div className="chat-turn-process-stack agent-loop-timeline">
-      {groups.map((group, groupIndex) => {
+      {hiddenGroupCount > 0 && <button type="button" className="agent-loop-timeline-group-title" onClick={() => setVisibleGroupCount((count) => count + 40)}>显示更早的处理过程（{hiddenGroupCount}{hiddenFailures > 0 ? `，含 ${hiddenFailures} 项失败` : ""}）</button>}
+      {visibleGroups.map((group, groupIndex) => {
         const keyed = withStableRenderKeys(group.cells);
         if (group.kind === "thinking") {
           return group.cells
@@ -211,7 +260,7 @@ export function AgentTimeline({ cells, renderCell, showAllOpenWork = false, expa
         }
         if (group.kind === "work") {
           if (group.cells.length > 1) {
-            return <WorkGroup key={`timeline-group-work-${group.segment ?? groupIndex}-${group.cells[0].id}`} group={group} renderCell={renderCell} isRunning={isRunning} expandWorkGroups={expandWorkGroups || showAllOpenWork} />;
+            return <WorkGroup key={`timeline-group-work-${group.segment === undefined ? `unscoped-${groupIndex}` : `segment-${group.segment}`}`} group={group} renderCell={renderCell} isRunning={isRunning} expandWorkGroups={expandWorkGroups || showAllOpenWork} />;
           }
           return keyed.map(({ cell, key }) => renderCell({ key, cell, className: "chat-turn-process-cell agent-loop-process-cell" }));
         }
@@ -229,4 +278,4 @@ export function AgentTimeline({ cells, renderCell, showAllOpenWork = false, expa
       })}
     </div>
   );
-}
+});

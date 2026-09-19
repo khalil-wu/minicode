@@ -24,21 +24,21 @@ async def _closing_session(tmp_path, monkeypatch, *, initiator="session", short_
     release = threading.Event()
     drain_started = asyncio.Event()
     drain_returned = asyncio.Event()
-    append = session.event_outbox._store.append
+    append = session.event_outbox._store.append_many
     drain = session.event_outbox.drain_persistence
     pending = set()
 
-    def held_append(payload):
+    def held_append(payloads):
         append_started.set()
         assert release.wait(8)
-        append(payload)
+        append(payloads)
 
     async def observed_drain():
         drain_started.set()
         await drain()
         drain_returned.set()
 
-    monkeypatch.setattr(session.event_outbox._store, "append", held_append)
+    monkeypatch.setattr(session.event_outbox._store, "append_many", held_append)
     monkeypatch.setattr(session.event_outbox, "drain_persistence", observed_drain)
     if short_drain:
         monkeypatch.setattr("backend.ws.event_outbox.CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01)
@@ -102,7 +102,7 @@ async def test_full_shutdown_keeps_writer_owned_through_new_operations(
         assert [event["seq"] for event in events] == (
             [1, 2, 3] if operation == "reconnect" else [1, 2]
         )
-        assert [event["delta"] for event in events] == (
+        assert [event["content"] for event in events] == (
             ["old-1", "old-2", "new-3"] if operation == "reconnect" else ["old-1", "old-2"]
         )
         assert context.session.llm.close_calls == 1

@@ -110,6 +110,8 @@ def _safe_tool_schema_hashes(tools: list[dict[str, Any]]) -> dict[str, str]:
         if schema is None:
             schema = tool.get("parameters") or tool.get("input_schema")
         if schema is None:
+            schema = tool.get("format")
+        if schema is None:
             schema = {"type": tool.get("type", "")}
         hashes[name[:80]] = _json_fingerprint(schema)
     return dict(sorted(hashes.items()))
@@ -151,6 +153,8 @@ def _safe_input_item_content_hash(item: Any) -> str:
         content = item.get("content")
         if content is None:
             content = item.get("output")
+        if content is None and item.get("type") == "custom_tool_call":
+            content = item.get("input")
     else:
         content = getattr(item, "content", None)
     if content in (None, "", [], {}):
@@ -188,6 +192,24 @@ def _safe_input_item_label(item: Any, index: int) -> dict[str, Any]:
     content_hash = _safe_input_item_content_hash(item)
     if content_hash:
         label["content_hash"] = content_hash
+    content = item.get("content") if isinstance(item, dict) else getattr(item, "content", None)
+    if role == "user" and isinstance(content, list):
+        text_blocks = [
+            str(block.get("text") or "")
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") in {"text", "input_text"}
+            and isinstance(block.get("text"), str)
+        ]
+        if len(text_blocks) >= 2 and text_blocks[0].lstrip().startswith(
+            "<system-reminder>\n<environment_context>"
+        ):
+            label.update({
+                "runtime_context_chars": len(text_blocks[0]),
+                "runtime_context_content_hash": _json_fingerprint(text_blocks[0]),
+                "user_input_chars": len(text_blocks[-1]),
+                "user_input_content_hash": _json_fingerprint(text_blocks[-1]),
+            })
     return label
 
 

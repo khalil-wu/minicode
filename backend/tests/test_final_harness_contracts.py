@@ -64,7 +64,8 @@ def test_journal_coalesces_bursts_but_flushes_final_text_immediately(monkeypatch
     now[0] += 0.13
     recorder.record_event(AgentEvent(type="agent_message.delta", data={"item_id": "answer", "delta": " tick"}))
     assert len(records) == 2
-    assert records[-1][1]["content"] == "x" * 8192 + " tick"
+    assert records[-1][1]["content_offset"] == 32
+    assert "".join(payload["content_delta"] for _, payload in records) == "x" * 8192 + " tick"
     final = "x" * 8192 + " tick final"
     recorder.record_event(AgentEvent(type="item.completed", data={"item": {"type": "agent_message", "id": "answer", "text": final, "status": status}}))
     assert len(records) == 3

@@ -142,3 +142,15 @@ def test_memory_read_prompt_uses_only_minicode_memory_contract(tmp_path: Path) -
     assert "untrusted reference material" in prompt
     assert "codex" not in prompt.lower()
     assert "session_meta.payload.id" not in prompt
+
+
+def test_memory_read_prompt_asks_for_the_citation_block_the_parser_expects(tmp_path: Path) -> None:
+    from backend.memory.citations import parse_memory_citation
+
+    prompt = build_memory_read_prompt(tmp_path / "memories", "v1\n## Task\nUse the index")
+    assert "<minicode-memory-citation>" in prompt
+    assert "<rollout_ids>" in prompt
+    # The example in the prompt round-trips through the parser.
+    example = prompt.split("<minicode-memory-citation>", 1)[1].split("</minicode-memory-citation>", 1)[0]
+    parsed = parse_memory_citation([example])
+    assert parsed is not None and parsed["entries"][0]["path"] == "MEMORY.md"

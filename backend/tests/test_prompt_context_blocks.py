@@ -610,3 +610,15 @@ def test_enter_plan_mode_updates_next_iteration_permissions(tmp_path: Path) -> N
     assert 'file_system type="read_only"' in second_runtime_system
     assert "# Collaboration Mode: Plan" in second_runtime_system
     assert "exit_plan_mode" in llm.tool_names[1]
+
+
+def test_session_timezone_is_an_iana_name_or_offset_never_localized_text() -> None:
+    import re
+
+    from backend.agent.context import local_timezone_name
+
+    name = local_timezone_name()
+    # A localized display name such as the Windows ANSI-code-page rendering
+    # of "China Standard Time" is neither an IANA zone nor an offset.
+    assert re.fullmatch(r"[A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)*|UTC[+-]\d{2}:\d{2}|UTC", name), name
+    assert name.isascii()

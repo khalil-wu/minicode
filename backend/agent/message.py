@@ -377,6 +377,27 @@ class AgentEvent:
         return cls(type="agent_message.delta", data=data)
 
     @classmethod
+    def agent_item_delta(cls, delta: str, *, item_id: str) -> AgentEvent:
+        """Incremental content for an already-announced process item.
+
+        Live-only: the running ``agent.item`` snapshot that precedes it and the
+        completed snapshot that follows it are what replay and persistence
+        carry.
+        """
+        clean_item_id = _required_event_text(
+            item_id,
+            field_name="item_id",
+            maximum=_MAX_EVENT_ID_CHARS,
+        )
+        if not isinstance(delta, str) or not delta:
+            raise ValueError("delta must be a non-empty string")
+        if len(delta) > _MAX_STREAM_DELTA_CHARS:
+            raise ValueError(
+                f"delta exceeds {_MAX_STREAM_DELTA_CHARS} characters"
+            )
+        return cls(type="agent.item.delta", data={"item_id": clean_item_id, "delta": delta})
+
+    @classmethod
     def agent_message_completed(
         cls,
         text: str,

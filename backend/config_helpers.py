@@ -119,6 +119,11 @@ class LLMSettings:
     max_output_tokens_verified: bool = False
     default_reasoning_effort: str = ""
     default_reasoning_summary: str = ""
+    supports_custom_tools: bool = False
+    responses_websocket: bool = False
+    native_compaction: bool | None = None
+    model_instructions: str = ""
+    parallel_tool_calls: bool | None = None
     seed: int | None = None
     default_headers: tuple[tuple[str, str], ...] = ()
     auth_header: bool = False
@@ -656,6 +661,15 @@ def _coerce_model_metadata(value: Any) -> dict[str, dict[str, Any]]:
         ).strip().lower()
         if default_reasoning_summary:
             metadata["default_reasoning_summary"] = default_reasoning_summary
+        for key in ("supports_custom_tools", "responses_websocket", "native_compaction", "parallel_tool_calls"):
+            if isinstance(raw_metadata.get(key), bool):
+                metadata[key] = raw_metadata[key]
+        if "native_compaction" in raw_metadata and raw_metadata["native_compaction"] is None:
+            metadata["native_compaction"] = None
+        if isinstance(raw_metadata.get("model_instructions"), str):
+            metadata["model_instructions"] = raw_metadata["model_instructions"].strip()
+        if isinstance(raw_metadata.get("parallel_tool_calls"), bool):
+            metadata["parallel_tool_calls"] = raw_metadata["parallel_tool_calls"]
         if metadata:
             metadata["source"] = "provider"
             result[model_id] = metadata
@@ -726,6 +740,11 @@ def get_provider_model_metadata(
         "reasoning_effort_levels": levels,
         "default_reasoning_effort": default_reasoning_effort,
         "default_reasoning_summary": default_reasoning_summary,
+        "supports_custom_tools": declared.get("supports_custom_tools", False),
+        "responses_websocket": declared.get("responses_websocket", False),
+        "native_compaction": declared.get("native_compaction"),
+        "model_instructions": declared.get("model_instructions", ""),
+        "parallel_tool_calls": declared.get("parallel_tool_calls"),
         "context_window": resolution.tokens,
         "context_window_source": resolution.source,
         "context_window_verified": resolution.verified,
@@ -1829,6 +1848,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
 
     if active_provider == "anthropic":
         anthropic = get_anthropic_settings(settings_data)
+        model_metadata = get_provider_model_metadata(anthropic, anthropic["model"])
         if anthropic["auth_header"] and not anthropic["api_key"]:
             raise SettingsError(
                 "auth_header=true requires an API key for the selected Anthropic provider"
@@ -1858,12 +1878,18 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
             max_output_tokens_verified=anthropic["max_output_tokens_verified"],
             default_reasoning_effort=anthropic["default_reasoning_effort"],
             default_reasoning_summary=anthropic["default_reasoning_summary"],
+            supports_custom_tools=model_metadata["supports_custom_tools"],
+            responses_websocket=model_metadata["responses_websocket"],
+            native_compaction=model_metadata["native_compaction"],
+            model_instructions=model_metadata["model_instructions"],
+            parallel_tool_calls=model_metadata["parallel_tool_calls"],
             default_headers=tuple(anthropic["default_headers"]),
             auth_header=bool(anthropic["auth_header"]),
         )
 
     if active_provider == "custom":
         custom = get_custom_settings(settings_data)
+        model_metadata = get_provider_model_metadata(custom, custom["model"])
         from backend.llm.capabilities import is_gpt_image_model
 
         image_config = (
@@ -1902,6 +1928,11 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
             max_output_tokens_verified=custom["max_output_tokens_verified"],
             default_reasoning_effort=custom["default_reasoning_effort"],
             default_reasoning_summary=custom["default_reasoning_summary"],
+            supports_custom_tools=model_metadata["supports_custom_tools"],
+            responses_websocket=model_metadata["responses_websocket"],
+            native_compaction=model_metadata["native_compaction"],
+            model_instructions=model_metadata["model_instructions"],
+            parallel_tool_calls=model_metadata["parallel_tool_calls"],
             default_headers=tuple(custom["default_headers"]),
             auth_header=bool(custom["auth_header"]),
             image_model=str(image_config["model"] if image_config else ""),
@@ -1910,6 +1941,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
         )
 
     openai = get_openai_settings(settings_data)
+    model_metadata = get_provider_model_metadata(openai, openai["model"])
     from backend.llm.capabilities import is_gpt_image_model
 
     image_config = (
@@ -1947,6 +1979,11 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
         max_output_tokens_verified=openai["max_output_tokens_verified"],
         default_reasoning_effort=openai["default_reasoning_effort"],
         default_reasoning_summary=openai["default_reasoning_summary"],
+        supports_custom_tools=model_metadata["supports_custom_tools"],
+        responses_websocket=model_metadata["responses_websocket"],
+        native_compaction=model_metadata["native_compaction"],
+        model_instructions=model_metadata["model_instructions"],
+        parallel_tool_calls=model_metadata["parallel_tool_calls"],
         default_headers=tuple(openai["default_headers"]),
         auth_header=bool(openai["auth_header"]),
         image_model=str(image_config["model"] if image_config else ""),

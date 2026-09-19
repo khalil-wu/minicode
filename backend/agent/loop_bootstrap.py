@@ -177,7 +177,7 @@ async def bootstrap_agent_loop(
     cancel_event = (
         session_context.cancel_event
         if session_context is not None and session_context.cancel_event is not None
-        else resolved_metadata.get("cancel_event")
+        else run_context.cancel_event or resolved_metadata.get("cancel_event")
     )
     if not isinstance(cancel_event, asyncio.Event):
         cancel_event = None
@@ -446,6 +446,7 @@ async def bootstrap_agent_loop(
         )
 
     hook_scope_id = conversation_id or str(session_id or "").strip()
+    context.bind_background_commands(background_manager)
     tool_context = ToolExecutionContext(
         permission=effective_permission_context,
         session_id=session_id,
@@ -496,6 +497,8 @@ async def bootstrap_agent_loop(
     tool_context.metadata["prompt_context"] = state.prompt_context
     tool_context.metadata["_context_builder"] = context
     tool_context.metadata["_agent_state"] = state
+    if run_context.extension_actions is not None:
+        run_context.extension_actions.tool_context = tool_context
     # Extension host actions resolve the live canonical execution context from
     # the turn metadata.  Keeping the object here avoids a second command
     # runtime while still allowing a generation-bound extension to execute

@@ -440,6 +440,7 @@ async def _purge_conversation_runtime_state(
         session.command_dispatcher.track_command_task(checkpoint_cleanup_task)
 
     cleanup_actions: list[tuple[str, Any]] = [
+        ("code_memory", session.conversation_runtime.forget_code_store),
         ("file_checkpoints", session.checkpoint_manager.delete_for_conversation),
         ("attachments", session.attachment_store.delete_for_conversation),
         ("artifacts", session.artifact_store.delete_for_conversation),
@@ -653,6 +654,12 @@ async def handle_conversation_create(
         workspace_root=workspace_root,
         git_branch=git_branch,
         git_isolated=request.git_isolated,
+        model_selection=(
+            {"provider": session.provider, "model": session.selected_model,
+             "reasoning_effort": str(session.config.llm.reasoning_effort or "")}
+            if not session.active_conversation_id and getattr(session, "_model_override_active", False)
+            else None
+        ),
     )
     if request.git_isolated:
         isolated = await session.create_isolated_conversation_worktree(created)
@@ -933,7 +940,45 @@ async def handle_conversation_switch(session: "WebSocketSession", data: dict[str
     from backend.services.conversation_payload_service import build_conversation_switched_payload
 
     conversation_id = str(data.get("conversation_id", ""))
-    target = session.conversation_repo.get_conversation(conversation_id)
+    view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, conversation_id)
+    if view is not None and view["message_count"] > 80 and not view.get("archived") and view.get("conversation_type", "main") == "main":
+        from backend.conversations.models import ConversationRecord
+        from datetime import UTC, datetime
+        target = ConversationRecord.from_dict(view)
+        if not await session.switch_workspace_for_conversation(target, announce=False):
+            return True
+        session.active_conversation_id = target.id
+        session.permission_context = session.permission_context_for_conversation(target, source="conversation.switch")
+        session.refresh_llm_selection()
+
+        async def restored(owner: str) -> None:
+            if owner != session.active_conversation_id:
+                return
+            error = session.conversation_runtime.hydration_error
+            if error is not None:
+                await session._on_conversation_hydration_complete(owner)
+                return
+            generation = session.conversation_runtime._hydration_generation
+            await session.reconcile_persisted_ui_agent_state(owner)
+            session.refresh_llm_selection()
+            current_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner)
+            if owner != session.active_conversation_id or generation != session.conversation_runtime._hydration_generation:
+                return
+            await session.send_payload({"type": "conversation.switched", "conversation_id": owner,
+                                        "conversation": current_view, "is_hydrating": False,
+                                        "session": session.runtime_snapshot(),
+                                        "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")}, log_context="conversation.switched")
+            if data.get("_reemit_pending", True):
+                await session.reemit_pending_state(conversation_id=owner)
+
+        session.conversation_runtime.defer_repository_hydration(target.id, on_hydration_complete=restored)
+        await session.send_payload({"type": "conversation.switched", "conversation_id": target.id,
+                                    "conversation": view, "is_hydrating": True, "context_pending": True,
+                                    "session": session.runtime_snapshot(),
+                                    "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")}, log_context="conversation.switched")
+        session.start_active_conversation_hydration(target.id)
+        return True
+    target = await asyncio.to_thread(session.conversation_repo.get_conversation, conversation_id)
     if target is None:
         await emit_conversation_not_found(session, conversation_id)
         return True
@@ -1060,7 +1105,9 @@ async def handle_conversation_rename(session: "WebSocketSession", data: dict[str
     from backend.services.conversation_payload_service import parse_conversation_rename_request
 
     request = parse_conversation_rename_request(data)
-    updated = session.conversation_repo.rename_conversation(request.conversation_id, request.title)
+    updated = await asyncio.to_thread(
+        session.conversation_repo.rename_conversation, request.conversation_id, request.title,
+    )
     if updated is None:
         await emit_conversation_not_found(session, request.conversation_id)
         from backend.ws.command_results import emit_command_error
@@ -3829,6 +3876,7 @@ async def handle_context_fork(session: "WebSocketSession", data: dict[str, Any])
                     parent_message_index=transcript_index,
                     fork_id=fork_id,
                     branch_kind="context_fork",
+                    model_selection=source_conversation.model_selection,
                 )
                 branch_workspace_root = str(branch.worktree_path or branch.workspace_root or "")
                 session.attachment_store.share_for_conversation(

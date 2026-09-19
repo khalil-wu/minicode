@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -120,6 +121,9 @@ class ConversationSummary:
     created_at: str
     updated_at: str
     revision: int = 0
+    content_revision: int = 0
+    content_updated_at: str = ""
+    model_selection: dict[str, str] = field(default_factory=dict)
     conversation_type: ConversationType = DEFAULT_CONVERSATION_TYPE
     memory_mode: ConversationMemoryMode = "enabled"
     memory_polluted: bool = False
@@ -159,6 +163,9 @@ class ConversationSummary:
             created_at=str(payload.get("created_at") or utc_now_iso()),
             updated_at=str(payload.get("updated_at") or utc_now_iso()),
             revision=_normalize_revision(payload.get("revision")),
+            content_revision=_normalize_revision(payload.get("content_revision", payload.get("revision"))),
+            content_updated_at=str(payload.get("content_updated_at") or payload.get("updated_at") or ""),
+            model_selection={key: str(value) for key, value in (payload.get("model_selection") or {}).items() if key in {"provider", "model", "reasoning_effort"}},
             conversation_type=conversation_type,
             memory_mode=normalize_memory_mode(
                 payload.get("memory_generation_mode", payload.get("memory_mode")),
@@ -202,6 +209,9 @@ class ConversationRecord:
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
     revision: int = 0
+    content_revision: int = 0
+    content_updated_at: str = ""
+    model_selection: dict[str, str] = field(default_factory=dict)
     conversation_type: ConversationType = DEFAULT_CONVERSATION_TYPE
     memory_mode: ConversationMemoryMode = "enabled"
     memory_polluted: bool = False
@@ -237,6 +247,9 @@ class ConversationRecord:
             created_at=self.created_at,
             updated_at=self.updated_at,
             revision=self.revision,
+            content_revision=self.content_revision,
+            content_updated_at=self.content_updated_at,
+            model_selection=dict(self.model_selection),
             conversation_type=self.conversation_type,
             memory_mode=self.memory_mode,
             memory_polluted=self.memory_polluted,
@@ -261,9 +274,11 @@ class ConversationRecord:
         )
 
     def to_meta_dict(self) -> dict[str, Any]:
-        payload = asdict(self)
-        payload.pop("transcript", None)
-        payload.pop("context_snapshot", None)
+        payload = {
+            item.name: deepcopy(getattr(self, item.name))
+            for item in fields(self)
+            if item.name not in {"transcript", "context_snapshot"}
+        }
         payload["message_count"] = self.message_count or len(self.transcript)
         payload["encoding_version"] = "utf-8-v1"  # Mark all new writes as UTF-8
         return payload
@@ -287,6 +302,13 @@ class ConversationRecord:
             created_at=str(payload.get("created_at") or utc_now_iso()),
             updated_at=str(payload.get("updated_at") or utc_now_iso()),
             revision=_normalize_revision(payload.get("revision")),
+            content_revision=_normalize_revision(payload.get("content_revision", payload.get("revision"))),
+            content_updated_at=str(payload.get("content_updated_at") or payload.get("updated_at") or payload.get("created_at") or ""),
+            model_selection={
+                key: str(value)
+                for key, value in (payload.get("model_selection") or {}).items()
+                if key in {"provider", "model", "reasoning_effort"}
+            },
             conversation_type=conversation_type,
             memory_mode=normalize_memory_mode(
                 payload.get("memory_generation_mode", payload.get("memory_mode")),

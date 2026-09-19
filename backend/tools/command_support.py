@@ -39,6 +39,27 @@ DEFAULT_TIMEOUT: float = 120.0
 MAX_TIMEOUT_MS = 600_000
 
 MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000
+DEFAULT_COMMAND_YIELD_MS = 10_000
+MAX_COMMAND_YIELD_MS = 60_000
+
+
+def command_wait_ms(value: Any, *, default: int = DEFAULT_COMMAND_YIELD_MS) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value != int(value) or not 0 <= value <= MAX_COMMAND_YIELD_MS:
+        raise ValueError(f"yield_time_ms must be an integer between 0 and {MAX_COMMAND_YIELD_MS}")
+    return int(value)
+
+
+def command_sandbox_recovery_hint(output: str, exit_code: int, *, sandbox_active: bool, escalated: bool, allow_unsandboxed: bool) -> str:
+    if sandbox_active and not escalated and allow_unsandboxed and _looks_like_sandbox_denial(output, exit_code):
+        return (
+            "\n\n[sandbox] This command ran in a restricted sandbox and the failure looks sandbox-related. "
+            "If it needs network or access outside the workspace, retry the SAME command with "
+            "with_escalated_permissions=true and a one-line justification; the user will be asked "
+            "to approve. Do not escalate for ordinary command errors."
+        )
+    return ""
 
 _DANGEROUS_ENV_EXACT = frozenset(
     {
@@ -405,10 +426,10 @@ _EXTERNAL_COMMAND_PATTERNS = tuple(
 
 
 def _command_side_effect_kind(args: dict[str, Any] | None) -> str:
-    """Classify shell execution conservatively without parsing shell syntax.
+    """Classify shell execution conservatively.
 
-    Codex and Claude Code either run commands inside a real sandbox or use a
-    complete command parser. MiniCode has neither parser on this path, so a
+    Literal argv extraction can prove a command is destructive or external;
+    it cannot prove one is read-only, because expanded words are dropped. So a
     command string never earns the read-only scheduling or permission fast
     path. Dedicated read/search/list tools remain available for that work.
     """
@@ -417,8 +438,10 @@ def _command_side_effect_kind(args: dict[str, Any] | None) -> str:
     if not command:
         return TOOL_SIDE_EFFECT_EXTERNAL
 
+    from backend.permissions import argv_rules
     from backend.permissions.checker import (
         check_catastrophic_command,
+        literal_command_parses,
         protected_write_command_reason,
     )
 
@@ -433,9 +456,19 @@ def _command_side_effect_kind(args: dict[str, Any] | None) -> str:
         or any(pattern.search(command) for pattern in _DESTRUCTIVE_COMMAND_PATTERNS)
     ):
         return TOOL_SIDE_EFFECT_DESTRUCTIVE
+    # The string patterns above only see top-level text. Resolve the literal
+    # argv of every command the script runs so a delete inside a brace group,
+    # loop body, pipeline tail, or quoted spelling is classified the same way.
+    literal_commands = [
+        argv for parsed in literal_command_parses(command) for argv in parsed.commands
+    ]
+    if any(argv_rules.destructive_reason(argv) for argv in literal_commands):
+        return TOOL_SIDE_EFFECT_DESTRUCTIVE
     if _as_bool(payload.get("with_escalated_permissions", False)):
         return TOOL_SIDE_EFFECT_EXTERNAL
     if any(pattern.search(command) for pattern in _EXTERNAL_COMMAND_PATTERNS):
+        return TOOL_SIDE_EFFECT_EXTERNAL
+    if any(argv_rules.is_external(argv) for argv in literal_commands):
         return TOOL_SIDE_EFFECT_EXTERNAL
     # Do not infer safety from shell text. This keeps commands out of plan
     # mode, speculative execution, concurrent read batches, and result cache.

@@ -1,6 +1,7 @@
 import { Check, ChevronDown, ChevronRight, Copy, Square, TerminalSquare } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ExecCellState } from "./cellTypes";
+import { ToolSourceBadge } from "./ToolSourceBadge";
 import { StatusIcon } from "../../components/icons";
 import {
   cellStatusLabel,
@@ -91,6 +92,7 @@ export function ExecCell({
           </span>
           <span className="exec-cell-title">{running ? "正在运行" : title}</span>
           <span className="exec-cell-command-preview" title={cell.command}>{cell.command}</span>
+          <ToolSourceBadge source={cell.callSource} />
           {(status !== "success" || cell.background) && <span className="exec-cell-meta">
             {statusMeta}
             {duration ? ` · ${duration}` : ""}

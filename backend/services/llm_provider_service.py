@@ -427,6 +427,27 @@ def _selected_model_capability_payload(
     }
 
 
+def _retain_model_behavior(
+    discovered: dict[str, dict[str, Any]], *, current: dict[str, Any], incoming: Any,
+    base_url: str, wire_api: str, models: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Keep explicit model behavior when refreshing the same provider draft."""
+    if _request_field_was_set(incoming, "model_metadata"):
+        configured = incoming.model_metadata
+    elif (base_url.rstrip("/") == str(current.get("base_url") or "").rstrip("/")
+          and wire_api == str(current.get("wire_api") or wire_api)):
+        configured = current.get("model_metadata", {})
+    else:
+        configured = {}
+    merged = {name: dict(value) for name, value in discovered.items()}
+    for name in models:
+        behavior = {key: value for key, value in configured.get(name, {}).items()
+                    if key in {"supports_custom_tools", "model_instructions", "responses_websocket", "native_compaction"}}
+        if behavior:
+            merged[name] = {**merged.get(name, {}), **behavior}
+    return merged
+
+
 async def refresh_llm_models(
     request: Any,
     *,
@@ -502,6 +523,11 @@ async def refresh_llm_models(
                       if _request_field_was_set(request.anthropic, "model_metadata")
                       else current.get("model_metadata", {}))
         )
+        if source == "live":
+            model_metadata = _retain_model_behavior(
+                model_metadata, current=current, incoming=request.anthropic,
+                base_url=base_url, wire_api="anthropic", models=final_models,
+            )
         payload = {
             "provider": provider,
             "provider_id": provider_id,
@@ -609,6 +635,11 @@ async def refresh_llm_models(
                   if _request_field_was_set(incoming, "model_metadata")
                   else current.get("model_metadata", {}))
     )
+    if source == "live":
+        model_metadata = _retain_model_behavior(
+            model_metadata, current=current, incoming=incoming,
+            base_url=base_url, wire_api=wire_api, models=final_models,
+        )
     payload = {
         "provider": provider,
         "provider_id": provider_id,

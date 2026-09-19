@@ -380,21 +380,77 @@ def subagent_mailbox_participant_id(metadata: dict[str, Any]) -> str:
     return coordination_agent_id(metadata)
 
 
+# Mailbox payloads that belong to lifecycle handlers, never to the model.
+_STRUCTURED_PROTOCOL_TYPES = frozenset({
+    "shutdown_request",
+    "shutdown_response",
+    "plan_approval_request",
+    "plan_approval_response",
+    "permission_request",
+    "permission_response",
+})
+
+
+def _structured_payload(message: Any) -> dict[str, Any] | None:
+    content = str(getattr(message, "content", "") or "").strip()
+    if not content.startswith("{"):
+        return None
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) and payload.get("type") else None
+
+
+def is_structured_protocol_message(message: Any) -> bool:
+    payload = _structured_payload(message)
+    return payload is not None and str(payload.get("type")) in _STRUCTURED_PROTOCOL_TYPES
+
+
+def select_model_visible_messages(messages: list[Any]) -> list[Any]:
+    """Drop protocol payloads and keep only the latest idle notice per teammate."""
+    latest_idle: dict[str, int] = {}
+    idle_index: dict[int, str] = {}
+    for index, message in enumerate(messages):
+        payload = _structured_payload(message)
+        if payload is not None and payload.get("type") == "idle_notification":
+            sender = str(payload.get("from") or getattr(message, "sender_id", "") or "")
+            idle_index[index] = sender
+            latest_idle[sender] = index
+    visible: list[Any] = []
+    for index, message in enumerate(messages):
+        if is_structured_protocol_message(message):
+            continue
+        if index in idle_index and latest_idle.get(idle_index[index]) != index:
+            continue
+        visible.append(message)
+    return visible
+
+
+def _render_mailbox_line(message: Any) -> str:
+    seq = int(getattr(message, "seq", 0) or 0)
+    sender = str(getattr(message, "sender_id", "") or "unknown")
+    recipient = str(getattr(message, "recipient_id", "") or "")
+    task_id = str(getattr(message, "task_id", "") or "")
+    task_suffix = f" task={task_id}" if task_id else ""
+    payload = _structured_payload(message)
+    if payload is not None and payload.get("type") == "idle_notification":
+        teammate = str(payload.get("from") or sender)
+        summary = str(payload.get("summary") or "").strip()
+        body = f"teammate {teammate} is idle and available"
+        if summary:
+            body += f". Last turn: {summary}"
+        return f"- seq={seq} from={sender} to={recipient}{task_suffix}: {body}"
+    content = str(getattr(message, "content", "") or "").strip()
+    return f"- seq={seq} from={sender} to={recipient}{task_suffix}: {content}"
+
+
 def format_subagent_mailbox_injection(messages: list[Any]) -> str:
     lines = [
         "<subagent_mailbox>",
         "New coordination messages addressed to this agent arrived while it was running. Treat them as current parent/teammate instructions and adjust the next step accordingly.",
     ]
-    for message in messages:
-        seq = int(getattr(message, "seq", 0) or 0)
-        sender = str(getattr(message, "sender_id", "") or "unknown")
-        recipient = str(getattr(message, "recipient_id", "") or "")
-        task_id = str(getattr(message, "task_id", "") or "")
-        task_suffix = f" task={task_id}" if task_id else ""
-        lines.append(
-            f"- seq={seq} from={sender} to={recipient}{task_suffix}: "
-            f"{str(getattr(message, 'content', '') or '').strip()}"
-        )
+    lines.extend(_render_mailbox_line(message) for message in messages)
     lines.append("</subagent_mailbox>")
     return "\n".join(lines)
 
@@ -493,13 +549,32 @@ async def inject_subagent_mailbox_updates(
         lifecycle_claims = []
         messages = []
         for claim in claims:
-            if str(getattr(claim.message, "message_id", "") or "").strip() in consumed_ids:
+            if (
+                str(getattr(claim.message, "message_id", "") or "").strip() in consumed_ids
+                or is_structured_protocol_message(claim.message)
+            ):
+                # Lifecycle payloads are handled by their own consumers (plan
+                # approval, shutdown). They are never model instructions.
                 lifecycle_claims.append(claim)
             else:
                 messages.append(claim.message)
         if lifecycle_claims:
             runtime.ack_swarm_message_claims(lifecycle_claims)
             claims = [claim for claim in claims if claim not in lifecycle_claims]
+        visible_messages = select_model_visible_messages(messages)
+        superseded_ids = {
+            str(getattr(message, "message_id", "") or "")
+            for message in messages
+        } - {str(getattr(message, "message_id", "") or "") for message in visible_messages}
+        if superseded_ids:
+            superseded_claims = [
+                claim for claim in claims
+                if str(getattr(claim.message, "message_id", "") or "") in superseded_ids
+            ]
+            if superseded_claims:
+                runtime.ack_swarm_message_claims(superseded_claims)
+                claims = [claim for claim in claims if claim not in superseded_claims]
+        messages = visible_messages
     else:
         if not addressed_messages:
             return 0
@@ -690,6 +765,15 @@ async def inject_parent_notifications(
     for item in pending:
         notification_id = str(item.get("notification_id") or "").strip()
         if not notification_id:
+            continue
+        if str(item.get("kind") or "") == "mailbox_wake":
+            # The marker only exists to start this turn; the message itself
+            # was delivered through the mailbox claim above.
+            ack_notification(
+                notification_id,
+                parent_run_id=parent_run_id,
+                conversation_id=conversation_id,
+            )
             continue
         subagent_id = str(item.get("subagent_id") or "").strip()
         item_epoch = int(item.get("mailbox_epoch") or 0)

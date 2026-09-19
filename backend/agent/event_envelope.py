@@ -47,6 +47,7 @@ _TURN_SCOPED: frozenset[str] = frozenset({
     "agent.run.started",
     "agent.run.completed",
     "agent.item",
+    "agent.item.delta",
     "agent.progress",
     "runtime.span",
     "task.update",

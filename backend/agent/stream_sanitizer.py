@@ -35,6 +35,9 @@ _REASONING_CONTROL_PREFIXES = (
     "<|",
     "<minicode-memory-citation>",
 )
+# Longest control opener a chunk boundary can legitimately split. ``<|`` is
+# not counted: special tokens are bounded by ``|>`` and prose never uses it.
+_MAX_HELD_PREFIX = len("<minicode-memory-citation>") + 8
 _MEMORY_CITATION_OPEN = "<minicode-memory-citation>"
 _MEMORY_CITATION_CLOSE = "</minicode-memory-citation>"
 
@@ -145,7 +148,13 @@ class ThinkingStreamSanitizer:
                 self._memory_citation_body = ""
                 continue
 
-            if self._looks_like_control_prefix(self._pending):
+            if (
+                self._looks_like_control_prefix(self._pending)
+                and len(self._pending) <= _MAX_HELD_PREFIX
+            ):
+                # The chunk may end inside a control tag; wait for more text.
+                # Anything longer than a real tag is prose such as ``<| x``
+                # or ``<think it``, and must not be withheld from the answer.
                 break
 
             visible.append("<")
@@ -154,11 +163,13 @@ class ThinkingStreamSanitizer:
         return "".join(visible)
 
     def finish(self) -> str:
+        """Release text held while waiting for a tag that never completed."""
+        tail = "" if self._inside_reasoning or self._inside_memory_citation else self._pending
         self._pending = ""
         self._inside_reasoning = False
         self._inside_memory_citation = False
         self._memory_citation_body = ""
-        return ""
+        return tail
 
 
 def scrub_thinking_tags(text: str) -> str:

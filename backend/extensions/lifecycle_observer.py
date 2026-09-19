@@ -272,16 +272,14 @@ class ExtensionLifecycleObserver:
 
     def _runtime_value(self, *keys: str, default: str = "") -> str:
         metadata = self.metadata if isinstance(self.metadata, Mapping) else {}
-        runtime = (
-            self.run_context.subagent_parent_runtime
-            if self.run_context is not None
-            else {}
-        )
-        runtime_mapping = runtime if isinstance(runtime, Mapping) else {}
+        snapshot = self.run_context.active_model_execution if self.run_context is not None else None
+        runtime_mapping = ({"provider": snapshot.provider, "provider_id": snapshot.provider,
+                            "model": snapshot.model, "model_id": snapshot.model,
+                            "thinking_level": snapshot.thinking_level} if snapshot is not None else {})
         for key in keys:
-            value = metadata.get(key)
+            value = runtime_mapping.get(key)
             if value is None or value == "":
-                value = runtime_mapping.get(key)
+                value = metadata.get(key)
             if value is not None and str(value).strip():
                 return str(value).strip()
         return default

@@ -453,13 +453,11 @@ def _shell_wrapper_payload(command: str) -> tuple[str | None, str]:
 
 
 def _normalize_for_catastrophic_match(command: str) -> str:
-    """Normalize a command for catastrophic-pattern matching.
+    """Normalize a command for the string-level catastrophic patterns.
 
-    Claude Code tokenizes the command into argv (``bashParser``) before testing
-    dangerous patterns, so quoted spellings collapse to their real targets. This
-    approximates that by dropping shell quotes (replacing them with spaces so
-    ``rm -rf "/"`` collapses to ``rm -rf /``). Home-variable trailing-slash
-    variants are handled by the patterns themselves.
+    Drops shell quotes (replacing them with spaces so ``rm -rf "/"`` collapses
+    to ``rm -rf /``). This is the floor used when a script cannot be parsed;
+    parseable scripts are also judged on their resolved argv.
     """
     no_quotes = command.replace('"', " ").replace("'", " ")
     return re.sub(r"\s+", " ", no_quotes).strip()
@@ -477,6 +475,9 @@ def _check_catastrophic_command(command: str, *, _depth: int = 0) -> tuple[bool,
     compound_reason = _destructive_compound_reason(stripped)
     if compound_reason:
         return False, f"命令被安全策略拦截: {compound_reason}"
+    literal_reason = _literal_catastrophic_reason(stripped)
+    if literal_reason:
+        return False, f"命令被安全策略拦截: {literal_reason}"
     if _depth >= 4:
         return False, "命令被安全策略拦截: shell wrapper nesting is too deep"
     for match in _COMMAND_SUBSTITUTION_RE.finditer(stripped):
@@ -498,6 +499,59 @@ def _check_catastrophic_command(command: str, *, _depth: int = 0) -> tuple[bool,
     if payload is not None:
         return _check_catastrophic_command(payload, _depth=_depth + 1)
     return True, ""
+
+
+def _literal_catastrophic_reason(command: str) -> str:
+    """Judge the commands a script really runs, not its surface text.
+
+    Brace groups, loop bodies, pipeline tails, quoted spellings and wrapper
+    payloads all resolve to plain argv here, so a rule sees ``rm -rf /``
+    whether it was written directly or hidden behind shell composition.
+    Unparseable scripts return "" and stay on the string-level floor above.
+    """
+    from backend.permissions import argv_rules
+
+    for parsed in literal_command_parses(command):
+        for argv in parsed.commands:
+            reason = argv_rules.catastrophic_reason(argv)
+            if reason:
+                return reason
+        if parsed.compound:
+            for argv in parsed.commands:
+                reason = argv_rules.compound_destructive_reason(argv)
+                if reason:
+                    return reason
+    return ""
+
+
+def literal_command_parses(command: str) -> list[Any]:
+    """Parse *command* with every grammar the host may run it under.
+
+    On Windows the command tool hands the script to PowerShell, but models
+    frequently write POSIX-style scripts that PowerShell aliases accept
+    (``rm -rf``), so both readings are judged. A grammar that cannot parse
+    the script contributes nothing; the string-level rules stay the floor.
+    """
+    from backend.permissions import powershell_ast, shell_ast
+
+    parses = []
+    posix = shell_ast.parse_literal_commands(command)
+    if posix is not None:
+        parses.append(posix)
+    if sys.platform == "win32" or _looks_like_powershell(command):
+        windows = powershell_ast.parse_literal_commands(command)
+        if windows is not None:
+            parses.append(windows)
+    return parses
+
+
+_POWERSHELL_HINT = re.compile(
+    r"(?:^|[\s;|&(])(?:[A-Z][a-z]+-[A-Z][A-Za-z]+|pwsh|powershell)\b|\$env:|\$_|-Recurse\b",
+)
+
+
+def _looks_like_powershell(command: str) -> bool:
+    return _POWERSHELL_HINT.search(command) is not None
 
 
 def check_catastrophic_command(command: str) -> tuple[bool, str]:

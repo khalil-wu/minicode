@@ -288,20 +288,21 @@ class MCPToolProxy(BaseTool):
             return self._error_result(result_text or "MCP tool execution failed")
 
         images: list[dict[str, str]] = []
+        audios: list[dict[str, str]] = []
         resource_text: list[str] = []
         output_files: list[dict[str, Any]] = []
         for block in result.content:
             if not isinstance(block, dict):
                 continue
             block_type = str(block.get("type") or "").strip().lower()
-            if block_type == "image":
+            if block_type in {"image", "audio"}:
                 data = str(block.get("data") or "").strip()
                 if data:
-                    images.append({
+                    (images if block_type == "image" else audios).append({
                         "media_type": str(
                             block.get("mimeType")
                             or block.get("media_type")
-                            or "image/png"
+                            or ("image/png" if block_type == "image" else "")
                         ),
                         "data": data,
                     })
@@ -353,6 +354,7 @@ class MCPToolProxy(BaseTool):
         return ToolResult(
             content=typed_content,
             images=images,
+            audios=audios,
             output_files=output_files,
             status="success",
             runtime_metadata={"mcp": {"structuredContent": result.structured_content, "_meta": result.meta}},

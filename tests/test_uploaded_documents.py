@@ -769,7 +769,7 @@ def test_attachment_metadata_limit_is_reported_as_413(monkeypatch, tmp_path) -> 
     assert exc_info.value.status_code == 413
 
 def test_openai_responses_input_includes_images() -> None:
-    adapter = OpenAIAdapter.__new__(OpenAIAdapter)
+    adapter = OpenAIAdapter(settings=LLMSettings(api_key="test", base_url="http://example.test/v1", model="test-model", wire_api="responses"))
     payload = adapter._build_responses_input(
         [
             LLMMessage(
@@ -796,7 +796,7 @@ def test_openai_responses_input_includes_images() -> None:
 
 
 def test_openai_responses_input_includes_pdf_documents() -> None:
-    adapter = OpenAIAdapter.__new__(OpenAIAdapter)
+    adapter = OpenAIAdapter(settings=LLMSettings(api_key="test", base_url="http://example.test/v1", model="test-model", wire_api="responses"))
     payload = adapter._build_responses_input(
         [
             LLMMessage(

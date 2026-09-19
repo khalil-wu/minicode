@@ -9,6 +9,7 @@ from backend.agent.context_ledger import ContextLedger
 from backend.agent.message import AgentEvent
 from backend.agent.state import AgentState
 from backend.config import TokenBudget
+from backend.llm.base import LLMMessage
 from backend.hooks.manager import HookEvent
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,8 @@ async def manage_context_budget(
     state: AgentState,
     budget: TokenBudget,
     tool_schemas: list[dict[str, Any]],
+    *,
+    messages: list[LLMMessage] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Run automatic compaction at the configured reserve boundary.
 
@@ -55,8 +58,9 @@ async def manage_context_budget(
     Without this guard a context that cannot be reduced below the threshold
     will loop indefinitely, burning API calls.
     """
-    if not ctx.needs_compaction(state, tool_schemas=tool_schemas):
-        warning = _pre_compaction_warning(ctx, state, budget, tool_schemas)
+    request_args = {"messages": messages} if messages is not None else {}
+    if not ctx.needs_compaction(state, tool_schemas=tool_schemas, **request_args):
+        warning = _pre_compaction_warning(ctx, state, budget, tool_schemas, **request_args)
         if warning is not None:
             yield warning
         return
@@ -96,6 +100,8 @@ def _pre_compaction_warning(
     state: AgentState,
     budget: TokenBudget,
     tool_schemas: list[dict[str, Any]],
+    *,
+    messages: list[LLMMessage] | None = None,
 ) -> AgentEvent | None:
     """Announce the approaching compaction boundary exactly once per band.
 
@@ -110,7 +116,8 @@ def _pre_compaction_warning(
         # The reserve alone fills the window, so there is no span between
         # "roomy" and "compacting" to warn about.
         return None
-    snapshot = ctx.get_budget_snapshot(state, tool_schemas=tool_schemas)
+    request_args = {"messages": messages} if messages is not None else {}
+    snapshot = ctx.get_budget_snapshot(state, tool_schemas=tool_schemas, **request_args)
     total = int(snapshot.get("total", 0) or 0)
     if total <= 0:
         return None

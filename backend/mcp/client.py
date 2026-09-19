@@ -204,9 +204,9 @@ class MCPCallResult:
             if not isinstance(item, dict):
                 continue
             block_type = str(item.get("type") or "").strip().lower()
-            if block_type == "image":
-                mime = str(item.get("mimeType") or item.get("media_type") or "image")
-                parts.append(f"[image content: {mime}]")
+            if block_type in {"image", "audio"}:
+                mime = str(item.get("mimeType") or item.get("media_type") or block_type)
+                parts.append(f"[{block_type} content: {mime}]")
             elif block_type == "resource":
                 resource = item.get("resource")
                 if isinstance(resource, dict):

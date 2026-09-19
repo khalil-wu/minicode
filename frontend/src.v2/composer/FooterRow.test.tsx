@@ -294,6 +294,7 @@ describe("FooterRow permission picker", () => {
 
     expect(sendClientCommand).toHaveBeenCalledWith({
       type: "llm.model.set",
+      conversation_id: "conv-footer",
       model: "gpt-5",
     });
   });
@@ -447,6 +448,7 @@ describe("FooterRow permission picker", () => {
 
     await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({
       type: "llm.config.set",
+      conversation_id: "conv-footer",
       provider: "openai",
       reasoning_effort: "xhigh",
       source: "frontend.footer",

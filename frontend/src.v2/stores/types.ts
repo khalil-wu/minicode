@@ -900,6 +900,16 @@ export interface ProviderDuplicateInputContentRow {
 export interface ProviderRequestSummary {
   model?: string;
   wire_api?: string;
+  transport?: {
+    mode?: "http" | "websocket";
+    incremental?: boolean;
+    connection_reused?: boolean;
+    response_items_complete?: boolean;
+    input_items_logical_len?: number;
+    input_items_sent_len?: number;
+    request_json_bytes?: number;
+    fallback_status?: number;
+  };
   instructions_len?: number;
   instructions_sent_len?: number;
   instructions_hash?: string;
@@ -1102,11 +1112,14 @@ export interface ProgressContentBlock {
 export interface AgentProgressEntry extends ProgressContentBlock {
   conversationId?: string;
 }
-export type ContentBlock = ThinkingContentBlock | TextContentBlock | ProcessContentBlock | ToolCallContentBlock | ProgressContentBlock;
+export type ContentBlock = (ThinkingContentBlock | TextContentBlock | ProcessContentBlock | ToolCallContentBlock | ProgressContentBlock) & { transcriptIndex?: number };
+
+export interface ToolHistoryPage { before: number; remaining: number; total: number; revision?: string }
 
 export interface ChatMessage {
   id: string;
   turnId?: string;
+  toolPage?: ToolHistoryPage;
   role: MessageRole;
   content: string;
   messageSource?: ChatMessageSource;
@@ -1228,6 +1241,12 @@ export interface SideChatThread {
   selectedContext?: { text: string; source?: string };
 }
 
+export interface ConversationHistoryPage {
+  beforeMessageId: string;
+  hasMore: boolean;
+  loading: boolean;
+}
+
 export interface ChatSlice {
   conversationId: string | null;
   conversations: ConversationMeta[];
@@ -1236,6 +1255,7 @@ export interface ChatSlice {
   activeGoal: ConversationGoal | null;
   messages: ChatMessage[];
   conversationMessages: Record<string, ChatMessage[]>;
+  conversationHistoryPages: Record<string, ConversationHistoryPage>;
   conversationStreaming: Record<string, boolean>;
   /** Provider retry frames that arrived before their exact assistant owner. */
   pendingProviderProgress: Record<string, ProgressContentBlock[]>;
@@ -1263,7 +1283,7 @@ export interface ChatSlice {
   removeConversation: (id: string) => Promise<boolean>;
   getVisibleMessages: (conversationId?: string | null) => ChatMessage[];
   setActiveGoal: (goal: ConversationGoal | null, conversationId?: string, revision?: number) => void;
-  hydrateConversationMessages: (id: string, messages: ChatMessage[], options?: { activate?: boolean; isStreaming?: boolean }) => void;
+  hydrateConversationMessages: (id: string, messages: ChatMessage[], options?: { activate?: boolean; isStreaming?: boolean; historyPage?: ConversationHistoryPage }) => void;
   bindStreamingTurn: (conversationId: string | undefined, messageId: string | undefined, turnId: string | undefined) => void;
   startAgentMessage: (
     itemId: string,
@@ -1306,6 +1326,12 @@ export interface ChatSlice {
   clearPendingProviderProgress: (conversationId?: string, messageId?: string) => void;
   removeProcessItem: (
     itemId: string,
+    conversationId?: string,
+    messageId?: string,
+  ) => void;
+  appendProcessItemDelta: (
+    itemId: string,
+    delta: string,
     conversationId?: string,
     messageId?: string,
   ) => void;

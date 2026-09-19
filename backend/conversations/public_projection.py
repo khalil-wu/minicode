@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import math
+import hashlib
+import json
 from collections.abc import Mapping
+from dataclasses import fields, is_dataclass
 from typing import Any
 
 from backend.agent.provider_protocol import provider_raw_for_projection
@@ -240,6 +243,9 @@ def project_public_tool_call(value: Any) -> dict[str, Any]:
         if isinstance(raw, bool):
             projected[key] = raw
     cleanup_receipt = source.get("cleanupReceipt", source.get("cleanup_receipt"))
+    call_source = source.get("callSource", source.get("call_source"))
+    if isinstance(call_source, Mapping) and call_source.get("kind") in {"code_mode", "extension"}:
+        projected["callSource"] = {key: public_text(call_source.get(key), max_chars=1024, single_line=True) for key in ("kind", "cell_id", "parent_call_id", "runtime_call_id")}
     if isinstance(cleanup_receipt, Mapping):
         projected["cleanupReceipt"] = _public_json(cleanup_receipt)
     for source_key, target_key in (
@@ -591,18 +597,28 @@ def project_public_transcript_message(value: Any) -> dict[str, Any]:
         projected["usage"] = usage
     raw_blocks = source.get("blocks")
     if isinstance(raw_blocks, list):
-        blocks = [
-            block
-            for raw_block in raw_blocks[:4_096]
-            if (block := _project_block(raw_block)) is not None
-        ]
+        blocks = []
+        for raw_block in raw_blocks:
+            block = _project_block(raw_block)
+            if block is not None:
+                position = _nonnegative_int(raw_block.get("transcriptIndex"))
+                if position is not None:
+                    block["transcriptIndex"] = position
+                blocks.append(block)
         if blocks:
             projected["blocks"] = blocks
+    tool_page = source.get("tool_page")
+    if isinstance(tool_page, Mapping):
+        page = {key: _nonnegative_int(tool_page.get(key)) for key in ("before", "remaining", "total")}
+        if all(value is not None for value in page.values()):
+            projected["tool_page"] = page
+            if isinstance(tool_page.get("revision"), str):
+                projected["tool_page"]["revision"] = tool_page["revision"]
     raw_calls = source.get("tool_calls")
     if isinstance(raw_calls, list):
         calls = [
             project_public_tool_call(raw_call)
-            for raw_call in raw_calls[:4_096]
+            for raw_call in raw_calls
             if isinstance(raw_call, Mapping)
         ]
         calls = [call for call in calls if call.get("id") and call.get("name")]
@@ -657,8 +673,84 @@ def project_public_transcript(value: Any) -> list[dict[str, Any]]:
     ]
 
 
-def project_public_conversation(value: Any, *, include_transcript: bool = True) -> dict[str, Any]:
-    source = value.to_dict() if hasattr(value, "to_dict") else value
+def project_transcript_page(
+    transcript: list[dict[str, Any]], *, limit: int, before_message_id: str = "",
+) -> dict[str, Any]:
+    end = len(transcript)
+    if before_message_id:
+        end = next((i for i, message in enumerate(transcript) if message.get("id") == before_message_id), -1)
+        if end < 0:
+            raise ValueError("The history page anchor no longer exists; reload the conversation.")
+    start = max(0, end - limit)
+    if start > 0 and transcript[start].get("role") == "assistant" and transcript[start - 1].get("role") == "user":
+        start -= 1
+    return {
+        "transcript": [project_tool_window(message) for message in transcript[start:end]],
+        "transcript_page": {
+            "before_message_id": str(transcript[start].get("id") or "") if start < end else "",
+            "has_more": start > 0,
+            "total_messages": len(transcript),
+        },
+    }
+
+
+def tool_history_revision(message: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(message.get("blocks", []), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def project_tool_items(message: dict[str, Any], *, before: int, limit: int = 40, revision: str = "") -> dict[str, Any]:
+    blocks = message.get("blocks", [])
+    if message.get("terminal_status", message.get("terminalStatus")) != "completed":
+        raise ValueError("The message is being updated; reload its conversation.")
+    if not 0 <= before <= len(blocks):
+        raise ValueError("The tool history cursor no longer exists; reload its conversation.")
+    current_revision = tool_history_revision(message)
+    if revision and revision != current_revision:
+        raise ValueError("The message changed; reload its conversation before loading earlier steps.")
+    positions = [index for index, block in enumerate(blocks)
+                 if isinstance(block, Mapping) and block.get("type") == "tool_call" and isinstance(block.get("record"), Mapping)]
+    earlier = [index for index in positions if index < before]
+    selected = earlier[-limit:]
+    return {
+        "message_id": message["id"],
+        "blocks": [{**projected, "transcriptIndex": index} for index in selected
+                   if (projected := _project_block(blocks[index])) is not None],
+        "tool_page": {"before": selected[0] if selected else 0,
+                      "remaining": len(earlier) - len(selected), "total": len(positions), "revision": current_revision},
+    }
+
+
+def project_tool_window(message: dict[str, Any], *, limit: int = 40) -> dict[str, Any]:
+    """Keep the answer/narration and latest completed tool steps on the first page."""
+    blocks = message.get("blocks", [])
+    if not isinstance(blocks, list):
+        return project_public_transcript_message(message)
+    positions = [index for index, block in enumerate(blocks)
+                 if isinstance(block, Mapping) and block.get("type") == "tool_call" and isinstance(block.get("record"), Mapping)]
+    if (message.get("terminal_status", message.get("terminalStatus")) != "completed"
+            or len(positions) <= limit or "tool_page" in message
+            or any((blocks[index].get("record") or {}).get("status") in {"running", "pending"} for index in positions)):
+        return project_public_transcript_message(message)
+    first = positions[-limit]
+    projected = project_public_transcript_message({key: value for key, value in message.items()
+                                                  if key not in {"blocks", "tool_calls", "toolCalls"}})
+    projected["blocks"] = [
+        {**block, "transcriptIndex": index}
+        for index, source in enumerate(blocks)
+        if isinstance(source, Mapping) and (source.get("type") != "tool_call" or index >= first)
+        and (block := _project_block(source)) is not None
+    ]
+    projected["tool_page"] = {"before": first, "remaining": len(positions) - limit, "total": len(positions), "revision": tool_history_revision(message)}
+    return projected
+
+
+def project_public_conversation(
+    value: Any, *, include_transcript: bool = True, transcript_limit: int | None = None,
+) -> dict[str, Any]:
+    # Project only public fields; asdict would first copy the entire private
+    # provider history even for a metadata or recent-page response.
+    source = ({field.name: getattr(value, field.name) for field in fields(value)}
+              if is_dataclass(value) else value.to_dict() if hasattr(value, "to_dict") else value)
     source = source if isinstance(source, Mapping) else {}
     projected: dict[str, Any] = {}
     for key, maximum in (
@@ -731,9 +823,13 @@ def project_public_conversation(value: Any, *, include_transcript: bool = True) 
         if count is not None:
             projected["parent_message_index"] = count
     if include_transcript:
-        transcript = project_public_transcript(source.get("transcript"))
-        projected["transcript"] = transcript
-        projected["message_count"] = len(transcript)
+        if transcript_limit is None:
+            transcript = project_public_transcript(source.get("transcript"))
+            projected["transcript"] = transcript
+            projected["message_count"] = len(transcript)
+        else:
+            projected.update(project_transcript_page(source.get("transcript", []), limit=transcript_limit))
+            projected["message_count"] = projected["transcript_page"]["total_messages"]
     projected["context_snapshot"] = _project_context_snapshot(source.get("context_snapshot"))
     return projected
 

@@ -56,6 +56,7 @@ export interface AgentProviderCapabilities {
   default_reasoning_summary?: unknown;
   vision?: unknown;
   native_pdf?: unknown;
+  native_compaction?: unknown;
   image_generation?: unknown;
   confidence?: unknown;
   limitations?: unknown;

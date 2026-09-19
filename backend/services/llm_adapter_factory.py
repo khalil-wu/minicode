@@ -53,6 +53,7 @@ def build_wire_adapter(
         return AnthropicAdapter(
             api_key=settings.api_key,
             model=settings.model,
+            model_instructions=settings.model_instructions,
             small_fast_model=settings.small_fast_model,
             base_url=settings.base_url or None,
             max_tokens=max(
@@ -62,6 +63,8 @@ def build_wire_adapter(
             ),
             context_window=settings.context_window,
             thinking_budget=(settings.thinking_budget or None) if thinking_budget is None else thinking_budget,
+            reasoning_effort=settings.reasoning_effort,
+            reasoning_effort_levels=tuple(settings.reasoning_effort_levels),
             use_auth_token=bool(settings.auth_header),
             cache_editing_beta_header=cache_editing_beta_header,
             default_headers=dict(settings.default_headers),
@@ -155,6 +158,11 @@ def _openai_compatible_settings(
         max_output_tokens_verified=bool(metadata["max_output_tokens_verified"]),
         default_reasoning_effort=str(metadata["default_reasoning_effort"]),
         default_reasoning_summary=str(metadata["default_reasoning_summary"]),
+        supports_custom_tools=metadata["supports_custom_tools"],
+        responses_websocket=metadata["responses_websocket"],
+        native_compaction=metadata["native_compaction"],
+        model_instructions=metadata["model_instructions"],
+        parallel_tool_calls=metadata["parallel_tool_calls"],
         image_model=image_model,
         image_size=image_size,
         image_quality=image_quality,
@@ -192,6 +200,7 @@ def build_provider_adapter(
             raise ValueError(f"Selected provider '{normalized}' has no model configuration")
         spec = model_runtime.resolve_adapter_spec(normalized, model_id)
         adapter = _build_registered_provider_adapter(spec)
+        adapter.provider_adapter_spec = spec
         cost_models = [spec.model]
         if spec.small_fast_model and spec.small_fast_model != model_id:
             cost_models.append(model_runtime.get_model(normalized, spec.small_fast_model))
@@ -222,6 +231,7 @@ def build_provider_adapter(
                 provider="anthropic",
                 base_url=str(base_url or ""),
                 model=model,
+                model_instructions=get_provider_model_metadata(anthropic_settings, model)["model_instructions"],
                 small_fast_model=str(
                     anthropic_settings["small_fast_model"] or ""
                 ),
@@ -288,6 +298,7 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapte
         return AnthropicAdapter(
             api_key=spec.api_key,
             model=spec.model_id,
+            model_instructions=spec.model_instructions,
             small_fast_model=spec.small_fast_model or spec.model_id,
             base_url=spec.base_url or None,
             max_tokens=max(
@@ -296,6 +307,8 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapte
             ),
             context_window=spec.context_window,
             thinking_budget=spec.thinking_budget,
+            reasoning_effort=spec.reasoning_effort,
+            reasoning_effort_levels=tuple(spec.reasoning_effort_levels),
             cache_editing_beta_header="",
             default_headers=spec.headers,
             provider_id=spec.provider_id,
@@ -333,6 +346,11 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapte
             max_output_tokens_verified=spec.max_output_tokens_verified,
             default_reasoning_effort=spec.default_reasoning_effort,
             default_reasoning_summary=spec.default_reasoning_summary,
+            supports_custom_tools=spec.supports_custom_tools,
+            responses_websocket=spec.responses_websocket,
+            native_compaction=spec.native_compaction,
+            model_instructions=spec.model_instructions,
+            parallel_tool_calls=spec.parallel_tool_calls,
             default_headers=tuple(
                 (str(key), str(value)) for key, value in spec.headers.items()
             ),
@@ -364,8 +382,12 @@ def create_session_llm(
         if not selected_model:
             raise ValueError(f"Selected provider '{primary_provider}' requires an explicit model selection")
         if selected_model == config.llm.model or config.config_layer_stack is None:
+            model_settings = (
+                config.llm if selected_model == config.llm.model
+                else replace(config.llm, model=selected_model, supports_custom_tools=False, responses_websocket=False, native_compaction=None, model_instructions="")
+            )
             return build_wire_adapter(
-                replace(config.llm, model=selected_model),
+                model_settings,
                 cache_editing_beta_header=os.getenv("MINICODE_ANTHROPIC_CACHE_EDITING_BETA_HEADER", ""),
             )
     settings_snapshot = (

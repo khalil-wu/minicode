@@ -11,16 +11,20 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import math
 import random
 import re
 import time
+from copy import deepcopy
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncIterator, cast
+from typing import Any, AsyncIterator, TypeVar, cast
+
+from backend.llm.provider_contracts import ProviderAdapterSpec
 from uuid import uuid4
 
 from backend.agent.lifecycle_errors import LifecycleStaleError
@@ -34,8 +38,10 @@ from backend.llm.errors import (
     retry_after_seconds,
 )
 from backend.llm.provider_contracts import ReasoningPolicy
+from backend.llm.native_compaction import NATIVE_COMPACTION_TYPE
 
 logger = logging.getLogger(__name__)
+_SideResult = TypeVar("_SideResult")
 
 
 _REQUEST_METADATA_KEY_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
@@ -108,8 +114,11 @@ async def emit_provider_lifecycle_request(
     emit_request = getattr(runner, "emit_before_provider_request", None)
     if not callable(emit_request):
         return payload
+    # Extensions can mutate nested request items. Give the hook ownership of
+    # its request copy, without copying ordinary unhooked provider calls.
+    hook_payload = deepcopy(payload)
     try:
-        value = await emit_request(payload)
+        value = await emit_request(hook_payload)
     except LifecycleStaleError:
         # A stale runtime is a host lifecycle violation, not an ordinary
         # extension-handler failure.  Pi prevents old contexts from issuing
@@ -120,7 +129,7 @@ async def emit_provider_lifecycle_request(
         logger.debug("Provider lifecycle request hook failed", exc_info=True)
         return payload
     if value is None:
-        return payload
+        return hook_payload
     if isinstance(payload, dict):
         if not isinstance(value, Mapping):
             raise TypeError(
@@ -626,6 +635,9 @@ class StreamEvent:
     # next request, such as Responses encrypted reasoning. Kept out of raw UI
     # diagnostics so opaque provider state is not exposed in inspector payloads.
     provider_items: list[dict[str, Any]] = field(default_factory=list)
+    # True only at a provider's semantic item-completion boundary, never when
+    # a JSON prefix merely happens to parse. These calls may execute in flight.
+    tool_calls_committed: bool = False
 
 
 @dataclass
@@ -678,6 +690,11 @@ class LLMMessage:
     # when refreshing or removing injected context.
     runtime_context: str = ""
 
+    # Set by user-turn admission, not inferred from the text or the user role.
+    # Skills, hook feedback, generated media and summaries also use that role.
+    # Provider adapters ignore this durable provenance field.
+    is_user_input: bool = False
+
     # Pi's native transcript carries a message timestamp.  It is assigned once
     # when a message enters the durable MiniCode history and then replayed on
     # every provider request.  Re-generating it while rebuilding a request
@@ -686,14 +703,31 @@ class LLMMessage:
     # deterministic fallback for such legacy messages.
     timestamp_ms: int | None = None
 
+    def user_text_parts(self) -> list[str]:
+        """Keep admitted runtime context and the user's text in separate wire blocks.
+
+        Only the explicit provenance field can identify an app-owned prefix.
+        Literal tags supplied by a user remain part of their original text.
+        """
+        text = self.content or ""
+        if self.is_user_input and self.runtime_context:
+            reminder = f"<system-reminder>\n{self.runtime_context}\n</system-reminder>"
+            prefix = reminder + "\n\n"
+            if text.startswith(prefix):
+                user_text = text[len(prefix):]
+                return [prefix, *([user_text] if user_text else [])]
+        return [text] if text else []
+
     def to_openai_message(self) -> dict[str, Any]:
         """转换为 OpenAI Chat Completions API 格式。"""
+        from backend.llm.native_compaction import require_native_context_origin
+        require_native_context_origin([self])
         msg: dict[str, Any] = {"role": self.role}
 
-        if self.role == "user" and self.images:
+        text_parts = self.user_text_parts() if self.role == "user" else []
+        if self.role == "user" and (self.images or len(text_parts) > 1):
             parts: list[dict[str, Any]] = []
-            if self.content:
-                parts.append({"type": "text", "text": self.content})
+            parts.extend({"type": "text", "text": text} for text in text_parts)
             for img in self.images:
                 media_type = img.get("media_type") or "image/png"
                 data = img.get("data") or ""
@@ -759,32 +793,68 @@ class LLMMessage:
 
 
 _PI_CONTEXT_SAFETY_TOKENS = 4_096
-_PI_ESTIMATED_IMAGE_CHARS = 4_800
+NATIVE_ATTACHMENT_TOKEN_ESTIMATE = 2_000
+
+
+def estimate_text_tokens(text: str) -> int:
+    """Coarse UTF-8 estimate, shared by history, admission and request limits."""
+    return (len(text.encode("utf-8")) + 3) // 4
+
+
+def _estimate_responses_window_tokens(items: list[dict[str, Any]]) -> int:
+    def media_adjustment(value: Any) -> int:
+        if isinstance(value, list):
+            return sum(media_adjustment(item) for item in value)
+        if not isinstance(value, dict):
+            return 0
+        kind = value.get("type")
+        payload = value.get("image_url") if kind == "input_image" else value.get("file_data") if kind == "input_file" else None
+        if isinstance(payload, str) and payload.startswith("data:") and ";base64," in payload:
+            encoded = payload.split(";base64,", 1)[1]
+            return NATIVE_ATTACHMENT_TOKEN_ESTIMATE * 4 - len(encoded.encode("utf-8"))
+        return sum(media_adjustment(item) for item in value.values())
+
+    total = 0
+    for item in items:
+        encrypted = item.get("encrypted_content")
+        if item.get("type") in {"reasoning", "compaction", "context_compaction"} and isinstance(encrypted, str):
+            # Codex's estimate_reasoning_length removes Base64 expansion and
+            # 650 bytes of envelope overhead. This is an estimate, not usage.
+            size = max(0, len(encrypted) * 3 // 4 - 650)
+        else:
+            size = len(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) + media_adjustment(item)
+        total += (max(0, size) + 3) // 4
+    return total
+
+
+def estimate_llm_message_tokens(message: LLMMessage, content: Any | None = None) -> int:
+    text = str(message.content if content is None else content)
+    if message.tool_calls:
+        text += "".join(call.name + _safe_json_dumps(call.arguments) for call in message.tool_calls)
+    native_tokens = 0
+    if message.provider_items:
+        ordinary_items = []
+        for item in message.provider_items:
+            if item.get("type") == NATIVE_COMPACTION_TYPE:
+                native_tokens += _estimate_responses_window_tokens(item["output"])
+            else:
+                ordinary_items.append(item)
+        if ordinary_items:
+            text += _safe_json_dumps(ordinary_items)
+    media_count = sum(bool(item.get("data")) for item in [*message.images, *message.documents])
+    return estimate_text_tokens(text) + native_tokens + media_count * NATIVE_ATTACHMENT_TOKEN_ESTIMATE
+
+
+def estimate_tool_schema_tokens(tools: list[dict[str, Any]] | None) -> int:
+    return estimate_text_tokens(_safe_json_dumps(tools)) if tools else 0
 
 
 def estimate_llm_context_tokens(
     messages: list[LLMMessage],
     tools: list[dict[str, Any]] | None = None,
 ) -> int:
-    """Estimate a provider context with Pi's four-characters-per-token rule."""
-
-    total = 0
-    for message in messages:
-        chars = len(str(message.content or ""))
-        chars += _PI_ESTIMATED_IMAGE_CHARS * (
-            len(message.images) + len(message.documents)
-        )
-        if message.tool_calls:
-            chars += sum(
-                len(str(call.name or "")) + len(_safe_json_dumps(call.arguments))
-                for call in message.tool_calls
-            )
-        if message.provider_items:
-            chars += len(_safe_json_dumps(message.provider_items))
-        total += math.ceil(chars / 4)
-    if tools:
-        total += math.ceil(len(_safe_json_dumps(tools)) / 4)
-    return max(0, total)
+    """Use the same item accounting as history retention and prompt admission."""
+    return sum(estimate_llm_message_tokens(message) for message in messages) + estimate_tool_schema_tokens(tools)
 
 
 def clamp_max_tokens_to_context(
@@ -828,6 +898,13 @@ class LLMAdapter(ABC):
     所有 LLM Provider（OpenAI / Claude / 本地模型）都实现此接口。
     核心方法：stream_chat()，返回 StreamEvent 异步迭代器。
     """
+
+    # Only runtime-factory adapters can be rebuilt with refreshed credentials.
+    provider_adapter_spec: ProviderAdapterSpec | None = None
+
+    def try_fallback_transport(self) -> bool:
+        """Switch a replayable request to another supported transport, if any."""
+        return False
 
     @abstractmethod
     async def stream_chat(
@@ -887,6 +964,11 @@ class LLMAdapter(ABC):
         return str(
             getattr(settings, "model", "") or getattr(self, "_model", "") or ""
         ).strip()
+
+    def model_instructions(self) -> str:
+        """Return instructions bound to this adapter's selected model."""
+        settings = getattr(self, "_settings", None)
+        return getattr(settings, "model_instructions", "") or getattr(self, "_model_instructions", "")
 
     def supported_reasoning_efforts(self) -> tuple[str, ...]:
         """Return reasoning levels exposed by this concrete transport."""
@@ -952,6 +1034,31 @@ class LLMAdapter(ABC):
         turn_context: LLMTurnContext | None = None,
     ) -> str:
         """Run one observable auxiliary call without mutating main-loop state."""
+        self.validate_context(messages)
+        return await self._run_auxiliary_call(
+            messages, options=options, turn_context=turn_context,
+            complete=self._side_query_chat,
+        )
+
+    async def compact_context(
+        self, messages: list[LLMMessage], *, turn_context: LLMTurnContext | None = None,
+    ) -> LLMMessage:
+        """Return a complete provider-native replacement window when supported."""
+        raise NotImplementedError("This adapter does not support native compaction")
+
+    def validate_context(self, messages: list[LLMMessage]) -> None:
+        from backend.llm.native_compaction import require_native_context_origin
+        require_native_context_origin(messages)
+
+    async def _run_auxiliary_call(
+        self,
+        messages: list[LLMMessage],
+        *,
+        options: SideQueryOptions,
+        turn_context: LLMTurnContext | None,
+        complete: Callable[..., Awaitable[_SideResult]],
+    ) -> _SideResult:
+        """The shared retry, deadline and accounting owner for auxiliary I/O."""
         operation = str(options.operation or "side_query").strip() or "side_query"
         record: dict[str, Any] = {
             "id": f"side:{operation}:{uuid4().hex[:12]}",
@@ -1016,7 +1123,7 @@ class LLMAdapter(ABC):
                         else _SIDE_QUERY_ATTEMPT_TIMEOUT_SECONDS
                     )
                     result = await asyncio.wait_for(
-                        self._side_query_chat(messages, context=call_context),
+                        complete(messages, context=call_context),
                         timeout=(attempt_timeout if attempt_timeout > 0 else None),
                     )
                     record["status"] = "completed"

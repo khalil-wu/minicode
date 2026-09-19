@@ -155,8 +155,6 @@ class TurnIterationAdmission:
             )
             return
 
-        if self.state.iterations > 0:
-            await sleep_or_cancel(0.15, self.tool_context.cancel_event)
         depth = self.chain.next_iteration()
         logger.info("%s Iteration %d", self.chain.to_log_context(), depth)
         iteration_preparation = await self.iteration_runtime.prepare(
@@ -165,8 +163,9 @@ class TurnIterationAdmission:
             pending_turn_context=pending_turn_context,
         )
         self.llm = self.iteration_runtime.llm
-        owner = getattr(self.iteration_runtime, "agent_session", None)
-        active_budget = getattr(owner, "token_budget", None)
+        snapshot = self.tool_context.model_execution
+        owner = self.iteration_runtime.agent_session
+        active_budget = snapshot.config.token_budget if snapshot is not None else getattr(owner, "token_budget", None)
         if active_budget is not None:
             self.token_budget = active_budget
         initial_turn_pending = False
@@ -180,25 +179,6 @@ class TurnIterationAdmission:
                 self.run_record.run_id,
             )
             _set_terminal_reason(self.state, "provider_capability", status="failed")
-            yield self._result(
-                action="terminate",
-                tool_schema_state=tool_schema_state,
-                initial_turn_pending=initial_turn_pending,
-            )
-            return
-
-        async with aclosing(manage_context_budget(
-            self.context, self.state, self.token_budget, tool_schemas,
-        )) as budget_events:
-            async for event in budget_events:
-                yield event
-        if self.state.stopped_reason:
-            if self.state.stopped_reason == "budget_exceeded":
-                _, budget_events = await self.budget_runtime.apply_boundary(
-                    TurnBudgetController.context_exhausted(),
-                )
-                for event in budget_events:
-                    yield event
             yield self._result(
                 action="terminate",
                 tool_schema_state=tool_schema_state,
@@ -241,6 +221,53 @@ class TurnIterationAdmission:
             run_id=self.run_record.run_id,
         )
 
+        # Admission examines the exact post-media, post-mailbox and post-hook request.
+        compacted = False
+        async with aclosing(manage_context_budget(
+            self.context, self.state, self.token_budget, tool_schemas,
+            messages=prepared_context.messages,
+        )) as budget_events:
+            async for event in budget_events:
+                compacted = compacted or event.type == "context_compacted"
+                yield event
+        if compacted and not self.state.stopped_reason:
+            prepared_context = await prepare_turn_context(
+                context=self.context,
+                state=self.state,
+                llm=self.llm,
+                tool_schemas=tool_schemas,
+                request_metadata=self.llm_request_metadata,
+                metadata=self.metadata,
+                external_metadata=self.external_metadata,
+                tool_context=self.tool_context,
+                turn_kernel=self.turn_kernel,
+                run_id=self.run_record.run_id,
+            )
+
+            if self.context.needs_compaction(
+                self.state, tool_schemas=tool_schemas, messages=prepared_context.messages,
+            ):
+                _set_terminal_reason(self.state, "budget_exceeded", status="failed")
+                yield AgentEvent.error(
+                    message="压缩后最终模型输入仍超出上下文窗口，请缩小本次输入或上下文扩展内容。",
+                    recoverable=True, error_type="budget",
+                )
+        if self.state.stopped_reason:
+            if self.state.stopped_reason == "budget_exceeded":
+                _, budget_events = await self.budget_runtime.apply_boundary(
+                    TurnBudgetController.context_exhausted(),
+                )
+                for event in budget_events:
+                    yield event
+            yield self._result(
+                action="terminate",
+                tool_schema_state=tool_schema_state,
+                initial_turn_pending=initial_turn_pending,
+            )
+            return
+
+
+        self.context.begin_provider_request(prepared_context.messages, tool_schemas)
         self.state.iterations += 1
         current_iteration_id = iteration_id(self.state)
         model_phase = "execute"

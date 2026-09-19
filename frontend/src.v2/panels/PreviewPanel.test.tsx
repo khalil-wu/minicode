@@ -37,6 +37,24 @@ const resetPreviewState = () => {
 };
 
 describe("PreviewPanel", () => {
+  it("plays owner-scoped audio without base64 and rebuilds its URL after reconnect", () => {
+    useAppStore.setState({ conversationId: "conv-audio", isConnected: true,
+      previewArtifact: { artifactId: "art-audio", name: "voice.wav", content: "", mediaType: "audio/wav", source: "artifact" } });
+    render(<PreviewPanel />);
+    const player = screen.getByLabelText("voice.wav") as HTMLAudioElement;
+    expect(player.controls).toBe(true);
+    expect(player.autoplay).toBe(false);
+    expect(player.src).toContain("/api/artifacts/raw");
+    expect(player.src).toContain("conversation_id=conv-audio");
+    expect(player.src).not.toContain("data:");
+    act(() => useAppStore.setState({ isConnected: false }));
+    expect(document.querySelector("audio")).toBeNull();
+    act(() => useAppStore.setState({ isConnected: true }));
+    expect(document.querySelector("audio")).not.toBeNull();
+    fireEvent.error(screen.getByLabelText("voice.wav"));
+    expect(screen.getByText("此音频无法播放，请下载后使用本地播放器打开。")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "下载音频" })).toBeTruthy();
+  });
   beforeEach(resetPreviewState);
   afterEach(() => {
     cleanup();

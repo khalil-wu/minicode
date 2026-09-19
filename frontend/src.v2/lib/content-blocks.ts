@@ -9,6 +9,65 @@ type LegacyMessageFields = {
 const legacyFields = (message: ChatMessage): LegacyMessageFields =>
   message as ChatMessage & LegacyMessageFields;
 
+// Positions, not record snapshots: scope/status/seq always come from the
+// current immutable message. Duplicate IDs retain every candidate.
+const messagePositions = new WeakMap<ChatMessage[], Map<string, number[]>>();
+const toolPositions = new WeakMap<ChatMessage, Map<string, number[]>>();
+
+export function messageIndices(messages: ChatMessage[], id: string): readonly number[] {
+  let positions = messagePositions.get(messages);
+  if (!positions) {
+    positions = new Map();
+    messages.forEach((message, index) => {
+      const indices = positions!.get(message.id);
+      if (indices) indices.push(index);
+      else positions!.set(message.id, [index]);
+    });
+    messagePositions.set(messages, positions);
+  }
+  return positions.get(id) ?? [];
+}
+
+export function inheritMessagePositions(previous: ChatMessage[], next: ChatMessage[]): void {
+  const positions = messagePositions.get(previous);
+  if (positions) messagePositions.set(next, positions);
+}
+
+export function inheritToolPositions(previous: ChatMessage, next: ChatMessage): void {
+  const positions = toolPositions.get(previous);
+  if (positions) toolPositions.set(next, positions);
+}
+
+export function toolCallLocations(messages: ChatMessage[], id: string, messageId?: string): Array<{
+  messageIndex: number; blockIndex: number; record: ToolCallRecord;
+}> {
+  const candidates: Array<{ messageIndex: number; blockIndex: number; record: ToolCallRecord }> = [];
+  const visit = (message: ChatMessage, messageIndex: number) => {
+    const blocks = getContentBlocks(message);
+    let positions = toolPositions.get(message);
+    if (!positions) {
+      positions = new Map();
+      blocks.forEach((block, index) => {
+        if (block.type !== "tool_call") return;
+        const indices = positions!.get(block.record.id);
+        if (indices) indices.push(index);
+        else positions!.set(block.record.id, [index]);
+      });
+      toolPositions.set(message, positions);
+    }
+    for (const blockIndex of positions.get(id) ?? []) {
+      const block = blocks[blockIndex] as Extract<ContentBlock, { type: "tool_call" }>;
+      candidates.push({ messageIndex, blockIndex, record: block.record });
+    }
+  };
+  if (messageId) {
+    for (const index of messageIndices(messages, messageId)) visit(messages[index], index);
+  } else {
+    messages.forEach(visit);
+  }
+  return candidates;
+}
+
 export function stripLegacyContentFields(message: ChatMessage): ChatMessage {
   const { thinking: _thinking, toolCalls: _toolCalls, ...rest } =
     message as ChatMessage & LegacyMessageFields;

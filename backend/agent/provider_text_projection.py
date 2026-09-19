@@ -42,6 +42,8 @@ async def project_provider_text_chunk(
     ).lower()
     visible_chunk = visible_text_sanitizer.feed(event.content)
     stream_text.full_text += visible_chunk
+    if visible_chunk:
+        stream_state.saw_visible_output = True
 
     if provider_phase in {"final_answer", "final"}:
         if not stream_text.saw_final_answer_phase:
@@ -64,15 +66,24 @@ async def project_provider_text_chunk(
             ):
                 yield projected
         provider_raw_final_text.update(provider_raw_text)
-    elif provider_phase == "commentary":
-        stream_text.pending_process_text += visible_chunk
-        if live_text_streaming:
-            process_event = stream_text.maybe_stream_process_text(
-                source="commentary",
-                event_factory=process_event_factory,
-            )
-            if process_event is not None:
-                yield process_event
+    elif provider_phase == "commentary" or (not provider_phase and stream_state.committed_tool_ids):
+        if stream_state.committed_tool_ids:
+            # Narration after a committed tool owns a new ordered item. Reusing
+            # the iteration's process buffer would replace earlier commentary.
+            for projected in stream_text.project_agent_message_delta(
+                visible_chunk, source="commentary", item_id=event.item_id,
+            ):
+                if live_text_streaming or projected.type == "item.started":
+                    yield projected
+        else:
+            stream_text.pending_process_text += visible_chunk
+            if live_text_streaming:
+                process_event = stream_text.maybe_stream_process_text(
+                    source="commentary",
+                    event_factory=process_event_factory,
+                )
+                if process_event is not None:
+                    yield process_event
     else:
         # Chat Completions and Anthropic Messages do not label assistant text
         # as commentary/final. Once a provider has started a typed tool item,

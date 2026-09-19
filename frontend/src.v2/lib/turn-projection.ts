@@ -180,7 +180,7 @@ export const activityKindFromToolRecord = (record: ToolCallRecord): TurnActivity
   return "genericTool";
 };
 
-const toolItem = (
+export const projectToolBlock = (
   block: Extract<ContentBlock, { type: "tool_call" }>,
   segment: number,
 ): TurnActivityItem => {
@@ -232,6 +232,9 @@ const progressItem = (
   segment,
   segmentClosed: false,
 });
+
+export const projectProgressBlock = (block: Extract<ContentBlock, { type: "progress" }>): TurnActivityItem =>
+  progressItem(block, 0);
 
 const thinkingKind = (
   block: Extract<ContentBlock, { type: "thinking" }>,
@@ -386,7 +389,7 @@ export function projectTurn(
     if (block.type === "tool_call") {
       if (!isVisibleActivity(block, Boolean(options.includeHiddenActivity))) return;
       if (!options.includeHiddenActivity && isPlanStateWrite(block.record)) return;
-      if (!block.record.temporaryRemoved) activityItems.push(toolItem(block, segment));
+      if (!block.record.temporaryRemoved) activityItems.push(projectToolBlock(block, segment));
       return;
     }
     if (block.type === "progress") {

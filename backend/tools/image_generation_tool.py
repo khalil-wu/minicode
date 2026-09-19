@@ -47,15 +47,11 @@ class GenerateImageTool(BaseTool):
         if context is None:
             return None
         metadata = context.metadata if isinstance(context.metadata, dict) else {}
-        run_context = context.run_context
-        parent_runtime = (
-            run_context.subagent_parent_runtime
-            if run_context is not None
-            else {}
-        )
+        snapshot = context.model_execution
+        if snapshot is not None:
+            provider = snapshot.provider.strip().lower()
+            return provider if provider in {"openai", "anthropic", "custom"} else None
         candidates = []
-        if isinstance(parent_runtime, dict):
-            candidates.append(parent_runtime.get("provider"))
         candidates.append(metadata.get("provider"))
         llm_settings = getattr(getattr(context, "llm", None), "_settings", None)
         candidates.append(getattr(llm_settings, "provider", None))

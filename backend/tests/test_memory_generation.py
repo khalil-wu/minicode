@@ -186,12 +186,16 @@ class _Repository:
         self.rollout_dir = rollout_dir
 
     def list_conversations(self) -> list[_Summary]:
+        from types import SimpleNamespace
         return [
-            _Summary(record.id, record.updated_at, record.workspace_root)
+            SimpleNamespace(**{key: value for key, value in vars(record).items() if key not in {"transcript", "message_count"}}, message_count=len(record.transcript))
             for record in self.records.values()
         ]
 
     def get_conversation(self, conversation_id: str) -> Any | None:
+        return self.records.get(conversation_id)
+
+    def get_conversation_summary(self, conversation_id: str) -> Any | None:
         return self.records.get(conversation_id)
 
     def transcript_path(self, conversation_id: str) -> Path:

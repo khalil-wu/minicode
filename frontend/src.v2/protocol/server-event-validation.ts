@@ -17,6 +17,7 @@ const REQUIRED_ROUTING_FIELDS: Partial<
 > = {
   "item.started": { conversation_id: "string", message_id: "string", item: "record" },
   "agent_message.delta": { item_id: "string", delta: "string" },
+  "agent.item.delta": { item_id: "string", delta: "string" },
   "item.completed": { conversation_id: "string", message_id: "string", item: "record" },
   "thinking_delta": { conversation_id: "string", message_id: "string", content: "string" },
   "thinking": { conversation_id: "string", message_id: "string", content: "string" },
@@ -244,6 +245,7 @@ const CONVERSATION_OWNED_EVENT_TYPES = new Set<ServerEventType>([
   "thinking_delta",
   "thinking",
   "agent.item",
+  "agent.item.delta",
   "agent.progress",
   "runtime.span",
   "agent.run.started",
@@ -1156,6 +1158,14 @@ const hasValidSemanticPayload = (
   type: ServerEventType,
 ): boolean => {
   let valid = true;
+  if (type === "agent.item.delta") {
+    valid = isBoundedString(value.conversation_id, 1_024)
+      && isBoundedString(value.item_id, 1_024)
+      && typeof value.delta === "string"
+      && value.delta.length > 0
+      && value.delta.length <= MAX_STREAM_DELTA_CHARS
+      && (!("message_id" in value) || isBoundedString(value.message_id, 1_024));
+  }
   if (type === "agent_message.delta") {
     valid = isBoundedString(value.conversation_id, 1_024)
       && isBoundedString(value.item_id, 1_024)

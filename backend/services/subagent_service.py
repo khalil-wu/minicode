@@ -236,6 +236,12 @@ def build_subagent_transcript_messages(
                         "status": "completed",
                         "is_streaming": False,
                     })
+        # Reconstruct raw deltas before applying the public text boundary; a
+        # secret can straddle chunks and truncation must not change offsets.
+        assistant["content"] = public_text(assistant.get("content"), max_chars=262_144)
+        for block in blocks:
+            if block.get("type") == "text":
+                block["content"] = public_text(block.get("content"), max_chars=262_144)
         if blocks:
             assistant["blocks"] = blocks
         if current_user is not None:
@@ -419,7 +425,17 @@ def build_subagent_transcript_messages(
             assistant = _ensure_assistant(timestamp, event_id)
             blocks = assistant["blocks"]
             item_id = str(payload.get("item_id") or event_id).strip()
-            content = public_text(payload.get("content"), max_chars=262_144)
+            existing_block = next((
+                block for block in blocks
+                if block.get("type") == "text" and block.get("item_id") == item_id
+            ), None)
+            if "content_delta" in payload:
+                previous = str(existing_block.get("content") or "") if existing_block else ""
+                if payload.get("content_offset") != len(previous):
+                    raise ValueError(f"Subagent journal text delta {item_id!r} has a discontinuous offset")
+                content = previous + str(payload["content_delta"])
+            else:
+                content = str(payload.get("content") or "")
             source = str(payload.get("source") or "pending").strip() or "pending"
             status = str(payload.get("status") or "running").strip().lower()
             block = {
@@ -428,7 +444,7 @@ def build_subagent_transcript_messages(
                 "content": content,
                 "source": source,
                 "status": status,
-                "is_streaming": status not in {"completed", "partial"},
+                "is_streaming": status not in {"completed", "partial", "cancelled"},
             }
             replaced = False
             for block_index, existing in enumerate(blocks):

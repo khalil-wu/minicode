@@ -17,6 +17,7 @@ from backend.tools.output_limits import (
     TASK_OUTPUT_MAX_CHARS,
 )
 from backend.tools.untrusted import wrap_untrusted_content
+from backend.tools.command_support import command_wait_ms, MAX_COMMAND_YIELD_MS
 
 
 class MonitorTool(BaseTool):
@@ -27,9 +28,10 @@ class MonitorTool(BaseTool):
     activity_kind = "commandExecution"
     display_label = "Monitor command"
     description = (
-        "Inspect, write to, or cancel background commands started by run_command with run_in_background=true. "
+        "Inspect, wait for, write to, or cancel owned commands returned by run_command. "
         "Use action=status to read live output, action=write_stdin to send exact characters to the owned "
         "process, and action=cancel to stop the exact owned process tree. "
+        "Pass cursor=the last next_cursor to read only new output, and yield_time_ms to wait for output or completion. "
         "Do not use shell process-name matching to clean up a background command."
     )
     permission = PermissionLevel.AUTO
@@ -79,6 +81,14 @@ class MonitorTool(BaseTool):
                         "type": "string",
                         "description": "Background command id returned by run_command. Required for write_stdin and cancel; omit for a status listing.",
                     },
+                    "yield_time_ms": {
+                        "type": "integer", "minimum": 0, "maximum": MAX_COMMAND_YIELD_MS,
+                        "description": "Wait up to this many milliseconds for completion or new output after cursor. Default 0. Waiting does not stop the command.",
+                    },
+                    "cursor": {
+                        "type": "integer", "minimum": 0,
+                        "description": "Byte cursor returned as next_cursor by the previous result. Use 0 for output from the beginning; omit for the latest tail.",
+                    },
                     "chars": {
                         "type": "string",
                         "description": "Exact UTF-8 characters to write. Include a newline explicitly when the process expects Enter.",
@@ -97,6 +107,10 @@ class MonitorTool(BaseTool):
                         "maximum": TASK_OUTPUT_MAX_CHARS,
                         "description": f"Maximum recent output characters to return for one command. Default {TASK_OUTPUT_DEFAULT_CHARS}.",
                     },
+                    "output_mode": {
+                        "type": "string", "enum": ["tail", "head_tail"],
+                        "description": "Without cursor: tail shows recent output (default); head_tail shows both the beginning and end. With cursor: read a sequential page.",
+                    },
                 },
             },
         )
@@ -109,20 +123,38 @@ class MonitorTool(BaseTool):
         manager = getattr(context, "background_manager", None) if context else None
         if manager is None:
             return self._error_result("No background command manager is available in this session.")
-        conversation_id = str(getattr(context, "conversation_id", "") or "").strip()
+        conversation_id = context.command_scope_id
         if not conversation_id:
-            return self._error_result("No conversation owner is available for background command inspection.")
+            return self._error_result("No session or conversation owner is available for command inspection.")
 
         action = str(args.get("action") or "status").strip().lower()
         command_id = str(args.get("command_id") or "").strip()
+        try:
+            wait_ms = command_wait_ms(args.get("yield_time_ms"), default=0)
+        except ValueError as exc:
+            return self._error_result(str(exc))
+        cursor = args.get("cursor")
+        if cursor is not None and (isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0):
+            return self._error_result("cursor must be a non-negative byte offset returned by this command")
+        if (wait_ms or cursor is not None) and not command_id:
+            return self._error_result("command_id is required when waiting for command output")
         if action == "write_stdin":
-            return await self._write_stdin(
+            written = await self._write_stdin(
                 manager,
                 command_id,
                 str(args.get("chars") or ""),
                 conversation_id=conversation_id,
                 close_stdin=bool(args.get("close_stdin", False)),
             )
+            if written.is_error or not (wait_ms or cursor is not None):
+                return written
+            try:
+                await manager.wait(command_id, conversation_id=conversation_id, wait_ms=wait_ms, cursor=cursor, cancel_event=getattr(context, "cancel_event", None))
+            except KeyError:
+                return self._error_result(f"Background command '{command_id}' was not found.")
+            snapshot = self._command_snapshot(manager, command_id, args, conversation_id=conversation_id)
+            snapshot.content = written.content + "\n" + snapshot.content
+            return snapshot
         if action == "cancel":
             if not command_id:
                 return self._error_result("command_id is required when action is cancel.")
@@ -133,6 +165,11 @@ class MonitorTool(BaseTool):
                 conversation_id=conversation_id,
             )
         if command_id:
+            if wait_ms:
+                try:
+                    await manager.wait(command_id, conversation_id=conversation_id, wait_ms=wait_ms, cursor=cursor, cancel_event=getattr(context, "cancel_event", None))
+                except KeyError:
+                    return self._error_result(f"Background command '{command_id}' was not found.")
             return self._command_snapshot(manager, command_id, args, conversation_id=conversation_id)
 
         include_completed = bool(args.get("include_completed", False))
@@ -247,17 +284,32 @@ class MonitorTool(BaseTool):
         except (TypeError, ValueError):
             max_chars = TASK_OUTPUT_DEFAULT_CHARS
         max_chars = max(1, min(max_chars, TASK_OUTPUT_MAX_CHARS))
-        snapshot = manager.get_output_snapshot(
-            command_id,
-            conversation_id=conversation_id,
-            max_chars=max_chars,
-        )
+        next_cursor = None
+        end_cursor = None
+        more = False
+        if args.get("cursor") is not None:
+            try:
+                chunk = manager.get_output_chunk(command_id, conversation_id=conversation_id, cursor=args["cursor"], max_chars=max_chars)
+            except (ValueError, OSError) as exc:
+                return self._error_result(str(exc))
+            if chunk is None:
+                return self._error_result(f"Background command '{command_id}' was not found.")
+            output, next_cursor, more, output_path = chunk
+            snapshot = (output, False, output_path)
+        elif args.get("output_mode") == "head_tail":
+            preview = manager.get_output_preview(command_id, conversation_id=conversation_id, max_chars=max_chars)
+            output, next_cursor, more, end_cursor = preview
+            snapshot = (output, more, command.output_path)
+        else:
+            snapshot = manager.get_output_snapshot(
+                command_id, conversation_id=conversation_id, max_chars=max_chars,
+            )
         if snapshot is None:
             return self._error_result(f"Background command '{command_id}' was not found.")
         output, truncated, output_path = snapshot
         header = (
             f"Background command {command.command_id} ({command.status})\n"
-            f"command: {command.command}\n"
+            f"command: {command.command[:160]}{'…' if len(command.command) > 160 else ''}\n"
             f"cwd: {command.cwd}\n"
             f"exit_code: {command.exit_code}\n"
             f"started_at: {command.started_at}\n"
@@ -266,6 +318,26 @@ class MonitorTool(BaseTool):
         )
         if truncated and not output_path:
             header += f"[showing last {len(output)} chars]\n"
+        if next_cursor is not None:
+            header += f"next_cursor: {next_cursor}\nmore_output: {str(more).lower()}\n"
+        if end_cursor is not None:
+            header += f"end_cursor: {end_cursor}\n"
+        if more or truncated:
+            if end_cursor is not None:
+                header += "Head/tail preview: next_cursor reads the omitted middle; end_cursor follows future output. "
+            elif next_cursor is not None:
+                header += "Output page: continue with next_cursor, or use cursor=0 to revisit the beginning. "
+            else:
+                header += "Tail preview: use cursor=0 to read the stored output from the beginning. "
+            header += "Do not rerun the command to retrieve diagnostics.\n"
+        cleanup_receipt = {}
+        if bool(getattr(command, "cleanup_pending", False)):
+            cleanup_receipt = {
+                "resource_kind": "command", "resource_id": command.command_id,
+                "reason": str(getattr(command, "cleanup_reason", "") or ""),
+                "requested": True, "acknowledged": True, "completed": False, "pending": 1,
+            }
+            header += "Process cleanup is still pending; use action='cancel' on this command id to retry cleanup.\n"
         body = wrap_untrusted_content(output, "monitor") if output else "<no output captured yet>"
         status = (
             "pending"
@@ -276,8 +348,12 @@ class MonitorTool(BaseTool):
         )
         return ToolResult(
             content=f"{header}\n{body}",
-            is_error=False,
+            is_error=command.status == "failed",
             status=status,
             result_kind="terminal",
             display_summary=f"Background command {command.command_id}: {command.status}",
+            runtime_metadata={"command_id": command.command_id, "next_cursor": next_cursor, "more_output": more,
+                              "end_cursor": end_cursor,
+                              "process_status": command.status, "exit_code": command.exit_code},
+            cleanup_receipt=cleanup_receipt,
         )

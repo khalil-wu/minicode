@@ -548,6 +548,14 @@ def apply_stream_event(
             status="pending",
             transition="waiting_approval",
         )
+    elif event_type == "agent.item.delta":
+        item_id = str(payload.get("item_id") or "").strip()
+        delta = str(payload.get("delta") or "")
+        if item_id and delta:
+            for block in _stream_content_blocks(state):
+                if block.get("type") == "process" and block.get("id") == item_id:
+                    block["content"] = f"{block.get('content') or ''}{delta}"
+                    break
     elif event_type in {"tool_output_delta", "command_output_chunk"}:
         _upsert_tool_state(
             state,

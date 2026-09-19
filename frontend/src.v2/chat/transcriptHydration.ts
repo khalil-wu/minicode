@@ -29,6 +29,7 @@ export type BackendTranscriptMessage = {
   content?: unknown;
   thinking?: unknown;
   blocks?: unknown;
+  tool_page?: unknown;
   tool_calls?: unknown;
   toolCalls?: unknown;
   artifacts?: unknown;
@@ -426,6 +427,7 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
         : undefined,
     seq: numberValue(tool.seq),
     scopeMigrationCount: numberValue(tool.scopeMigrationCount ?? tool.scope_migration_count),
+    callSource: (tool.callSource ?? tool.call_source) as ToolCallRecord["callSource"],
     iterationId: typeof tool.iterationId === "string"
       ? tool.iterationId
       : typeof tool.iteration_id === "string"
@@ -474,6 +476,8 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
   const blocks: ContentBlock[] = [];
   const toolBlockIndexes = new Map<string, number>();
   for (const item of items) {
+    const position = nonNegativeNumberValue(item.transcriptIndex);
+    const pushBlock = (block: ContentBlock) => blocks.push(position === undefined ? block : { ...block, transcriptIndex: position });
     const type = String(item.type ?? "").trim();
     if (type === "thinking") {
       if (isHiddenProviderReasoning(item) || isTransientProviderReasoning(item)) continue;
@@ -481,7 +485,7 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
       const itemId = stringValue(item.item_id ?? item.itemId);
       const contentIndex = numberValue(item.content_index ?? item.contentIndex);
       const lifecycle = stringValue(item.lifecycle);
-      blocks.push({
+      pushBlock({
         type: "thinking",
         content: typeof item.content === "string" ? item.content : "",
         source: stringValue(item.source),
@@ -508,7 +512,7 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
         || legacyRole === "runtime"
         || ["model_preamble", "post_tool", "runtime"].includes(legacySource || "")
       ) {
-        blocks.push({
+        pushBlock({
           type: "process",
           id: stringValue(item.itemId ?? item.item_id) || `legacy-process-${blocks.length}`,
           itemKind: "process_text",
@@ -524,7 +528,7 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
       const isStreaming = booleanValue(item.isStreaming ?? item.is_streaming) === true
         || legacyVisibility === "draft"
         || legacyVisibility === "unsealed";
-      blocks.push({
+      pushBlock({
         type: "text",
         itemId: stringValue(item.itemId ?? item.item_id) || "agent-message",
         content: typeof item.content === "string" ? item.content : "",
@@ -548,7 +552,7 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
         || !itemKind
         || String(item.status ?? "").trim().toLowerCase() === "retracted"
       ) continue;
-      blocks.push({
+      pushBlock({
         type: "process",
         id,
         itemKind,
@@ -583,7 +587,7 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
         const existingIndex = toolBlockIndexes.get(record.id);
         if (existingIndex == null) {
           toolBlockIndexes.set(record.id, blocks.length);
-          blocks.push({ type: "tool_call", record });
+          pushBlock({ type: "tool_call", record });
         } else {
           const existing = blocks[existingIndex];
           if (existing?.type === "tool_call") {
@@ -612,7 +616,7 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
       const providerState = isAgentProgressProviderState(rawProviderState)
         ? rawProviderState
         : undefined;
-      blocks.push({
+      pushBlock({
         type: "progress",
         id,
         stage: isProgressStage(item.stage) ? item.stage : "status",
@@ -796,6 +800,10 @@ export const hydrateMessages = (
     const role = toRole(message.role);
     const content = transcriptContent(message);
     const parsedBlocks = normalizeContentBlocks(message.blocks);
+    const rawPage = message.tool_page as Record<string, unknown> | undefined;
+    const toolPage = rawPage && [rawPage.before, rawPage.remaining, rawPage.total].every((value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
+      ? { before: rawPage.before as number, remaining: rawPage.remaining as number, total: rawPage.total as number, revision: stringValue(rawPage.revision) }
+      : undefined;
     const fallbackToolCalls = toArray<unknown>(message.tool_calls ?? message.toolCalls).flatMap((item) => {
       const record = toToolCallRecord(item);
       return record ? [record] : [];
@@ -806,6 +814,7 @@ export const hydrateMessages = (
     const blocks = parsedBlocks ?? legacyBlocksFor(message, role, fallbackToolCalls);
     const timestamp = toTimestamp(message.timestamp, index);
     return {
+      toolPage,
       id: typeof message.id === "string" && message.id ? message.id : `m-${index}-${timestamp}`,
       turnId: stringValue(message.turnId ?? message.turn_id),
       role,

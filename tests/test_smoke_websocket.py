@@ -966,3 +966,40 @@ def test_websocket_rejects_unknown_session_model(monkeypatch) -> None:
     assert updated["type"] == "llm.model.updated"
     assert updated["model"] == "gpt-5.4"
     assert "deepseek-v4" not in updated["available_models"]
+
+
+def test_task_model_choice_survives_creation_switch_and_new_connection(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
+    monkeypatch.setenv("OPENAI_AVAILABLE_MODELS", "gpt-5.4,gpt-5.4-mini")
+    _install_llm_factory(monkeypatch)
+    used_models = []
+
+    async def observed_loop(*args, **kwargs):
+        used_models.append(kwargs["llm"].model)
+        async for event in _fake_agent_loop(*args, **kwargs):
+            yield event
+
+    monkeypatch.setattr("backend.agent.query_engine.run_agent_loop", observed_loop)
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws?session_id=task-model-first") as ws:
+            _assert_startup_events(ws)
+            ws.send_json({"type": "llm.model.set", "model": "gpt-5.4-mini"})
+            assert _receive_next_type(ws, "llm.model.updated")["model"] == "gpt-5.4-mini"
+            a = _create_active_conversation(ws, title="A")["active_conversation_id"]
+            _create_active_conversation(ws, title="B")
+            ws.send_json({"type": "llm.model.set", "model": "gpt-5.4"})
+            _receive_next_type(ws, "llm.model.updated")
+            ws.send_json({"type": "conversation.switch", "conversation_id": a})
+            switched = _receive_next_type(ws, "conversation.switched")
+            assert switched["session"]["selected_model"] == "gpt-5.4-mini"
+            ws.send_json({"type": "user_message", "content": "continue A"})
+            assert _receive_next_type(ws, "done", max_attempts=80)["status"] == "completed"
+        with client.websocket_connect("/ws?session_id=task-model-reopened") as ws:
+            _assert_startup_events(ws)
+            ws.send_json({"type": "session.restore", "last_conversation_id": a})
+            restored = _receive_next_type(ws, "session.restored")
+            assert restored["model"] == "gpt-5.4-mini"
+            ws.send_json({"type": "user_message", "content": "continue after reconnect"})
+            assert _receive_next_type(ws, "done", max_attempts=80)["status"] == "completed"
+    assert used_models == ["gpt-5.4-mini", "gpt-5.4-mini"]

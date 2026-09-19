@@ -36,6 +36,11 @@ logger = logging.getLogger(__name__)
 
 ReplayState = tuple[WebSocketReplayEventStore, list[dict[str, Any]]]
 
+# Upper bound on how many staged events one drain window writes together. The
+# window is bounded so a long backlog cannot hold an unbounded line buffer, and
+# the remainder is written by the next iteration of the same writer.
+_PERSISTENCE_BATCH_LIMIT = 256
+
 
 class EventOutbox:
     """Own ordered WebSocket delivery and the durable reconnect window."""
@@ -74,8 +79,12 @@ class EventOutbox:
             )
         )
         self._event_seq = self._max_replay_event_seq(self._events)
+        self._events = deque(self._events, maxlen=replay_limit)
+        self._events_since_rewrite = len(self._events)
         self._replay_cursor = self._event_seq
         self._send_lock = asyncio.Lock()
+        self._delivery_queue: asyncio.Queue[tuple[int, dict[str, Any], asyncio.Future[bool] | None]] = asyncio.Queue(maxsize=256)
+        self._delivery_task: asyncio.Task[None] | None = None
         self._persist_tail: asyncio.Task[None] | None = None
         self._pending_persistence: deque[
             tuple[dict[str, Any], list[dict[str, Any]] | None]
@@ -136,6 +145,7 @@ class EventOutbox:
             "log_read_status": self._store.read_status.to_payload(),
             "persistence_failed_sequences": sorted(self._persistence_failed_seqs),
             "persistence_errors": list(self._persistence_errors[-20:]),
+            "pending_delivery": self._delivery_queue.qsize(),
         }
 
     def load_persisted_window(
@@ -212,6 +222,7 @@ class EventOutbox:
         connection_generation: int | None = None,
         log_context: str,
         envelope: bool = True,
+        wait_for_delivery: bool = True,
     ) -> bool:
         generation = (
             self._resolved_generation()
@@ -286,21 +297,49 @@ class EventOutbox:
                     self.session_id,
                 )
                 return False
+            receipt = asyncio.get_running_loop().create_future() if wait_for_delivery else None
+            if receipt is not None:
+                receipt.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+            await self._delivery_queue.put((generation, enveloped, receipt))
+            if self._delivery_task is None or self._delivery_task.done():
+                self._delivery_task = asyncio.create_task(self._deliver_pending())
+        if receipt is not None:
+            return await asyncio.shield(receipt)
+        # Let an available transport make progress without tying execution to
+        # socket completion. The bounded queue owns backpressure for slow peers.
+        await asyncio.sleep(0)
+        return True
+
+    async def _deliver_pending(self) -> None:
+        while not self._delivery_queue.empty():
+            generation, payload, receipt = self._delivery_queue.get_nowait()
+            delivered = False
             try:
-                await self.websocket.send_json(enveloped)
+                if self._can_send(generation):
+                    await self.websocket.send_json(payload)
+                    delivered = True
             except Exception as exc:
+                if generation == self.connection_generation:
+                    self.connected = False
                 if not self.is_expected_disconnect_exception(exc):
-                    raise
-                if self._has_active_run():
+                    if receipt is not None:
+                        receipt.set_exception(exc)
+                    else:
+                        logger.exception("Websocket notification delivery failed for %s", self.session_id)
+            finally:
+                if not delivered and self._has_active_run():
                     self.events_dropped_during_disconnect = True
-                logger.debug(
-                    "Dropping %s after websocket disconnect in session %s: %s",
-                    log_context,
-                    self.session_id,
-                    exc,
-                )
-                return False
-            return True
+                if receipt is not None and not receipt.done():
+                    receipt.set_result(delivered)
+                self._delivery_queue.task_done()
+
+    async def drain_delivery(self) -> None:
+        task = self._delivery_task
+        if task is not None and not task.done():
+            await await_with_deadline(
+                task, timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label="websocket notification delivery", owner=self._cleanup_tasks,
+            )
 
     def _envelope(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._event_seq += 1
@@ -335,26 +374,56 @@ class EventOutbox:
         self._replay_cursor = int(replay_payload["seq"])
         self._events.append(replay_payload)
         rewrite_events: list[dict[str, Any]] | None = None
-        if len(self._events) > self._replay_limit:
-            del self._events[: len(self._events) - self._replay_limit]
+        self._events_since_rewrite += 1
+        if self._events_since_rewrite >= self._replay_limit:
             rewrite_events = [dict(event) for event in self._events]
+            self._events_since_rewrite = 0
         return replay_payload, rewrite_events
 
     async def _persist_pending(self) -> None:
         while self._pending_persistence:
-            replay_payload, rewrite_events = self._pending_persistence.popleft()
-            await self._persist_event(replay_payload, rewrite_events)
+            # Yield once so every event staged during this event-loop tick joins
+            # the same append. A streamed turn stages hundreds of events; one
+            # write per drain window replaces one filesystem round trip each.
+            await asyncio.sleep(0)
+            batch: list[dict[str, Any]] = []
+            while (
+                self._pending_persistence
+                and len(batch) < _PERSISTENCE_BATCH_LIMIT
+            ):
+                replay_payload, rewrite_events = self._pending_persistence.popleft()
+                if rewrite_events is not None:
+                    # Publish queued events first: a rewrite replaces the whole
+                    # file with the retained window, so writing the batch after
+                    # it would duplicate what the window already contains. The
+                    # payload rides along only as the failure trigger, since the
+                    # window already carries it.
+                    if batch:
+                        await self._persist_batch(batch)
+                        batch = []
+                    await self._persist_batch([replay_payload], rewrite_events)
+                    continue
+                batch.append(replay_payload)
+            if batch:
+                await self._persist_batch(batch)
 
-    async def _persist_event(
+    async def _persist_batch(
         self,
-        replay_payload: dict[str, Any],
-        rewrite_events: list[dict[str, Any]] | None,
+        replay_payloads: list[dict[str, Any]],
+        rewrite_events: list[dict[str, Any]] | None = None,
     ) -> None:
+        if not replay_payloads and rewrite_events is None:
+            return
+        # The event whose publication failed is the repair trigger. If the
+        # replacement rewrite also fails, only that event is unresolved: the
+        # rest of the window is either already on disk or still queued.
+        trigger = replay_payloads[0] if replay_payloads else None
         if self._persistence_failed_seqs and rewrite_events is None:
             # Only a failed publication needs a complete repair window. It
             # covers queued events too, so publish that window once in order.
             rewrite_events = [dict(event) for event in self._events]
             self._pending_persistence.clear()
+            replay_payloads = []
         try:
             if rewrite_events is not None:
                 repaired_events = rewrite_events
@@ -365,19 +434,33 @@ class EventOutbox:
                     if (seq := self._replay_seq_value(event)) is not None
                 )
             else:
-                await asyncio.to_thread(self._store.append, replay_payload)
-                seq = self._replay_seq_value(replay_payload)
-                if seq is not None:
-                    self._persistence_failed_seqs.discard(seq)
+                await asyncio.to_thread(self._store.append_many, replay_payloads)
+                for replay_payload in replay_payloads:
+                    seq = self._replay_seq_value(replay_payload)
+                    if seq is not None:
+                        self._persistence_failed_seqs.discard(seq)
         except Exception as exc:
-            seq = self._replay_seq_value(replay_payload)
-            if seq is not None:
-                self._persistence_failed_seqs.add(seq)
+            if rewrite_events is not None:
+                trigger_seq = (
+                    self._replay_seq_value(trigger) if trigger is not None else None
+                )
+                seqs = [] if trigger_seq is None else [trigger_seq]
+            else:
+                seqs = [
+                    seq
+                    for seq in (
+                        self._replay_seq_value(payload)
+                        for payload in replay_payloads
+                    )
+                    if seq is not None
+                ]
+            self._persistence_failed_seqs.update(seqs)
             self._persistence_errors.append(
                 {
                     "kind": "websocket_replay_persistence",
                     "session_id": self.session_id,
-                    "seq": seq,
+                    "seq": seqs[0] if len(seqs) == 1 else None,
+                    "seqs": seqs,
                     "error_type": type(exc).__name__,
                     "error": str(exc),
                     "recorded_at": datetime.now(timezone.utc)
@@ -387,11 +470,17 @@ class EventOutbox:
             )
             del self._persistence_errors[:-20]
             logger.error(
-                "Failed to persist websocket replay event for session %s (seq=%s)",
+                "Failed to persist websocket replay event(s) for session %s (seqs=%s)",
                 self.session_id,
-                seq,
+                seqs,
                 exc_info=True,
             )
+        finally:
+            # An in-flight write may fail after its event has left the retained
+            # window. Keep failures for that window; the diagnostic log retains
+            # older failures without permanently poisoning replay health.
+            if self._persistence_failed_seqs:
+                self._persistence_failed_seqs.intersection_update(event["seq"] for event in self._events)
 
     async def drain_persistence(self) -> None:
         tail = self._persist_tail
@@ -431,11 +520,11 @@ class EventOutbox:
                 self._store.delete_for_conversation,
                 owner,
             )
-            self._events = [
+            self._events = deque((
                 event
                 for event in self._events
                 if str(event.get("conversation_id") or "").strip() != owner
-            ]
+            ), maxlen=self._replay_limit)
             return int(removed)
 
     @staticmethod
@@ -484,8 +573,9 @@ class EventOutbox:
 
         expected_previous = last_seq
         materialized: list[dict[str, Any]] = []
-        for index in range(first_after_index, len(self._events)):
-            payload = self._events[index]
+        events = list(self._events)
+        for index in range(first_after_index, len(events)):
+            payload = events[index]
             seq = self._replay_seq_value(payload)
             if seq is None or seq <= expected_previous:
                 return [], True
@@ -498,13 +588,25 @@ class EventOutbox:
                 )
                 if payload.get("previous_replay_seq") == 0:
                     previous_replay_seq = 0
-                if previous_replay_seq != expected_previous:
+                if index == first_after_index:
+                    # The renderer's cursor may sit on a live-only event, which
+                    # is never staged (payload_contracts.LIVE_ONLY_EVENT_TYPES).
+                    # The next staged event then chains back past that cursor, so
+                    # equality would report a gap for every reconnect that
+                    # happens mid-stream. Only a chain that would skip a
+                    # *persisted* event is a real gap: that is the eviction case,
+                    # where the previous persisted sequence is still ahead of the
+                    # cursor. Re-anchor the chain below so the session.replay
+                    # contract still validates from `last_seq`.
+                    if previous_replay_seq is None or previous_replay_seq > expected_previous:
+                        return [], True
+                elif previous_replay_seq != expected_previous:
                     return [], True
             elif index == first_after_index:
                 if index <= 0:
                     return [], True
-                retained_previous = self._replay_seq_value(self._events[index - 1])
-                if retained_previous != expected_previous:
+                retained_previous = self._replay_seq_value(events[index - 1])
+                if retained_previous is None or retained_previous > expected_previous:
                     return [], True
 
             replay_event = dict(payload)

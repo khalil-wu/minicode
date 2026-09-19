@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -294,13 +295,28 @@ async def handle_model_command(session: "WebSocketSession", data: dict[str, Any]
     if request.error_event is not None:
         await emit_command_error(session, "model.set", request.error_event)
         return True
-    await session.set_selected_model(request.model, manual_override=True)
+    conversation_id = str(data.get("conversation_id") or session.active_conversation_id or "")
+    owner = _model_execution_owner(session, conversation_id)
+    try:
+        changed = await owner.set_selected_model(request.model, manual_override=True, conversation_id=conversation_id or None)
+        if not changed and owner is not session:
+            await emit_command_error(session, "model.set", "The requested model is unavailable for this conversation.")
+    except ValueError as exc:
+        await emit_command_error(session, "model.set", exc)
     # A rejected selection must still restore the client from the session's
     # authoritative model state. This is an explicit command response, not a
     # duplicate background runtime projection.
     await session.send_llm_state(force=True)
     await session.session_lifecycle.send_runtime_capabilities(source="llm.model.set")
     return True
+
+
+def _model_execution_owner(session: "WebSocketSession", conversation_id: str) -> "WebSocketSession":
+    if session.ws_manager is not None and conversation_id:
+        owner = session.ws_manager.running_session_for_conversation(conversation_id)
+        if owner is not None:
+            return owner
+    return session
 
 
 async def handle_read_artifact_command(session: "WebSocketSession", data: dict[str, Any]) -> bool:
@@ -1116,6 +1132,26 @@ async def handle_commands_list(session: "WebSocketSession", data: dict[str, Any]
 async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     source = str(data.get("source") or "").strip()
     from_slash_command = source.startswith("slash:")
+    conversation_id = str(data.get("conversation_id") or session.active_conversation_id or "")
+    owner = _model_execution_owner(session, conversation_id)
+    from backend.services.misc_command_service import is_conversation_effort_command
+
+    if is_conversation_effort_command(data, conversation_id):
+        level = str(data["reasoning_effort"]).strip().lower()
+        try:
+            changed = await owner.set_selected_model("", manual_override=True, conversation_id=conversation_id, reasoning_effort=level)
+        except ValueError as exc:
+            await emit_command_error(session, "effort", exc)
+            return True
+        if not changed:
+            if owner is not session:
+                await emit_command_error(session, "effort", "The task's selected model is unavailable; reasoning effort was not changed.")
+            return True
+        await session.emit_command_result("effort", f"Reasoning effort set to '{level}'.",
+            data={"reasoning_effort": level, "applied": True, "conversation_id": conversation_id})
+        await session.send_llm_state()
+        await session.session_lifecycle.send_runtime_capabilities(source="llm.config.set")
+        return True
     from backend.services.llm_config_service import apply_llm_config_update
 
     try:
@@ -1201,6 +1237,24 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
     session.context_builder.bind_llm(session.llm)
     session.context_builder.bind_budget(session.config.token_budget)
 
+    if conversation_id:
+        session.conversation_repo.update_model_selection(
+            conversation_id, provider=session.provider,
+            model=session.selected_model,
+            reasoning_effort=str(session.config.llm.reasoning_effort or ""),
+        )
+        if owner is not session:
+            await owner._set_selected_provider_model(session.provider, session.selected_model,
+                manual_override=True, conversation_id=conversation_id, config_override=session.config,
+                reasoning_effort=reasoning_effort or None)
+        else:
+            from backend.agent.model_execution import ModelExecutionSnapshot
+
+            snapshot = ModelExecutionSnapshot.capture(session.config, session.llm)
+            session.publish_live_model_execution(conversation_id, replace(snapshot,
+                model_runtime=model_runtime, available_models=tuple(session.available_models),
+                models_source=session.models_source,
+                model_info=model_runtime.get_model(session.provider, session.selected_model) if model_runtime is not None else None))
     if reasoning_effort and not from_slash_command:
         await session.emit_command_result(
             "effort",

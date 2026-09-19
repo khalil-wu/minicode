@@ -14,6 +14,7 @@ from backend.agent.agent_identity import coordination_agent_id
 from backend.agent.mailbox_delivery import inject_parent_notifications, inject_subagent_mailbox_updates, subagent_mailbox_participant_id
 from backend.agent.rollout_budget import RolloutBudget
 from backend.agent.run_context import RunContext
+from backend.agent.model_execution import ModelExecutionSnapshot
 from backend.agent.runtime import AgentRuntime
 from backend.agent.state import AgentState
 from backend.agent.swarm_store import FileSwarmStore
@@ -178,7 +179,7 @@ async def test_selected_same_model_default_effort_builds_new_adapter(tmp_path, m
     monkeypatch.setattr(subagent_support, "apply_model_thinking_level", apply_effort)
     build = Mock(return_value=child)
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", build)
-    context = RunContext(subagent_parent_runtime={"llm": parent, "config": AppConfig(llm=LLMSettings(api_key="fixture")), "provider": "provider", "model": "same-model", "thinking_level": "high", "model_runtime": SimpleNamespace(get_model=lambda p, m: model)})
+    context = RunContext(model_execution=ModelExecutionSnapshot(llm=parent, config=AppConfig(llm=LLMSettings(api_key="fixture")), provider="provider", model="same-model", thinking_level="high", model_runtime=SimpleNamespace(get_model=lambda p, m: model)))
     result = await subagent_support._resolve_subagent_llm(parent, parent_metadata={}, run_context=context, agent_type="general-purpose", model_override="same-model", workspace_root=tmp_path)
     assert result.llm is child and result.owns_llm
     assert result.effort == "low"
@@ -190,7 +191,7 @@ async def test_task_provider_override_resolves_in_target_provider(tmp_path, monk
     parent = SimpleNamespace(_provider="original", _model="original-sonnet")
     target_model = SimpleNamespace(id="target-sonnet", name="Sonnet", reasoning=False, context_window=0)
     registry = SimpleNamespace(get_models=lambda provider: [target_model] if provider == "requested" else [], get_model=lambda provider, model: target_model if (provider, model) == ("requested", "target-sonnet") else None, get_provider=lambda provider: object())
-    context = RunContext(subagent_parent_runtime={"llm": parent, "config": AppConfig(llm=LLMSettings(api_key="fixture")), "provider": "original", "model": "original-sonnet", "model_runtime": registry})
+    context = RunContext(model_execution=ModelExecutionSnapshot(llm=parent, config=AppConfig(llm=LLMSettings(api_key="fixture")), provider="original", model="original-sonnet", model_runtime=registry))
     resolved = await subagent_support._resolve_subagent_llm(parent, parent_metadata={}, run_context=context, agent_type="general-purpose", model_override="sonnet", provider_override="requested", workspace_root=tmp_path, build_adapter=False)
     assert (resolved.provider, resolved.model) == ("requested", "target-sonnet")
     with pytest.raises(ValueError, match="conflicts"):

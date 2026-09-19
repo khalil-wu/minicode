@@ -102,6 +102,7 @@ CONVERSATION_SCOPED_EVENT_TYPES = {
     "agent.run.started",
     "agent.run.completed",
     "agent.item",
+    "agent.item.delta",
     "user_message.queue.updated",
     "image_chunk",
     "thinking_delta",
@@ -455,6 +456,7 @@ class WebSocketSession(
 
     def _create_fresh_active_conversation(self) -> None:
         self.conversation_runtime.create_fresh_active_conversation()
+        self.refresh_llm_selection()
         if self.active_conversation_id:
             self.run_manager.watch_conversation_notifications(
                 self.active_conversation_id
@@ -464,7 +466,16 @@ class WebSocketSession(
     def _ensure_active_conversation(
         self, preferred_id: str | None = None
     ) -> None:
+        blank_selection = (
+            not self.active_conversation_id and not preferred_id and self._model_override_active
+        )
         self.conversation_runtime.ensure_active_conversation(preferred_id)
+        if blank_selection:
+            self.conversation_repo.update_model_selection(
+                self.active_conversation_id, provider=self.provider, model=self.selected_model,
+                reasoning_effort=str(self.config.llm.reasoning_effort or ""), only_if_unset=True,
+            )
+        self.refresh_llm_selection()
         if self.active_conversation_id:
             self.run_manager.watch_conversation_notifications(
                 self.active_conversation_id
@@ -529,7 +540,7 @@ class WebSocketSession(
             for conversation_id, task in self.run_manager.run_tasks.items()
             if conversation_id and task is not None and not task.done()
         )
-        active = self.active_conversation
+        active = self.conversation_repo.get_conversation_summary(self.active_conversation_id) if self.active_conversation_id else None
         if active is not None and (
             getattr(active, "archived", False)
             or getattr(active, "conversation_type", "main") != "main"
@@ -813,6 +824,7 @@ class WebSocketSession(
         task: asyncio.Task[None],
         task_id: str,
         cancel_event: asyncio.Event,
+        run_context: RunContext | None = None,
     ) -> None:
         self.run_manager.register(
             conversation_id=conversation_id,
@@ -820,6 +832,7 @@ class WebSocketSession(
             task_id=task_id,
             cancel_event=cancel_event,
             active_conversation_id=self.active_conversation_id,
+            run_context=run_context,
         )
 
     def _cleanup_agent_run(
@@ -918,6 +931,7 @@ class WebSocketSession(
                 task=managed_run.task,
                 task_id=managed_run.id,
                 cancel_event=run_cancel_event,
+                run_context=run_context,
             )
             if run_metadata.get("_queued_user_message_dispatch"):
                 self.run_manager.mark_queue_owned_run(
@@ -1293,18 +1307,26 @@ class WebSocketSession(
         notify: bool = False,
         defer_start: bool = False,
     ) -> bool:
-        return self.conversation_runtime.load_active_conversation_snapshot(
+        hydrating = self.conversation_runtime.load_active_conversation_snapshot(
             conversation_id,
             snapshot,
             notify=notify,
             defer_start=defer_start,
             on_hydration_complete=self._on_conversation_hydration_complete,
         )
+        if conversation_id == self.active_conversation_id:
+            self.refresh_llm_selection()
+        return hydrating
 
     def start_active_conversation_hydration(self, conversation_id: str) -> bool:
         return self.conversation_runtime.start_hydration(conversation_id)
 
     async def _on_conversation_hydration_complete(self, conversation_id: str) -> None:
+        error = self.conversation_runtime.hydration_error
+        if error is not None:
+            event = AgentEvent.error(str(error), error_type="context", recoverable=True)
+            event.data["conversation_id"] = conversation_id
+            await self.send_event(event)
         await self.send_payload(
             {
                 "type": "conversation.hydration.updated",
@@ -1332,12 +1354,14 @@ class WebSocketSession(
         connection_generation: int | None = None,
         log_context: str,
         envelope: bool = True,
+        wait_for_delivery: bool = True,
     ) -> bool:
         return await self.event_outbox.send_payload(
             payload,
             connection_generation=connection_generation,
             log_context=log_context,
             envelope=envelope,
+            wait_for_delivery=wait_for_delivery,
         )
 
     async def send_conversation_list(self) -> None:
@@ -1382,10 +1406,10 @@ class WebSocketSession(
             if getattr(item, "conversation_type", "main") == "main"
         ]
         snapshot_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        active = self.active_conversation
+        active = await asyncio.to_thread(self.conversation_repo.get_conversation_view, self.active_conversation_id) if self.active_conversation_id else None
         if active is not None and (
-            getattr(active, "archived", False)
-            or getattr(active, "conversation_type", "main") != "main"
+            active.get("archived", False)
+            or active.get("conversation_type", "main") != "main"
         ):
             active = None
             self.active_conversation_id = None
@@ -1394,7 +1418,7 @@ class WebSocketSession(
             "conversation_id": self.active_conversation_id,
             "active_conversation_id": self.active_conversation_id,
             "conversations": conversations,
-            "active_conversation": project_public_conversation(active) if active is not None else None,
+            "active_conversation": active,
             "session": self.runtime_snapshot(),
             "snapshot_at": snapshot_at,
         }
@@ -1581,7 +1605,7 @@ class WebSocketSession(
             if request_id:
                 self.turn_wait_state.pending_approval_payloads[request_id] = dict(payload)
 
-        await self.send_payload(payload, log_context=f"event:{event.type}")
+        await self.send_payload(payload, log_context=f"event:{event.type}", wait_for_delivery=False)
         if event.type not in _NOTIFICATION_HOOK_EVENT_TYPES:
             return
         from backend.hooks.manager import get_hook_manager_for_session

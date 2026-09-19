@@ -41,7 +41,7 @@ class ArtifactContentResult:
             data["name"] = self.name
         if self.url:
             data["url"] = self.url
-        elif self.media_type and not self.is_attachment:
+        elif self.media_type and not self.is_attachment and self.content:
             data["url"] = f"data:{self.media_type};base64,{self.content}"
         if self.is_attachment:
             data["is_attachment"] = True
@@ -86,21 +86,17 @@ def read_artifact_content(
         if len(lines) > 5:
             preview += f"\n... ({len(lines)} lines total)"
     else:
-        content = artifact_store.get(
-            clean_artifact_id,
-            conversation_id=conversation_id,
-            workspace_root=workspace_root,
-        )
         meta = artifact_store.get_meta(
             clean_artifact_id,
             conversation_id=conversation_id,
             workspace_root=workspace_root,
         )
-        preview = artifact_store.get_preview(
-            clean_artifact_id,
-            conversation_id=conversation_id,
-            workspace_root=workspace_root,
-        ) or ""
+        if meta is not None and meta.type == "audio":
+            # Binary audio travels through the owner-scoped raw endpoint.
+            content, preview = "", "音频输出"
+        else:
+            content = artifact_store.get(clean_artifact_id, conversation_id=conversation_id, workspace_root=workspace_root)
+            preview = artifact_store.get_preview(clean_artifact_id, conversation_id=conversation_id, workspace_root=workspace_root) or ""
         media_type = (
             str(getattr(meta, "media_type", "") or "").strip()
             or ("image/png" if getattr(meta, "type", "") == "image" else "")

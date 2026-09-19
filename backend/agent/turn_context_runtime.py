@@ -191,6 +191,8 @@ async def prepare_turn_context(
             else None
         )
 
+    extension_actions = tool_context.run_context.extension_actions
+    extension_messages: list[str] = []
     # before_agent_start custom messages are inserted after the canonical user
     # prompt, matching the runtime's message-to-user conversion. Apply
     # the result once; later iterations only rebuild the provider projection.
@@ -206,10 +208,12 @@ async def prepare_turn_context(
                         raw_message.get("content", "")
                     ).strip()
                     if content:
-                        append_user_context(content)
+                        extension_messages.append(content)
         metadata["_extension_before_agent_messages_applied"] = True
 
     pending_extension_messages = metadata.pop("_extension_pending_messages", [])
+    queued_extension_messages = context.extension_state.pop("pending_messages", [])
+    extension_messages.extend(queued_extension_messages)
     if isinstance(pending_extension_messages, list):
         append_user_context = getattr(context, "append_user_context", None)
         if callable(append_user_context):
@@ -225,56 +229,32 @@ async def prepare_turn_context(
                     else raw_message
                 ).strip()
                 if content:
-                    append_user_context(content)
+                    extension_messages.append(content)
 
-    # Appended entries land in the transcript where the model
-    # can see them; project them as user context so they stop vanishing in a
-    # metadata list nobody reads.
-    pending_extension_entries = metadata.pop("_extension_entries", [])
-    if isinstance(pending_extension_entries, list):
-        append_user_context = getattr(context, "append_user_context", None)
-        if callable(append_user_context):
-            for pending in pending_extension_entries:
-                if not isinstance(pending, dict):
-                    continue
-                custom_type = str(pending.get("custom_type") or "").strip()
-                data = pending.get("data")
-                if not custom_type:
-                    continue
-                if data is None:
-                    continue
-                if isinstance(data, str):
-                    data_text = data.strip()
-                else:
-                    import json as _json
-
-                    try:
-                        data_text = _json.dumps(data, ensure_ascii=False)
-                    except (TypeError, ValueError):
-                        data_text = str(data)
-                if data_text:
-                    append_user_context(f"<{custom_type}>{data_text}</{custom_type}>")
-
-    # Labels attach a human label to an entry; surface it as context
-    # so the label is not silently dropped.
-    pending_extension_labels = metadata.pop("_extension_labels", [])
-    if isinstance(pending_extension_labels, list):
-        append_user_context = getattr(context, "append_user_context", None)
-        if callable(append_user_context):
-            for pending in pending_extension_labels:
-                if not isinstance(pending, dict):
-                    continue
-                entry_id = str(pending.get("entry_id") or "").strip()
-                label = pending.get("label")
-                label_text = (
-                    label.strip() if isinstance(label, str) else str(label or "")
-                ).strip()
-                if not label_text:
-                    continue
-                if entry_id:
-                    append_user_context(f"<entry-label id=\"{entry_id}\">{label_text}</entry-label>")
-                else:
-                    append_user_context(f"<entry-label>{label_text}</entry-label>")
+    # Old host bindings may still hand over these lists at admission. They
+    # migrate into extension storage, never into the provider message stream.
+    import json
+    from uuid import uuid4
+    entries = metadata.pop("_extension_entries", [])
+    labels = metadata.pop("_extension_labels", [])
+    for entry in entries:
+        if extension_actions is not None:
+            extension_actions.append_entry(entry["custom_type"], entry.get("data"))
+        else:
+            context.extension_state.setdefault("entries", []).append({
+                "id": "ext_" + uuid4().hex, "type": "custom",
+                "custom_type": entry["custom_type"],
+                "data": json.loads(json.dumps(entry.get("data"), ensure_ascii=False, allow_nan=False)),
+            })
+    for item in labels:
+        if extension_actions is not None:
+            extension_actions.set_label(item["entry_id"], item.get("label"))
+        else:
+            stored_labels = context.extension_state.setdefault("labels", {})
+            if item.get("label") is None:
+                stored_labels.pop(item["entry_id"], None)
+            else:
+                stored_labels[item["entry_id"]] = str(item["label"])
 
     # Fallback user messages queued by extensions when no run manager was
     # bound; deliver them the next context build instead of losing them.
@@ -287,7 +267,25 @@ async def prepare_turn_context(
                     pending.get("content", "") if isinstance(pending, dict) else pending
                 ).strip()
                 if content:
-                    append_user_context(content)
+                    extension_messages.append(content)
+
+    history_start = len(context._history)
+    for content in extension_messages:
+        context.append_user_context(content)
+    if extension_actions is not None:
+        if extension_messages:
+            # The queue handoff and its provider-visible messages are one
+            # durable change. A crash must not leave only the queue deletion.
+            extension_actions.changed({
+                "fields": {}, "remove": ["pending_messages"] if queued_extension_messages else [],
+                "context_messages": [
+                    {"role": message.role, "content": message.content,
+                     "timestamp_ms": message.timestamp_ms, "is_user_input": False}
+                    for message in context._history[history_start:]
+                ],
+            })
+        if extension_messages or entries or labels:
+            await extension_actions.flush()
 
     reconcile = getattr(context, "reconcile_dangling_tool_calls", None)
     if callable(reconcile):

@@ -69,6 +69,7 @@ class StreamTextState:
     process_text_streamed: bool = False
     process_text_last_emitted: str = ""
     process_text_source: str = "model_preamble"
+    emitted_agent_messages: dict[str, str] = field(default_factory=dict)
 
     @property
     def has_live_provisional_item(self) -> bool:
@@ -100,6 +101,7 @@ class StreamTextState:
         self.active_agent_message_source = source
         self.published_agent_message_source = source
         self.agent_message_started = True
+        self.emitted_agent_messages[self.active_agent_message_id] = ""
         return AgentEvent.agent_message_started(
             item_id=self.active_agent_message_id,
             source=source,
@@ -151,6 +153,7 @@ class StreamTextState:
         if source:
             self.active_agent_message_source = source
         self.active_agent_message_text += delta
+        self.emitted_agent_messages[self.active_agent_message_id] = self.active_agent_message_text
         reclassified = (
             self.active_agent_message_source != self.published_agent_message_source
         )
@@ -177,6 +180,7 @@ class StreamTextState:
         if not self.agent_message_started or not self.active_agent_message_id:
             return None
         item_id = self.active_agent_message_id
+        self.emitted_agent_messages[item_id] = text
         self.agent_message_started = False
         self.active_agent_message_id = ""
         self.active_agent_message_text = ""
@@ -246,7 +250,21 @@ class StreamTextState:
         text = self.process_buffer()
         if not text or text == self.process_text_last_emitted:
             return None
+        previous = self.process_text_last_emitted
         self.process_text_last_emitted = text
+        # The first chunk announces the item with its full metadata. Later
+        # chunks extend it: a snapshot per provider delta would resend the
+        # whole narration every time and be replayed as such.
+        if (
+            self.process_text_streamed
+            and self.process_text_source == source
+            and previous
+            and text.startswith(previous)
+        ):
+            return AgentEvent.agent_item_delta(
+                text[len(previous):],
+                item_id=f"{self.iteration_id}:model-output:{source or 'stream'}",
+            )
         # Mark the process item as having a live projection.  The terminal
         # flush still emits one completed update, while subsequent chunks only
         # emit when the accumulated content actually changed.
@@ -301,6 +319,7 @@ class StreamTextState:
 
     def reset_for_provider_retry(self) -> None:
         self.reset_for_retry()
+        self.emitted_agent_messages.clear()
         self.saw_final_answer_phase = False
         self.process_text_emitted = False
         self.process_text_streamed = False
@@ -338,7 +357,13 @@ class StreamAttemptState:
     provider_done: bool = False
     saw_partial_tool_call: bool = False
     has_non_text_result: bool = False
+    # Provider thinking/activity is observable progress, but it is still
+    # replay-safe. Visible text and media cross the authentication replay
+    # boundary; keep that fact separate from the provider payload itself.
+    saw_visible_output: bool = False
+    saw_provider_activity: bool = False
     final_tool_batch_received: bool = False
+    committed_tool_ids: set[str] = field(default_factory=set)
     partial_tool_names: dict[str, str] = field(default_factory=dict)
     partial_tool_args: dict[str, dict[str, Any]] = field(default_factory=dict)
     provider_activities: dict[str, ProviderActivityEvent] = field(
@@ -377,6 +402,7 @@ class StreamAttemptState:
             self.usage = event.usage
         if event.type == StreamEventType.IMAGE_CHUNK:
             self.has_non_text_result = bool(event.image_data) or self.has_non_text_result
+            self.saw_visible_output = bool(event.image_data) or self.saw_visible_output
             return ProviderEventOutcome()
         if event.type in {
             StreamEventType.TOOL_CALL_START,
@@ -385,6 +411,8 @@ class StreamAttemptState:
             self.saw_partial_tool_call = True
             return ProviderEventOutcome(partial_tool_stream=True)
         if event.type == StreamEventType.TOOL_CALL:
+            if event.provider_items:
+                self.response_items[:] = event.provider_items
             complete = tuple(event.tool_calls)
             self.merge_tool_calls(list(complete))
             self.saw_partial_tool_call = self.saw_partial_tool_call or bool(complete)
@@ -471,6 +499,8 @@ class StreamAttemptState:
         self.finish_reason = ""
         self.provider_done = False
         self.has_non_text_result = False
+        self.saw_visible_output = False
+        self.saw_provider_activity = False
         self.saw_partial_tool_call = False
         self.final_tool_batch_received = False
         self.partial_tool_names.clear()
@@ -492,5 +522,6 @@ class StreamAttemptState:
         self.finish_reason = str(finish_reason or "")
         self.raw_done.clear()
         self.raw_done.update(dict(raw or {}))
-        self.response_items[:] = list(response_items or [])
+        if response_items or not self.committed_tool_ids:
+            self.response_items[:] = list(response_items or [])
         self.response_phase = str(response_phase or "")

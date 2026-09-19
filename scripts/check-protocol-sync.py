@@ -21,6 +21,7 @@ WS_EVENTS = ROOT / "backend" / "ws" / "events.py"
 AGENT_MESSAGE = ROOT / "backend" / "agent" / "message.py"
 STREAMING_TYPES = ROOT / "frontend" / "src.v2" / "protocol" / "streaming-types.ts"
 PAYLOAD_CONTRACTS = ROOT / "backend" / "ws" / "payload_contracts.py"
+USE_WEBSOCKET = ROOT / "frontend" / "src.v2" / "hooks" / "useWebSocket.ts"
 
 
 def parse_python_literal(name: str, source: str) -> set[str]:
@@ -45,6 +46,26 @@ def parse_python_frozenset(name: str, source: str, source_path: Path) -> set[str
     if not match:
         sys.exit(f"could not find frozenset {name} in {source_path}")
     return set(re.findall(r'[\"\']([^\"\']+)[\"\']', match.group(1) or ""))
+
+
+def parse_python_string_frozenset(name: str, source: str, source_path: Path) -> set[str]:
+    """Collect the string literals of ``NAME = frozenset({...}) | OTHER`` via the AST.
+
+    Unlike the regex parser this ignores comments, so a backtick or quote in a
+    comment cannot be mistaken for an entry.
+    """
+    module = ast.parse(source)
+    for node in module.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            continue
+        return {
+            constant.value
+            for constant in ast.walk(node.value)
+            if isinstance(constant, ast.Constant) and isinstance(constant.value, str)
+        }
+    sys.exit(f"could not find frozenset {name} in {source_path}")
 
 
 def parse_session_projection_validator_branches(source: str) -> set[str]:
@@ -339,6 +360,32 @@ def main() -> int:
         print(f"[OK] Backend literal event payloads: {len(literal_events)} covered")
 
     payload_contracts_src = PAYLOAD_CONTRACTS.read_text(encoding="utf-8")
+    # The renderer must not move its durable replay cursor on any event the
+    # backend never stages into the replay log; otherwise the next durable
+    # event's previous_replay_seq mismatches and the stream freezes.
+    backend_non_replayable = parse_python_string_frozenset(
+        "NON_REPLAYABLE_EVENT_TYPES", payload_contracts_src, PAYLOAD_CONTRACTS,
+    ) | parse_python_string_frozenset("LIVE_ONLY_EVENT_TYPES", payload_contracts_src, PAYLOAD_CONTRACTS)
+    use_websocket_src = USE_WEBSOCKET.read_text(encoding="utf-8")
+    cursor_match = re.search(
+        r"const NON_REPLAYABLE_CURSOR_EVENT_TYPES = new Set<string>\(\[(.*?)\]\);",
+        use_websocket_src,
+        re.DOTALL,
+    )
+    if not cursor_match:
+        sys.exit(f"could not find NON_REPLAYABLE_CURSOR_EVENT_TYPES in {USE_WEBSOCKET}")
+    frontend_cursor_set = set(re.findall(r'"([^"]+)"', cursor_match.group(1)))
+    if report_drift(
+        "NON_REPLAYABLE_CURSOR_EVENT_TYPES",
+        backend_non_replayable - frontend_cursor_set,
+        frontend_cursor_set - backend_non_replayable,
+        "backend",
+        "frontend",
+    ):
+        drift = True
+    else:
+        print(f"[OK] Non-replayable cursor set: {len(frontend_cursor_set)} entries match")
+
     projection_events = parse_python_frozenset(
         "SESSION_PROJECTION_EVENT_TYPES",
         payload_contracts_src,

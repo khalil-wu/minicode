@@ -50,6 +50,15 @@ class ToolCallRecord(BaseModel):
         "iteration_id",
         "request_digest",
         "cleanup_receipt",
+        # Background-command bookkeeping. The renderer reads command state from
+        # the terminal/notice event stream, and the only consumers of these are
+        # internal: the post-compaction command restore reads record.command_id
+        # and record.output_cursor to rebuild the model's next_cursor.
+        "command_id",
+        "output_cursor",
+        # How the call was sourced (direct, nested, code mode, …). Provenance
+        # for the runtime, not part of the transcript contract.
+        "call_source",
     })
 
     @classmethod

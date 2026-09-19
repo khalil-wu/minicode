@@ -16,6 +16,7 @@ from backend.tools.agent_artifact_tools import PresentFileTool
 from backend.tools.apply_patch import ApplyPatchTool
 from backend.tools.browser_control_tool import BrowserControlTool
 from backend.tools.command_tool import RunCommandTool
+from backend.tools.code_execution import ToolExecTool, ToolWaitTool
 from backend.tools.file_tools import (
     EditFileTool,
     ListFilesTool,
@@ -101,6 +102,8 @@ def build_tool_registry(
     registry.register(GlobFilesTool())
 
     registry.register(RunCommandTool(artifact_store))
+    registry.register(ToolExecTool())
+    registry.register(ToolWaitTool())
     registry.register(SleepTool())
     registry.register(MonitorTool())
     registry.register(ReadTerminalTool())

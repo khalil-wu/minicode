@@ -47,6 +47,26 @@ from backend.tools.file_tools_common import (
 )
 
 
+# Matches the parser envelope, including a move with no content changes.
+APPLY_PATCH_GRAMMAR = r'''start: begin_patch hunk+ end_patch
+begin_patch: "*** Begin Patch" LF
+end_patch: "*** End Patch" LF?
+hunk: add_hunk | delete_hunk | update_hunk
+add_hunk: "*** Add File: " filename LF add_line*
+delete_hunk: "*** Delete File: " filename LF
+update_hunk: "*** Update File: " filename LF (change_move change? | change)
+filename: /[^\r\n]+/
+add_line: "+" LINE_TEXT? LF
+change_move: "*** Move to: " filename LF
+change: (change_context | change_line)+ eof_line?
+change_context: ("@@" | "@@ " /[^\r\n]+/) LF
+change_line: ("+" | "-" | " ") LINE_TEXT? LF
+eof_line: "*** End of File" LF
+LINE_TEXT: /[^\r\n]+/
+%import common.LF
+'''
+
+
 class ApplyPatchTool(BaseTool):
     """Apply a MiniCode-style patch envelope across one or more files."""
 
@@ -62,7 +82,8 @@ class ApplyPatchTool(BaseTool):
         "patch must be one string starting with '*** Begin Patch' and ending with '*** End Patch'. "
         "Use hunks like '*** Add File:', '*** Update File:', optional '*** Move to:', and '*** Delete File:'. "
         "In update hunks, prefix context with space, removals with '-', additions with '+'. "
-        "Read files first so context/removal lines match exactly; do not wrap in JSON or Markdown fences."
+        "Read files first so context/removal lines match exactly. Put the patch in the JSON patch string; "
+        "do not put JSON or Markdown fences inside that string."
     )
     permission = PermissionLevel.DIFF_REVIEW
 
@@ -80,7 +101,18 @@ class ApplyPatchTool(BaseTool):
             return []
 
     def model_description(self) -> str:
-        return "Apply a MiniCode patch envelope for multi-file edits or renames."
+        return (
+            "Apply a patch to add, update, delete, or rename workspace files. "
+            "Pass the entire patch as the JSON patch string, with actual newlines. "
+            "The string starts with *** Begin Patch and ends with *** End Patch. "
+            "Use *** Add File: path (every content line starts with +), "
+            "*** Delete File: path, or *** Update File: path followed by @@ hunks. "
+            "Update hunk lines start with a space for context, - for removals, + for additions. "
+            "An optional *** Move to: new-path follows an Update File header. "
+            "Read existing files first so context matches. Do not put Markdown fences inside the patch. "
+            "Edits are atomic per file; on partial failure re-read the reported changed files before retrying.\n"
+            "Example patch string:\n*** Begin Patch\n*** Update File: src/main.py\n@@\n-print('old')\n+print('new')\n*** End Patch"
+        )
 
     def model_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -96,6 +128,16 @@ class ApplyPatchTool(BaseTool):
                 "required": ["patch"],
             },
             strict=True,
+            freeform={
+                "input_field": "patch",
+                "description": (
+                    "Apply a patch to add, update, delete, or rename workspace files. "
+                    "Send the raw *** Begin Patch ... *** End Patch envelope with actual newlines. "
+                    "Do not wrap it in JSON or Markdown fences. Read existing files first so context matches. "
+                    "Edits are atomic per file; on partial failure re-read the reported changed files before retrying."
+                ),
+                "format": {"type": "grammar", "syntax": "lark", "definition": APPLY_PATCH_GRAMMAR},
+            },
         )
 
     def get_spec(self):
@@ -351,10 +393,15 @@ class ApplyPatchTool(BaseTool):
             return f"Update File '{change.path}': cannot read binary or non-UTF-8 file."
 
         try:
-            new_content = apply_update_hunks(
-                normalize_text_newlines(old_content), change.hunks, change.path,
-            )
-            new_content = preserve_text_line_endings(new_content, old_content.encode("utf-8"))
+            if change.hunks:
+                new_content = apply_update_hunks(
+                    normalize_text_newlines(old_content), change.hunks, change.path,
+                )
+                new_content = preserve_text_line_endings(new_content, old_content.encode("utf-8"))
+            else:
+                # A pure rename must not manufacture a trailing newline or
+                # normalize mixed line endings in the original file.
+                new_content = old_content
         except ApplyPatchError as exc:
             return str(exc)
 

@@ -1688,7 +1688,9 @@ async def _test_task_tool_can_start_background_subagent(monkeypatch, tmp_path):
     assert snapshot["subagents"][0]["background_task"] == "running"
 
     release.set()
-    for _ in range(20):
+    # Hang detector, not a latency assertion: recording the completion first
+    # (checkpoint + swarm-store upsert) measured ~220ms before the event.
+    for _ in range(500):
         if any(event_type == "subagent.done" for event_type, _ in events):
             break
         await asyncio.sleep(0.01)
@@ -1773,7 +1775,7 @@ async def _test_task_stop_cancels_background_subagent(monkeypatch, tmp_path):
     assert seen_cancel_events
     assert seen_cancel_events[-1].is_set()
     await asyncio.wait_for(cancelled.wait(), timeout=1)
-    for _ in range(20):
+    for _ in range(500):
         if any(data.get("error") == "cancelled" for event_type, data in events if event_type == "subagent.done"):
             break
         await asyncio.sleep(0.01)
@@ -1880,7 +1882,7 @@ def test_task_tool_queues_independent_background_subagents_at_global_limit(monke
             }, context=ctx))
 
         assert all(result.status == "running" for result in results)
-        await asyncio.wait_for(first_wave_started.wait(), timeout=1)
+        await asyncio.wait_for(first_wave_started.wait(), timeout=10)
         snapshot = runtime.list_runs(include_subagents=True)["subagents"]
         assert len([
             item for item in snapshot
@@ -1892,7 +1894,7 @@ def test_task_tool_queues_independent_background_subagents_at_global_limit(monke
         ]) == 2
 
         release.set()
-        for _ in range(100):
+        for _ in range(500):
             if started == 6 and not any(
                 item.get("status") in {"pending", "running"}
                 for item in runtime.list_runs(include_subagents=True)["subagents"]
@@ -1954,7 +1956,7 @@ def test_single_foreground_subagent_waits_for_global_worker_slot(monkeypatch, tm
             )
             assert result.status == "running"
 
-        await asyncio.wait_for(first_wave_started.wait(), timeout=1)
+        await asyncio.wait_for(first_wave_started.wait(), timeout=10)
         foreground_task = asyncio.create_task(
             _task_tool().execute(
                 {
@@ -2026,7 +2028,7 @@ def test_parallel_background_batch_runs_eight_with_four_workers_and_can_cancel_q
         subagent_ids = _subagent_ids_from(result.content)
 
         assert len(subagent_ids) == 8
-        await asyncio.wait_for(first_wave_started.wait(), timeout=1)
+        await asyncio.wait_for(first_wave_started.wait(), timeout=10)
         snapshot = runtime.list_runs(include_subagents=True)["subagents"]
         assert len([item for item in snapshot if item.get("status") == "running"]) == 4
         queued = [
@@ -2132,7 +2134,7 @@ async def _test_task_tool_can_start_parallel_background_subagents(monkeypatch, t
     assert len(running) == 2
 
     release.set()
-    for _ in range(40):
+    for _ in range(500):
         if len([event for event in events if event[0] == "subagent.done"]) == 2:
             break
         await asyncio.sleep(0.01)

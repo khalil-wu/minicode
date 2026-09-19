@@ -31,7 +31,9 @@ from backend.ws.agent_runner import (
 )
 from backend.ws.run_manager import SessionRunManager
 from backend.ws.command_dispatcher import SessionCommandDispatcher
+from backend.ws.conversation_runtime import ConversationRuntime
 from backend.ws.session_lifecycle import SessionLifecycle
+from backend.ws.utils import build_summary_from_transcript
 
 
 def _run_session_scenario(awaitable):
@@ -182,6 +184,14 @@ class _Session(SessionAgentRunnerMixin):
             token_budget=self.config.token_budget,
             agent_settings=self.config.agent,
             llm=self.llm,
+        )
+        # Same collaborator contract as WebSocketSession (handler.py): the
+        # runner reads code_store_for() off it, and a missing collaborator must
+        # fail here rather than silently take a different code path.
+        self.conversation_runtime = ConversationRuntime(
+            conversation_repo=self.conversation_repo,
+            context_builder=self.context_builder,
+            build_summary_from_transcript=build_summary_from_transcript,
         )
         self.provider = "openai"
         self.available_models = ["gpt-test"]
@@ -1008,9 +1018,23 @@ def test_new_turn_replays_terminal_projection_before_resetting_context(
 
 
 def test_runner_persists_partial_work_and_replaces_it_when_user_cancels(tmp_path, monkeypatch):
+    import threading
     events: list[dict] = []
     session = _Session(tmp_path, events)
     tool_started = asyncio.Event()
+    release_projection = threading.Event()
+    projection_committed = threading.Event()
+    original_commit = session.conversation_repo.commit_turn_projection
+
+    def commit_projection(*args, **kwargs):
+        if kwargs.get("partial"):
+            assert release_projection.wait(10)
+        result = original_commit(*args, **kwargs)
+        if kwargs.get("partial"):
+            projection_committed.set()
+        return result
+
+    monkeypatch.setattr(session.conversation_repo, "commit_turn_projection", commit_projection)
 
     async def blocking_runner(**kwargs):
         await _admit_runner_turn(kwargs)
@@ -1047,7 +1071,10 @@ def test_runner_persists_partial_work_and_replaces_it_when_user_cancels(tmp_path
             },
         ))
         await asyncio.wait_for(tool_started.wait(), timeout=10)
-
+        # Tool execution waits for its journal fact, not the derived UI view.
+        assert not projection_committed.is_set()
+        release_projection.set()
+        assert await asyncio.to_thread(projection_committed.wait, 10)
         partial = ConversationRepository(session.conversation_repo._base_dir).get_conversation("conv_runnerdone")
         assert partial is not None
         assert partial.transcript[-1]["id"] == "assistant-cancelled"

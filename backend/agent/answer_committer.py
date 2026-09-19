@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from backend.agent.answer_commit_projection import AnswerCommitProjection
 from backend.agent.provider_protocol import usage_terminal_projection
+from backend.agent.response_utils import provider_items_for_final_answer
 from backend.agent.terminal_projection import TurnTerminalProjection
 from backend.llm.base import UsageInfo
 
@@ -38,12 +39,13 @@ class AnswerCommitter:
     ) -> TurnTerminalProjection:
         deps = self._deps
         state = deps.state
-        if final_text or provider_items:
+        replay_items = provider_items_for_final_answer(provider_items)
+        if final_text or replay_items:
             deps.append_assistant_history(
                 deps.context,
                 final_text,
                 phase=provider_phase or "final_answer",
-                provider_items=provider_items,
+                provider_items=replay_items,
             )
         if final_text:
             state.reply = (

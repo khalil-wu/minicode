@@ -11,7 +11,7 @@ import json
 import math
 import re
 import html
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from backend.tools.catalog import BRIDGE_TOOL_NAMES
@@ -82,10 +82,17 @@ class DeferredToolCatalog:
         self.permission_context = permission_context
         self.scope = str(scope or DEFAULT_DEFERRED_CATALOG_SCOPE).strip() or DEFAULT_DEFERRED_CATALOG_SCOPE
         self._entries_cache: list[DeferredToolEntry] | None = None
+        self._direct_names: set[str] = set()
+        self._doc_freq: dict[str, int] = {}
+        self._avg_dl = 0.0
 
     def entries(self) -> list[DeferredToolEntry]:
         if self._entries_cache is None:
             self._entries_cache = self._build_entries()
+            for entry in self._entries_cache:
+                for token in set(entry.tokens):
+                    self._doc_freq[token] = self._doc_freq.get(token, 0) + 1
+            self._avg_dl = sum(len(entry.tokens) for entry in self._entries_cache) / max(len(self._entries_cache), 1)
         return list(self._entries_cache)
 
     def _build_entries(self) -> list[DeferredToolEntry]:
@@ -100,6 +107,8 @@ class DeferredToolCatalog:
             permission_context=self.permission_context,
             materialize_schema=False,
         ):
+            if view.direct and view.exposure != "hidden" and view.name not in BRIDGE_TOOL_NAMES:
+                self._direct_names.add(view.name)
             if view.name in BRIDGE_TOOL_NAMES:
                 continue
             if (
@@ -131,15 +140,9 @@ class DeferredToolCatalog:
         if not catalog or not query_tokens:
             return []
 
-        doc_freq: dict[str, int] = {}
-        for entry in catalog:
-            for token in set(entry.tokens):
-                doc_freq[token] = doc_freq.get(token, 0) + 1
-        avg_dl = sum(len(entry.tokens) for entry in catalog) / max(len(catalog), 1)
-
         scored: list[tuple[float, DeferredToolEntry]] = []
         for entry in catalog:
-            score = _bm25_score(query_tokens, entry.tokens, doc_freq, avg_dl, len(catalog))
+            score = _bm25_score(query_tokens, entry.tokens, self._doc_freq, self._avg_dl, len(catalog))
             name_lower = entry.name.lower()
             query_lower = query.lower()
             if query_lower and query_lower in name_lower:
@@ -160,23 +163,8 @@ class DeferredToolCatalog:
 
     def directly_visible_names(self) -> set[str]:
         """Return directly visible names from the canonical schema view."""
-        build_views = getattr(self.registry, "build_schema_views", None)
-        if not callable(build_views):
-            raise TypeError("DeferredToolCatalog requires ToolRegistry.build_schema_views")
-        names: set[str] = set()
-        for view in build_views(
-            toolset_policy=self.toolset_policy,
-            permission_checker=self.permission_checker,
-            permission_context=self.permission_context,
-            materialize_schema=False,
-        ):
-            if (
-                view.name not in BRIDGE_TOOL_NAMES
-                and bool(getattr(view, "direct", False))
-                and getattr(view, "exposure", "") != "hidden"
-            ):
-                names.add(str(view.name))
-        return names
+        self.entries()
+        return set(self._direct_names)
 
     def select_names(self, query: str, limit: int) -> list[str] | None:
         """Resolve exact/bare selection, including already-direct tools.
@@ -357,6 +345,8 @@ class ToolSearchTool(BaseTool):
 
     def __init__(self, registry: Any | None = None) -> None:
         self._registry = registry
+        self._catalog_key: Any = None
+        self._catalog: DeferredToolCatalog | None = None
 
     def get_spec(self) -> ToolSpec:
         return ToolSpec(
@@ -389,7 +379,8 @@ class ToolSearchTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
-        if self._registry is None:
+        registry = getattr(context, "tool_registry", None) or self._registry
+        if registry is None:
             return self._error_result("Tool registry is not available")
         query = str(args.get("query") or "").strip()
         if not query:
@@ -404,15 +395,16 @@ class ToolSearchTool(BaseTool):
         if max_results < 1:
             return self._error_result("max_results must be a positive integer")
         limit = min(max_results, 20)
-        catalog = DeferredToolCatalog(
-            self._registry,
-            toolset_policy=_toolset_policy_for_context(
-                getattr(context, "permission", None),
-                getattr(context, "metadata", None),
-            ),
-            permission_checker=getattr(context, "permission_checker", None),
-            permission_context=getattr(context, "permission", None),
-        )
+        permission = getattr(context, "permission", None)
+        checker = getattr(context, "permission_checker", None)
+        policy = _toolset_policy_for_context(permission, getattr(context, "metadata", None))
+        key = (id(registry), registry.version, policy.cache_key() if policy is not None else "",
+               asdict(permission) if permission is not None else None,
+               checker.policy_snapshot() if checker is not None else None)
+        if self._catalog is None or key != self._catalog_key:
+            self._catalog = DeferredToolCatalog(registry, toolset_policy=policy, permission_checker=checker, permission_context=permission)
+            self._catalog_key = key
+        catalog = self._catalog
         selected = catalog.select_names(query, limit)
         deferred_entries = catalog.entries()
         deferred_names = {entry.name for entry in deferred_entries}

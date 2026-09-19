@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+from backend.async_cleanup import to_thread_cancel_safe
+from backend.atomic_io import await_task_despite_cancellation
 
 from backend.agent.message import AgentEvent
 from backend.agent.query_journal import (
@@ -107,7 +111,16 @@ class QueryTerminalTransaction:
         )
         return AgentEvent.done(status=status, reason=str(reason or ""))
 
-    def commit(
+    async def commit(
+        self, terminal_event: AgentEvent, *, validate: bool,
+    ) -> QueryTerminalResult:
+        # Once terminal publication starts, finish the whole transaction. A
+        # cancellation between its writes must not create a second outcome.
+        return await await_task_despite_cancellation(
+            asyncio.create_task(self._commit(terminal_event, validate=validate))
+        )
+
+    async def _commit(
         self,
         terminal_event: AgentEvent,
         *,
@@ -159,7 +172,7 @@ class QueryTerminalTransaction:
             status = "partial"
             self._apply_status(terminal_event, status, reason)
 
-        status, reason = self._finalize_retained_checkpoint(
+        status, reason = await self._finalize_retained_checkpoint(
             terminal_event,
             status=status,
             reason=reason,
@@ -167,7 +180,7 @@ class QueryTerminalTransaction:
 
         journal_errors: list[BaseException] = []
         try:
-            self.journal.record_terminal_intent(terminal_event)
+            await to_thread_cancel_safe(self.journal.record_terminal_intent, terminal_event)
         except Exception as exc:
             journal_errors.append(exc)
             logger.error(
@@ -180,12 +193,12 @@ class QueryTerminalTransaction:
         completion_event = self._commit_runtime(status=status, reason=reason)
         commit_failed = terminal_commit_failed(completion_event)
         if not commit_failed:
-            self._finalize_completed_checkpoint(status)
+            await self._finalize_completed_checkpoint(status)
 
         try:
             if completion_event is not None:
-                self.journal.record_event(completion_event)
-            self.journal.record_terminal(terminal_event)
+                await to_thread_cancel_safe(self.journal.record_event, completion_event)
+            await to_thread_cancel_safe(self.journal.record_terminal, terminal_event)
         except Exception as exc:
             journal_errors.append(exc)
             logger.error(
@@ -235,7 +248,7 @@ class QueryTerminalTransaction:
             return terminal_journal_failure_event(exc)
         return None
 
-    def _finalize_retained_checkpoint(
+    async def _finalize_retained_checkpoint(
         self,
         terminal_event: AgentEvent,
         *,
@@ -253,7 +266,7 @@ class QueryTerminalTransaction:
             turn_kernel.checkpoint_evidence().get("status") or "none"
         )
         if checkpoint_status != "save_failed":
-            checkpoint_status = turn_kernel.finalize_checkpoint(
+            checkpoint_status = await to_thread_cancel_safe(turn_kernel.finalize_checkpoint,
                 session_id=self.turn_ctx.session_id,
                 user_message=self.turn_ctx.user_message,
                 state=self.turn_ctx.state,
@@ -289,7 +302,7 @@ class QueryTerminalTransaction:
         )
         return event or turn_kernel.completion_event
 
-    def _finalize_completed_checkpoint(self, status: str) -> None:
+    async def _finalize_completed_checkpoint(self, status: str) -> None:
         turn_kernel = self.turn_ctx.turn_kernel
         if (
             status != "completed"
@@ -297,7 +310,7 @@ class QueryTerminalTransaction:
             or bool(self.turn_ctx.metadata.get("retain_completed_checkpoint"))
         ):
             return
-        turn_kernel.finalize_checkpoint(
+        await to_thread_cancel_safe(turn_kernel.finalize_checkpoint,
             session_id=self.turn_ctx.session_id,
             user_message=self.turn_ctx.user_message,
             state=self.turn_ctx.state,

@@ -14,7 +14,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
-from backend.agent.compaction import format_compaction_history, parse_compaction_output
+from backend.agent.compaction import (
+    COMPACTION_USER_INPUT_MAX_TOKENS,
+    format_compaction_history,
+    parse_compaction_output,
+    retain_user_inputs,
+)
 from backend.agent.context_ledger import (
     ContextLedger,
     ContextLedgerCategory,
@@ -24,7 +29,6 @@ from backend.agent.context_ledger import (
 from backend.agent.state import AgentState
 from backend.agent.history_store import (
     ConversationHistory,
-    estimate_message_tokens,
     group_raw_messages,
     repair_tool_messages,
 )
@@ -37,8 +41,15 @@ from backend.agent.attachment_policy import (
     supports_native_pdf_input,
 )
 from backend.attachments.store import AttachmentStore
-from backend.llm.base import LLMMessage, SideQueryOptions, ToolCallEvent, UsageInfo
+from backend.llm.base import (
+    LLMAdapter, LLMMessage, SideQueryOptions, ToolCallEvent, UsageInfo,
+    estimate_llm_context_tokens, estimate_llm_message_tokens, estimate_text_tokens,
+    estimate_tool_schema_tokens,
+)
 from backend.llm.capabilities import capabilities_for_adapter
+from backend.llm.native_compaction import NATIVE_COMPACTION_TYPE, native_compaction_windows, validate_compaction_window
+from backend.skills.manager import SkillManager
+from backend.skills.executor import SkillExecutor
 from backend.agent.prompting import (
     COMPACTION_SYSTEM_PROMPT,
     PromptParts,
@@ -71,13 +82,45 @@ class CompactionNoopError(RuntimeError):
         super().__init__(message)
 
 
+def local_timezone_name(now: datetime | None = None) -> str:
+    """Name the host time zone in a form the model can reason about.
+
+    Prefers an explicit ``TZ`` setting, then the IANA name of the local zone.
+    Falls back to a fixed UTC offset. ``datetime.tzname()`` is never used: on
+    Windows it is the localized display name decoded through the ANSI code
+    page, which yields mojibake outside Latin locales.
+    """
+    configured = str(os.environ.get("TZ") or "").strip()
+    if configured:
+        return configured
+    try:
+        from tzlocal import get_localzone_name
+
+        iana = str(get_localzone_name() or "").strip()
+    except Exception:
+        iana = ""
+    if iana:
+        return iana
+    current = now or datetime.now().astimezone()
+    offset = current.utcoffset()
+    if offset is None:
+        return "UTC"
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    hours, minutes = divmod(abs(total_minutes), 60)
+    return f"UTC{sign}{hours:02d}:{minutes:02d}"
+
+
 def clone_context_builder(builder: "ContextBuilder") -> "ContextBuilder":
     """Clone reusable prompt/history state for branch-style agent runs."""
     cloned = copy(builder)
     for name in (
         "_pending_runtime_context_update",
         "_persistent_notes",
+        "extension_state",
+        "extension_cursor",
         "_read_file_hashes",
+        "_turn_admissions",
         "_last_prompt_section_summary",
         "_tool_result_budget_seen_ids",
         "_tool_result_budget_replacements",
@@ -89,6 +132,7 @@ def clone_context_builder(builder: "ContextBuilder") -> "ContextBuilder":
     # ConversationHistory clones independently: its estimator is a bound
     # helper on the source builder and must not be deep-copied.
     cloned._history_store = builder._history_store.clone()
+    cloned._withheld_media_timestamps = set()
     return cloned
 
 
@@ -176,6 +220,11 @@ def _sanitize_provider_items(raw_items: Any) -> list[dict[str, Any]]:
     for raw in raw_items:
         if not isinstance(raw, dict):
             continue
+        if raw.get("type") == NATIVE_COMPACTION_TYPE:
+            # This item owns a complete context window. Never turn corrupt or
+            # unknown native state into a silently empty successful restore.
+            sanitized.append(validate_compaction_window(_clone_provider_value(raw)))
+            continue
         try:
             safe = _clone_provider_value(raw)
         except (TypeError, ValueError, OverflowError):
@@ -213,6 +262,7 @@ def _sanitize_provider_items(raw_items: Any) -> list[dict[str, Any]]:
         if item_type not in {
             "reasoning",
             "function_call",
+            "custom_tool_call",
             "chat_reasoning",
             "reasoning_content",
             # Backward compatibility for snapshots created before Anthropic
@@ -303,29 +353,6 @@ POST_COMPACT_MAX_TOKENS_PER_FILE = 5_000
 # Summary output is bounded independently from the user-message compaction
 # budget.
 COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS = 20_000
-
-TURN_PREFIX_SUMMARIZATION_PROMPT = """This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
-
-Summarize the prefix to provide context for the retained suffix:
-
-## Original Request
-[What did the user ask for in this turn?]
-
-## Early Progress
-- [Key decisions and work done in the prefix]
-
-## Context for Suffix
-- [Information needed to understand the retained recent work]
-
-Be concise. Focus on what's needed to understand the kept suffix."""
-
-
-@dataclass(frozen=True, slots=True)
-class _CompactionCut:
-    first_kept_index: int
-    turn_start_index: int
-    is_split_turn: bool
-
 
 @dataclass(frozen=True, slots=True)
 class _ToolResultBudgetCandidate:
@@ -462,10 +489,7 @@ def _detect_project_type(cwd: Path) -> str:
 
 
 def _estimate_content_tokens(content: str) -> int:
-    """Estimate tokens with the provider-neutral ``chars / 4`` heuristic."""
-    if not content:
-        return 0
-    return (len(content) + 3) // 4
+    return estimate_text_tokens(content)
 
 
 def _xml_text(value: Any) -> str:
@@ -497,7 +521,7 @@ class ContextBuilder:
 
     @_history.setter
     def _history(self, value: list[LLMMessage]) -> None:
-        self._history_store.messages = value
+        self._history_store.replace_all(value)
 
     @property
     def _history_frozen_count(self) -> int:
@@ -544,14 +568,7 @@ class ContextBuilder:
         message: LLMMessage,
         raw_content: Any | None = None,
     ) -> int:
-        """Token estimator used by ConversationHistory (content + native media)."""
-        return int(
-            estimate_message_tokens(
-                raw_content if raw_content is not None else message.content,
-                message.tool_calls,
-            )
-            + estimate_native_attachments(message.images, message.documents)[0]
-        )
+        return estimate_llm_message_tokens(message, raw_content)
 
     def __init__(
         self,
@@ -574,6 +591,8 @@ class ContextBuilder:
         self._compaction_count = 0
         self._skill_executor = skill_executor
         self._skill_manager = skill_manager
+        if isinstance(skill_manager, SkillManager):
+            self.bind_skill_manager(skill_manager, workspace_root)
         self._memory_manager = memory_manager
         self._llm = llm
         self._llm_turn_context: Any | None = None
@@ -589,11 +608,18 @@ class ContextBuilder:
         self._attachment_store = AttachmentStore()
         self._last_actual_prompt_tokens = 0
         self._last_estimated_prompt_tokens = 0
+        self._request_prompt_estimate = 0
+        self._request_history_estimate = 0
+        self._observed_prompt_estimate = 0
+        self._observed_history_estimate = 0
+        self._withheld_media_timestamps: set[int] = set()
         # Keep read-file state across user turns so an interrupted
         # task can resume edits without rereading unchanged files. The content
         # hash remains an optimistic guard: writes still fail if the file has
         # changed since the last successful read.
         self._read_file_hashes: dict[str, str] = {}
+        self._turn_admissions: dict[str, dict[str, Any]] = {}
+        self._background_commands: Any | None = None
         self._prepared_prompt_parts: PromptParts | None = None
         self._prepared_prompt_state: AgentState | None = None
         self._last_prompt_section_summary: dict[str, Any] = {}
@@ -601,6 +627,9 @@ class ContextBuilder:
         # one turn. The override is ephemeral and is never written to the
         # durable conversation snapshot.
         self._extension_system_prompt_override: str | None = None
+        self.extension_state: dict[str, Any] = {}
+        self.extension_cursor: dict[str, Any] = {}
+        self._extension_history_floor = 0
         self._git_status_context: str | None = None
         self._git_status_workspace: str = ""
         self._guideline_load_reason = "session_start"
@@ -623,15 +652,23 @@ class ContextBuilder:
         # longer causes datetime/TZ drift on every provider iteration.
         session_now = datetime.now().astimezone()
         self._session_current_date = session_now.strftime("%Y-%m-%d")
-        self._session_timezone = (
-            str(os.environ.get("TZ") or "").strip()
-            or session_now.tzname()
-            or "local"
-        )
+        self._session_timezone = local_timezone_name(session_now)
 
     def bind_llm(self, llm: Any) -> None:
         """Bind the session's active adapter for compaction and side queries."""
+        if self._llm is not llm:
+            self._withheld_media_timestamps.clear()
+            self._last_actual_prompt_tokens = 0
+            self._last_estimated_prompt_tokens = 0
         self._llm = llm
+
+    @property
+    def skill_manager(self) -> Any | None:
+        return self._skill_manager
+
+    def bind_skill_manager(self, manager: SkillManager, workspace_root: Path | str | None) -> None:
+        self._skill_manager = manager.snapshot(workspace_root)
+        self._skill_executor = SkillExecutor(self._skill_manager)
 
     def bind_budget(self, token_budget: TokenBudget) -> None:
         """Bind the active turn budget used by prompt and compaction paths."""
@@ -642,6 +679,12 @@ class ContextBuilder:
 
     def bind_hook_manager(self, hook_manager: Any) -> None:
         self._hook_manager = hook_manager
+
+    def bind_background_commands(self, manager: Any | None) -> None:
+        self._background_commands = manager
+
+    def record_turn_admission(self, message_id: str, boundary: dict[str, Any]) -> None:
+        self._turn_admissions[message_id] = dict(boundary)
 
     @property
     def hook_manager(self) -> Any | None:
@@ -786,6 +829,7 @@ class ContextBuilder:
         insert_at = 1 if (
             self._history
             and self._history[0].role == "user"
+            and not self._history[0].is_user_input
             and _extract_compaction_summary(str(self._history[0].content or ""))
             is not None
         ) else 0
@@ -887,6 +931,7 @@ class ContextBuilder:
 
     async def start_turn(self, user_message: str, state: AgentState) -> None:
         """Render and store one model-visible user turn."""
+        self._withheld_media_timestamps.clear()
         user_message = str(user_message or "")
         if not user_message.strip() and not state.attachments:
             return
@@ -944,6 +989,7 @@ class ContextBuilder:
                 documents=attachment_plan.documents,
                 attachment_refs=self._snapshot_attachment_refs(state.attachments),
                 runtime_context=runtime_context,
+                is_user_input=True,
             ),
             raw_content=user_turn_content,
         )
@@ -1035,13 +1081,6 @@ class ContextBuilder:
             prompt_parts = self._build_prompt_parts(active_state, workspace_root)
         self._prepared_prompt_parts = None
         self._prepared_prompt_state = None
-        system_content = prompt_parts.render_system()
-        if self._extension_system_prompt_override is not None:
-            system_content = self._extension_system_prompt_override
-        plugin_instructions = self._build_plugin_instructions(active_state)
-        tool_runtime_instructions = self._build_tool_runtime_context_block(
-            active_state
-        ).strip()
         self._pending_runtime_context_update = ""
         # Clean obsolete unsent wrappers first.  A changed runtime projection
         # is then appended as a durable history checkpoint and is not removed
@@ -1049,6 +1088,27 @@ class ContextBuilder:
         self._compact_old_user_runtime_context_for_cache()
         self._refresh_active_user_runtime_context(active_state)
 
+        messages = self._render_prompt_messages(active_state, workspace_root, prompt_parts)
+        # Freeze the transcript used by this request; subsequent runtime updates append.
+        self._history_frozen_count = max(self._history_frozen_count, len(self._history))
+        return messages
+
+    def _render_prompt_messages(
+        self, state: AgentState, workspace_root: Path | None,
+        prompt_parts: PromptParts | None = None,
+    ) -> list[LLMMessage]:
+        """One provider projection shared by sending and budget accounting."""
+        if any(native_compaction_windows(message) for message in self._history):
+            self._llm.validate_context(self._history)
+        prompt_parts = prompt_parts or self._build_prompt_parts(state, workspace_root)
+        messages: list[LLMMessage] = []
+        system_content = prompt_parts.render_system()
+        if self._extension_system_prompt_override is not None:
+            system_content = self._extension_system_prompt_override
+        plugin_instructions = self._build_plugin_instructions(state)
+        tool_runtime_instructions = self._build_tool_runtime_context_block(
+            state
+        ).strip()
         # ── End of system prompt ────────────────────────────────────────────────
         # Retrieval remains agentic: memory and document context enter through
         # explicit tool results instead of an implicit per-turn injection.
@@ -1071,15 +1131,49 @@ class ContextBuilder:
             )
         supports_images = capabilities_for_adapter(self._llm).vision is not False
         supports_pdf = supports_native_pdf_input(self._llm)
-        for message in self._get_history_within_budget():
+        history = self._get_history_within_budget()
+        attachment_tokens_left = max(
+            0, self._budget.total - self._budget.response_reserve
+            - sum(self._estimate_history_message(message) for message in messages + history),
+        )
+        for message in history:
+            if message.timestamp_ms in self._withheld_media_timestamps:
+                references = ", ".join(
+                    f"read_artifact('{ref['artifact_id']}')"
+                    for ref in message.attachment_refs if ref.get("artifact_id")
+                )
+                notice = (
+                    "[media-size recovery] Native media is temporarily omitted from this request "
+                    "after a provider size rejection. Original attachments are retained. "
+                    + (f"Read them using {references}, or retry with a supported model." if references
+                       else "Retry with a supported model to inspect the retained media.")
+                )
+                message = replace(
+                    message, images=[], documents=[],
+                    content=message.content + "\n\n" + notice,
+                )
             if message.documents and not supports_pdf:
                 pdf_refs = [ref for ref in message.attachment_refs if ref.get("media_type") == "application/pdf"]
                 plan = build_attachment_input_plan(
                     pdf_refs or [{**document, "kind": "document"} for document in message.documents],
                     llm=self._llm, attachment_store=self._attachment_store,
-                    conversation_id=str(getattr(active_state, "conversation_id", "") or ""),
+                    conversation_id=str(getattr(state, "conversation_id", "") or ""),
                     workspace_root=str(workspace_root or ""),
                 )
+                inlined_texts = []
+                hints = list(plan.text_hints)
+                for item in plan.inlined_texts:
+                    tokens = _estimate_content_tokens(item["content"])
+                    if tokens <= attachment_tokens_left:
+                        inlined_texts.append(item)
+                        attachment_tokens_left -= tokens
+                    else:
+                        hints.append(
+                            f"- {item['file_name']}: the complete extracted PDF text exceeds the remaining input budget. "
+                            f"Read it in sections with read_artifact('{item['artifact_id']}', offset=1, limit=100) "
+                            "before answering about its contents. The original file and complete extracted text are retained."
+                        )
+                plan = replace(plan, inlined_texts=inlined_texts, text_hints=hints)
                 message = replace(message, documents=[], content=self._with_attachment_text_fallback(message.content, plan))
             if message.images and not supports_images:
                 # Keep canonical pixels/refs in history. Like Codex for_prompt,
@@ -1090,15 +1184,6 @@ class ContextBuilder:
                 ] or [unsupported_image_hint("Image")]
                 message = replace(message, images=[], content=message.content + "\n\n" + "\n".join(hints))
             messages.append(message)
-        # ``build`` is the provider boundary: callers consume this exact list
-        # for the next request.  Freeze the durable transcript now so a later
-        # iteration can only append new runtime/user data and never rewrite the
-        # bytes that formed this request's cache prefix.
-        self._history_frozen_count = max(
-            self._history_frozen_count,
-            len(self._history),
-        )
-
         return messages
 
     @staticmethod
@@ -1336,20 +1421,11 @@ class ContextBuilder:
             )
             if not plan.images and not plan.documents:
                 continue
-            self._history[index] = LLMMessage(
-                role=message.role,
-                content=message.content,
-                name=message.name,
-                tool_call_id=message.tool_call_id,
-                tool_calls=message.tool_calls,
-                is_error=message.is_error,
-                phase=message.phase,
-                provider_items=list(message.provider_items),
+            self._history[index] = replace(
+                message,
                 images=message.images or plan.images,
                 documents=message.documents or plan.documents,
                 attachment_refs=refs,
-                runtime_context=message.runtime_context,
-                timestamp_ms=message.timestamp_ms,
             )
             changed = True
         if changed:
@@ -1396,6 +1472,7 @@ class ContextBuilder:
             memory_context=self._build_memory_context(),
             persistent_context=self._build_persistent_context(),
             git_status_context=self._git_status_context,
+            model_instructions=self._llm.model_instructions() if isinstance(self._llm, LLMAdapter) else "",
         )
         self._last_prompt_section_summary = summarize_prompt_sections(sections)
         state.prompt_context["prompt_section_summary"] = (
@@ -1473,6 +1550,9 @@ class ContextBuilder:
         active_index: int | None = None
         for index in range(len(self._history) - 1, -1, -1):
             message = self._history[index]
+            if native_compaction_windows(message):
+                active_index = index
+                break
             if (
                 message.role != "user"
                 or message.tool_call_id
@@ -1492,7 +1572,7 @@ class ContextBuilder:
         if active_index is None:
             return False
         active = self._history[active_index]
-        if self._history_message_is_frozen(active_index):
+        if native_compaction_windows(active) or self._history_message_is_frozen(active_index):
             latest_runtime = str(active.runtime_context or "").strip()
             for later in reversed(self._history[active_index + 1 :]):
                 if self._is_durable_runtime_update(later):
@@ -1529,20 +1609,10 @@ class ContextBuilder:
         )
         if refreshed == content and runtime_context == refreshed_runtime:
             return False
-        self._history[active_index] = LLMMessage(
-            role=active.role,
+        self._history[active_index] = replace(
+            active,
             content=refreshed,
-            name=active.name,
-            tool_call_id=active.tool_call_id,
-            tool_calls=active.tool_calls,
-            is_error=active.is_error,
-            images=list(active.images),
-            documents=list(active.documents),
-            phase=active.phase,
-            provider_items=list(active.provider_items),
-            attachment_refs=list(active.attachment_refs),
             runtime_context=refreshed_runtime,
-            timestamp_ms=active.timestamp_ms,
         )
         self._history_store.rebuild_token_cache()
         self._last_actual_prompt_tokens = 0
@@ -2105,17 +2175,35 @@ class ContextBuilder:
         *,
         phase: str = "",
         provider_items: list[dict[str, Any]] | None = None,
-    ) -> None:
+        message: LLMMessage | None = None,
+    ) -> LLMMessage:
         """Append assistant message with tool_calls. Optionally preserve preceding text."""
-        self._history_store.append(
-            LLMMessage(
+        if message is None:
+            message = LLMMessage(
                 role="assistant",
                 content=content,
-                tool_calls=tool_calls,
+                tool_calls=list(tool_calls),
                 phase=str(phase or ""),
                 provider_items=list(provider_items or []),
             )
-        )
+            self._history_store.append(message)
+        else:
+            message.tool_calls.extend(tool_calls)
+            message.content = content
+            message.phase = str(phase or "")
+            if provider_items:
+                message.provider_items = list(provider_items)
+            self._history_store.refresh_message_estimate(message)
+        return message
+
+    def settle_streamed_tool_message(self, message: LLMMessage) -> None:
+        """Keep tool results in call order before the next provider request."""
+        index = next(i for i, item in enumerate(self._history) if item is message)
+        ids = {call.id for call in message.tool_calls}
+        results = {item.tool_call_id: item for item in self._history[index + 1:] if item.role == "tool" and item.tool_call_id in ids}
+        remainder = [item for item in self._history[index + 1:] if not (item.role == "tool" and item.tool_call_id in ids)]
+        self._history[index + 1:] = [results[call.id] for call in message.tool_calls if call.id in results] + remainder
+        self._history_store.rebuild_token_cache(changed_from=index + 1)
 
     def reconcile_dangling_tool_calls(self) -> int:
         """Keep tool messages valid for OpenAI-compatible providers.
@@ -2251,24 +2339,10 @@ class ContextBuilder:
             if not stripped:
                 continue
             next_history.append(
-                LLMMessage(
-                    role=message.role,
+                replace(
+                    message,
                     content=stripped,
-                    name=message.name,
-                    tool_call_id=message.tool_call_id,
-                    tool_calls=message.tool_calls,
-                    is_error=message.is_error,
-                    images=list(message.images),
-                    documents=list(message.documents),
-                    phase=message.phase,
-                    provider_items=list(message.provider_items),
-                    attachment_refs=list(message.attachment_refs),
                     runtime_context="",
-                    # Runtime-wrapper cleanup is a content projection, not a
-                    # new transcript event. Preserve the durable timestamp so
-                    # a later rebuild/resume cannot serialize a different
-                    # prefix solely because this unsent message was normalized.
-                    timestamp_ms=message.timestamp_ms,
                 )
             )
         if changed:
@@ -2474,7 +2548,8 @@ class ContextBuilder:
         return max(
             estimated,
             self._last_estimated_prompt_tokens,
-            self._last_actual_prompt_tokens,
+            self._last_actual_prompt_tokens + max(0, self._history_tokens_total - self._observed_history_estimate)
+            if self._last_actual_prompt_tokens else 0,
         )
 
     def context_ledger(self) -> ContextLedger:
@@ -2518,35 +2593,14 @@ class ContextBuilder:
             categories[category]["tokens"] += _estimate_content_tokens("x" * chars)
             item_counts[category] += 1
 
-        native_attachment_tokens = 0
-        native_attachment_count = 0
-        for index, message in enumerate(self._history):
-            estimate = (
-                self._history_token_estimates[index]
-                if index < len(self._history_token_estimates)
-                else estimate_message_tokens(message.content, message.tool_calls)
-            )
-            attachment_tokens, attachment_count, attachment_sources = (
-                estimate_native_attachments(
-                    message.images,
-                    message.documents,
-                )
-            )
-            if message.role == "tool":
-                category = "tool_results"
-                source = str(message.name or "tool")
-            else:
-                category = "history"
-                source = str(message.role or "message")
-            categories[category]["tokens"] += max(0, int(estimate) - attachment_tokens)
-            categories[category]["sources"].append(source)
-            item_counts[category] += 1
-            if attachment_count:
-                native_attachment_tokens += attachment_tokens
-                native_attachment_count += attachment_count
-                item_counts["files_attachments"] += attachment_count
-                categories["files_attachments"]["tokens"] += attachment_tokens
-                categories["files_attachments"]["sources"].extend(attachment_sources)
+        history_ledger = self._history_store.ledger_categories()
+        for category, row in history_ledger.items():
+            categories[category]["tokens"] += row["tokens"]
+            categories[category]["sources"].extend(row["sources"])
+            categories[category]["source_count"] = row["source_count"]
+            item_counts[category] += row["items"]
+        native_attachment_tokens = history_ledger["files_attachments"]["tokens"]
+        native_attachment_count = history_ledger["files_attachments"]["items"]
 
         for note in self._persistent_notes:
             content = str(note.get("content") or "")
@@ -2571,7 +2625,7 @@ class ContextBuilder:
                     "label": values["label"],
                     "estimated_tokens": int(values["tokens"]),
                     "item_count": item_counts[category],
-                    "source_count": len(sources),
+                    "source_count": values.get("source_count", len(sources)),
                     "sources": sources[:12],
                 }
             )
@@ -2584,6 +2638,11 @@ class ContextBuilder:
             "native_attachment_count": native_attachment_count,
             "entries": entries,
         }
+
+    def begin_provider_request(self, messages: list[LLMMessage], tools: list[dict[str, Any]]) -> None:
+        """Capture the admitted input before streamed tool items change history."""
+        self._request_prompt_estimate = estimate_llm_context_tokens(messages, tools)
+        self._request_history_estimate = self._history_tokens_total
 
     def record_actual_usage(
         self, usage: UsageInfo | None, provider_raw: dict[str, Any] | None = None
@@ -2602,6 +2661,8 @@ class ContextBuilder:
         cache_creation = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
         if observed > 0:
             self._last_actual_prompt_tokens = observed
+            self._observed_prompt_estimate = self._request_prompt_estimate
+            self._observed_history_estimate = self._request_history_estimate
         # Cache-hit diagnostic: log cache efficiency when provider reports cache reads
         if cache_read > 0 and observed > 0:
             logger.info(
@@ -2616,84 +2677,25 @@ class ContextBuilder:
     def strip_historical_media(
         self, *, keep_recent_user_turns: int = 1
     ) -> dict[str, int]:
-        """Drop image/document attachments from older history turns.
-
-        Used for media-size recovery: oversized attachments that already failed
-        the provider request are removed so the next attempt can continue with
-        text-only historical context. The most recent user turn attachments are
-        preserved by default so the active request can still be inspected.
-        """
-        keep_recent = max(0, int(keep_recent_user_turns))
-        user_indices = [
-            idx for idx, msg in enumerate(self._history) if msg.role == "user"
-        ]
-        # Protect only the latest user turn when there is older history to strip.
-        # If the conversation has a single user turn, still strip its media —
-        # that is the only recovery lever for a media-size rejection.
-        protected: set[int] = set()
-        if keep_recent and len(user_indices) > keep_recent:
-            protected = set(user_indices[-keep_recent:])
-
-        stripped_messages = 0
-        stripped_images = 0
-        stripped_documents = 0
-        changed = False
-        for idx, msg in enumerate(self._history):
-            if idx in protected:
+        """Withhold rejected native media for this turn, preserving canonical history."""
+        self._history_store.ensure_timestamps()
+        users = [i for i, message in enumerate(self._history) if message.role == "user"]
+        keep = max(0, int(keep_recent_user_turns))
+        protected = set(users[-keep:]) if keep else set()
+        stats = {"messages": 0, "images": 0, "documents": 0}
+        for index, message in enumerate(self._history):
+            if index in protected or message.timestamp_ms in self._withheld_media_timestamps:
                 continue
-            images = list(getattr(msg, "images", []) or [])
-            documents = list(getattr(msg, "documents", []) or [])
-            if not images and not documents:
+            if not message.images and not message.documents:
                 continue
-            stripped_images += len(images)
-            stripped_documents += len(documents)
-            stripped_messages += 1
-            changed = True
-            note_bits: list[str] = []
-            if images:
-                note_bits.append(f"{len(images)} image(s)")
-            if documents:
-                note_bits.append(f"{len(documents)} document(s)")
-            note = (
-                f"[media-size recovery] Removed historical {' and '.join(note_bits)} "
-                "from context after a provider media-size rejection. "
-                "Re-attach a smaller asset if the original media is still required."
-            )
-            content = str(msg.content or "").rstrip()
-            if note not in content:
-                content = f"{content}\n\n{note}".strip() if content else note
-            self._history[idx] = LLMMessage(
-                role=msg.role,
-                content=content,
-                name=msg.name,
-                tool_call_id=msg.tool_call_id,
-                tool_calls=msg.tool_calls,
-                images=[],
-                documents=[],
-                attachment_refs=[],
-                phase=getattr(msg, "phase", None),
-                provider_items=getattr(msg, "provider_items", None),
-                is_error=msg.is_error,
-                runtime_context=msg.runtime_context,
-                timestamp_ms=msg.timestamp_ms,
-            )
-
-        if changed:
-            self._history_frozen_count = 0
-            self._history_store.rebuild_token_cache()
+            self._withheld_media_timestamps.add(message.timestamp_ms)
+            stats["messages"] += 1
+            stats["images"] += len(message.images)
+            stats["documents"] += len(message.documents)
+        if stats["messages"]:
             self._last_actual_prompt_tokens = 0
             self._last_estimated_prompt_tokens = 0
-            logger.info(
-                "[MediaSizeRecovery] stripped_messages=%d images=%d documents=%d",
-                stripped_messages,
-                stripped_images,
-                stripped_documents,
-            )
-        return {
-            "messages": stripped_messages,
-            "images": stripped_images,
-            "documents": stripped_documents,
-        }
+        return stats
 
     def quarantine_latest_external_web_results(self) -> int:
         """Isolate the latest web-tool batch after a provider content refusal.
@@ -2765,62 +2767,26 @@ class ContextBuilder:
         self,
         state: AgentState,
         tool_schemas: list[dict[str, Any]] | None = None,
+        *,
+        messages: list[LLMMessage] | None = None,
     ) -> dict[str, Any]:
-        workspace_root = self._workspace_root_for_state(state)
-        prompt_parts = self._build_prompt_parts(state, workspace_root)
-        system_tokens = _estimate_content_tokens(prompt_parts.render_system())
-        plugin_tokens = _estimate_content_tokens(self._build_plugin_instructions(state))
-        runtime_instruction_tokens = _estimate_content_tokens(
-            self._build_tool_runtime_context_block(state)
+        if messages is None:
+            workspace_root = self._workspace_root_for_state(state)
+            self._rehydrate_attachment_refs(state, workspace_root)
+            messages = self._render_prompt_messages(state, workspace_root)
+        system_tokens = sum(self._estimate_history_message(m) for m in messages if m.role == "system")
+        developer_tokens = sum(self._estimate_history_message(m) for m in messages if m.role == "developer")
+        plugin_instructions = self._build_plugin_instructions(state).strip()
+        plugin_tokens = sum(
+            self._estimate_history_message(m) for m in messages
+            if plugin_instructions and m.role == "developer" and m.content == plugin_instructions
         )
-        history_tokens = 0
-        tools_tokens = 0
-        for index in self._get_history_within_budget_indices():
-            history_tokens += self._history_token_estimates[index]
-        # The trusted turn runtime is normally already part of the active user
-        # message.  Replace that message's old projection in the estimate when
-        # the workspace/mode changed; otherwise a dynamic update would be
-        # under-counted (or counted twice).  Before the first turn there is no
-        # provenance-bearing message yet, so retain a projected runtime estimate.
-        current_runtime = self._build_runtime_context_prefix(state).strip()
-        runtime_message_index = next(
-            (
-                index
-                for index in range(len(self._history) - 1, -1, -1)
-                if self._history[index].role == "user"
-                and str(self._history[index].runtime_context or "").strip()
-            ),
-            -1,
-        )
-        trusted_runtime_tokens = 0
-        if runtime_message_index >= 0:
-            runtime_message = self._history[runtime_message_index]
-            user_text = self._strip_trusted_runtime_context(runtime_message)
-            projected_content = self._build_user_turn_content(user_text, state)
-            history_tokens += (
-                estimate_message_tokens(
-                    projected_content,
-                    runtime_message.tool_calls,
-                )
-                - self._history_token_estimates[runtime_message_index]
-            )
-        else:
-            trusted_runtime_tokens = _estimate_content_tokens(current_runtime)
-
-        if tool_schemas:
-            tools_tokens = _estimate_content_tokens(str(tool_schemas))
-
-        used = (
-            system_tokens
-            + plugin_tokens
-            + runtime_instruction_tokens
-            + trusted_runtime_tokens
-            + history_tokens
-            + tools_tokens
-        )
+        history_tokens = sum(self._estimate_history_message(m) for m in messages if m.role not in {"system", "developer"})
+        tools_tokens = estimate_tool_schema_tokens(tool_schemas)
         observed_actual = self._last_actual_prompt_tokens
-        if observed_actual > used:
-            used = observed_actual
+        estimated = system_tokens + developer_tokens + history_tokens + tools_tokens
+        correction = max(0, observed_actual - self._observed_prompt_estimate) if self._observed_prompt_estimate else 0
+        used = max(estimated + correction, observed_actual)
         self._last_estimated_prompt_tokens = used
         return {
             "used": used,
@@ -2828,8 +2794,8 @@ class ContextBuilder:
             "breakdown": {
                 "system": system_tokens,
                 "plugins": plugin_tokens,
-                "runtime_instructions": runtime_instruction_tokens,
-                "trusted_runtime": trusted_runtime_tokens,
+                "runtime_instructions": developer_tokens - plugin_tokens,
+                "trusted_runtime": 0,
                 "skills": 0,
                 "retrieved": 0,
                 "history": history_tokens,
@@ -2843,6 +2809,7 @@ class ContextBuilder:
         state: AgentState | None = None,
         *,
         tool_schemas: list[dict[str, Any]] | None = None,
+        messages: list[LLMMessage] | None = None,
     ) -> bool:
         # The compaction boundary is the request that can actually be sent:
         # rendered prompt tokens plus the provider response reserve.  Keep the
@@ -2850,7 +2817,7 @@ class ContextBuilder:
         # makes low-window providers compact even when the rendered request
         # fits exactly, and had no matching production-source owner.
         snapshot = self.get_budget_snapshot(
-            state or AgentState(user_message=""), tool_schemas=tool_schemas
+            state or AgentState(user_message=""), tool_schemas=tool_schemas, messages=messages
         )
         trigger = max(0, self._budget.total - self._budget.response_reserve)
         return int(snapshot.get("used", 0)) > trigger
@@ -2941,6 +2908,7 @@ class ContextBuilder:
         blocks: list[str] = []
         for title, payload in (
             ("Active plan snapshot", self._latest_plan_snapshot(state)),
+            ("Owned command state", self._post_compaction_commands(state)),
         ):
             if payload is None:
                 continue
@@ -2948,10 +2916,31 @@ class ContextBuilder:
             blocks.append(
                 f"### {title}\n"
                 "This is structured session state restored after compaction. "
-                "Use it as the current plan/todo checkpoint, not just prose summary.\n"
+                "Continue from this task checkpoint. For commands, keep the existing command_id, "
+                "use monitor with next_cursor, and observe the exit before dependent work.\n"
                 f"```json\n{rendered}\n```"
             )
         return blocks
+
+    def _post_compaction_commands(self, state: AgentState) -> list[dict[str, Any]] | None:
+        if self._background_commands is None:
+            return None
+        observed = {record.command_id for record in state.tool_calls if record.command_id}
+        cursors = {
+            record.command_id: record.output_cursor for record in state.tool_calls
+            if record.command_id and record.output_cursor is not None
+        }
+        return [
+            {"command_id": command["command_id"], "status": command["status"],
+             "command": command["command"][:1000], "cwd": command["cwd"],
+             "exit_code": command["exit_code"], "next_cursor": cursors.get(command["command_id"], 0),
+             "output_path": command["output_path"]}
+            for command in self._background_commands.list_commands(
+                include_completed=True,
+                conversation_id=state.conversation_id or state.prompt_context.get("session_id", ""),
+            )
+            if command["status"] == "running" or command["command_id"] in observed
+        ] or None
 
     @staticmethod
     def _latest_plan_snapshot(state: AgentState) -> dict[str, Any] | None:
@@ -3081,7 +3070,16 @@ class ContextBuilder:
         cloned = clone_context_builder(self)
         if message_index < 0:
             message_index = max(0, len(self._history) + message_index)
-        cloned._history = list(self._history[: max(0, message_index + 1)])
+        from backend.agent.extension_history import rewind_extension_state
+        cloned.extension_state = rewind_extension_state(
+            self.extension_state, history_end=max(0, message_index + 1), current_history_end=len(self._history),
+        )
+        cloned.extension_cursor = {}
+        cloned._history = cloned._history[: max(0, message_index + 1)]
+        cloned._turn_admissions = {
+            key: boundary for key, boundary in cloned._turn_admissions.items()
+            if boundary["history_end"] <= len(cloned._history)
+        }
         cloned._history_frozen_count = min(
             max(0, int(cloned._history_frozen_count)),
             len(cloned._history),
@@ -3142,15 +3140,15 @@ class ContextBuilder:
             ).strip()
         return str(await self._llm.simple_chat(messages)).strip()
 
-    def _compaction_cut(self, keep_recent_tokens: int) -> _CompactionCut:
-        """Find a valid token cut, including split-turn metadata."""
+    def _compaction_cut(self, keep_recent_tokens: int) -> int:
+        """Find a token cut that does not separate a tool call from its result."""
         valid_cut_points = [
             index
             for index, message in enumerate(self._history)
             if message.role in {"user", "assistant"}
         ]
         if not valid_cut_points:
-            return _CompactionCut(0, -1, False)
+            return 0
 
         cut_index = valid_cut_points[0]
         accumulated = 0
@@ -3160,26 +3158,14 @@ class ContextBuilder:
             if accumulated >= target:
                 cut_index = next(
                     (point for point in valid_cut_points if point >= index),
-                    cut_index,
+                    # If the final tool result alone exceeds the tail target,
+                    # retain its call/result group instead of falling back to
+                    # index zero and declaring the entire history uncompactable.
+                    valid_cut_points[-1],
                 )
                 break
 
-        if self._history[cut_index].role == "user":
-            return _CompactionCut(cut_index, -1, False)
-
-        turn_start = next(
-            (
-                index
-                for index in range(cut_index - 1, -1, -1)
-                if self._history[index].role == "user"
-            ),
-            -1,
-        )
-        return _CompactionCut(
-            cut_index,
-            turn_start,
-            turn_start >= 0,
-        )
+        return cut_index
 
 
     async def compact(
@@ -3187,39 +3173,41 @@ class ContextBuilder:
     ) -> str:
         """Summarize older entries while preserving a token-bounded recent tail."""
         clear_system_prompt_sections()
-        keep_recent = self._agent_settings.compaction_keep_recent_tokens
-        cut = self._compaction_cut(keep_recent)
-        recent_start = cut.first_kept_index
+        if capabilities_for_adapter(self._llm).native_compaction:
+            return await self._compact_native_context(focus, restore_state)
+        # A local summary can compact newer readable history, but may not
+        # rewrite or discard an already-installed encrypted provider window.
+        pinned_end = next((index + 1 for index in range(len(self._history) - 1, -1, -1)
+                           if native_compaction_windows(self._history[index])), 0)
+        if pinned_end:
+            self._llm.validate_context(self._history)
+        keep_recent = min(self._agent_settings.compaction_keep_recent_tokens, max(0, self._budget.history_budget // 2))
+        recent_start = self._compaction_cut(keep_recent)
 
-        if recent_start <= 0:
+        if recent_start <= pinned_end:
             raise CompactionNoopError()
 
-        if cut.is_split_turn:
-            history_messages = self._history[: cut.turn_start_index]
-            turn_prefix_messages = self._history[
-                cut.turn_start_index : recent_start
-            ]
-            history_summary = (
-                await self._summarize_early(history_messages, focus=focus)
-                if history_messages
-                else "No prior history."
-            )
-            turn_prefix_summary = await self._summarize_turn_prefix(
-                turn_prefix_messages
-            )
-            compressed_summary = (
-                f"{history_summary}\n\n---\n\n"
-                "**Turn Context (split turn):**\n\n"
-                f"{turn_prefix_summary}"
-            )
-        else:
-            early_messages = self._history[:recent_start]
-            compressed_summary = await self._summarize_early(
-                early_messages,
-                focus=focus,
-            )
-        self._guideline_load_reason = "compact"
-        next_compaction_count = self._compaction_count + 1
+        pinned = self._history[:pinned_end]
+        early_messages = self._history[pinned_end:recent_start]
+        recent = self._history[recent_start:]
+        wrapper_tokens = estimate_text_tokens(COMPACTION_SUMMARY_PREFIX + COMPACTION_SUMMARY_SUFFIX)
+        available = self._budget.history_budget - sum(self._estimate_history_message(message) for message in pinned + recent) - wrapper_tokens
+        if available <= 0:
+            raise CompactionNoopError("The retained context leaves no room for a compaction summary")
+        user_messages = retain_user_inputs(
+            [replace(message, content=self._strip_trusted_runtime_context(message))
+             for message in early_messages if message.is_user_input],
+            min(COMPACTION_USER_INPUT_MAX_TOKENS, available // 2),
+        )
+        summary_limit = min(
+            self._compaction_output_limit(0.8),
+            available - sum(self._estimate_history_message(message) for message in user_messages),
+        )
+        # One summary sees the complete removed prefix, even when the cut is
+        # inside a turn. User constraints also survive as admitted source text.
+        compressed_summary = await self._summarize_early(
+            early_messages, focus=focus, max_tokens=summary_limit,
+        )
         summary_message = LLMMessage(
             role="user",
             content=(
@@ -3227,10 +3215,49 @@ class ContextBuilder:
                 f"{COMPACTION_SUMMARY_SUFFIX}"
             ),
         )
-        recent = self._history[recent_start:]
-        self._compaction_count = next_compaction_count
+        # Compaction changes the text projection, not ownership of user media.
+        # Keep durable references outside the model-written summary so another
+        # compaction or model switch can still rehydrate the originals.
+        retained_refs = {
+            ref["artifact_id"]: ref
+            for message in pinned + recent
+            for ref in message.attachment_refs
+        }
+        for message in early_messages:
+            for ref in message.attachment_refs:
+                if ref["artifact_id"] not in retained_refs:
+                    summary_message.attachment_refs.append(ref)
+                    retained_refs[ref["artifact_id"]] = ref
+            if not message.attachment_refs:
+                summary_message.images.extend(message.images)
+                summary_message.documents.extend(message.documents)
+        self._install_compacted_history(
+            pinned + [summary_message] + user_messages + recent,
+            removed_prefix=recent_start, recent_count=len(recent), restore_state=restore_state,
+        )
+        return compressed_summary
+
+    async def _compact_native_context(self, focus: str, restore_state: AgentState | None) -> str:
+        state = restore_state or AgentState(user_message="", conversation_id=self._conversation_id, workspace_root=self._workspace_root)
+        messages = self._render_prompt_messages(state, self._workspace_root_for_state(state))
+        if focus:
+            messages.insert(0, LLMMessage(role="system", content=f"Compaction focus requested by the user: {focus}"))
+        replacement = await self._llm.compact_context(messages, turn_context=self._llm_turn_context)
+        # References preserve access to originals without duplicating the
+        # provider's returned media or trying to interpret encrypted content.
+        refs = {ref["artifact_id"]: ref for message in self._history for ref in message.attachment_refs}
+        replacement.attachment_refs = list(refs.values())
+        self._install_compacted_history([replacement], removed_prefix=len(self._history), recent_count=0, restore_state=restore_state)
+        return "Provider-native context compaction completed."
+
+    def _install_compacted_history(
+        self, history: list[LLMMessage], *, removed_prefix: int, recent_count: int, restore_state: AgentState | None,
+    ) -> None:
+        """Publish a successful replacement and reset its derived context state."""
+        self._guideline_load_reason = "compact"
+        self._compaction_count += 1
         self._consecutive_autocompact_failures = 0
-        self._history = [summary_message] + recent
+        self._history = history
         # Compaction intentionally rewrites the prefix; a provider must create
         # a new cache segment from the compacted summary.
         self._history_frozen_count = 0
@@ -3239,31 +3266,20 @@ class ContextBuilder:
         # from evidence the active context no longer contains.
         self._read_file_hashes.clear()
         self._ensure_invoked_skill_messages()
+        self._history_store.ensure_timestamps()
         self._history_store.rebuild_token_cache()
+        from backend.conversations.context_delta import rebase_turn_admissions
+        self._turn_admissions = rebase_turn_admissions(
+            self._turn_admissions, removed_prefix=removed_prefix,
+            inserted_prefix=len(self._history) - recent_count,
+        )
+        from backend.agent.extension_history import rebase_extension_history
+        inserted_prefix = len(self._history) - recent_count
+        rebase_extension_history(self.extension_state, removed_prefix=removed_prefix, inserted_prefix=inserted_prefix)
+        self._extension_history_floor = max(inserted_prefix, self._extension_history_floor - removed_prefix + inserted_prefix)
         self._last_actual_prompt_tokens = 0
         self._last_estimated_prompt_tokens = 0
         self._restore_recent_files_after_compaction(restore_state)
-        return compressed_summary
-
-    async def _summarize_turn_prefix(self, messages: list[LLMMessage]) -> str:
-        raw_text = format_compaction_history(messages)
-        if self._llm is not None and raw_text:
-            prompt = (
-                f"<conversation>\n{raw_text}\n</conversation>\n\n"
-                f"{TURN_PREFIX_SUMMARIZATION_PROMPT}"
-            )
-            output = await self._compaction_chat(
-                [
-                    LLMMessage(role="system", content=COMPACTION_SYSTEM_PROMPT),
-                    LLMMessage(role="user", content=prompt),
-                ],
-                max_tokens=self._compaction_output_limit(0.5),
-            )
-            output = output.strip()
-            if output:
-                return parse_compaction_output(output).summary
-            raise RuntimeError("Turn prefix compaction returned an empty summary")
-        return raw_text
 
     async def _compaction_chat(
         self,
@@ -3338,7 +3354,7 @@ class ContextBuilder:
         """Overflow recovery uses the same session compaction contract."""
         return await self.compact(restore_state=restore_state)
 
-    async def _summarize_early(self, early: list[LLMMessage], focus: str = "") -> str:
+    async def _summarize_early(self, early: list[LLMMessage], focus: str = "", *, max_tokens: int | None = None) -> str:
         previous_summary, current_messages = self._split_previous_compaction_summary(
             early
         )
@@ -3363,7 +3379,7 @@ class ContextBuilder:
                 # caching still applies to the repeated message prefix.
                 output = await self._compaction_chat(
                     cache_messages,
-                    max_tokens=self._compaction_output_limit(0.8),
+                    max_tokens=max_tokens if max_tokens is not None else self._compaction_output_limit(0.8),
                 )
                 output = output.strip()
                 if output:
@@ -3376,7 +3392,9 @@ class ContextBuilder:
                 # breaker.
                 logger.debug("LLM summarization failed: %s", exc)
                 raise
-        return raw_text
+        if raw_text:
+            raise RuntimeError("No LLM is bound to this context for compaction")
+        raise CompactionNoopError()
 
     @staticmethod
     def _split_previous_compaction_summary(
@@ -3386,7 +3404,7 @@ class ContextBuilder:
         if not messages:
             return "", []
         first = messages[0]
-        if first.role != "user":
+        if first.role != "user" or first.is_user_input:
             return "", list(messages)
         summary = _extract_compaction_summary(str(first.content or ""))
         if summary is None:
@@ -3411,13 +3429,18 @@ class ContextBuilder:
     def clear(self) -> None:
         clear_system_prompt_sections()
         self._history_store.clear()
+        self._withheld_media_timestamps.clear()
         self._pending_runtime_context_update = ""
         self._persistent_notes.clear()
         self._read_file_hashes.clear()
         self._compaction_count = 0
+        self._turn_admissions.clear()
         self._prepared_prompt_parts = None
         self._prepared_prompt_state = None
         self._extension_system_prompt_override = None
+        self.extension_state.clear()
+        self.extension_cursor.clear()
+        self._extension_history_floor = 0
         self._last_prompt_section_summary = {}
         self._git_status_context = None
         self._git_status_workspace = ""
@@ -3439,6 +3462,7 @@ class ContextBuilder:
         *,
         max_messages: int | None = None,
         max_chars: int | None = None,
+        history_from: int = 0,
     ) -> dict[str, Any]:
         """Export a resume snapshot with optional cheap pre-serialization bounds.
 
@@ -3447,7 +3471,7 @@ class ContextBuilder:
         durability boundary from first constructing and hashing an arbitrarily
         large conversation only to truncate it later in ``save_checkpoint``.
         """
-        groups = self._history_store.groups()
+        groups = self._history_store.groups() if history_from == 0 else [self._history[history_from:]]
         if max_messages is not None:
             message_limit = max(0, int(max_messages))
             selected_reversed: list[list[LLMMessage]] = []
@@ -3486,6 +3510,7 @@ class ContextBuilder:
                 # it only in the snapshot would make resume classify the same
                 # provider-visible message differently.
                 "runtime_context": str(message.runtime_context or ""),
+                **({"is_user_input": True} if message.is_user_input else {}),
                 "timestamp_ms": (
                     int(message.timestamp_ms)
                     if message.timestamp_ms is not None
@@ -3560,10 +3585,25 @@ class ContextBuilder:
                 int(self._history_frozen_count) - omitted_prefix_count,
             ),
         )
+        from backend.conversations.context_delta import rebase_turn_admissions
+        admissions = rebase_turn_admissions(
+            self._turn_admissions,
+            removed_prefix=omitted_prefix_count if max_messages is not None or max_chars is not None else 0,
+            inserted_prefix=0,
+        )
+        from backend.agent.checkpoint import CONTEXT_SNAPSHOT_SCHEMA_VERSION
+        extension_state = deepcopy(self.extension_state)
+        if max_messages is not None or max_chars is not None:
+            from backend.agent.extension_history import rebase_extension_history
+            rebase_extension_history(extension_state, removed_prefix=omitted_prefix_count, inserted_prefix=0)
         return {
+            "context_schema_version": CONTEXT_SNAPSHOT_SCHEMA_VERSION,
             "history": sanitized_history,
             "history_frozen_count": frozen_count,
+            **({"turn_admissions": admissions} if admissions else {}),
             "persistent_notes": [dict(note) for note in self._persistent_notes],
+            "extension_state": extension_state,
+            "extension_cursor": dict(self.extension_cursor),
             # Bound read-file state to 100 entries. Preserve the most recent
             # insertion order here so conversation snapshots cannot grow
             # without limit.
@@ -3581,6 +3621,27 @@ class ContextBuilder:
             "context_ledger": self.context_ledger(),
         }
 
+    def export_snapshot_delta(
+        self, before: dict[str, Any], *, since_revision: int | None,
+    ) -> tuple[dict[str, Any], int]:
+        """Capture only changed history; the caller advances its cursor on commit."""
+        from backend.conversations.context_delta import context_snapshot_delta
+
+        revision = self._history_store.revision
+        start = 0 if since_revision is None else self._history_store.changed_since(since_revision)
+        after = self.export_snapshot(history_from=start)
+        after["history_frozen_count"] = self._history_frozen_count
+        if since_revision is None:
+            return context_snapshot_delta(before, after), revision
+        delta = context_snapshot_delta(
+            {key: value for key, value in before.items() if key != "history"},
+            {key: value for key, value in after.items() if key != "history"},
+        )
+        if start < len(self._history) or start != len(before.get("history", [])):
+            delta["history_from"] = start
+            delta["history"] = after["history"]
+        return delta, revision
+
     def load_snapshot(self, snapshot: dict[str, Any] | None) -> None:
         self.clear()
         if not snapshot:
@@ -3588,7 +3649,7 @@ class ContextBuilder:
 
         self._load_snapshot_metadata(snapshot)
         self._history = self.deserialize_snapshot_history(
-            snapshot.get("history", [])
+            self._snapshot_history_with_admissions(snapshot)
         )
         if not self._history_frozen_metadata_present and self._history:
             self._history_frozen_count = len(self._history)
@@ -3615,7 +3676,7 @@ class ContextBuilder:
             return []
 
         self._load_snapshot_metadata(snapshot)
-        raw_history = self.sanitize_snapshot_history(snapshot.get("history", []))
+        raw_history = self._snapshot_history_with_admissions(snapshot)
         if recent_history_count <= 0:
             recent_history: list[dict[str, Any]] = []
             pending_history = raw_history
@@ -3705,6 +3766,19 @@ class ContextBuilder:
         self._history_store.rebuild_token_cache()
         self._reconstruct_tool_result_budget_state()
 
+    def _snapshot_history_with_admissions(self, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+        # Older snapshots have no per-message provenance. A committed turn
+        # admission identifies the final entry of its input span as the real
+        # user message; do not guess from user-authored tags or role alone.
+        admitted_indices = {
+            int(boundary["history_end"]) - 1
+            for boundary in self._turn_admissions.values()
+        }
+        return self.sanitize_snapshot_history([
+            {**raw, "is_user_input": True} if index in admitted_indices else raw
+            for index, raw in enumerate(snapshot.get("history", []))
+        ])
+
     @staticmethod
     def sanitize_snapshot_history(
         raw_history: list[dict[str, Any]],
@@ -3733,6 +3807,7 @@ class ContextBuilder:
             # marker examples. Only explicit provenance may identify runtime
             # context; importing history must not guess from text spelling.
             raw["runtime_context"] = str(raw.get("runtime_context") or "")
+            raw["is_user_input"] = role == "user" and raw.get("is_user_input") is True
             sanitized.append(raw)
         return sanitized
 
@@ -3800,6 +3875,7 @@ class ContextBuilder:
                         raw.get("attachment_refs")
                     ),
                     runtime_context=str(raw.get("runtime_context") or ""),
+                    is_user_input=raw["is_user_input"],
                     timestamp_ms=parsed_timestamp,
                 )
             )
@@ -3814,6 +3890,12 @@ class ContextBuilder:
         return parsed_history
 
     def _load_snapshot_metadata(self, snapshot: dict[str, Any]) -> None:
+        from backend.agent.checkpoint import CONTEXT_SNAPSHOT_SCHEMA_VERSION
+        if int(snapshot.get("context_schema_version") or 1) not in (1, 2, 3, CONTEXT_SNAPSHOT_SCHEMA_VERSION):
+            raise ValueError("Unsupported context snapshot schema version")
+        self._turn_admissions = {str(key): dict(value) for key, value in snapshot.get("turn_admissions", {}).items()}
+        self.extension_state = deepcopy(snapshot.get("extension_state", {}))
+        self.extension_cursor = dict(snapshot.get("extension_cursor", {}))
         self._history_frozen_metadata_present = "history_frozen_count" in snapshot
         try:
             self._history_frozen_count = max(

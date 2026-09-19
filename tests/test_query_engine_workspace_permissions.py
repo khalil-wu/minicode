@@ -4,6 +4,7 @@ from pathlib import Path
 from backend.agent.query_engine import QueryEngine, QuerySubmission
 from backend.config import AgentSettings, PermissionSettings, TokenBudget
 from backend.permissions.checker import PermissionChecker
+from backend.tools.registry import ToolRegistry
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.registry import ToolRegistry
 
@@ -39,7 +40,7 @@ def test_query_engine_rebinds_permission_checker_to_submission_workspace(tmp_pat
     submission = QuerySubmission(
         user_message="read README",
         llm=object(),
-        tool_registry=object(),
+        tool_registry=ToolRegistry(),
         artifact_store=object(),
         permission_checker=PermissionChecker(PermissionSettings(), tmp_path / "MiniCode"),
         agent_settings=AgentSettings(),

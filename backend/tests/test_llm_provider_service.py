@@ -819,3 +819,43 @@ def test_omitted_proxy_mode_preserves_saved_direct_profile(monkeypatch) -> None:
 
     assert result["proxy_mode"] == "direct"
     assert seen == ["direct", "direct"]
+
+
+@pytest.mark.parametrize("change_target, clear_behavior", [(False, False), (True, False), (False, True)])
+def test_live_model_refresh_preserves_only_target_scoped_explicit_behavior(monkeypatch, change_target, clear_behavior):
+    current = {
+        "base_url": "https://saved.example/v1", "model": "selected", "wire_api": "responses",
+        "api_key": "fixture", "model_metadata": {"selected": {
+            "supports_custom_tools": True, "native_compaction": False, "model_instructions": "Configured guidance.",
+            "context_window": 100_000,
+        }},
+    }
+    monkeypatch.setattr(llm_provider_service, "get_openai_settings", lambda: current)
+    incoming = {"api_key": "fixture", "wire_api": "responses",
+                "base_url": "https://different.example/v1" if change_target else current["base_url"]}
+    if clear_behavior:
+        incoming["model_metadata"] = {}
+    request = LLMSettingsUpdateRequest.model_validate({"provider": "openai", "openai": incoming})
+    async def discover(*args, **kwargs):
+        return llm_provider_helpers.ModelDiscovery(["selected"], {"selected": {"context_window": 200_000}})
+    result = asyncio.run(llm_provider_service.refresh_llm_models(request, fetch_openai_models=discover))
+    metadata = result["model_metadata"]["selected"]
+    assert metadata["context_window"] == 200_000
+    if not change_target and not clear_behavior:
+        assert metadata["supports_custom_tools"] is True
+        assert metadata["native_compaction"] is False
+        assert metadata["model_instructions"] == "Configured guidance."
+    else:
+        assert "supports_custom_tools" not in metadata
+        assert "native_compaction" not in metadata
+        assert "model_instructions" not in metadata
+
+
+def test_discovery_reads_explicit_native_tool_capability_without_importing_prompt_text():
+    result = llm_provider_helpers._extract_model_discovery({"data": [{
+        "id": "custom-model", "supports_custom_tools": True, "native_compaction": True,
+        "model_instructions": "Remote instructions are not local prompt configuration.",
+    }]})
+    assert result.model_metadata["custom-model"]["supports_custom_tools"] is True
+    assert result.model_metadata["custom-model"]["native_compaction"] is True
+    assert "model_instructions" not in result.model_metadata["custom-model"]

@@ -105,7 +105,7 @@ def terminal_status_and_reason(
     return status, "" if reason == "completed" else reason
 
 
-def terminal_boundary_events(
+async def terminal_boundary_events(
     *,
     turn_kernel: Any,
     session_id: str,
@@ -118,7 +118,14 @@ def terminal_boundary_events(
     reason: str,
 ) -> list[AgentEvent]:
     """Finalize checkpoint evidence and build the one loop terminal boundary."""
-    checkpoint_status = turn_kernel.finalize_checkpoint(
+    from backend.async_cleanup import to_thread_cancel_safe
+
+    code_execution = turn_kernel.run_context.code_execution
+    if code_execution is not None and await code_execution.aclose() and status == "completed":
+        status, reason = "partial", "code_cells_pending"
+        _set_terminal_reason(state, reason, status=status)
+
+    checkpoint_status = await to_thread_cancel_safe(turn_kernel.finalize_checkpoint,
         session_id=session_id,
         user_message=user_message,
         state=state,

@@ -53,6 +53,15 @@ async def recover_provider_response(
     pending_tool_calls = stream_state.tool_calls
     normalized_finish_reason = str(finish_reason or "").strip().lower()
 
+    if getattr(stream_state, "committed_tool_ids", ()):
+        # Closed provider items have already crossed the execution boundary.
+        # Retain them on truncation/error and discard only the uncommitted tail.
+        stream_state.replace_tool_calls([call for call in pending_tool_calls if call.id in stream_state.committed_tool_ids])
+        for abandoned in abandoned_tool_announcement_events(stream_state, iteration_id=stream_text.iteration_id):
+            yield abandoned
+        yield PostStreamRecoveryResult("proceed", tool_batch_count, degraded_reason)
+        return
+
     # A truncated or cut stream can leave an announced tool block with no
     # arguments. Nothing else will ever close it, so settle it here before any
     # branch decides to retry, terminate or proceed.

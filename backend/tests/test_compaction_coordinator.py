@@ -1,7 +1,9 @@
 from backend.ws.compaction_coordinator import rebase_turn_admissions_after_compaction
+import pytest
 
 
-def test_compaction_rebases_only_boundaries_in_retained_suffix() -> None:
+@pytest.mark.parametrize("annotated", [False, True])
+def test_compaction_rebases_only_boundaries_in_retained_suffix(annotated) -> None:
     before = {
         "history": [
             {"role": "user", "content": "old"},
@@ -17,7 +19,7 @@ def test_compaction_rebases_only_boundaries_in_retained_suffix() -> None:
     after = {
         "history": [
             {"role": "user", "content": "summary"},
-            {"role": "user", "content": "keep"},
+            {"role": "user", "content": "keep", **({"is_user_input": True} if annotated else {})},
             {"role": "assistant", "content": "keep answer"},
         ]
     }

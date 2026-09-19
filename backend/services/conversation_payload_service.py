@@ -250,7 +250,7 @@ def build_conversation_switched_payload(
     return {
         "type": "conversation.switched",
         "conversation_id": conversation.id,
-        "conversation": project_public_conversation(conversation),
+        "conversation": project_public_conversation(conversation, transcript_limit=80),
         "is_hydrating": bool(is_hydrating),
         "session": runtime_snapshot,
         "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),

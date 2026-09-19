@@ -22,6 +22,8 @@ class _HookManager:
 
 class _Session:
     def __init__(self) -> None:
+        self.ws_manager = None
+        self.active_conversation_id = None
         self.config = AppConfig(llm=LLMSettings(api_key="test-key"))
         self.provider = "openai"
         self.available_models = ["gpt-5"]

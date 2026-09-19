@@ -368,11 +368,16 @@ describe("useWebSocket server sequence tracking", () => {
     commitProcessedInboundEvent(pong);
     expect(shouldProcessInboundEvent(pong)).toBe(false);
     expect(shouldProcessInboundEvent({ type: "runtime.capabilities", event_id: "b", seq: 9 } as ServerEvent)).toBe(true);
+    // Live-only deltas are never staged into the backend replay log, so they
+    // must not move the durable cursor either.
     const delta = { type: "agent_message.delta", conversation_id: "conv-1", event_id: "c", seq: 2 } as ServerEvent;
     expect(shouldProcessInboundEvent(delta)).toBe(true);
     commitProcessedInboundEvent(delta);
+    expect(getLastReceivedServerSeqForTests()).toBe(0);
 
-    expect(getLastReceivedServerSeqForTests()).toBe(2);
+    const durable = { type: "done", conversation_id: "conv-1", event_id: "d", seq: 3, previous_replay_seq: 0 } as ServerEvent;
+    commitProcessedInboundEvent(durable);
+    expect(getLastReceivedServerSeqForTests()).toBe(3);
   });
 
   it("accepts live durable links across transient wire-sequence gaps", () => {

@@ -524,7 +524,7 @@ async def execute_tool_batch(
 ) -> AsyncIterator[AgentEvent]:
     tool_ctx.tool_registry = tool_registry
     auto_queue: list[ToolCallEvent] = []
-    iteration_id = f"iter:{max(1, state.iterations)}"
+    iteration_id = tool_ctx.iteration_id or f"iter:{max(1, state.iterations)}"
     runtime = _ToolBatchRuntime(
         ctx=ctx,
         state=state,
@@ -544,7 +544,9 @@ async def execute_tool_batch(
             prepared_call,
             fallback_id=f"tool_{index}",
         )
-        if execution_limit is not None and index > max(0, execution_limit):
+        gate = tool_ctx.run_context.tool_execution_gate if tool_ctx.run_context is not None else None
+        admitted = gate is None or gate.admit(tc.id, len(state.tool_calls))
+        if not admitted or (execution_limit is not None and index > max(0, execution_limit)):
             started_epoch = time.time()
             _tool_start_times(state)[tc.id] = started_epoch
             reason = execution_limit_reason.strip() or (

@@ -31,7 +31,7 @@ class QueryJournalRecorder:
     terminal_intent_key: tuple[str, str] | None = None
     tool_names: dict[str, str] = field(default_factory=dict)
     agent_messages: dict[str, dict[str, str]] = field(default_factory=dict)
-    agent_message_receipts: dict[str, tuple[str, float]] = field(
+    agent_message_receipts: dict[str, tuple[int, float]] = field(
         default_factory=dict
     )
 
@@ -104,6 +104,12 @@ class QueryJournalRecorder:
         if self.journal is None:
             return
         data = dict(event.data or {})
+        if event.type == "artifact.preview":
+            self.lifecycle("artifact_preview", data)
+            return
+        if (data.get("call_source") or {}).get("kind") in {"code_mode", "extension"} and event.type not in {"tool_call", "tool_result", "approval_request", "ask_user"}:
+            self.lifecycle("nested_tool_event", {"event_type": event.type, **data})
+            return
         if event.type == "item.started":
             item = data.get("item") if isinstance(data.get("item"), dict) else {}
             if item.get("type") == "agent_message":
@@ -112,6 +118,7 @@ class QueryJournalRecorder:
                     "content": "",
                     "source": str(item.get("source") or "pending"),
                 }
+                self.agent_message_receipts.pop(item_id, None)
             return
         if event.type == "agent_message.delta":
             self._record_agent_message_delta(data)
@@ -286,13 +293,13 @@ class QueryJournalRecorder:
         message["content"] += delta
         if data.get("source"):
             message["source"] = str(data["source"])
-        previous_content, previous_at = self.agent_message_receipts.get(
+        previous_length, previous_at = self.agent_message_receipts.get(
             item_id,
-            ("", 0.0),
+            (0, 0.0),
         )
         now = time.monotonic()
         if (
-            not previous_content
+            not previous_length
             or now - previous_at >= 0.12
         ):
             if self.journal is None:
@@ -302,13 +309,14 @@ class QueryJournalRecorder:
                 {
                     "kind": "assistant_message",
                     "item_id": item_id,
-                    "content": message["content"],
+                    "content_delta": message["content"][previous_length:],
+                    "content_offset": previous_length,
                     "source": message["source"],
                     "status": "running",
                     "transcript_only": True,
                 },
             )
-            self.agent_message_receipts[item_id] = (message["content"], now)
+            self.agent_message_receipts[item_id] = (len(message["content"]), now)
 
     def _record_completed_item(self, data: dict[str, Any]) -> None:
         item = data.get("item") if isinstance(data.get("item"), dict) else {}
@@ -331,7 +339,7 @@ class QueryJournalRecorder:
                 "transcript_only": True,
             },
         )
-        self.agent_message_receipts[item_id] = (content, time.monotonic())
+        self.agent_message_receipts[item_id] = (len(content), time.monotonic())
 
     def _checkpoint_evidence(self) -> dict[str, Any]:
         if self.turn_kernel is None:

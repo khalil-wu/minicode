@@ -53,6 +53,48 @@ jobs:
             echo "::error file=pytest-${{ matrix.suite }}.log::${line}"
           done <<< "$failure_lines"
 
+  windows-harness:
+    name: Windows harness and process contracts
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install backend
+        run: python -m pip install -e ".[dev]"
+      - name: Check Windows execution, storage, and cancellation
+        run: >-
+          python -m pytest
+          backend/tests/test_architecture_review_repairs.py
+          backend/tests/test_projection_log.py
+          backend/tests/test_native_compaction.py
+          backend/tests/test_code_execution.py
+          backend/tests/test_model_execution_ownership.py
+          backend/tests/test_model_control_ownership.py
+          backend/tests/test_extension_model_ownership.py
+          backend/tests/test_extension_execution_actions.py
+          backend/tests/test_extension_state_deltas.py
+          backend/tests/test_journal_context_deltas.py
+          backend/tests/test_extension_history_boundaries.py
+          backend/tests/test_step_capability_snapshot.py
+          backend/tests/test_model_execution_snapshot.py
+          backend/tests/test_auth_request_ownership.py
+          backend/tests/test_step_auth_refresh.py
+          backend/tests/test_code_audio.py
+          backend/tests/test_user_request_boundary.py
+          backend/tests/test_canonical_context_checkpoint.py
+          backend/tests/test_compaction_user_fidelity.py
+          backend/tests/test_tool_history_pagination.py
+          backend/tests/test_yielding_commands.py
+          backend/tests/test_command_output_fidelity.py
+          backend/tests/test_terminal_service_canonical_exec.py
+          backend/tests/test_background_command_lifecycle.py
+          backend/tests/test_apply_patch.py
+          --maxfail=1 --tb=short
+
   frontend:
     name: Frontend tests and budgets
     runs-on: ubuntu-latest

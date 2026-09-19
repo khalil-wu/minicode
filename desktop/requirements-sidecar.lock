@@ -7,6 +7,7 @@ pydantic==2.13.4
 jsonschema==4.26.0
 httpx==0.28.1
 watchdog==6.0.0
+mini-racer==0.14.1
 python-multipart==0.0.20
 psutil==7.0.0
 pathspec==0.12.1

@@ -5,9 +5,53 @@ from types import SimpleNamespace
 from backend.agent.answer_committer import AnswerCommitDependencies, AnswerCommitter
 from backend.agent.answer_commit_projection import AnswerCommitProjection
 from backend.agent.answer_commit_projection import build_answer_commit_projection
+from backend.agent.response_utils import provider_items_for_final_answer
 from backend.agent.stream_attempt import StreamAttemptState, StreamTextState
 from backend.agent.loop_process_events import model_process_text_event
 from backend.llm.base import StreamEvent, StreamEventType, ToolCallEvent, UsageInfo
+
+
+def test_final_answer_history_drops_anthropic_thinking_but_keeps_protocol_blocks() -> None:
+    items = [
+        {"type": "thinking", "thinking": "private", "signature": "sig"},
+        {
+            "type": "anthropic_message",
+            "content": [
+                {"type": "thinking", "thinking": "private", "signature": "sig"},
+                {"type": "text", "text": "answer"},
+            ],
+        },
+    ]
+
+    prepared = provider_items_for_final_answer(items)
+
+    assert prepared == [
+        {
+            "type": "anthropic_message",
+            "content": [{"type": "text", "text": "answer"}],
+        }
+    ]
+    assert items[1]["content"][0]["type"] == "thinking"
+
+
+def test_final_answer_history_keeps_complete_anthropic_tool_protocol_state() -> None:
+    items = [
+        {
+            "type": "anthropic_message",
+            "content": [
+                {"type": "thinking", "thinking": "private", "signature": "sig"},
+                {"type": "text", "text": "working"},
+                {
+                    "type": "server_tool_use",
+                    "id": "server-1",
+                    "name": "web_search",
+                    "input": {"query": "MiniCode"},
+                },
+            ],
+        }
+    ]
+
+    assert provider_items_for_final_answer(items) == items
 
 
 def test_agent_message_items_close_before_a_new_unique_item_starts() -> None:
@@ -139,10 +183,21 @@ def test_process_text_projection_emits_each_changed_accumulated_prefix() -> None
     )
 
     assert first is not None
+    assert first.type == "agent.item"
     assert first.data["content"] == "first"
     assert duplicate is None
+    # Later chunks extend the announced item instead of resending it.
     assert second is not None
-    assert second.data["content"] == "first second"
+    assert second.type == "agent.item.delta"
+    assert second.data == {"item_id": first.data["id"], "delta": " second"}
+
+    # A buffer that is not an extension (reclassified text) re-announces.
+    state.pending_process_text = "rewritten"
+    third = state.maybe_stream_process_text(
+        source="commentary", event_factory=model_process_text_event
+    )
+    assert third is not None and third.type == "agent.item"
+    assert third.data["content"] == "rewritten"
 
 
 def test_stream_attempt_preserves_duplicate_provider_ids_by_batch_occurrence() -> None:

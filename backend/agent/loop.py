@@ -185,6 +185,12 @@ async def run_agent_loop(
     permission_checker = bootstrap.permission_checker
     session_id = bootstrap.session_id
     task_id = bootstrap.task_id
+    if tool_registry.get_tool("tool_exec") is not None:
+        from backend.agent.code_execution import CodeExecutionRuntime
+        from backend.agent.tool_execution_gate import ToolExecutionGate
+        run_context.tool_execution_gate = ToolExecutionGate(limit=settings.max_tool_calls, initial_completed=len(state.tool_calls))
+        run_context.code_execution = CodeExecutionRuntime(context=ctx, state=state,
+            tool_context=tool_ctx, permission_checker=permission_checker, skill_manager=bootstrap.skill_manager, turn_kernel=turn_kernel)
     stream_text = StreamTextState()
     initial_user_turn_pending = not bool(
         metadata.get("_query_engine_recovery_restored")
@@ -221,7 +227,7 @@ async def run_agent_loop(
                 error_type="hook",
                 error_code="user_prompt_blocked",
             )
-            for event in terminal_boundary_events(
+            for event in await terminal_boundary_events(
                 turn_kernel=turn_kernel,
                 session_id=session_id,
                 user_message=user_message,
@@ -419,7 +425,7 @@ async def run_agent_loop(
             state=state,
             terminal_projection=terminal_projection,
         )
-        for event in terminal_boundary_events(
+        for event in await terminal_boundary_events(
             turn_kernel=turn_kernel,
             session_id=session_id,
             user_message=user_message,
@@ -443,7 +449,9 @@ async def run_agent_loop(
                 stream_text=iteration_execution_state.stream_text,
                 scrub_text=_scrub_thinking_tags,
             )
-            turn_kernel.finalize_checkpoint(
+            from backend.async_cleanup import to_thread_cancel_safe
+
+            await to_thread_cancel_safe(turn_kernel.finalize_checkpoint,
                 session_id=session_id,
                 user_message=user_message,
                 state=state,
@@ -474,7 +482,7 @@ async def run_agent_loop(
                     else "agent_loop.runtime_error"
                 ),
             )
-            for event in terminal_boundary_events(
+            for event in await terminal_boundary_events(
                 turn_kernel=turn_kernel,
                 session_id=session_id,
                 user_message=user_message,
@@ -486,3 +494,6 @@ async def run_agent_loop(
                 reason="runtime_error",
             ):
                 yield event
+    finally:
+        if run_context.code_execution is not None:
+            await run_context.code_execution.aclose()

@@ -146,7 +146,7 @@ def parse_patch(text: str) -> list[FileChange]:
                 move_to = body[i][len(MOVE_TO):].strip() or None
                 i += 1
             hunks, i = _parse_update_hunks(body, i, n, path)
-            if not hunks:
+            if not hunks and not move_to:
                 raise ApplyPatchError(
                     f"Update File '{path}' has no change hunks."
                 )

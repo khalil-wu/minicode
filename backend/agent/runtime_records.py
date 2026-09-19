@@ -219,6 +219,7 @@ class SwarmMessageRecord:
     conversation_id: str = ""
     team_name: str = ""
     task_id: str = ""
+    summary: str = ""
     sender_mailbox_epoch: int = 0
     recipient_mailbox_epoch: int = 0
     recipient_mailbox_epochs: dict[str, int] = field(default_factory=dict)
@@ -408,6 +409,7 @@ def _swarm_message_from_dict(data: dict[str, Any]) -> SwarmMessageRecord:
         conversation_id=str(data.get("conversation_id") or ""),
         team_name=str(data.get("team_name") or ""),
         task_id=str(data.get("task_id") or ""),
+        summary=str(data.get("summary") or ""),
         sender_mailbox_epoch=max(0, int(data.get("sender_mailbox_epoch") or 0)),
         recipient_mailbox_epoch=max(0, int(data.get("recipient_mailbox_epoch") or 0)),
         recipient_mailbox_epochs={

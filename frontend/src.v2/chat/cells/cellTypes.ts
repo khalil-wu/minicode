@@ -5,7 +5,7 @@
 
 import type { ToolCallRecord } from "../../lib/tool-call-reducer";
 import type { TurnActivityKind } from "../../lib/turn-projection";
-import type { ArtifactPreview, ChatMessageSource, Citation, MessageUsage, ProgressContentBlock } from "../../stores/types";
+import type { ArtifactPreview, ChatMessageSource, Citation, MessageUsage, ProgressContentBlock, ToolHistoryPage } from "../../stores/types";
 
 // ── Diff File Change ────────────────────────────────────────────────
 
@@ -90,6 +90,7 @@ export interface ExecCellState {
   kind: "exec";
   id: string;
   command: string;
+  callSource?: ToolCallRecord["callSource"];
   cwd?: string;
   background?: boolean;
   status: "pending_approval" | "running" | "success" | "partial" | "failed" | "cancelled";
@@ -234,6 +235,9 @@ export type HistoryCellState =
 
 export interface ChatTurnState {
   id: string;
+  /** Pure streaming receipts preserve the file evidence owned by this projection. */
+  resourceKey?: object;
+  toolPage?: ToolHistoryPage;
   turnId?: string;
   userCell: UserMessageCellState | null;
   committedCells: Exclude<

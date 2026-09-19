@@ -112,6 +112,7 @@ export const artifactFallbackLabel = (
   mediaType?: unknown,
 ): string => {
   const normalized = `${normalizedValue(kind)} ${normalizeArtifactMediaType(mediaType)}`;
+  if (normalized.includes("audio/")) return "音频输出";
   if (normalized.includes("image") || normalized.includes("screenshot")) return "生成图片";
   if (normalized.includes("pdf")) return "生成的 PDF";
   if (normalized.includes("file") || normalized.includes("text")) return "生成文件";

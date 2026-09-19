@@ -486,7 +486,7 @@ def test_provider_retry_discards_tracked_tools_before_resetting_payload() -> Non
         def cancel_remaining(self) -> None:
             calls.append("cancel_tools")
 
-    class StreamText:
+    class StreamText(StreamTextState):
         def cancel_active_agent_message(self):
             calls.append("cancel_message")
             return None
@@ -675,7 +675,7 @@ def test_provider_error_uses_structured_429_and_retry_after_metadata_without_tur
                 turn_kernel=turn_kernel,
                 provider_attempt=object(),
                 stream_state=StreamAttemptState(),
-                stream_text=SimpleNamespace(full_text=""),
+                stream_text=StreamTextState(iteration_id="iter:error"),
                 pending_tool_calls=[],
                 usage=UsageInfo(),
                 turn_usage=UsageInfo(),
@@ -777,7 +777,7 @@ def test_provider_error_retries_structured_525_instead_of_finishing(
                 turn_kernel=TurnKernel(),
                 provider_attempt=object(),
                 stream_state=StreamAttemptState(),
-                stream_text=SimpleNamespace(full_text=""),
+                stream_text=StreamTextState(iteration_id="iter:error"),
                 pending_tool_calls=[],
                 usage=UsageInfo(),
                 turn_usage=UsageInfo(),
@@ -933,7 +933,7 @@ def test_provider_retry_uses_stream_budget_instead_of_turn_recovery_budget() -> 
                 turn_kernel=kernel,
                 provider_attempt=object(),
                 stream_state=StreamAttemptState(),
-                stream_text=SimpleNamespace(full_text=""),
+                stream_text=StreamTextState(iteration_id="iter:error"),
                 pending_tool_calls=[],
                 usage=UsageInfo(),
                 turn_usage=UsageInfo(),

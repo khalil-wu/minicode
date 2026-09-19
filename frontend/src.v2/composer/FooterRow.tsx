@@ -159,7 +159,8 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   };
 
   const switchModel = (model: string) => {
-    sendClientCommand({ type: "llm.model.set", model });
+    const conversationId = useAppStore.getState().conversationId;
+    sendClientCommand({ type: "llm.model.set", model, ...(conversationId ? { conversation_id: conversationId } : {}) });
     setModelOpen(false);
     queueMicrotask(() => dropdownRef.current?.querySelector<HTMLButtonElement>(':scope > button')?.focus());
   };

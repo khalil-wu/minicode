@@ -35,6 +35,41 @@ class StreamRetryState:
     """Mutable counters owned by one foreground provider operation."""
 
     consecutive_529_errors: int = 0
+    auth_recovery_attempted: bool = False
+    # The connect phase keeps its own schedule. Its delays double from a short
+    # initial value to a long cap because the cause is usually the user's
+    # network rather than the request, and its attempts are deliberately not
+    # counted against the request retry budget.
+    connection_retries: int = 0
+    connection_retry_delay_seconds: float = 0.0
+
+
+# Connect-phase schedule. An unreachable provider is a waiting problem, not a
+# failing request: the delay starts short so a blip recovers immediately and
+# caps so a long outage polls slowly.
+CONNECTION_RETRY_INITIAL_DELAY_SECONDS = 5.0
+CONNECTION_RETRY_MAX_DELAY_SECONDS = 60.0
+
+
+def plan_connection_retry(
+    state: StreamRetryState,
+    *,
+    initial_seconds: float = CONNECTION_RETRY_INITIAL_DELAY_SECONDS,
+    max_seconds: float = CONNECTION_RETRY_MAX_DELAY_SECONDS,
+) -> float:
+    """Return the next connect-phase delay and advance the doubling schedule.
+
+    Unlike :meth:`DefaultStreamRetryPolicy.decide_retry` this returns no retry
+    budget: the caller reissues the same attempt until the provider becomes
+    reachable or the turn's own deadline fires.
+    """
+
+    initial = max(0.0, float(initial_seconds))
+    ceiling = max(initial, float(max_seconds))
+    delay = state.connection_retry_delay_seconds or initial
+    state.connection_retries += 1
+    state.connection_retry_delay_seconds = min(delay * 2.0, ceiling)
+    return delay
 
 
 class StreamRetryPolicy(Protocol):

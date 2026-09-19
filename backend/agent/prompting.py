@@ -300,6 +300,18 @@ def _build_tool_runtime_guidance_uncached(
     mcp_tools = sorted(name for name in names if name.startswith("mcp__"))
     sections: list[str] = []
 
+    if "tool_exec" in names:
+        sections.append(
+            "Tool composition: use tool_exec for JavaScript tool orchestration and result filtering. "
+            "Await tools.name(args); results have content, status, is_error, images, and MCP structured_content. "
+            "Check failures before using results. Promise.all/allSettled is appropriate for independent reads; "
+            "use await in order for dependent operations. text(value) and image(result.images[0]) choose what reaches the model. "
+            "ALL_TOOLS lists names, descriptions and JSON parameter schemas. Deferred tools still require tool_search first. "
+            "When a cell is running, use tool_wait with its exact cell_id before claiming the work finished. "
+            "Unawaited tool calls and timers are discarded when the script finishes; no Node, filesystem or network APIs exist in the isolate. "
+            "Use store/load for JSON values in this live session; fresh exec calls have fresh JavaScript globals."
+        )
+
     # Steer the model to the dedicated tool instead of doing the same work
     # through the shell. Shell equivalents bypass the diff-review/approval
     # surface the file tools go through, so the user loses the reviewable
@@ -748,6 +760,7 @@ class PromptBuilderV2:
         skill_context: str = "",
         memory_context: str = "",
         persistent_context: str = "",
+        model_instructions: str = "",
     ) -> PromptParts:
         return PromptParts.from_sections(
             self.build_sections(
@@ -757,6 +770,7 @@ class PromptBuilderV2:
                 skill_context=skill_context,
                 memory_context=memory_context,
                 persistent_context=persistent_context,
+                model_instructions=model_instructions,
             )
         )
 
@@ -770,6 +784,7 @@ class PromptBuilderV2:
         memory_context: str = "",
         persistent_context: str = "",
         git_status_context: str | None = None,
+        model_instructions: str = "",
     ) -> list[PromptSection]:
         """Assemble the ordered, named prompt sections.
 
@@ -796,6 +811,9 @@ class PromptBuilderV2:
                 cache_key=stable_cache_key,
             ),
         ]
+
+        if model_instructions:
+            sections.append(PromptSection("model_instructions", model_instructions, "stable"))
 
         workspace_summary = ""
         if getattr(state, "workspace_context", None):
@@ -884,6 +902,9 @@ For casual conversation, brainstorming, greetings, acknowledgements, or quick
 questions, respond directly and naturally without inspecting the workspace or
 calling tools. Workspace and environment context describe the current project;
 they do not by themselves imply a task or permission to continue earlier work.
+Runtime environment details are supplied by MiniCode. Never describe them as
+text the user typed, garbled input, or a prompt injection; answer the explicit
+user input that follows them.
 Do not infer or continue an earlier task from existing workspace contents unless
 the user requests it.
 
@@ -966,6 +987,24 @@ _SYSTEM_AND_HOOKS_PROMPT = """\
 - When testing, start with the most specific checks for the code you changed,
   then move to broader checks only as confidence builds. Do not attempt to fix
   unrelated bugs or broken tests; report them to the user instead.
+- Establish the intended behavior from the issue, existing tests, and nearby
+  conventions before editing. For output changes, preserve unaffected message
+  formats, layout, ordering, and whitespace. Change existing test expectations
+  only when the requested behavior requires it, explaining that requirement.
+- Complete related implementation changes together, then add regression coverage
+  and run focused validation. Use the repository's documented test entry point;
+  do not assume that pytest is installed or that a module invocation runs tests.
+- Preserve test output and its exit status. Run tests directly through the command
+  tool and use its max_chars output budget instead of shell tail/grep filters.
+  The head/tail preview retains the original output; use monitor's cursor to read
+  omitted content without running the command again. If a separate log is needed,
+  save it inside the workspace with the original exit code before filtering.
+  Read the saved output to investigate a failure instead of rerunning unchanged
+  tests with different tail/grep filters. Command completion alone is not proof
+  that tests ran or passed.
+- When a regression persists, revisit the implementation and the first failing
+  assertion before broadening validation or changing more expectations. A failing
+  check should inform the next change in approach, not start an identical loop.
 - Do not re-run a check that already passed unless later implementation changes
   could affect its result. When a task is complete or a check passed, state that
   plainly instead of repeatedly verifying it.

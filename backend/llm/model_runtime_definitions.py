@@ -176,6 +176,11 @@ _MODEL_KNOWN_KEYS = frozenset(
         "maxTokens",
         "max_tokens",
         "headers",
+        "supports_custom_tools",
+        "responses_websocket",
+        "native_compaction",
+        "model_instructions",
+        "parallel_tool_calls",
     }
 )
 
@@ -411,6 +416,10 @@ def _declared_boolean(value: Any, *, field: str, default: bool = False) -> bool:
     if not isinstance(value, bool):
         raise ProviderRegistrationError(f"{field} must be a boolean")
     return value
+
+
+def _declared_optional_boolean(value: Any, *, field: str) -> bool | None:
+    return None if value is None else _declared_boolean(value, field=field)
 
 
 def _finite_number(value: Any, *, field: str) -> float:
@@ -991,7 +1000,7 @@ def _base_model(
         # budget, so advertise capability without inventing intermediate
         # budget mappings.
         reasoning=(
-            configured_thinking_budget > 0
+            bool(configured_thinking_budget > 0 or settings.get("reasoning_effort") or metadata["reasoning_effort_levels"])
             if api == "anthropic-messages"
             else bool(metadata["reasoning_effort_levels"])
         ),
@@ -1020,6 +1029,11 @@ def _base_model(
         reasoning_effort_levels=tuple(metadata["reasoning_effort_levels"]),
         default_reasoning_effort=str(metadata["default_reasoning_effort"]),
         default_reasoning_summary=str(metadata["default_reasoning_summary"]),
+        supports_custom_tools=metadata["supports_custom_tools"],
+        responses_websocket=metadata["responses_websocket"],
+        native_compaction=metadata["native_compaction"],
+        model_instructions=metadata["model_instructions"],
+        parallel_tool_calls=metadata["parallel_tool_calls"],
     )
 
 

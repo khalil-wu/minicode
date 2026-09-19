@@ -93,6 +93,22 @@ _NON_TOOL_DOC_TOKENS = frozenset(
         "tool_a",
         "tool_b",
         "tool_name",
+        "next_cursor",  # Output byte cursor returned by command/monitor results.
+        # Result/runtime fields the model reads out of tool output rather than
+        # passing in: code execution returns is_error and structured_content
+        # (from MCP structuredContent), and the command tool reports its read
+        # position as runtime_metadata["end_cursor"].
+        "is_error",
+        "structured_content",
+        "end_cursor",
+        # Names in the code-execution JavaScript surface, not tool arguments:
+        # the image()/audio() helpers take an image_block/audio_block (with a
+        # media_type), and yield_control is a documented global alongside exit
+        # and notify.
+        "image_block",
+        "audio_block",
+        "media_type",
+        "yield_control",
     }
 )
 

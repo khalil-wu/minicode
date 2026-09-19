@@ -277,7 +277,7 @@ async def run_terminal_exec_command(
                 result_event = event
         output = str(result_event.data.get("summary") or "") if result_event is not None else ""
         match = re.match(r"Exit code:\s*(-?\d+)", output, re.IGNORECASE)
-        exit_code = int(match.group(1)) if match else (-1 if result_event is None or result_event.data.get("is_error") else 0)
+        exit_code = int(match.group(1)) if match else (-1 if result_event is None or result_event.data.get("is_error") else None)
         return terminal_output_payload(
             command,
             output[:30000],

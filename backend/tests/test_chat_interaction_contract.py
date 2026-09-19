@@ -202,7 +202,9 @@ def test_search_tool_model_schemas_expose_cc_parameters() -> None:
 def test_common_direct_tool_model_descriptions_stay_short() -> None:
     artifact_store = ArtifactStore()
 
-    assert ApplyPatchTool().model_schema().description == "Apply a MiniCode patch envelope for multi-file edits or renames."
+    patch_description = ApplyPatchTool().model_schema().description
+    assert "actual newlines" in patch_description
+    assert "*** Begin Patch" in patch_description and "*** End Patch" in patch_description
     assert ReadFileTool(artifact_store).model_schema().description == "Read a text file with line numbers and content_hash."
     assert ListFilesTool().model_schema().description == "List files and directories to inspect project structure."
     assert ReadArtifactTool(artifact_store).model_schema().description == (
@@ -262,6 +264,8 @@ def test_run_command_model_schema_exposes_execution_policy_controls() -> None:
         "cwd",
         "env",
         "run_in_background",
+        "yield_time_ms",
+        "max_chars",
         "timeout",
         "description",
         "with_escalated_permissions",

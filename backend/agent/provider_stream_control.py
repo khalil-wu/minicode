@@ -36,6 +36,7 @@ async def apply_provider_chunk_steer(
     tool_tracker: Any,
     stream_iter: Any,
     provider_attempt: Any,
+    close_stream: Any | None = None,
 ) -> AsyncIterator[AgentEvent | ProviderSteerResult]:
     """Apply a queued steer only at a text projection safe boundary."""
 
@@ -74,7 +75,7 @@ async def apply_provider_chunk_steer(
         target_message_id=chunk_steer.target_message_id,
     )
     tool_tracker.cancel_remaining()
-    close_stream = getattr(stream_iter, "aclose", None)
+    close_stream = close_stream or getattr(stream_iter, "aclose", None)
     if callable(close_stream):
         with suppress(Exception):
             await close_stream()
@@ -99,9 +100,21 @@ async def reset_for_provider_retry(
     """Discard speculative output before replaying on the same provider."""
 
     tool_tracker.cancel_remaining()
-    completed = stream_text.cancel_active_agent_message()
-    if completed is not None:
-        yield completed
+    # A retry replaces the uncommitted attempt, including text items already
+    # closed by a provider phase change. None of these items owns a tool effect.
+    stream_text.cancel_active_agent_message()
+    for item_id in stream_text.emitted_agent_messages:
+        yield AgentEvent.agent_message_completed(
+            "", item_id=item_id, source="cancelled", status="cancelled",
+        )
+    if stream_text.process_text_last_emitted:
+        retracted = model_process_text_event(
+            stream_text.process_text_last_emitted, [],
+            iteration_id=stream_text.iteration_id,
+            source=stream_text.process_text_source, status="retracted",
+        )
+        if retracted is not None:
+            yield retracted
     # reset_provider_payload() forgets the announced tool blocks, so settle
     # them first or the discarded attempt's pending cards never close.
     for abandoned in abandoned_tool_announcement_events(

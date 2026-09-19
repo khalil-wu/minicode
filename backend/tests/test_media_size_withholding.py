@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from backend.agent.context import ContextBuilder
 from backend.agent.error_withholding import (
@@ -11,7 +12,27 @@ from backend.agent.turn_recovery_runtime import (
 )
 from backend.config import TokenBudget
 from backend.llm.base import LLMMessage, ToolCallEvent
-from backend.llm.errors import classify_llm_error, sanitize_llm_error_message
+from backend.llm.errors import (
+    LLMErrorType,
+    ProviderErrorType,
+    classify_llm_error,
+    sanitize_llm_error_message,
+)
+
+
+def test_classification_uses_typed_wire_compatible_categories() -> None:
+    classification = classify_llm_error("HTTP 429 rate limit exceeded")
+
+    assert classification.error_type is LLMErrorType.API
+    assert classification.provider_error_type is ProviderErrorType.RATE_LIMIT
+    assert classification.error_type == "api"
+    assert classification.provider_error_type == "rate_limit"
+    assert json.dumps(
+        {
+            "error_type": classification.error_type,
+            "provider_error_type": classification.provider_error_type,
+        }
+    ) == '{"error_type": "api", "provider_error_type": "rate_limit"}'
 
 
 def test_classify_media_size_and_prompt_too_long() -> None:
@@ -81,9 +102,12 @@ def test_strip_historical_media_keeps_recent_user_attachments() -> None:
     assert stats["messages"] == 1
     assert stats["images"] == 1
     assert stats["documents"] == 1
-    assert builder._history[0].images == []
-    assert builder._history[0].documents == []
-    assert "media-size recovery" in str(builder._history[0].content)
+    assert builder._history[0].images
+    assert not builder._render_prompt_messages(AgentState(user_message=""), None)[1].images
+    assert builder._history[0].documents
+    assert not builder._render_prompt_messages(AgentState(user_message=""), None)[1].documents
+    assert "media-size recovery" not in str(builder._history[0].content)
+    assert "media-size recovery" in builder._render_prompt_messages(AgentState(user_message=""), None)[1].content
     assert builder._history[2].images and builder._history[2].images[0]["data"] == "CCC"
 
 
@@ -126,7 +150,8 @@ def test_media_size_withholding_strips_before_compact() -> None:
         )
     )
     assert recovered is True
-    assert builder._history[0].images == []
+    assert builder._history[0].images
+    assert not builder._render_prompt_messages(AgentState(user_message=""), None)[1].images
     assert builder._history[1].images and builder._history[1].images[0]["data"] == "NEWIMG"
     assert compact_calls["n"] == 0
 
@@ -231,7 +256,7 @@ def test_reactive_compaction_runs_only_once_per_turn() -> None:
     assert compact_calls["n"] == 1
 
 
-def test_strip_historical_media_single_turn_still_strips() -> None:
+def test_strip_historical_media_preserves_only_user_input() -> None:
     builder = ContextBuilder(token_budget=TokenBudget(total=8_000))
     builder._history_store.append(
         LLMMessage(
@@ -241,6 +266,7 @@ def test_strip_historical_media_single_turn_still_strips() -> None:
         )
     )
     stats = builder.strip_historical_media(keep_recent_user_turns=1)
-    assert stats["images"] == 1
-    assert builder._history[0].images == []
+    assert stats["images"] == 0
+    assert builder._history[0].images
+    assert builder._render_prompt_messages(AgentState(user_message=""), None)[1].images
 

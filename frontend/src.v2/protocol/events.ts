@@ -25,6 +25,7 @@ export type {
   StreamingClientCommandType,
   ItemStartedEvent,
   AgentMessageDeltaEvent,
+  AgentItemDeltaEvent,
   ItemCompletedEvent,
   ImageChunkLiveEvent,
   ImageChunkReplayEvent,
@@ -337,6 +338,7 @@ export interface UntypedServerEvent {
     | "tool_call"
     | "tool_result"
     | "tool_output_delta"
+    | "agent.item.delta"
     | "command_output_chunk"
     | "agent.run.started"
     | "agent.run.completed"
@@ -544,6 +546,7 @@ export type ProviderOAuthCommand = {
 import type {
   ItemStartedEvent,
   AgentMessageDeltaEvent,
+  AgentItemDeltaEvent,
   ItemCompletedEvent,
   ImageChunkEvent,
   ThinkingDeltaEvent,
@@ -696,6 +699,7 @@ type ServerEventPayload =
   | ToolOutputDeltaEvent
   | CommandOutputChunkEvent
   | AgentItemEvent
+  | AgentItemDeltaEvent
   | AgentProgressEvent
   | RuntimeSpanEvent
   | AgentRunStartedEvent
@@ -1003,6 +1007,7 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "tool_call",
   "tool_result",
   "tool_output_delta",
+  "agent.item.delta",
   "agent.run.started",
   "agent.run.completed",
   "user_message.queue.updated",

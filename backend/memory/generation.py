@@ -16,12 +16,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Callable
 
 from filelock import Timeout as FileLockTimeout
 
 from backend.atomic_io import atomic_write_text
 from backend.async_cleanup import cancel_and_drain
+from backend.async_cleanup import to_thread_cancel_safe as _to_thread_cancel_safe
 from backend.llm.base import LLMMessage, SideQueryOptions
 from backend.memory.consolidation_agent import run_memory_consolidation_agent
 from backend.memory.file_memory import FileMemory
@@ -128,25 +129,6 @@ async def drain_memory_background_tasks(*, timeout: float = 5.0) -> set[asyncio.
     return pending
 
 
-async def _to_thread_cancel_safe(func: Any, /, *args: Any, **kwargs: Any) -> Any:
-    """Keep registry ownership until the executor thread actually exits."""
-
-    inner = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
-    try:
-        return await asyncio.shield(inner)
-    except asyncio.CancelledError:
-        while not inner.done():
-            try:
-                await asyncio.shield(inner)
-            except asyncio.CancelledError:
-                continue
-        try:
-            inner.result()
-        except BaseException:
-            pass
-        raise
-
-
 class MemoryGenerationError(RuntimeError):
     pass
 
@@ -164,6 +146,9 @@ class Phase2WorkspaceState:
     artifacts_valid: bool
 
 
+_STARTUP_TASKS: dict[tuple[str, int], asyncio.Task[Any]] = {}
+
+
 def schedule_memory_startup(
     *,
     repository: Any,
@@ -171,16 +156,22 @@ def schedule_memory_startup(
     workspace_root: Path | str | None,
     current_conversation_id: str,
     token_budget: int | None = None,
+    foreground_tasks: Callable[[], Iterable[asyncio.Task[Any]]] | None = None,
 ) -> asyncio.Task[Any] | None:
     """Start maintenance in a clean task context so turn usage is not inherited."""
 
     if llm is None or not workspace_root or memory_reset_in_progress():
         return None
+    key = (str(Path(workspace_root).resolve()), id(llm))
+    existing = _STARTUP_TASKS.get(key)
+    if existing is not None and not existing.done():
+        return existing
     coordinator = MemoryGenerationCoordinator(
         repository=repository,
         llm=llm,
         workspace_root=workspace_root,
         token_budget=token_budget,
+        foreground_tasks=foreground_tasks,
     )
     task = asyncio.create_task(
         coordinator.run_startup(current_conversation_id=current_conversation_id),
@@ -188,6 +179,11 @@ def schedule_memory_startup(
         context=contextvars.Context(),
     )
     _track_background_task(task)
+    _STARTUP_TASKS[key] = task
+    def finished(done: asyncio.Task[Any]) -> None:
+        if _STARTUP_TASKS.get(key) is done:
+            _STARTUP_TASKS.pop(key)
+    task.add_done_callback(finished)
     return task
 
 
@@ -244,6 +240,7 @@ class MemoryGenerationCoordinator:
         workspace_root: Path | str,
         token_budget: int | None = None,
         now: Any | None = None,
+        foreground_tasks: Callable[[], Iterable[asyncio.Task[Any]]] | None = None,
     ) -> None:
         self.repository = repository
         self.llm = llm
@@ -257,6 +254,15 @@ class MemoryGenerationCoordinator:
         self.worker_id = uuid.uuid4().hex
         self.token_budget = int(token_budget or 0)
         self._now_fn = now or time.time
+        self._foreground_tasks = foreground_tasks
+
+    async def _wait_for_foreground(self) -> None:
+        if self._foreground_tasks is None:
+            return
+        while active := {task for task in self._foreground_tasks() if not task.done()}:
+            # asyncio.wait observes completion without propagating a memory
+            # cancellation to the foreground tasks it is waiting on.
+            await asyncio.wait(active)
 
     def _now(self) -> int:
         return int(self._now_fn())
@@ -264,6 +270,7 @@ class MemoryGenerationCoordinator:
     async def run_startup(self, *, current_conversation_id: str) -> None:
         """Run MiniCode's prune -> gate -> Phase 1 -> Phase 2 startup order."""
 
+        await self._wait_for_foreground()
         now = self._now()
         await _to_thread_cancel_safe(
             self.store.prune_unselected_outputs,
@@ -316,9 +323,7 @@ class MemoryGenerationCoordinator:
                 continue
             if candidate_root != self.memory_root:
                 continue
-            record = self.repository.get_conversation(str(summary.id))
-            if record is not None:
-                results.append(record)
+            results.append(summary)
         return results
 
     async def _reconcile_ineligible_outputs(self, conversations: Iterable[Any]) -> None:
@@ -339,7 +344,7 @@ class MemoryGenerationCoordinator:
             return False
         if self._generation_mode(conversation) != "enabled":
             return False
-        if not list(getattr(conversation, "transcript", []) or []):
+        if not (getattr(conversation, "message_count", 0) or getattr(conversation, "transcript", [])):
             return False
         updated_at = self._source_updated_at(conversation)
         return (
@@ -360,7 +365,7 @@ class MemoryGenerationCoordinator:
 
     @staticmethod
     def _source_revision(conversation: Any) -> int:
-        raw = getattr(conversation, "revision", None)
+        raw = getattr(conversation, "content_revision", getattr(conversation, "revision", None))
         if isinstance(raw, bool) or raw is None:
             raise MemoryGenerationError("Conversation has no durable revision")
         revision = int(raw)
@@ -370,7 +375,7 @@ class MemoryGenerationCoordinator:
 
     @staticmethod
     def _source_updated_at(conversation: Any) -> int:
-        raw = str(getattr(conversation, "updated_at", "") or "").strip()
+        raw = str(getattr(conversation, "content_updated_at", "") or getattr(conversation, "updated_at", "") or "").strip()
         if not raw:
             raise MemoryGenerationError("Conversation has no updated_at timestamp")
         try:
@@ -384,6 +389,7 @@ class MemoryGenerationCoordinator:
         return int(parsed.timestamp())
 
     async def _run_phase1(self, conversation: Any) -> None:
+        await self._wait_for_foreground()
         source_revision = self._source_revision(conversation)
         source_updated_at = self._source_updated_at(conversation)
         claim = await _to_thread_cancel_safe(
@@ -398,10 +404,15 @@ class MemoryGenerationCoordinator:
         if claim is None:
             return
         try:
+            conversation = await _to_thread_cancel_safe(self.repository.get_conversation, str(conversation.id))
+            if (conversation is None or self._source_revision(conversation) != source_revision
+                    or self._generation_mode(conversation) != "enabled" or bool(getattr(conversation, "archived", False))):
+                await _to_thread_cancel_safe(self.store.abandon_stage1, claim)
+                return
             rollout = self._serialize_rollout(conversation)
             result = await self._extract_phase1(conversation, rollout)
             current = await _to_thread_cancel_safe(
-                self.repository.get_conversation,
+                self.repository.get_conversation_summary,
                 str(conversation.id),
             )
             if current is None or self._generation_mode(current) != "enabled":
@@ -545,6 +556,7 @@ class MemoryGenerationCoordinator:
         return conversation_id
 
     async def _run_phase2(self) -> None:
+        await self._wait_for_foreground()
         claim = await _to_thread_cancel_safe(
             self.store.claim_phase2,
             worker_id=self.worker_id,
@@ -626,7 +638,7 @@ class MemoryGenerationCoordinator:
     def _eligible_phase2_outputs(self, outputs: Iterable[Stage1Output]) -> list[Stage1Output]:
         eligible: list[Stage1Output] = []
         for output in outputs:
-            conversation = self.repository.get_conversation(output.thread_id)
+            conversation = self.repository.get_conversation_summary(output.thread_id)
             if conversation is None or self._generation_mode(conversation) != "enabled":
                 self.store.remove_thread_output(output.thread_id)
                 continue
@@ -640,7 +652,7 @@ class MemoryGenerationCoordinator:
 
     def _outputs_still_eligible(self, outputs: Iterable[Stage1Output]) -> bool:
         for output in outputs:
-            conversation = self.repository.get_conversation(output.thread_id)
+            conversation = self.repository.get_conversation_summary(output.thread_id)
             if conversation is None:
                 return False
             if self._generation_mode(conversation) != "enabled":
@@ -701,7 +713,7 @@ class MemoryGenerationCoordinator:
 
     def _sync_phase2_inputs(self, outputs: list[Stage1Output]) -> str:
         records = {
-            output.thread_id: self.repository.get_conversation(output.thread_id)
+            output.thread_id: self.repository.get_conversation_summary(output.thread_id)
             for output in outputs
         }
         sections = ["# Raw Memories", ""]

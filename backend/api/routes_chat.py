@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from backend.artifact.media import AUDIO_MEDIA_EXTENSIONS
+
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, Response, UploadFile
@@ -26,6 +28,47 @@ from .models import ChatRequest, ChatResponse, UploadResponse
 from backend.services.tool_registry_factory import get_attachment_store as _get_attachment_store
 
 router = APIRouter()
+
+@router.get("/api/conversations/{conversation_id}/messages")
+async def conversation_messages(
+    conversation_id: str,
+    session_id: str = Query(..., min_length=1),
+    before_message_id: str = Query(""),
+    limit: int = Query(80, ge=1, le=200),
+) -> dict:
+    session = _state.ws_manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        page = await run_in_threadpool(
+            session.conversation_repo.get_transcript_page, conversation_id,
+            limit=limit, before_message_id=before_message_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if page is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return page
+
+@router.get("/api/conversations/{conversation_id}/messages/{message_id}/tools")
+async def conversation_message_tools(
+    conversation_id: str, message_id: str,
+    session_id: str = Query(..., min_length=1), before: int = Query(..., ge=0),
+    limit: int = Query(40, ge=1, le=200),
+    revision: str = Query("", max_length=64),
+) -> dict:
+    session = _state.ws_manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        page = await run_in_threadpool(session.conversation_repo.get_message_tool_items,
+                                      conversation_id, message_id, before=before, limit=limit, revision=revision)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if page is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return page
+
 
 @router.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
@@ -150,7 +193,7 @@ def _native_body_response(
     download: bool = False,
 ) -> Response:
     total = len(body)
-    inline_media = media_type == "application/pdf" or media_type in {
+    inline_media = media_type == "application/pdf" or media_type in AUDIO_MEDIA_EXTENSIONS or media_type in {
         "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp", "image/avif",
     }
     disposition = "inline" if inline_media and not download else "attachment"
@@ -213,7 +256,7 @@ async def raw_generated_artifact(
     artifact_id: str = Query(..., min_length=1),
     asset_token: str | None = Query(None),
 ) -> Response:
-    """Stream an owner-scoped generated image for chat and context thumbnails."""
+    """Stream owner-scoped generated images and audio, including byte ranges."""
 
     _ = asset_token
     try:

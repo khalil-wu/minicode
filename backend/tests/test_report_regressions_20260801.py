@@ -192,7 +192,7 @@ def test_compaction_serializes_assistant_tool_calls() -> None:
     ])
 
     assert transcript == (
-        '[Assistant tool calls]: read_file(file_path="README.md")'
+        '[Assistant tool calls]: read_file(file_path="README.md") [call_id="call-1"]'
     )
 
 

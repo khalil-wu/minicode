@@ -980,6 +980,7 @@ class FileSwarmStore:
                 "conversation_id": conversation_id,
                 "team_name": str(payload.get("team_name") or ""),
                 "task_id": str(payload.get("task_id") or ""),
+                "summary": str(payload.get("summary") or "")[:200],
                 "sender_mailbox_epoch": max(0, int(payload.get("sender_mailbox_epoch") or 0)),
                 "recipient_mailbox_epoch": max(0, int(payload.get("recipient_mailbox_epoch") or 0)),
                 "recipient_mailbox_epochs": {

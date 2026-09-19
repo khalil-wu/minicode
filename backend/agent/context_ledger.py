@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict
 
+from backend.llm.base import NATIVE_ATTACHMENT_TOKEN_ESTIMATE
+
 
 ContextLedgerCategory = Literal[
     "system_runtime",
@@ -21,7 +23,6 @@ ContextLedgerCategory = Literal[
 # Mechanism and constant taken from cc (services/compact/microCompact.ts:38
 # IMAGE_MAX_TOKEN_SIZE, which services/tokenEstimation.ts:404 also aligns to);
 # the ledger boundary and its accounting are MiniCode's own.
-NATIVE_ATTACHMENT_TOKEN_ESTIMATE = 2_000
 
 
 class ContextLedgerEntry(TypedDict):

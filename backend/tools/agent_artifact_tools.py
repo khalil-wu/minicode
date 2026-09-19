@@ -292,6 +292,13 @@ class ReadArtifactTool(BaseTool):
                 f"Artifact '{artifact_id}' does not exist in this conversation and workspace."
             )
 
+        if payload is None:
+            meta = self._artifact_store.get_meta(artifact_id, conversation_id=conversation_id, workspace_root=workspace_root)
+            if meta is not None and meta.type == "audio":
+                return ToolResult(content=f"Audio artifact {artifact_id} ({meta.media_type}), available for playback; not transcribed.",
+                    artifact_id=artifact_id, artifact_kind="file", artifact_media_type=meta.media_type,
+                    audios=[{"media_type": meta.media_type, "data": content}] if context is not None and context.result_sink is not None else [])
+
         sliced, window = self._slice_lines(content, args)
         # A preview of the artifact head would be appended to the model-visible
         # result alongside the slice, re-adding the very content offset/limit

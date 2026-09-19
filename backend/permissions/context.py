@@ -12,6 +12,9 @@ from backend.permissions.profiles import WorkspaceScope
 from backend.agent.run_context import RunContext
 
 if TYPE_CHECKING:
+    from backend.agent.model_execution import ModelExecutionSnapshot
+    from backend.llm.base import ToolCallEvent
+    from backend.tools.base import ToolResult
     from backend.agent.turn_diff_tracker import TurnDiffTracker
     from backend.sandbox.policy import SandboxPolicy
     from backend.tasks.manager import TaskManager
@@ -25,6 +28,17 @@ PermissionMode = Literal[
     "auto",
 ]
 EventEmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallSource:
+    kind: Literal["direct", "code_mode", "extension"] = "direct"
+    parent_call_id: str = ""
+    cell_id: str = ""
+    runtime_call_id: str = ""
+
+
+DIRECT_TOOL_SOURCE = ToolCallSource()
 
 
 @dataclass(frozen=True)
@@ -95,6 +109,7 @@ class ToolExecutionContext:
     # Process-local owners for the active turn. Durable/transport metadata
     # remains in ``metadata``; runtime capabilities do not.
     run_context: RunContext | None = None
+    model_execution: ModelExecutionSnapshot | None = None
     cancel_event: asyncio.Event | None = None
     emit_event: EventEmitter | None = None
     approval_handler: Callable[[str], Any] | None = None
@@ -137,6 +152,17 @@ class ToolExecutionContext:
     # changes. Subagent contexts leave this unset and therefore cannot commit
     # a permission transition.
     permission_context_committer: Callable[[PermissionContext], tuple[PermissionContext, Any]] | None = None
+    tool_span_started_at: dict[str, int] = field(default_factory=dict, repr=False)
+    call_sources: dict[str, ToolCallSource] = field(default_factory=dict, repr=False)
+    iteration_id: str = ""
+    result_sink: Callable[[ToolCallEvent, ToolResult], None] | None = field(default=None, repr=False)
+
+    def source_for_call(self, call_id: str) -> ToolCallSource:
+        return self.call_sources.get(call_id, DIRECT_TOOL_SOURCE)
+
+    @property
+    def command_scope_id(self) -> str:
+        return self.conversation_id or self.session_id
 
     def __post_init__(self) -> None:
         # Promote the pre-R1 registry slot once at the context boundary. This
@@ -146,3 +172,5 @@ class ToolExecutionContext:
             legacy_registry = self.metadata.pop("_tool_registry", None)
             if legacy_registry is not None:
                 self.tool_registry = legacy_registry
+        if self.model_execution is None and self.run_context is not None:
+            self.model_execution = self.run_context.model_execution

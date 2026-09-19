@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Check, ChevronDown, ChevronRight, Circle, Copy, Pencil, Wifi, WifiOff } from "lucide-react";
 import type { ActivityCellState } from "./cellTypes";
+import { ToolSourceBadge } from "./ToolSourceBadge";
 import { useAppStore } from "../../stores";
 import {
   type ActivityDetail,
@@ -343,6 +344,7 @@ export const ActivityCell = memo(function ActivityCell({
               {detail}
             </span>
           )}
+          <ToolSourceBadge source={records[0]?.callSource} />
           {singleInlineDetail?.lineInfo && <span className="activity-cell-detail-meta">{singleInlineDetail.lineInfo}</span>}
 
           {isRunning && cell.progress?.text && !providerLabel && (
@@ -374,6 +376,9 @@ export const ActivityCell = memo(function ActivityCell({
           hasInlineEvidence ? "activity-cell-tool-expanded" : "",
           hasArtifactEvidence ? "activity-cell-artifact-gallery" : "",
         ].filter(Boolean).join(" ")}>
+          {records.filter((record) => record.name === "tool_exec" && typeof record.args.code === "string").map((record) => (
+            <pre key={`code-${record.id}`} className="activity-cell-inline-output" aria-label="组合脚本">{record.args.code as string}</pre>
+          ))}
           {hasChangeEvidence && changeDetails.map((change, index) => (
             <div key={`${change.path}-${index}`} className="activity-cell-change-card">
               <div className="activity-cell-change-card-header">

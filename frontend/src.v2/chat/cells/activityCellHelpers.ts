@@ -1,4 +1,4 @@
-import type { ActivityCellState } from "./cellTypes";
+import type { ActivityCellState, HistoryCellState } from "./cellTypes";
 import { purifyToolErrorText } from "../errorMessages";
 import { readableToolLabel } from "../toolDisplayName";
 
@@ -12,6 +12,17 @@ export interface ActivityDetail {
 }
 
 export type ActivityToolRecord = NonNullable<ActivityCellState["toolCallRecords"]>[number];
+
+/** File evidence used to resolve transcript links, shared with invalidation. */
+export function knownFilePathsForCell(cell: HistoryCellState): string[] {
+  if (cell.kind === "diff") return cell.files.filter((file) => file.changeType !== "deleted").map((file) => file.path);
+  if (cell.kind !== "activity") return [];
+  return (cell.toolCallRecords ?? []).filter((record) => record.status === "success").flatMap((record) => [
+    ...(typeof record.args.file_path === "string" ? [record.args.file_path] : []),
+    ...(record.diff?.files ?? []).filter((file) => file.status !== "deleted").map((file) => file.path),
+    ...(record.outputFiles ?? []).map((file) => file.path),
+  ]);
+}
 
 /** Web fetch records share the web-search activity envelope but render as a
  * separate, flat transcript action. Keep the discriminator in one place so

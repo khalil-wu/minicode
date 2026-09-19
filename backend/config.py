@@ -296,6 +296,12 @@ class AgentSettings:
     stream_max_attempts: int = 10
     stream_retry_delay_seconds: float = 0.5
     stream_retryable_substrings: tuple[str, ...] = ()
+    # A provider that cannot be reached is waited out rather than budgeted: the
+    # request never left the client, so replaying it is always safe, and the
+    # cause is normally the user's network returning. Only the connect phase is
+    # unbounded; a request that fails mid-stream still spends stream_max_attempts.
+    # Set false to fail such turns after the normal retry budget instead.
+    stream_connection_retries_enabled: bool = True
     # Deprecated compatibility fields. Iteration budgets are explicit and are
     # never inferred from request text, tool signatures, or output heuristics.
 
@@ -748,6 +754,9 @@ def load_config(*, cwd: Path | None = None) -> AppConfig:
         ),
         stream_retry_delay_seconds=_coerce_nonnegative_float(
             agent_data.get("stream_retry_delay_seconds"), AgentSettings.stream_retry_delay_seconds
+        ),
+        stream_connection_retries_enabled=coerce_feature_bool(
+            agent_data.get("stream_connection_retries_enabled", True), True
         ),
         stream_retryable_substrings=tuple(
             str(item).strip()

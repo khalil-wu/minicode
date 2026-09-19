@@ -14,6 +14,8 @@ from backend.agent.parent_notification_outbox import (
     subscribe_parent_notification_enqueued,
 )
 from backend.agent.message import UserCommand
+from backend.agent.run_context import RunContext
+from backend.agent.model_execution import ModelExecutionSnapshot
 from backend.agent.turn_input import TurnInput, TurnInputQueue
 from backend.async_cleanup import (
     CANCELLATION_DRAIN_TIMEOUT_SECONDS,
@@ -41,6 +43,7 @@ class SessionRunManager:
         self._session = session
         wait_state = TurnWaitState.for_session(session)
         self._run_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._run_contexts: dict[str, RunContext] = {}
         self._run_task_ids: dict[str, str] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._active_run_task: asyncio.Task[Any] | None = None
@@ -666,6 +669,7 @@ class SessionRunManager:
         task_id: str,
         cancel_event: asyncio.Event,
         active_conversation_id: str | None,
+        run_context: RunContext | None = None,
     ) -> None:
         if conversation_id:
             # One conversation owns at most one live run. Overwriting the three
@@ -690,6 +694,10 @@ class SessionRunManager:
                 key for key in self._delivery_complete if key[0] != conversation_id
             }
             self.run_tasks[conversation_id] = task
+            if run_context is not None:
+                self._run_contexts[conversation_id] = run_context
+            else:
+                self._run_contexts.pop(conversation_id, None)
             self.run_task_ids[conversation_id] = task_id
             self.cancel_events[conversation_id] = cancel_event
         if conversation_id == active_conversation_id:
@@ -697,6 +705,14 @@ class SessionRunManager:
             self._active_task_id = task_id
             self._active_run_cancel_event = cancel_event
         self._session.session_lifecycle.schedule_task_runtime_update()
+
+    def publish_model_execution(self, conversation_id: str, snapshot: ModelExecutionSnapshot) -> asyncio.Task[Any] | None:
+        task = self.running_task_for(conversation_id)
+        context = self._run_contexts.get(conversation_id)
+        if task is None or context is None:
+            return None
+        context.model_execution = snapshot
+        return task
 
     def watch_conversation_notifications(self, conversation_id: str) -> None:
         """Bind one conversation to this session's CC-style queue subscriber."""
@@ -1005,6 +1021,7 @@ class SessionRunManager:
         newer_run_registered = registered_task is not None and registered_task is not task
         if conversation_id and registered_task is task:
             self.run_tasks.pop(conversation_id, None)
+            self._run_contexts.pop(conversation_id, None)
         if conversation_id and self.run_task_ids.get(conversation_id) == task_id:
             self.run_task_ids.pop(conversation_id, None)
         if conversation_id and self.cancel_events.get(conversation_id) is cancel_event:

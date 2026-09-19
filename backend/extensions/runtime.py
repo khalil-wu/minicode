@@ -16,6 +16,8 @@ import copy
 import inspect
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any
@@ -293,6 +295,8 @@ class ExtensionRuntime:
         self._event_unsubscribers: dict[str, list[Callable[[], None]]] = {}
         self._event_bus: ExtensionEventBus | None = None
         self._actions: dict[str, Callable[..., Any]] = dict(actions or {})
+        self._execution_context = ContextVar("extension_execution_context", default=None)
+        self._execution_tool_context = ContextVar("extension_execution_tool_context", default=None)
         self._active = True
         self._stale_message: str | None = None
 
@@ -323,12 +327,36 @@ class ExtensionRuntime:
         self._actions.update(dict(actions or {}))
         self._actions.update(kwargs)
 
-    def action(self, name: str, *args: Any, **kwargs: Any) -> Any:
+    def action(self, action_name: str, *args: Any, **kwargs: Any) -> Any:
         self.assert_active()
-        callback = self._actions.get(name)
+        owner = self.execution_run_context
+        if owner is not None and owner.extension_actions is not None:
+            owner.extension_actions._live()
+            callback = owner.extension_actions.runtime_actions.get(action_name)
+            if callback is not None:
+                return _call_with_signature(callback, kwargs, args)
+        callback = self._actions.get(action_name)
         if callback is None:
-            raise RuntimeError(f"Extension runtime action '{name}' is not bound")
+            raise RuntimeError(f"Extension runtime action '{action_name}' is not bound")
         return _call_with_signature(callback, kwargs, args)
+
+    @property
+    def execution_run_context(self):
+        return self._execution_context.get()
+
+    @property
+    def execution_tool_context(self):
+        return self._execution_tool_context.get()
+
+    @contextmanager
+    def execution_scope(self, run_context, tool_context=None):
+        token = self._execution_context.set(run_context)
+        tool_token = self._execution_tool_context.set(tool_context)
+        try:
+            yield
+        finally:
+            self._execution_tool_context.reset(tool_token)
+            self._execution_context.reset(token)
 
     def bind_provider_sink(self, sink: Any | None) -> None:
         self.assert_active()
@@ -484,11 +512,28 @@ class ExtensionContext:
         self._runner = runner
         self._signal = signal
         self._tool_context = tool_context
+        self._run_context = getattr(tool_context, "run_context", None) or runner.runtime.execution_run_context
+        self._model_execution = getattr(tool_context, "model_execution", None) or (
+            self._run_context.active_model_execution or self._run_context.model_execution
+            if self._run_context is not None else None
+        )
         self._mode = mode
         self._event_system_prompt: str | None = None
+        actions = self._run_context.extension_actions if self._run_context is not None else None
+        query = actions.query if actions is not None else None
+        root = getattr(tool_context, "workspace_root", None) or (query.state.workspace_root if query is not None else None)
+        self._cwd = str(root) if root is not None else runner.cwd
+        if self._signal is None and query is not None:
+            self._signal = query.cancel_event
 
     def _assert(self) -> None:
         self._runner.assert_active()
+
+    def _context_action(self, name, default=None, **kwargs):
+        actions = self._run_context.extension_actions if self._run_context is not None else None
+        if actions is not None and name in actions.context_actions:
+            return _call_with_signature(actions.context_actions[name], kwargs, ())
+        return self._runner.context_action(name, default=default, **kwargs)
 
     @property
     def ui(self) -> Any:
@@ -508,27 +553,34 @@ class ExtensionContext:
     @property
     def cwd(self) -> str:
         self._assert()
-        return self._runner.cwd
+        return self._cwd
 
     @property
     def model(self) -> Any:
         self._assert()
-        return self._runner.context_action("model")
+        snapshot = self._model_execution
+        if snapshot is not None:
+            if snapshot.model_info is not None:
+                return snapshot.model_info
+            return snapshot.model_runtime.get_model(snapshot.provider, snapshot.model) if snapshot.model_runtime is not None else None
+        return self._context_action("model")
 
     @property
     def thinking_level(self) -> Any:
         self._assert()
+        if self._run_context is not None and self._run_context.model_execution is not None:
+            return self._run_context.model_execution.thinking_level
         return self._runner.runtime.get_thinking_level()
 
     @property
     def session_manager(self) -> Any:
         self._assert()
-        return self._runner.context_action("session_manager")
+        return self._context_action("session_manager")
 
     @property
     def model_registry(self) -> Any:
         self._assert()
-        return self._runner.context_action("model_registry")
+        return self._context_action("model_registry")
 
     @property
     def signal(self) -> Any:
@@ -542,37 +594,39 @@ class ExtensionContext:
 
     def is_idle(self) -> bool:
         self._assert()
-        return bool(self._runner.context_action("is_idle", default=True))
+        return bool(self._context_action("is_idle", default=True))
 
     def is_project_trusted(self) -> bool:
         self._assert()
-        return bool(self._runner.context_action("is_project_trusted", default=False))
+        return bool(self._context_action("is_project_trusted", default=False))
 
     def abort(self) -> Any:
         self._assert()
-        return self._runner.context_action("abort")
+        return self._context_action("abort")
 
     def has_pending_messages(self) -> bool:
         self._assert()
-        return bool(self._runner.context_action("has_pending_messages", default=False))
+        return bool(self._context_action("has_pending_messages", default=False))
 
     def shutdown(self) -> Any:
         self._assert()
+        if self._run_context is not None and self._run_context.extension_actions is not None:
+            return self._run_context.extension_actions.shutdown()
         return self._runner.request_shutdown()
 
     def get_context_usage(self) -> Any:
         self._assert()
-        return self._runner.context_action("get_context_usage")
+        return self._context_action("get_context_usage")
 
     def compact(self, options: Mapping[str, Any] | None = None) -> Any:
         self._assert()
-        return self._runner.context_action("compact", options=options)
+        return self._context_action("compact", options=options)
 
     def get_system_prompt(self) -> str:
         self._assert()
         if self._event_system_prompt is not None:
             return self._event_system_prompt
-        return str(self._runner.context_action("get_system_prompt", default=""))
+        return str(self._context_action("get_system_prompt", default=""))
 
     def _set_event_system_prompt(self, prompt: str | None) -> None:
         self._event_system_prompt = prompt
@@ -608,15 +662,15 @@ class ExtensionCommandContext(ExtensionContext):
 
     def get_system_prompt_options(self) -> Any:
         self._assert()
-        return self._runner.context_action("get_system_prompt_options", default={})
+        return self._context_action("get_system_prompt_options", default={})
 
     async def wait_for_idle(self) -> Any:
         self._assert()
-        return await _maybe_await(self._runner.context_action("wait_for_idle"))
+        return await _maybe_await(self._context_action("wait_for_idle"))
 
     async def reload(self) -> Any:
         self._assert()
-        return await _maybe_await(self._runner.context_action("reload"))
+        return await _maybe_await(self._context_action("reload"))
 
 
 class ExtensionAPI:
@@ -1028,7 +1082,7 @@ class ExtensionToolAdapter(BaseTool):
     def is_idempotent(self, args: dict[str, Any] | None = None) -> bool:
         if self.idempotent is not None:
             return bool(self.idempotent)
-        return self.get_side_effect_kind(args) == "none"
+        return self.is_read_only(args)
 
     async def execute(self, args: dict[str, Any], context: Any = None) -> Any:
         tool_call_id = ""
@@ -1150,6 +1204,11 @@ class ExtensionRunner:
 
     def context_action(self, name: str, default: Any = None, **kwargs: Any) -> Any:
         self.assert_active()
+        owner = self.runtime.execution_run_context
+        if owner is not None and owner.extension_actions is not None:
+            callback = owner.extension_actions.context_actions.get(name)
+            if callback is not None:
+                return _call_with_signature(callback, kwargs, ())
         callback = self._context_actions.get(name)
         if callback is None:
             return default
@@ -1433,6 +1492,29 @@ class ExtensionRunner:
             self, signal=signal, tool_context=tool_context, mode=self.mode
         )
 
+    def for_execution(self, run_context):
+        from backend.extensions.execution import BoundExtensionRunner
+
+        return BoundExtensionRunner(self, run_context)
+
+    @property
+    def execution_run_context(self):
+        return self.runtime.execution_run_context
+
+    @property
+    def execution_tool_context(self):
+        return self.runtime.execution_tool_context
+
+    async def _invoke_callback(self, callback, values, positional=()):
+        context = values.get("ctx") or values.get("context")
+        owner = context._run_context if context is not None else self.runtime.execution_run_context
+        with self.runtime.execution_scope(owner, context.tool_context if context is not None else None):
+            try:
+                return await _maybe_await(_call_with_signature(callback, values, positional))
+            finally:
+                if owner is not None and owner.extension_actions is not None:
+                    await owner.extension_actions.flush()
+
     def create_command_context(
         self, *, signal: Any = None, tool_context: Any = None
     ) -> ExtensionCommandContext:
@@ -1464,12 +1546,8 @@ class ExtensionRunner:
         results: list[Any] = []
         for extension, handler in self._handlers_for(event_name):
             try:
-                value = _call_with_signature(
-                    handler,
-                    {"event": event_payload, "ctx": ctx, "context": ctx},
-                    (event_payload, ctx),
-                )
-                results.append(await _maybe_await(value))
+                results.append(await self._invoke_callback(handler,
+                    {"event": event_payload, "ctx": ctx, "context": ctx}, (event_payload, ctx)))
             except ExtensionStaleError:
                 raise
             except Exception as exc:
@@ -1508,9 +1586,7 @@ class ExtensionRunner:
                 "system_prompt_options": event_options,
             }
             try:
-                value = await _maybe_await(
-                    _call_with_signature(handler, {"event": event, "ctx": context, "context": context}, (event, context))
-                )
+                value = await self._invoke_callback(handler, {"event": event, "ctx": context, "context": context}, (event, context))
             except Exception as exc:
                 self.record_error("before_agent_start", extension.path, exc)
                 continue
@@ -1543,9 +1619,7 @@ class ExtensionRunner:
             handler_messages = copy.deepcopy(current)
             event = {"type": "context", "messages": handler_messages}
             try:
-                value = await _maybe_await(
-                    _call_with_signature(handler, {"event": event, "ctx": context, "context": context}, (event, context))
-                )
+                value = await self._invoke_callback(handler, {"event": event, "ctx": context, "context": context}, (event, context))
             except ExtensionStaleError:
                 raise
             except Exception as exc:
@@ -1568,9 +1642,7 @@ class ExtensionRunner:
         for extension, handler in self._handlers_for("before_provider_request"):
             event = {"type": "before_provider_request", "payload": current}
             try:
-                value = await _maybe_await(
-                    _call_with_signature(handler, {"event": event, "ctx": context, "context": context}, (event, context))
-                )
+                value = await self._invoke_callback(handler, {"event": event, "ctx": context, "context": context}, (event, context))
             except ExtensionStaleError:
                 raise
             except Exception as exc:
@@ -1594,9 +1666,7 @@ class ExtensionRunner:
         for extension, handler in self._handlers_for("before_provider_headers"):
             event = {"type": "before_provider_headers", "headers": current}
             try:
-                await _maybe_await(
-                    _call_with_signature(handler, {"event": event, "ctx": context, "context": context}, (event, context))
-                )
+                await self._invoke_callback(handler, {"event": event, "ctx": context, "context": context}, (event, context))
             except ExtensionStaleError:
                 raise
             except Exception as exc:
@@ -1624,13 +1694,7 @@ class ExtensionRunner:
         decision: ToolCallDecision | None = None
         for extension, handler in self._handlers_for("tool_call"):
             try:
-                value = await _maybe_await(
-                    _call_with_signature(
-                        handler,
-                        {"event": event, "ctx": ctx, "context": ctx},
-                        (event, ctx),
-                    )
-                )
+                value = await self._invoke_callback(handler, {"event": event, "ctx": ctx, "context": ctx}, (event, ctx))
                 if value is None:
                     continue
                 if isinstance(value, ToolCallDecision):
@@ -1680,13 +1744,7 @@ class ExtensionRunner:
         modified = False
         for extension, handler in self._handlers_for("tool_result"):
             try:
-                value = await _maybe_await(
-                    _call_with_signature(
-                        handler,
-                        {"event": event, "ctx": ctx, "context": ctx},
-                        (event, ctx),
-                    )
-                )
+                value = await self._invoke_callback(handler, {"event": event, "ctx": ctx, "context": ctx}, (event, ctx))
                 # Handlers may mutate the event, including nested fields, and
                 # return None. Project that same event instead of comparing
                 # shallow aliases that cannot observe in-place mutations.
@@ -1763,12 +1821,9 @@ class ExtensionRunner:
                 "ctx": ctx,
                 "tool_context": tool_context,
             }
-            raw = _call_with_signature(
-                definition.execute,
-                values,
-                (tool_call_id, event.input, signal, on_update, ctx),
-            )
-            result = _as_tool_result(await _maybe_await(raw))
+            raw = await self._invoke_callback(definition.execute, values,
+                (tool_call_id, event.input, signal, on_update, ctx))
+            result = _as_tool_result(raw)
 
         # Build the extension result event while retaining MiniCode's compact
         # ToolResult object for the host.
@@ -2033,6 +2088,10 @@ class ExtensionRunner:
         return await _maybe_await(value)
 
     def request_shutdown(self) -> None:
+        owner = self.runtime.execution_run_context
+        if owner is not None and owner.extension_actions is not None:
+            owner.extension_actions.shutdown()
+            return
         self._shutdown_requested = True
         callback = self.runtime._actions.get("shutdown")
         if callback is not None:

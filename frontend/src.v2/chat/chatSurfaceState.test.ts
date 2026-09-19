@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage, ContentBlock } from "../stores/types";
+import { inheritMessageTopology } from "../lib/message-changes";
 import {
   createRecentTurnProjectionCache,
   projectMessagesToTurns,
@@ -1025,6 +1026,7 @@ describe("chat surface explicit projection", () => {
       }],
     };
 
+    inheritMessageTopology(messages, nextMessages);
     const second = projectRecentMessagesToTurns(nextMessages, true, 40, cache, "conv-long");
 
     expect(second.hiddenTurnCount).toBe(160);

@@ -292,6 +292,7 @@ class AgentTurnState:
             'startedAt': int(data.get('started_at') or self._now_ms()),
             'displayHint': str(data.get('display_hint') or ''),
             'inputSummary': str(data.get('input_summary') or ''),
+            'callSource': data.get('call_source'),
         }
         for source_key, target_key in (
             ('result_kind', 'resultKind'),

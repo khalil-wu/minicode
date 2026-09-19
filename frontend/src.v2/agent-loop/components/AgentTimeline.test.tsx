@@ -216,7 +216,7 @@ describe("AgentTimeline", () => {
     const { container, rerender } = render(<AgentTimeline cells={cells} renderCell={renderCell} isRunning />);
     expect(container.querySelectorAll(".agent-loop-process-cell")).toHaveLength(2);
     rerender(<AgentTimeline cells={cells} renderCell={renderCell} isRunning={false} />);
-    const toggle = screen.getByRole("button", { name: "读取了文件" });
+    const toggle = screen.getByRole("button", { name: "读取了文件 · 2 项" });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(container.querySelectorAll(".agent-loop-process-cell")).toHaveLength(0);
     fireEvent.click(toggle);

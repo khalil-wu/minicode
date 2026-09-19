@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from backend.llm.openai_adapter import _normalized_openai_base_url, _proxy_url_for_base_url
+from backend.llm.openai_adapter import OpenAIAdapter
+from backend.config import LLMSettings
 
 
 def _clear_proxy_env(monkeypatch) -> None:
@@ -33,6 +35,24 @@ def test_https_proxy_is_used_for_https_provider(monkeypatch) -> None:
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
 
     assert _proxy_url_for_base_url("https://api.example.test/v1") == "http://127.0.0.1:7897"
+
+
+def test_default_openai_endpoint_resolves_proxy_using_its_actual_https_scheme(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("HTTP_PROXY", "http://wrong.test:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://correct.test:8080")
+    captured = {}
+    def client(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(aclose=AsyncMock())
+    monkeypatch.setattr("backend.llm.openai_adapter.httpx.AsyncClient", client)
+    adapter = OpenAIAdapter(LLMSettings(api_key="fixture", provider="openai", base_url=""))
+    assert captured["proxy"] == "http://correct.test:8080"
+    assert _proxy_url_for_base_url(adapter._responses_url()) == captured["proxy"]
+    asyncio.run(adapter.aclose())
 
 
 def test_no_proxy_bypasses_explicit_and_environment_proxy(monkeypatch) -> None:

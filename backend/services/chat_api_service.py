@@ -21,6 +21,7 @@ from backend.agent.run_context import RunContext
 from backend.agent.state import AgentState
 from backend.agent.context import ContextBuilder
 from backend.artifact.store import ArtifactStore
+from backend.artifact.media import AUDIO_MEDIA_EXTENSIONS
 from backend.config import load_config
 from backend.documents.service import ingest_uploaded_document
 from backend.permissions.context import PermissionContext
@@ -552,7 +553,7 @@ def generated_artifact_native_payload(
     artifact_id: str,
     ws_manager: Any,
 ) -> tuple[bytes, str, str]:
-    """Return one owner-scoped generated image without routing it over WebSocket."""
+    """Return one owner-scoped generated image or audio without WebSocket binary bodies."""
 
     session = ws_manager.get_session(session_id)
     if session is None:
@@ -586,6 +587,12 @@ def generated_artifact_native_payload(
     media_type = str(getattr(meta, "media_type", "") or "").split(";", 1)[0].strip().lower()
     if media_type == "image/jpg":
         media_type = "image/jpeg"
+    if meta.type == "audio" and media_type in AUDIO_MEDIA_EXTENSIONS:
+        try:
+            body = base64.b64decode(content, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ChatApiServiceError(500, "The stored audio body is invalid.") from exc
+        return body, media_type, f"generated-{artifact_id}.{AUDIO_MEDIA_EXTENSIONS[media_type]}"
     if getattr(meta, "type", "") != "image" or media_type not in GENERATED_IMAGE_MEDIA_TYPES:
         raise ChatApiServiceError(415, "The requested artifact is not a supported generated image.")
     try:

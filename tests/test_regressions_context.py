@@ -115,7 +115,7 @@ def test_compaction_history_formatter_keeps_recent_role_summaries() -> None:
     assert raw_text == (
         "[User]: first request\n\n"
         "[Assistant]: first answer\n\n"
-        "[Tool result]: tool output"
+        '[Tool result] {"call_id":null,"name":"read_file","is_error":false}: tool output'
     )
 
 
@@ -141,11 +141,11 @@ def test_context_builder_token_usage_uses_cached_history_estimates() -> None:
     assert first > 0
 
 
-def test_context_estimates_follow_minicode_chars_per_token_contract() -> None:
+def test_context_estimates_follow_shared_utf8_token_contract() -> None:
     assert estimate_message_tokens("") == 0
     assert estimate_message_tokens("abcd") == 1
     assert estimate_message_tokens("abcde") == 2
-    assert estimate_message_tokens("中文测试") == 1
+    assert estimate_message_tokens("中文测试") == 3
 
 
 def test_native_attachment_estimates_follow_minicode_fixed_contract() -> None:
@@ -318,7 +318,7 @@ def test_context_builder_compact_preserves_recent_message_objects() -> None:
 def test_context_builder_compact_summarizes_split_turn_prefix() -> None:
     llm = _SummaryLLM(model="model-a", response="summary checkpoint")
     builder = ContextBuilder(
-        agent_settings=AgentSettings(compaction_keep_recent_tokens=20), llm=llm
+        agent_settings=AgentSettings(compaction_keep_recent_tokens=7), llm=llm
     )
     tool_call = LLMMessage(
         role="assistant",
@@ -345,14 +345,11 @@ def test_context_builder_compact_summarizes_split_turn_prefix() -> None:
 
     summary = asyncio.run(builder.compact())
 
-    assert llm.simple_calls == 2
+    assert llm.simple_calls == 1
     # Compaction follows the fixed 20k summary cap used by MiniCode;
     # it is not derived from the recent-context reserve.
-    assert llm.simple_max_tokens == [20_000, 20_000]
-    assert summary == (
-        f"{llm.response}\n\n---\n\n"
-        f"**Turn Context (split turn):**\n\n{llm.response}"
-    )
+    assert llm.simple_max_tokens == [20_000]
+    assert summary == llm.response
     assert builder._history[1:] == [  # type: ignore[attr-defined]
         tool_call,
         tool_result,
@@ -1173,7 +1170,7 @@ def test_context_ledger_counts_prompt_sections_as_items() -> None:
 def test_context_builder_full_compact_uses_the_same_token_tail_contract() -> None:
     llm = _SummaryLLM(model="model-a", response="compact summary")
     ctx = ContextBuilder(
-        token_budget=TokenBudget(total=120),
+        token_budget=TokenBudget(total=120, system_prompt=0, active_skills=0, memory_index=0, tool_schemas=0, agent_state=0, response_reserve=8),
         agent_settings=AgentSettings(compaction_keep_recent_tokens=6),
         llm=llm,
     )
@@ -1185,10 +1182,7 @@ def test_context_builder_full_compact_uses_the_same_token_tail_contract() -> Non
     before_history_tokens = ctx._history_tokens_total  # type: ignore[attr-defined]
     summary = asyncio.run(ctx.full_compact())
 
-    assert summary == (
-        f"{llm.response}\n\n---\n\n"
-        f"**Turn Context (split turn):**\n\n{llm.response}"
-    )
-    assert llm.simple_calls == 2
+    assert summary == llm.response
+    assert llm.simple_calls == 1
     assert ctx.history_length < before
     assert ctx._history_tokens_total < before_history_tokens  # type: ignore[attr-defined]

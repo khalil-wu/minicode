@@ -148,7 +148,7 @@ async def test_cold_connect_loads_once_off_loop_and_preserves_replay_status(
         assert session.run_manager._notification_loop is asyncio.get_running_loop()
         assert session.event_outbox.current_replay_seq == 42
         assert session.event_outbox.replay_log_degraded is malformed_tail
-        assert session.event_outbox._events == [payload]
+        assert list(session.event_outbox._events) == [payload]
         assert path.read_text(encoding="utf-8") == content
         assert connection["llm"].close_calls == 0
         assert connection["artifact_store"].shutdown_calls == 0

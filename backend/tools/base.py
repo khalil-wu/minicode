@@ -88,6 +88,9 @@ class ToolResult:
     artifact_kind: str | None = None
     artifact_media_type: str | None = None
     artifact_bytes: int | None = None
+    # Audio stays binary until selected for playback; the shared result
+    # boundary persists it and gives the model an explicit artifact reference.
+    audios: list[dict[str, str]] = field(default_factory=list, repr=False)
 
     def to_context_string(self) -> str:
         """Return the compact representation injected into model context.
@@ -449,6 +452,9 @@ class ToolSchema:
     description: str
     parameters: dict[str, Any]
     strict: bool = False
+    # Optional native text format plus the canonical argument receiving it.
+    # Kept local until a provider selects its supported wire representation.
+    freeform: dict[str, Any] | None = None
 
     @staticmethod
     def _supports_openai_strict(schema: Any) -> bool:
@@ -499,6 +505,8 @@ class ToolSchema:
         }
         if self.strict and self._supports_openai_strict(self.parameters):
             tool["function"]["strict"] = True
+        if self.freeform is not None:
+            tool["_minicode_freeform"] = self.freeform
         return tool
 
     def to_summary(self) -> str:
@@ -512,6 +520,7 @@ class ToolSchema:
             description=description,
             parameters=self.parameters,
             strict=self.strict,
+            freeform=self.freeform,
         )
 
 
@@ -522,6 +531,7 @@ class BaseTool(ABC):
     description: str
     permission: PermissionLevel = PermissionLevel.AUTO
     read_only: bool = False
+    orchestrates_tools: bool = False
     # Capability hints (CC parity). Tools override as needed; registry/MCP
     # adapter and ToolSchemaView derive exposure/permission from these instead
     # of hardcoding per-name special cases.

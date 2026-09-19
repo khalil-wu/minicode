@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import re
@@ -92,9 +93,13 @@ class BackgroundCommand:
     cleanup_requested_at: float | None = None
     cleanup_completed_at: float | None = None
     cleanup_error: dict[str, Any] = field(default_factory=dict, repr=False)
+    backgrounded: bool = True
+    output_changed: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    stream_callback: Callable[[str], Any] | None = field(default=None, repr=False)
 
     def append_live_output(self, piece: str) -> None:
         """Persist one streamed chunk and keep only a bounded in-memory tail."""
+        self.output_changed.set()
         if not piece:
             return
         if self.task_output is not None and not self.output_write_error:
@@ -228,6 +233,8 @@ class BackgroundCommandManager:
         parent_run_id: str = "",
         sandbox_policy: SandboxPolicy | None = None,
         effective_command: str = "",
+        backgrounded: bool = True,
+        stream_callback: Callable[[str], Any] | None = None,
     ) -> BackgroundCommand:
         """在后台执行命令，立即返回 BackgroundCommand。"""
         owner = str(conversation_id or "").strip()
@@ -255,7 +262,7 @@ class BackgroundCommandManager:
                 "Background commands require an explicit sandbox policy; the command was not started."
             )
         runner = SandboxRunner(sandbox_policy)
-        capability = runner.capability()
+        capability = runner.capability(cwd=cwd)
         if not capability.available:
             raise RuntimeError(
                 f"Sandbox unavailable: {capability.reason}. The background command was not started."
@@ -286,6 +293,8 @@ class BackgroundCommandManager:
         bg_cmd = BackgroundCommand(
             command_id=command_id,
             command=display_command,
+            backgrounded=backgrounded,
+            stream_callback=stream_callback,
             description=description or display_command[:60],
             cwd=cwd or os.getcwd(),
             status="running",
@@ -358,6 +367,9 @@ class BackgroundCommandManager:
     async def _notify_completed_once(self, bg_cmd: BackgroundCommand) -> None:
         """Deliver exactly one terminal callback, even across cancel races."""
 
+        bg_cmd.output_changed.set()
+        if not bg_cmd.backgrounded:
+            return
         if bg_cmd.command_id in self._completion_notified:
             return
         self._completion_notified.add(bg_cmd.command_id)
@@ -394,6 +406,8 @@ class BackgroundCommandManager:
                 await asyncio.sleep(STALL_CHECK_INTERVAL_SECONDS)
                 if bg_cmd.status != "running":
                     return
+                if not bg_cmd.backgrounded:
+                    continue
                 size = bg_cmd.output_bytes
                 if size > last_size:
                     last_size = size
@@ -470,7 +484,7 @@ class BackgroundCommandManager:
                         process_start_time=bg_cmd.process_start_time,
                         **runner.container_ownership,
                     )
-                if self._on_started:
+                if self._on_started and bg_cmd.backgrounded:
                     try:
                         await self._on_started(bg_cmd)
                     except Exception as exc:
@@ -483,6 +497,10 @@ class BackgroundCommandManager:
                 # Keep the owned task record current so the Monitor can serve
                 # both polling snapshots and continuous output streaming.
                 bg_cmd.append_live_output(piece)
+                if bg_cmd.stream_callback is not None:
+                    value = bg_cmd.stream_callback(piece)
+                    if inspect.isawaitable(value):
+                        await value
 
             stall_stop = self._start_stall_watchdog(bg_cmd)
             try:
@@ -595,6 +613,7 @@ class BackgroundCommandManager:
             # Only a proven process exit closes the cleanup receipt. When the
             # tree's exit could not be observed the record stays pending so the
             # owner (or the next process's reconciliation) can still reap it.
+            bg_cmd.stream_callback = None
             if unproven_cleanup:
                 bg_cmd.cleanup_pending = True
                 bg_cmd.cleanup_reason = unproven_cleanup
@@ -743,6 +762,70 @@ class BackgroundCommandManager:
         if not owner or command is None or command.conversation_id != owner:
             return None
         return command
+
+    async def wait(
+        self, command_id: str, *, conversation_id: str, wait_ms: int,
+        cursor: int | None = None, cancel_event: asyncio.Event | None = None,
+    ) -> BackgroundCommand:
+        """Wait on owned output/completion without cancelling the process on timeout."""
+        command = self.get_status(command_id, conversation_id=conversation_id)
+        if command is None:
+            raise KeyError(command_id)
+        deadline = asyncio.get_running_loop().time() + wait_ms / 1000
+        while command.status == "running":
+            command.output_changed.clear()
+            if cancel_event is not None and cancel_event.is_set():
+                raise asyncio.CancelledError
+            if cursor is not None and command.output_bytes > cursor:
+                break
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            changed = asyncio.create_task(command.output_changed.wait())
+            cancelled = asyncio.create_task(cancel_event.wait()) if cancel_event is not None else None
+            waiters = {changed, *([cancelled] if cancelled is not None else [])}
+            try:
+                done, _ = await asyncio.wait(waiters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+                if cancelled is not None and cancelled in done:
+                    raise asyncio.CancelledError
+                if not done:
+                    break
+            finally:
+                for waiter in waiters:
+                    waiter.cancel()
+                await asyncio.gather(*waiters, return_exceptions=True)
+        return command
+
+    async def detach(self, command_id: str, *, conversation_id: str) -> None:
+        command = self.get_status(command_id, conversation_id=conversation_id)
+        if command is None:
+            raise KeyError(command_id)
+        if command.status == "running" and not command.backgrounded:
+            command.backgrounded = True
+            command.stream_callback = None
+            if command.pid is not None and self._on_started is not None:
+                await self._on_started(command)
+
+    def get_output_chunk(
+        self, command_id: str, *, conversation_id: str, cursor: int, max_chars: int,
+    ) -> tuple[str, int, bool, str] | None:
+        from backend.terminal.task_output import read_task_output_chunk
+
+        command = self.get_status(command_id, conversation_id=conversation_id)
+        if command is None:
+            return None
+        text, next_cursor, more = read_task_output_chunk(command.output_path, cursor, max_chars)
+        return text, next_cursor, more, command.output_path
+
+    def get_output_preview(
+        self, command_id: str, *, conversation_id: str, max_chars: int,
+    ) -> tuple[str, int, bool, int] | None:
+        from backend.terminal.task_output import read_task_output_preview
+
+        command = self.get_status(command_id, conversation_id=conversation_id)
+        if command is None:
+            return None
+        return read_task_output_preview(command.output_path, max_chars)
 
     def get_output(self, command_id: str, *, conversation_id: str) -> str | None:
         cmd = self.get_status(command_id, conversation_id=conversation_id)

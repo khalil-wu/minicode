@@ -1,0 +1,73 @@
+{
+  "session_id": "schema-compatibility",
+  "timestamp": 1789128000.0,
+  "user_message": "continue the build",
+  "iterations": 3,
+  "reply": "Build launched",
+  "messages": [
+    {
+      "role": "user",
+      "content": "continue the build"
+    }
+  ],
+  "tool_calls": [
+    {
+      "tool_name": "command",
+      "tool_input": {
+        "command": "npm run build"
+      },
+      "tool_output": "command_id: build-1",
+      "artifact_id": null,
+      "source_url": null,
+      "extraction_status": null,
+      "content_preview": null,
+      "evidence_type": null,
+      "provider": null,
+      "provider_error_type": null,
+      "error_kind": null,
+      "user_summary": null,
+      "developer_detail": null,
+      "recoverable": true,
+      "projection": null,
+      "model_observation": null,
+      "turn_id": "turn-1",
+      "iteration_id": "iteration-3",
+      "status": "success",
+      "request_digest": "",
+      "cleanup_receipt": {},
+      "artifact_kind": null,
+      "artifact_media_type": null,
+      "artifact_bytes": null
+    }
+  ],
+  "active_skills": [],
+  "disabled_tools": [],
+  "loaded_deferred_tools": [],
+  "stopped_reason": "timeout",
+  "last_mutation_index": 0,
+  "run_id": "old-run",
+  "conversation_id": "schema-conversation",
+  "checkpoint_type": "run_checkpoint",
+  "resume_payload": {},
+  "context_snapshot": {
+    "persistent_notes": [
+      {
+        "kind": "task",
+        "title": "build",
+        "content": "inspect build output"
+      }
+    ],
+    "history": [
+      {
+        "role": "user",
+        "content": "continue the build"
+      }
+    ],
+    "context_schema_version": 1,
+    "context_revision": "5a3bac442b19190a73707f1fee61da387348c9b3ef5b3d8575aa295283663620"
+  },
+  "context_revision": "5a3bac442b19190a73707f1fee61da387348c9b3ef5b3d8575aa295283663620",
+  "schema_version": 4,
+  "sequence": 1,
+  "checksum": "17ffa8806cbbcd985da9106c2b8ccc14fb657899f3c2070d3cf4a2ddbd4dc119"
+}

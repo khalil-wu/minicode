@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import Context
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -29,6 +30,7 @@ async def wait_for_next_provider_event(
     stream_state: Any,
     pending_tool_calls: list[Any],
     awaiting_trailing_tool_done: bool,
+    read_context: Context | None = None,
 ) -> AsyncIterator[ProviderWaitResult]:
     """Finish with one bounded provider-stream acquisition result."""
 
@@ -63,6 +65,7 @@ async def wait_for_next_provider_event(
             timeout_seconds=timeout,
             cancel_event=tool_context.cancel_event,
             owner=tool_context.pending_provider_tasks,
+            read_context=read_context,
         )
     except PhaseDeadlineExceeded:
         raise

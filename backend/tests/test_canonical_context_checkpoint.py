@@ -13,6 +13,7 @@ from backend.agent.checkpoint import (
     CheckpointCorruptionError,
     _compute_checksum,
     context_snapshot_revision,
+    get_checkpoint_dir,
     load_latest_checkpoint,
     save_checkpoint,
 )
@@ -24,7 +25,7 @@ from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmissio
 from backend.agent.query_recovery import prepare_query_recovery
 from backend.agent.runtime import AgentRuntime
 from backend.agent.run_context import RunContext
-from backend.agent.state import AgentState
+from backend.agent.state import AgentState, ToolCallRecord
 from backend.agent.turn_kernel import TurnKernel
 from backend.artifact.store import ArtifactStore
 from backend.config import AgentSettings, PermissionSettings, TokenBudget
@@ -48,6 +49,7 @@ def _snapshot() -> dict:
         "compaction_count": 2,
         "git_status_context": "M backend/agent/checkpoint.py",
         "git_status_workspace": "C:/workspace",
+        "extension_state": {"entries": [{"id": "ext_original", "custom_type": "state", "data": {"count": 7}}], "labels": {"ext_original": "saved"}},
         "invoked_skills": [],
         "context_ledger": {
             "schema_version": 1,
@@ -105,14 +107,15 @@ def _save_full_snapshot(tmp_path: Path, *, session_id: str = "snapshot-session")
     )
 
 
-def test_schema4_checkpoint_persists_and_restores_complete_context_snapshot(
+def test_current_checkpoint_persists_and_restores_complete_context_snapshot(
     tmp_path: Path,
 ) -> None:
     path = _save_full_snapshot(tmp_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
 
-    assert payload["schema_version"] == CHECKPOINT_SCHEMA_VERSION == 4
-    assert payload["context_snapshot"]["context_schema_version"] == 1
+    assert payload["schema_version"] == CHECKPOINT_SCHEMA_VERSION == 10
+    assert "messages" not in payload
+    assert payload["context_snapshot"]["context_schema_version"] == 4
     assert payload["context_revision"] == payload["context_snapshot"]["context_revision"]
     assert payload["context_revision"] == context_snapshot_revision(
         payload["context_snapshot"]
@@ -126,6 +129,7 @@ def test_schema4_checkpoint_persists_and_restores_complete_context_snapshot(
     )
     assert checkpoint is not None
     assert checkpoint.context_revision == payload["context_revision"]
+    assert checkpoint.messages == payload["context_snapshot"]["history"]
 
     restored = ContextBuilder()
     restored.load_snapshot(checkpoint.context_snapshot)
@@ -138,6 +142,111 @@ def test_schema4_checkpoint_persists_and_restores_complete_context_snapshot(
     assert round_trip["compaction_count"] == 2
     assert round_trip["git_status_context"] == "M backend/agent/checkpoint.py"
     assert round_trip["git_status_workspace"] == "C:/workspace"
+    assert round_trip["extension_state"] == _snapshot()["extension_state"]
+
+
+@pytest.mark.parametrize("schema_version", [4, 5, 6, 7, 8, 9, 10])
+def test_checkpoint_schema_transition_restores_tool_state_from_disk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    schema_version: int,
+) -> None:
+    monkeypatch.setenv("MINICODE_STATE_ROOT", str(tmp_path))
+    if schema_version == 4:
+        # Frozen with the v4 writer and ToolCallRecord from aea9007f9d9b.
+        # Keep this independent of the current writer's fields and defaults.
+        fixture = Path(__file__).parent / "fixtures" / "checkpoint_schema4.json"
+        path = get_checkpoint_dir("schema-compatibility") / "1789128000000-000001.json"
+        path.write_bytes(fixture.read_bytes())
+    else:
+        path = save_checkpoint(
+            session_id="schema-compatibility",
+            conversation_id="schema-conversation",
+            run_id="old-run",
+            user_message="continue the build",
+            iterations=3,
+            reply="Build launched",
+            messages=[{"role": "user", "content": "continue the build"}],
+            context_snapshot={
+                "history": [{"role": "user", "content": "continue the build"}],
+                "persistent_notes": [
+                    {"kind": "task", "title": "build", "content": "inspect build output"}
+                ],
+            },
+            tool_calls=[ToolCallRecord(
+                tool_name="command",
+                tool_input={"command": "npm run build"},
+                tool_output="command_id: build-1",
+                turn_id="turn-1",
+                iteration_id="iteration-3",
+                command_id="build-1",
+                output_cursor=4096,
+            )],
+            active_skills=[],
+            disabled_tools=set(),
+            stopped_reason="timeout",
+            last_mutation_index=0,
+        )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if schema_version in {5, 6, 7, 8, 9}:
+        payload["schema_version"] = schema_version
+        payload["messages"] = payload["context_snapshot"]["history"]
+        if schema_version < 9:
+            for record in payload["tool_calls"]:
+                record.pop("call_source", None)
+            payload["context_snapshot"]["context_schema_version"] = 1 if schema_version == 5 else 3 if schema_version == 8 else 2
+        payload["context_snapshot"]["context_revision"] = context_snapshot_revision(payload["context_snapshot"])
+        payload["context_revision"] = payload["context_snapshot"]["context_revision"]
+        payload["checksum"] = _compute_checksum(payload)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    assert payload["schema_version"] == schema_version
+    if schema_version == 4:
+        assert "command_id" not in payload["tool_calls"][0]
+        assert "output_cursor" not in payload["tool_calls"][0]
+
+    state = AgentState(user_message="resume", max_iterations=2)
+    context = ContextBuilder()
+    metadata = {"resume_from_checkpoint": True}
+    result = prepare_query_recovery(
+        session_id="schema-compatibility",
+        conversation_id="schema-conversation",
+        metadata=metadata,
+        state=state,
+        context_builder=context,
+        max_iterations_budget=2,
+        current_run_id="new-run",
+    )
+
+    assert result.restored is True
+    assert state.iterations == 3
+    assert state.max_iterations == 5
+    assert len(state.tool_calls) == 1
+    call = state.tool_calls[0]
+    assert call.tool_name == "command"
+    assert call.tool_input == {"command": "npm run build"}
+    assert call.tool_output == "command_id: build-1"
+    assert call.turn_id == "turn-1"
+    assert call.iteration_id == "iteration-3"
+    assert call.command_id == ("build-1" if schema_version >= 5 else "")
+    assert call.output_cursor == (4096 if schema_version >= 5 else None)
+    assert context.export_snapshot()["persistent_notes"][0]["content"] == "inspect build output"
+    assert metadata["checkpoint_origin"]["schema_version"] == schema_version
+    assert metadata["checkpoint_origin"]["run_id"] == "old-run"
+    assert metadata["run_id"] == "new-run"
+
+
+@pytest.mark.parametrize("schema_version", [3, 11])
+def test_checkpoint_loader_rejects_unsupported_envelopes(
+    tmp_path: Path, schema_version: int,
+) -> None:
+    path = _save_full_snapshot(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = schema_version
+    payload["checksum"] = _compute_checksum(payload)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CheckpointCorruptionError, match="verification failed"):
+        load_latest_checkpoint("snapshot-session", base_dir=tmp_path)
 
 
 def test_context_revision_rejects_tampering_even_with_recomputed_envelope_checksum(
@@ -241,7 +350,7 @@ def test_full_snapshot_recovery_preserves_revision_metadata(
     assert restored["persistent_notes"] == _snapshot()["persistent_notes"]
     assert restored["compaction_count"] == 2
     assert metadata["checkpoint_origin"]["context_snapshot_present"] is True
-    assert metadata["checkpoint_origin"]["context_schema_version"] == 1
+    assert metadata["checkpoint_origin"]["context_schema_version"] == 4
     assert (
         metadata["checkpoint_origin"]["context_revision"]
         == checkpoint.context_revision
@@ -288,7 +397,7 @@ def test_turn_kernel_records_checkpoint_save_and_clear_failures(
         ) == "saved"
         saved_evidence = kernel.checkpoint_evidence()
         assert saved_evidence["status"] == "saved"
-        assert saved_evidence["schema_version"] == 4
+        assert saved_evidence["schema_version"] == CHECKPOINT_SCHEMA_VERSION
         assert saved_evidence["sequence"] >= 1
         assert len(saved_evidence["context_revision"]) == 64
         checkpoint = load_latest_checkpoint(

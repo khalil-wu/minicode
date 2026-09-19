@@ -12,6 +12,7 @@ from collections.abc import Mapping
 
 from backend.agent.context import ContextBuilder
 from backend.agent.run_context import RunContext
+from backend.agent.model_execution import ModelExecutionSnapshot
 from backend.agent.prompt_cache import prompt_cache_fork_diagnostic
 from backend.agents.loader import (
     discover_agents,
@@ -408,6 +409,7 @@ async def _resolve_subagent_llm(
     *,
     parent_metadata: dict[str, Any] | None,
     run_context: RunContext | None = None,
+    model_execution: ModelExecutionSnapshot | None = None,
     agent_type: str,
     model_override: str = "",
     provider_override: str = "",
@@ -421,33 +423,18 @@ async def _resolve_subagent_llm(
     precedence, while omitted model/thinking values inherit the parent.
     """
 
-    metadata = parent_metadata if isinstance(parent_metadata, dict) else {}
-    snapshot = (
-        run_context.subagent_parent_runtime
-        if run_context is not None
-        else {}
-    )
-    snapshot = snapshot if isinstance(snapshot, Mapping) else {}
-    inherited_llm = snapshot.get("llm") or inherited_llm
+    snapshot = model_execution or (run_context.model_execution if run_context is not None else None)
+    inherited_llm = snapshot.llm if snapshot is not None else inherited_llm
     if inherited_llm is None:
         raise ValueError("Subagent runtime has no parent LLM to inherit.")
 
-    parent_config = snapshot.get("config")
-    if not (
-        isinstance(parent_config, AppConfig)
-        or (
-            parent_config is not None
-            and hasattr(parent_config, "agent")
-            and hasattr(parent_config, "token_budget")
-        )
-    ):
-        parent_config = load_config(cwd=workspace_root)
+    parent_config = snapshot.config if snapshot is not None else load_config(cwd=workspace_root)
 
     inferred_provider, inferred_model = _adapter_provider_model(inherited_llm)
-    parent_provider = str(snapshot.get("provider") or inferred_provider).strip()
-    parent_model = str(snapshot.get("model") or inferred_model).strip()
-    model_runtime = snapshot.get("model_runtime")
-    parent_effort = str(snapshot.get("thinking_level") or "").strip().lower()
+    parent_provider = snapshot.provider if snapshot is not None else inferred_provider
+    parent_model = snapshot.model if snapshot is not None else inferred_model
+    model_runtime = snapshot.model_runtime if snapshot is not None else None
+    parent_effort = snapshot.thinking_level if snapshot is not None else ""
     if not parent_effort:
         primary = _primary_llm_adapter(inherited_llm)
         current_effort = getattr(primary, "current_reasoning_effort", None)
@@ -474,11 +461,16 @@ async def _resolve_subagent_llm(
     model_inherits = requested_model.lower() in {"", "inherit"}
     effort_inherits = requested_effort.lower() in {"", "inherit"}
     model_was_selected = not model_inherits
-    available_snapshot = tuple(snapshot.get("available_models") or ())
+    available_snapshot = snapshot.available_models if snapshot is not None else ()
 
     requested_provider = str(provider_override or "").strip()
     target_provider = parent_provider if requested_provider.lower() in {"", "inherit"} else requested_provider
     target_model = parent_model
+    if snapshot is not None and model_inherits and effort_inherits and target_provider == parent_provider:
+        # Inheritance uses the captured parent choice even if its catalog has
+        # since changed. No new selection or adapter resolution is involved.
+        return _SubagentLLMResolution(llm=inherited_llm, config=parent_config,
+            provider=parent_provider, model=parent_model, effort=parent_effort, owns_llm=False)
     if not model_inherits:
         target_model = requested_model
         alias = requested_model.strip().lower()
@@ -922,6 +914,8 @@ def _fork_snapshot_for_child(
             "fork_turns requires an active parent ContextBuilder"
         )
     snapshot = export_snapshot()
+    snapshot.get("extension_state", {}).pop("pending_messages", None)
+    snapshot.get("extension_state", {}).pop("followups", None)
     history = snapshot.get("history") if isinstance(snapshot, dict) else None
     if not isinstance(history, list):
         raise ValueError("parent context snapshot history is unavailable")
@@ -935,6 +929,7 @@ def _fork_snapshot_for_child(
         if isinstance(item, dict) and str(item.get("role") or "") == "user"
     ]
     if not user_indices:
+        start = end = 0
         selected_history: list[dict[str, Any]] = []
     else:
         end = user_indices[-1] + 1
@@ -947,6 +942,21 @@ def _fork_snapshot_for_child(
             for item in history[start:end]
             if isinstance(item, dict)
         ]
+    from backend.agent.extension_history import REWIND_KEY, rebase_extension_history
+    from backend.conversations.context_delta import rebase_turn_admissions
+    rebase_extension_history(snapshot.get("extension_state", {}), removed_prefix=start, inserted_prefix=0)
+    timeline = snapshot.get("extension_state", {}).get(REWIND_KEY)
+    if timeline is not None:
+        timeline["floor"] = min(timeline["floor"], len(selected_history))
+        for item in timeline["changes"]:
+            item["history_end"] = min(item["history_end"], len(selected_history))
+    snapshot["turn_admissions"] = {
+        key: boundary for key, boundary in rebase_turn_admissions(
+            snapshot.get("turn_admissions", {}), removed_prefix=start, inserted_prefix=0,
+        ).items() if boundary["history_end"] <= len(selected_history)
+    }
+    snapshot["history_frozen_count"] = max(0, min(len(selected_history), snapshot.get("history_frozen_count", 0) - start))
+    snapshot.pop("extension_cursor", None)
     return {**snapshot, "history": selected_history}
 
 

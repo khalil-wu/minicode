@@ -1200,6 +1200,42 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     }));
   });
 
+  it("extends a running process item with agent.item.delta instead of resending it", () => {
+    handle({
+      type: "agent.item",
+      id: "it:model-output:commentary",
+      item_id: "it:model-output:commentary",
+      kind: "process_text",
+      content: "Let me check",
+      status: "running",
+      source: "commentary",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    handle({
+      type: "agent.item.delta",
+      item_id: "it:model-output:commentary",
+      delta: " the tests first.",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+    // A delta for an item that was never announced creates nothing.
+    handle({
+      type: "agent.item.delta",
+      item_id: "never-announced",
+      delta: "x",
+      message_id: "assistant-stream",
+    } as ServerEvent);
+
+    const processBlocks = (useAppStore.getState().messages[0]?.blocks ?? []).filter(
+      (block) => block.type === "process",
+    );
+    expect(processBlocks).toHaveLength(1);
+    expect(processBlocks[0]).toEqual(expect.objectContaining({
+      id: "it:model-output:commentary",
+      content: "Let me check the tests first.",
+      status: "running",
+    }));
+  });
+
   it("keeps debug and retracted process evidence in Inspector without rendering it", () => {
     handle({
       type: "agent.item",

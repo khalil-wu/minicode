@@ -42,6 +42,9 @@ def _receive_next_non_task_update(ws, *, max_attempts: int = 20) -> dict[str, ob
         "session.state_changed",
         "agent.run.started",
         "agent.run.completed",
+        # Query admission publishes its captured model owner before transcript
+        # events. Model-control tests validate that notification separately.
+        "llm.model.updated",
         # Lifecycle/control commands now return structured acknowledgements so
         # the frontend can settle pending operations. Data-plane assertions in
         # this helper intentionally continue to the next projected state event.
@@ -1048,7 +1051,7 @@ def test_conversation_repository_reuses_cached_summary_index_for_repeat_list(tmp
 
     assert {item.id for item in listed_once} == {first.id, second.id}
     assert [item.id for item in listed_twice] == [item.id for item in listed_once]
-    assert first_pass_reads >= 2
+    assert not any(".transcript." in name or ".snapshot." in name for name in read_calls)
     assert read_calls[first_pass_reads:] == [
         ".conversation-store.instance",
         ".conversation-store.revision",
@@ -1090,7 +1093,7 @@ def test_conversation_repository_updates_cached_index_after_mutation(tmp_path, m
     assert listed[0].id == created.id
     assert listed[0].title == "refresh the cached title"
     assert listed[0].message_count == 1
-    assert mutation_reads >= 3
+    assert not any(".transcript." in name or ".snapshot." in name for name in read_calls[:mutation_reads])
     assert read_calls[mutation_reads:] == [
         ".conversation-store.instance",
         ".conversation-store.revision",
@@ -1964,7 +1967,8 @@ def test_regenerate_replaces_transcript_tail_instead_of_appending_duplicate_turn
                     "retry_from_message_id": user_message["id"],
                 }
             )
-            assert _receive_next_non_task_update(ws)["type"] == "item.completed"
+            received = _receive_next_non_task_update(ws)
+            assert received["type"] == "item.completed", received
             assert _receive_next_non_task_update(ws)["type"] == "done"
             assert _receive_next_non_task_update(ws)["type"] == "conversation.summary.updated"
 

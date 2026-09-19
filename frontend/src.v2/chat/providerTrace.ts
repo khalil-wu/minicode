@@ -61,6 +61,7 @@ export interface ProviderSafeRequestPackage {
   wire_api: string;
   endpoint: string;
   request_params: Record<string, unknown>;
+  transport?: NonNullable<ProviderRawMetadata["request_summary"]>["transport"];
   prompt: {
     redacted: true;
     instructions_len?: number;
@@ -323,7 +324,11 @@ export const providerRequestModeSummary = (raw?: ProviderRawMetadata | null): st
     ? `retention ${params.prompt_cache_retention.trim()}`
     : "retention off";
   const store = "store" in params ? `store ${String(params.store)}` : "store n/a";
-  return `${wire} · ${retention} · ${store}`;
+  const transport = summary.transport;
+  const delivery = transport?.mode === "websocket"
+    ? `WebSocket ${transport.incremental ? `delta ${transport.input_items_sent_len}/${transport.input_items_logical_len} items` : "full input"}`
+    : transport?.fallback_status ? `HTTP after upgrade ${transport.fallback_status}` : "";
+  return [wire, delivery, retention, store].filter(Boolean).join(" · ");
 };
 
 export const providerTraceDiagnostics = (raw?: ProviderRawMetadata | null): string[] => {
@@ -862,6 +867,7 @@ export const providerSafeRequestPackage = (raw: ProviderRawMetadata): ProviderSa
     wire_api: summary.wire_api ?? "",
     endpoint,
     request_params: sanitizeProviderTraceExportValue(summary.request_params ?? {}) as Record<string, unknown>,
+    ...(summary.transport ? { transport: sanitizeProviderTraceExportValue(summary.transport) as typeof summary.transport } : {}),
     prompt: {
       redacted: true,
       instructions_len: summary.instructions_len,
@@ -908,10 +914,11 @@ export const providerCurlSkeleton = (raw: ProviderRawMetadata): string => {
     ...request.request_params,
     instructions: `<redacted len=${request.prompt.instructions_len ?? 0} hash=${request.prompt.instructions_hash || "none"}>`,
     tools: `<redacted count=${request.tools.tools_len ?? 0} hash=${request.tools.tools_hash || "none"}>`,
-    input: `<redacted items=${request.input.input_items_len ?? 0}>`,
+    input: `<redacted items=${request.transport?.mode === "websocket" ? request.input.input_items_logical_len ?? request.input.input_items_len ?? 0 : request.input.input_items_len ?? 0}>`,
     metadata: { keys: request.metadata.keys ?? [] },
   };
   return [
+    ...(request.transport?.mode === "websocket" ? ["# Original used WebSocket; this HTTP diagnostic skeleton requires the full input."] : []),
     `curl https://api.example.com${request.endpoint} \\`,
     `  -H "Authorization: Bearer $PROVIDER_API_KEY" \\`,
     `  -H "Content-Type: application/json" \\`,

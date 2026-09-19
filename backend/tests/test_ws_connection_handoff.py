@@ -194,13 +194,22 @@ async def test_replacement_preserves_work_already_durably_admitted(tmp_path):
         assert session.run_manager.durable_queue.has_client_command("old-input-command")
         await manager.connect(**newer)
         session.command_dispatcher.command_semaphore.release()
-        await asyncio.gather(*tuple(session.command_dispatcher.command_tasks))
+        # The reader is still suspended inside the acknowledgement it just sent,
+        # so the durable command is scheduled only on a later loop pass, and its
+        # task then runs to completion. Wait for the observable effect instead of
+        # assuming one scheduling pass; the bound is a hang detector.
+        for _ in range(500):
+            await asyncio.gather(*tuple(session.command_dispatcher.command_tasks))
+            if session.conversation_repo.get_conversation("conv_old_input") is not None:
+                break
+            await asyncio.sleep(0.01)
         assert session.conversation_repo.get_conversation("conv_old_input") is not None
         assert "old-input-command" in session.command_dispatcher.recent_client_command_id_set
         assert not session.run_manager.durable_queue.has_client_command("old-input-command")
         incoming.put_nowait({"type": "websocket.disconnect", "code": 1000})
-        with pytest.raises(WebSocketDisconnect):
-            await reader
+        # A replaced reader retires by returning from its generation guard, not
+        # by raising: see test_replaced_asgi_reader_cannot_admit_late_input.
+        await asyncio.wait_for(reader, 2)
     finally:
         if not reader.done():
             reader.cancel()

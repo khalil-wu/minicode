@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from backend.agent.attachment_policy import AttachmentUnavailableError
+from backend.async_cleanup import to_thread_cancel_safe
 from backend.agent.context import ContextBuilder
 from backend.agent.execution_journal import execution_journal_owner
 from backend.agent.lifecycle_generation import LifecycleGenerationState
@@ -41,6 +42,7 @@ from backend.agent.provider_activity import (
 from backend.agent.query_engine import AgentSession, QuerySubmission
 from backend.agent.runtime import default_runtime
 from backend.agent.run_context import RunContext
+from backend.agent.model_execution import ModelExecutionSnapshot
 from backend.agent.turn_state import AgentTurnState
 from backend.artifact.store import MAX_CONTENT_LENGTH as MAX_ARTIFACT_CONTENT_CHARS
 from backend.config import AppConfig, get_available_models, get_llm_provider, load_config
@@ -122,6 +124,7 @@ _TURN_MESSAGE_SCOPED_EVENT_TYPES = {
     "agent.run.started",
     "agent.run.completed",
     "agent.item",
+    "agent.item.delta",
     "agent.progress",
     # MiniCode's turn-owned checklist and aggregate diff snapshots carry the
     # same turn/message owner as tool items. Keeping them in this set prevents
@@ -691,6 +694,47 @@ def _get_or_create_session_llm(
     return adapter
 
 
+async def _refresh_session_model_auth(
+    session: Any,
+    snapshot: ModelExecutionSnapshot,
+    force: bool,
+    owner_task: asyncio.Task,
+) -> ModelExecutionSnapshot:
+    """Rotate request auth without changing an admitted model's wire contract."""
+    runtime = snapshot.model_runtime
+    original = snapshot.llm.provider_adapter_spec
+    if runtime is None or original is None:
+        return snapshot
+    await runtime.refresh_provider_auth(snapshot.provider, publish_snapshot=False)
+
+    def refreshed_spec():
+        current = runtime.resolve_adapter_spec(snapshot.provider, snapshot.model)
+        return replace(original, api_key=current.api_key, base_url=current.base_url,
+            headers=current.headers, env=current.env, auth_header=current.auth_header)
+
+    spec = refreshed_spec()
+    if force and spec == original:
+        await runtime.refresh_oauth_credentials(snapshot.provider, publish_snapshot=False, force=True)
+        spec = refreshed_spec()
+    if spec == original:
+        return snapshot
+
+    from backend.services.llm_adapter_factory import _build_registered_provider_adapter
+
+    adapter = _build_registered_provider_adapter(spec)
+    adapter.provider_adapter_spec = spec
+    adapter._request_model_costs = snapshot.llm._request_model_costs
+    _apply_thinking_level(adapter, snapshot.model_info, snapshot.thinking_level)
+    # Auth replacements are run-owned, including child runs and paused cells.
+    # Existing leases close them only after their final owner has finished.
+    _lease_session_llm_for_task(session, adapter, owner_task)
+    retired = getattr(session, "_retired_llm_adapters", None)
+    if retired is None:
+        retired = session._retired_llm_adapters = {}
+    retired[id(adapter)] = adapter
+    return replace(snapshot, llm=adapter)
+
+
 def _coerce_ui_agent_state(value: Any) -> dict[str, Any]:
     state = _empty_ui_agent_state()
     if not isinstance(value, dict):
@@ -1214,6 +1258,8 @@ async def _replay_pending_conversation_projections(
                     if isinstance(payload.get("context_snapshot"), dict)
                     else {}
                 ),
+                **({"context_delta": payload["context_delta"], "partial": bool(payload.get("partial"))}
+                   if "context_delta" in payload else {}),
                 summary=(
                     str(payload["summary"])
                     if payload.get("summary") is not None
@@ -1843,7 +1889,7 @@ class SessionAgentRunnerMixin:
         if not isinstance(registries, dict):
             registries = self._conversation_tool_registries = {}
         if workspace_root is None and clean_id:
-            conversation = self.conversation_repo.get_conversation(clean_id)
+            conversation = self.conversation_repo.get_conversation_summary(clean_id)
             if conversation is not None:
                 workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
         current_manager = self._mcp_manager_for_workspace(workspace_root)
@@ -2544,6 +2590,10 @@ class SessionAgentRunnerMixin:
         conversation_id = str(getattr(conversation, "id", "") or "").strip()
         run_manager = getattr(self, "run_manager", None)
         owner_context = run_context or RunContext()
+        owner_context.enqueue_extension_followup = (
+            (lambda command: run_manager.enqueue_user_message(conversation_id, command)) if run_manager is not None else None
+        )
+        owner_context.extension_name_setter = lambda name: self.conversation_repo.rename_conversation(conversation_id, name)
         model_runtime = model_runtime or self._model_runtime_for_conversation(
             conversation_id
         )
@@ -2564,6 +2614,15 @@ class SessionAgentRunnerMixin:
 
         def _available_tool_names() -> list[str]:
             return _activatable_tool_names(tool_registry)
+
+        def _remember_tool_selection(names: list[str]) -> None:
+            state = _published_runtime_state()
+            if state is None:
+                runner._pending_active_tools = list(names)
+            else:
+                state["active_tool_names"] = list(names)
+
+        owner_context.extension_tool_selection_setter = _remember_tool_selection
 
         def _default_active_tool_names() -> list[str]:
             from backend.tools.toolsets import ToolsetPolicy
@@ -2818,7 +2877,13 @@ class SessionAgentRunnerMixin:
                 ),
             ]
 
+        def _model_execution_owner() -> RunContext:
+            return getattr(runner, "execution_run_context", None) or owner_context
+
         async def _set_model(model: Any) -> bool:
+            selection_owner = _model_execution_owner()
+            snapshot = selection_owner.model_execution
+            selected_catalog = snapshot.model_runtime if snapshot is not None else model_runtime
             if isinstance(model, dict):
                 provider_name = str(model.get("provider") or "").strip()
                 model_name = str(
@@ -2836,45 +2901,16 @@ class SessionAgentRunnerMixin:
                     or ""
                 ).strip()
             if not provider_name:
-                provider_name = str(getattr(self, "provider", "") or "").strip()
+                provider_name = snapshot.provider if snapshot is not None else str(getattr(self, "provider", "") or "").strip()
             resolved_model = (
-                model_runtime.get_model(provider_name, model_name)
-                if model_runtime is not None
-                and callable(getattr(model_runtime, "get_model", None))
+                selected_catalog.get_model(provider_name, model_name)
+                if selected_catalog is not None
                 else None
             )
             if (
                 resolved_model is None
             ):
                 return False
-            # Provider/model identity is immutable for a live turn.  A model
-            # switch requested by an extension is staged for the next turn so
-            # one transcript never contains mixed provider semantics.
-            turn_snapshot = owner_context.turn_model_snapshot
-            if isinstance(turn_snapshot, dict):
-                current_identity = (
-                    str(turn_snapshot.get("provider") or "").strip(),
-                    str(turn_snapshot.get("model") or "").strip(),
-                )
-                requested_identity = (provider_name, model_name)
-                if requested_identity != current_identity:
-                    pending = getattr(self, "_queued_model_selections", None)
-                    if not isinstance(pending, dict):
-                        pending = self._queued_model_selections = {}
-                    pending[conversation_id] = {
-                        "provider": provider_name,
-                        "model": model_name,
-                    }
-                    emit = getattr(runner, "emit", None)
-                    if callable(emit):
-                        await emit(
-                            {
-                                "type": "model_select",
-                                "model": {"provider": provider_name, "id": model_name},
-                                "source": "queued_next_turn",
-                            }
-                        )
-                    return True
             published_state = getattr(self, "_extension_runtime_states", {}).get(
                 conversation_id
             )
@@ -2887,6 +2923,19 @@ class SessionAgentRunnerMixin:
                 # swap. Validate now, then apply only after publication so a
                 # later bind failure cannot mutate the live provider/model.
                 setattr(runner, "_pending_model_selection", resolved_model)
+                return True
+            if snapshot is not None:
+                await selected_catalog.refresh_oauth_credentials(provider_name)
+                await selected_catalog.refresh_provider_auth(provider_name)
+                previous_levels = model_thinking_levels(snapshot.model_info, snapshot.llm)
+                thinking_seed = snapshot.thinking_level if previous_levels not in {(), ("off",)} else "medium"
+                selected = _publish_model_selection(provider_name, model_name, thinking_seed)
+                await runner.emit({
+                    "type": "model_select",
+                    "model": {"provider": selected.provider, "id": selected.model},
+                    "previousModel": {"provider": snapshot.provider, "id": snapshot.model},
+                    "source": "next_provider_step",
+                })
                 return True
             setter = getattr(self, "_set_selected_provider_model", None)
             if not callable(setter):
@@ -2905,6 +2954,7 @@ class SessionAgentRunnerMixin:
                 manual_override=True,
                 model_runtime=model_runtime,
                 emit_unavailable=False,
+                conversation_id=conversation_id,
             )
             if not changed:
                 return False
@@ -2941,27 +2991,6 @@ class SessionAgentRunnerMixin:
                 resolved_model,
                 thinking_seed,
             )
-            owner_context.extension_thinking_level = effective_thinking
-            parent_runtime = owner_context.subagent_parent_runtime
-            if parent_runtime:
-                parent_runtime.update(
-                    {
-                        "config": selected_config,
-                        "provider": str(getattr(self, "provider", "") or ""),
-                        "model": str(getattr(self, "selected_model", "") or ""),
-                        "model_runtime": model_runtime,
-                        "available_models": tuple(
-                            model.id
-                            for model in model_runtime.get_models(
-                                str(getattr(self, "provider", "") or "")
-                            )
-                        )
-                        if model_runtime is not None
-                        else tuple(getattr(self, "available_models", ()) or ()),
-                        "llm": active_llm,
-                        "thinking_level": effective_thinking or "off",
-                    }
-                )
             emit = getattr(runner, "emit", None)
             current_provider = str(getattr(self, "provider", "") or "")
             current_model = str(getattr(self, "selected_model", "") or "")
@@ -2984,52 +3013,60 @@ class SessionAgentRunnerMixin:
                 )
             return True
 
-        def _get_thinking_level() -> str:
-            llm_config = getattr(getattr(self, "config", None), "llm", None)
-            return str(
-                owner_context.extension_thinking_level
-                or getattr(llm_config, "reasoning_effort", "")
-                or "off"
+        def _publish_model_selection(provider: str, model: str, level: str) -> ModelExecutionSnapshot:
+            # Build before publishing; an in-flight request and its tools retain
+            # their original adapter, budget and model identity.
+            selection_owner = _model_execution_owner()
+            previous = selection_owner.model_execution
+            selected_catalog = previous.model_runtime
+            config = _config_with_runtime_model_budget(
+                replace(previous.config, llm=replace(previous.config.llm,
+                    provider=provider, model=model, reasoning_effort=level)),
+                model_runtime=selected_catalog, provider=provider, model=model,
             )
+            adapter = _get_or_create_session_llm(self, config=config, provider=provider,
+                model=model, model_runtime=selected_catalog)
+            selected_model = selected_catalog.get_model(provider, model) if selected_catalog is not None else None
+            effective = _apply_thinking_level(adapter, selected_model, level)
+            config = replace(config, llm=replace(config.llm, reasoning_effort=effective))
+            selected = ModelExecutionSnapshot(config=config, llm=adapter, provider=provider, model=model,
+                thinking_level=effective, model_runtime=selected_catalog,
+                available_models=tuple(item.id for item in selected_catalog.get_models(provider)) if selected_catalog is not None else previous.available_models,
+                models_source=previous.models_source, model_info=selected_model)
+            if selection_owner is owner_context:
+                self.conversation_repo.update_model_selection(conversation_id,
+                    provider=provider, model=model, reasoning_effort=effective)
+            selection_owner.model_execution = selected
+            if selection_owner.retain_model is not None and selection_owner.extension_actions is not None:
+                selection_owner.retain_model(adapter, selection_owner.extension_actions.execution_task)
+            if selection_owner is owner_context and agent_session is not None:
+                agent_session.llm = adapter
+                agent_session.token_budget = config.token_budget
+            return selected
+
+        def _get_thinking_level() -> str:
+            snapshot = _model_execution_owner().model_execution
+            if snapshot is not None:
+                return snapshot.thinking_level
+            return str(getattr(getattr(getattr(self, "config", None), "llm", None), "reasoning_effort", "") or "off")
 
         def _set_thinking_level(level: Any) -> str:
             previous = _get_thinking_level()
-            active_llm = (
-                agent_session.llm
-                if agent_session is not None
-                else getattr(self, "llm", None) or run_llm
-            )
-            current_provider = str(getattr(self, "provider", "") or "")
-            current_model = str(getattr(self, "selected_model", "") or "")
-            selected_runtime_model = (
-                model_runtime.get_model(current_provider, current_model)
-                if model_runtime is not None
-                else None
-            )
-            value = _apply_thinking_level(
-                active_llm,
-                selected_runtime_model,
-                level,
-            )
-            owner_context.extension_thinking_level = value
-            parent_runtime = owner_context.subagent_parent_runtime
-            if parent_runtime:
-                parent_runtime["llm"] = active_llm
-                parent_runtime["thinking_level"] = value or "off"
+            snapshot = _model_execution_owner().model_execution
+            if snapshot is not None:
+                value = _publish_model_selection(snapshot.provider, snapshot.model, str(level or "off")).thinking_level
+            else:
+                active_llm = agent_session.llm if agent_session is not None else run_llm
+                current_provider = str(getattr(self, "provider", "") or "")
+                current_model = str(getattr(self, "selected_model", "") or "")
+                selected_model = model_runtime.get_model(current_provider, current_model) if model_runtime is not None else None
+                value = _apply_thinking_level(active_llm, selected_model, level)
+                self.conversation_repo.update_model_selection(conversation_id,
+                    provider=current_provider, model=current_model, reasoning_effort=value)
             emit = getattr(runner, "emit", None)
             if callable(emit) and previous != value:
-                try:
-                    asyncio.create_task(
-                        emit(
-                            {
-                                "type": "thinking_level_select",
-                                "level": value,
-                                "previousLevel": previous,
-                            }
-                        )
-                    )
-                except RuntimeError:
-                    pass
+                asyncio.create_task(emit({"type": "thinking_level_select", "level": value,
+                    "previousLevel": previous, "source": "next_provider_step"}))
             return value
 
         async def _exec(command: Any, args: Any = None, options: Any = None) -> Any:
@@ -3051,7 +3088,7 @@ class SessionAgentRunnerMixin:
             from backend.llm.base import ToolCallEvent
             from backend.tools.base import ToolResult
 
-            tool_context = run_metadata.get("_tool_execution_context")
+            tool_context = getattr(runner, "execution_tool_context", None) or run_metadata.get("_tool_execution_context")
             if tool_context is None:
                 raise RuntimeError("extension exec is only available during an active MiniCode turn")
             command_text = str(command or "").strip()
@@ -3069,7 +3106,7 @@ class SessionAgentRunnerMixin:
                 )
             options_map = dict(options) if isinstance(options, dict) else {}
             request_args = {"command": command_text, **options_map}
-            registry = tool_registry
+            registry = tool_context.tool_registry or tool_registry
             tool = registry.get_tool("run_command")
             if tool is None:
                 raise RuntimeError("MiniCode run_command capability is unavailable")
@@ -3254,11 +3291,8 @@ class SessionAgentRunnerMixin:
             from backend.ws.compaction_coordinator import compact_conversation
             from backend.llm.base import LLMTurnContext
 
-            active_llm = (
-                agent_session.llm
-                if agent_session is not None
-                else getattr(self, "llm", None) or run_llm
-            )
+            snapshot = owner_context.active_model_execution or owner_context.model_execution
+            active_llm = snapshot.llm if snapshot is not None else (agent_session.llm if agent_session is not None else run_llm)
             run_context_builder.bind_llm(active_llm)
             _lease_session_llm_for_current_task(self, active_llm)
             llm_turn_context = owner_context.llm_turn_context
@@ -3287,15 +3321,18 @@ class SessionAgentRunnerMixin:
             )
             return committed.summary
 
+        def _context_model():
+            selection_owner = _model_execution_owner()
+            snapshot = selection_owner.active_model_execution or selection_owner.model_execution
+            if snapshot is not None and snapshot.model_info is not None:
+                return snapshot.model_info
+            provider = snapshot.provider if snapshot is not None else str(getattr(self, "provider", "") or "")
+            model = snapshot.model if snapshot is not None else str(getattr(self, "selected_model", "") or "")
+            catalog = snapshot.model_runtime if snapshot is not None else model_runtime
+            return catalog.get_model(provider, model) if catalog is not None else None
+
         context_actions = {
-            "model": lambda: (
-                model_runtime.get_model(
-                    str(getattr(self, "provider", "") or ""),
-                    str(getattr(self, "selected_model", "") or ""),
-                )
-                if model_runtime is not None
-                else None
-            ),
+            "model": _context_model,
             "session_manager": lambda: self,
             "model_registry": lambda: model_registry,
             "is_idle": lambda: not bool(
@@ -4060,19 +4097,8 @@ class SessionAgentRunnerMixin:
                 )
                 else config_provider or resolved_provider
             )
-            queued_selection = getattr(self, "_queued_model_selections", {}).pop(
-                conversation.id, None
-            )
-            queued_provider = (
-                str(queued_selection.get("provider") or "").strip()
-                if isinstance(queued_selection, dict)
-                else ""
-            )
-            queued_model = (
-                str(queued_selection.get("model") or "").strip()
-                if isinstance(queued_selection, dict)
-                else ""
-            )
+            conversation = self.conversation_repo.get_conversation(conversation.id)
+            task_selection = conversation.model_selection
             selected_provider = str(getattr(self, "provider", "") or "").strip()
             preserve_provider_override = bool(
                 getattr(self, "_provider_override_active", False)
@@ -4080,7 +4106,7 @@ class SessionAgentRunnerMixin:
                 and run_model_runtime.get_provider(selected_provider) is not None
             )
             run_provider = (
-                queued_provider
+                task_selection.get("provider")
                 or (selected_provider if preserve_provider_override else configured_provider)
             )
             if run_model_runtime is not None:
@@ -4136,8 +4162,8 @@ class SessionAgentRunnerMixin:
 
             # Determine model for this run
             config_model = getattr(run_config.llm, "model", "").strip()
-            if queued_model:
-                run_model = queued_model
+            if task_selection.get("model"):
+                run_model = task_selection["model"]
             elif run_provider != self.provider:
                 # Provider changed: use config model, not any previous override
                 run_model = config_model
@@ -4169,6 +4195,10 @@ class SessionAgentRunnerMixin:
                 provider=run_provider,
                 model=run_model,
             )
+            if "reasoning_effort" in task_selection:
+                run_config = replace(run_config, llm=replace(
+                    run_config.llm, reasoning_effort=task_selection["reasoning_effort"],
+                ))
 
             run_llm = _get_or_create_session_llm(
                 self,
@@ -4199,6 +4229,12 @@ class SessionAgentRunnerMixin:
                 run_runtime_model,
                 requested_run_thinking,
             )
+            if not task_selection:
+                conversation = self.conversation_repo.update_model_selection(
+                    conversation.id, provider=run_provider, model=run_model,
+                    reasoning_effort=str(run_config.llm.reasoning_effort or ""),
+                    only_if_unset=True,
+                )
 
             # Only update session fields if this is the active conversation run
             # This keeps the UI in sync without breaking concurrent background runs
@@ -4327,6 +4363,7 @@ class SessionAgentRunnerMixin:
                     workspace_root=run_workspace_root,
                     current_conversation_id=conversation.id,
                     token_budget=int(getattr(run_config.token_budget, "total", 0) or 0),
+                    foreground_tasks=lambda: tuple(self.run_manager.run_tasks.values()),
                 )
                 _lease_session_llm_for_task(self, run_llm, memory_task)
 
@@ -4348,13 +4385,18 @@ class SessionAgentRunnerMixin:
             agent_settings=run_config.agent,
             token_budget=run_config.token_budget,
             context_builder=run_context_builder,
+            code_store=self.conversation_runtime.code_store_for(conversation.id),
             approval_handler=self.approval_handler,
             lifecycle_observer_factory=lifecycle_observer_factory,
             lifecycle_runtime=lifecycle_runtime,
         )
 
         def _active_run_llm() -> Any:
-            return getattr(run_agent_session, "llm", None) or run_llm
+            snapshot = run_context.active_model_execution
+            return snapshot.llm if snapshot is not None else run_agent_session.llm
+
+        run_context.retain_model = lambda adapter, task: _lease_session_llm_for_task(self, adapter, task)
+        run_context.refresh_model_auth = lambda snapshot, force, task: _refresh_session_model_auth(self, snapshot, force, task)
 
         run_context_builder.load_snapshot(run_context_snapshot)
         normalized_attachments = list(attachments or [])
@@ -4387,26 +4429,15 @@ class SessionAgentRunnerMixin:
             "_turn_model_snapshot",
         ):
             run_metadata.pop(reserved_key, None)
-        run_context.extension_thinking_level = run_thinking_level
-        run_context.turn_model_snapshot = {
-            "provider": run_provider,
-            "model": run_model,
-            "adapter_type": type(run_llm).__name__,
-        }
-        run_context.subagent_parent_runtime = {
-            # Codex builds every child from the live turn config instead of
-            # re-reading process-global provider settings. Pi passes the
-            # dispatching session model/thinking values to its child process.
-            # Keep the same live, internal-only snapshot for TaskTool.
-            "config": run_config,
-            "provider": run_provider,
-            "model": run_model,
-            "model_runtime": run_model_runtime,
-            "available_models": tuple(run_available_models),
-            "models_source": run_models_source,
-            "llm": run_llm,
-            "thinking_level": run_thinking_level,
-        }
+        # A UI selection may have arrived while startup awaited credentials or
+        # history. Its published choice already belongs to this registered run.
+        if run_context.model_execution is None:
+            run_context.model_execution = ModelExecutionSnapshot(
+                config=run_config, provider=run_provider, model=run_model,
+                model_runtime=run_model_runtime, available_models=tuple(run_available_models),
+                models_source=run_models_source, llm=run_llm, thinking_level=run_thinking_level,
+                model_info=run_runtime_model,
+            )
         extension_state = getattr(self, "_extension_runtime_states", {}).get(
             conversation.id
         )
@@ -4730,6 +4761,7 @@ class SessionAgentRunnerMixin:
                     ),
                 }
                 saved_snapshot["turn_admissions"] = admissions
+                run_context_builder.record_turn_admission(user_message_id, admissions[user_message_id])
                 append_once = getattr(execution_journal, "append_once", None)
                 if not callable(append_once):
                     raise RuntimeError("turn admission has no idempotent journal writer")
@@ -4904,18 +4936,37 @@ class SessionAgentRunnerMixin:
         turn_started_at_ms = _now_ms()
         partial_persist_lock = asyncio.Lock()
         last_partial_persisted_at = 0.0
+        partial_persist_task: asyncio.Task[None] | None = None
+        partial_persist_pending = False
+        partial_persist_forced = False
+        partial_history_revision: int | None = None
 
         async def _persist_partial_turn(*, force: bool = False) -> None:
-            """Checkpoint the current typed turn without writing every token."""
+            """Coalesce the derived conversation view behind the durable journal."""
+            nonlocal partial_persist_task, partial_persist_pending, partial_persist_forced
+            partial_persist_pending = True
+            partial_persist_forced |= force
+            if partial_persist_task is None or partial_persist_task.done():
+                partial_persist_task = asyncio.create_task(_flush_partial_turns())
+
+        async def _flush_partial_turns() -> None:
+            nonlocal partial_persist_pending, partial_persist_forced
+            while partial_persist_pending:
+                force = partial_persist_forced
+                partial_persist_pending = partial_persist_forced = False
+                await _write_partial_turn(force=force)
+
+        async def _write_partial_turn(*, force: bool = False) -> None:
+            """Journal context changes and publish the current turn projection."""
+            from backend.conversations.context_delta import context_snapshot_delta
             nonlocal last_partial_persisted_at
+            nonlocal partial_history_revision
             if not _accepts_projection_events():
                 return
             async with partial_persist_lock:
                 now = time.monotonic()
-                # Codex durably journals streamed response items. MiniCode's
-                # transcript stores the current projection instead, so cap
-                # delta-driven rewrites while always committing lifecycle
-                # boundaries such as tool results and approval waits.
+                # Coalesce text updates, but persist tool/approval boundaries
+                # immediately. Older turns stay in the immutable checkpoint.
                 if not force and now - last_partial_persisted_at < 1.0:
                     return
                 snapshot = turn_state.finalize(terminal_status="partial")
@@ -4944,19 +4995,15 @@ class SessionAgentRunnerMixin:
                     async with self._conversation_projection_lock(conversation.id):
                         if not _accepts_projection_events():
                             return
-                        saved_snapshot = run_context_builder.export_snapshot()
-                        latest_conversation = await asyncio.to_thread(
-                            self.conversation_repo.get_conversation,
+                        projection_base = await asyncio.to_thread(
+                            self.conversation_repo.get_projection_context,
                             conversation.id,
                         )
-                        _merge_ui_agent_state_into_snapshot(
-                            saved_snapshot,
-                            getattr(latest_conversation, "context_snapshot", None),
-                        )
-                        if latest_conversation is None:
+                        if projection_base is None:
                             raise RuntimeError(
                                 "conversation disappeared during partial projection"
                             )
+                        expected_revision, previous_snapshot = projection_base
                         partial_journal = run_context.execution_journal
                         append_lifecycle = getattr(
                             partial_journal,
@@ -4967,33 +5014,39 @@ class SessionAgentRunnerMixin:
                             raise RuntimeError(
                                 "partial conversation projection has no execution journal owner"
                             )
-                        pending_projection = append_lifecycle(
+                        snapshot_changes, captured_history_revision = run_context_builder.export_snapshot_delta(
+                            previous_snapshot,
+                            since_revision=partial_history_revision,
+                        )
+                        # UI state has its own projection owner. ContextBuilder
+                        # does not remove fields maintained by that owner.
+                        snapshot_changes["removed"] = [key for key in snapshot_changes["removed"] if key not in {UI_AGENT_STATE_SNAPSHOT_KEY, UI_AGENT_STATE_REVISION_KEY}]
+                        pending_projection = await to_thread_cancel_safe(append_lifecycle,
                             "conversation_projection_pending",
                             {
                                 "conversation_id": conversation.id,
                                 "assistant_message": partial_message,
-                                "context_snapshot": saved_snapshot,
+                                "context_delta": snapshot_changes,
+                                "partial": True,
                                 "summary": None,
-                                "expected_revision": int(
-                                    getattr(latest_conversation, "revision", 0) or 0
-                                ),
+                                "expected_revision": expected_revision,
                             },
                         )
                         committed = await asyncio.to_thread(
                             self.conversation_repo.commit_turn_projection,
                             conversation.id,
                             assistant_message=partial_message,
-                            context_snapshot=saved_snapshot,
+                            context_delta=snapshot_changes,
+                            partial=True,
+                            return_record=False,
                             summary=None,
-                            expected_revision=int(
-                                getattr(latest_conversation, "revision", 0) or 0
-                            ),
+                            expected_revision=expected_revision,
                         )
                         if committed is None:
                             raise RuntimeError(
                                 "conversation disappeared during partial projection"
                             )
-                        append_lifecycle(
+                        await to_thread_cancel_safe(append_lifecycle,
                             "conversation_projection_committed",
                             {
                                 "conversation_id": conversation.id,
@@ -5006,6 +5059,7 @@ class SessionAgentRunnerMixin:
                             },
                         )
                         last_partial_persisted_at = time.monotonic()
+                        partial_history_revision = captured_history_revision
                 except Exception:
                     logger.exception(
                         "Failed to persist partial assistant transcript projection for conversation %s",
@@ -5248,6 +5302,18 @@ class SessionAgentRunnerMixin:
 
                 if event.type in {"item.started", "agent_message.delta", "item.completed"}:
                     _project_agent_message_event(turn_state, event.type, event.data)
+                elif event.type == "artifact.preview":
+                    event.data["message_id"] = assistant_message_id
+                    event.data.setdefault("text_offset", _utf16_code_unit_length(turn_state.content()))
+                    artifact = {"artifactId": event.data["artifact_id"], "kind": event.data.get("kind", "file"),
+                        "summary": event.data.get("summary", ""), "bytes": event.data.get("bytes", 0),
+                        "mediaType": event.data.get("media_type", ""), "textOffset": event.data["text_offset"]}
+                    for existing in assistant_artifacts:
+                        if existing["artifactId"] == artifact["artifactId"]:
+                            existing.update(artifact)
+                            break
+                    else:
+                        assistant_artifacts.append(artifact)
                 elif event.type == "image_chunk":
                     raw_image_data = str(event.data.get("image_data") or "").strip()
                     raw_media_type = str(
@@ -5379,7 +5445,7 @@ class SessionAgentRunnerMixin:
                     "ask_user",
                 }:
                     await _persist_partial_turn(force=True)
-                elif event.type in {"agent_message.delta", "tool_output_delta"}:
+                elif event.type in {"agent_message.delta", "tool_output_delta", "agent.item.delta"}:
                     await _persist_partial_turn()
 
                 event.data.setdefault("conversation_id", conversation.id)
@@ -5445,6 +5511,15 @@ class SessionAgentRunnerMixin:
             # cancel a sleeping timer before terminal projection can complete.
             async with reasoning_flush_lock:
                 await reasoning_deadline.close()
+            if partial_persist_task is not None:
+                # Repeated stop requests cannot detach the writer and let an
+                # older partial projection commit after this turn's terminal.
+                while not partial_persist_task.done():
+                    try:
+                        await asyncio.shield(partial_persist_task)
+                    except asyncio.CancelledError:
+                        continue
+                partial_persist_task.result()
 
             # Clear streaming metadata
             streams = getattr(self, "_conversation_streams", {})
@@ -5628,20 +5703,25 @@ class SessionAgentRunnerMixin:
                                     conversation.id,
                                 )
 
-                        saved_snapshot = run_context_builder.export_snapshot()
-                        latest_conversation = await asyncio.to_thread(
-                            self.conversation_repo.get_conversation,
+                        projection_base = await asyncio.to_thread(
+                            self.conversation_repo.get_projection_context,
                             conversation.id,
                         )
-                        if latest_conversation is None:
+                        if projection_base is None:
                             raise RuntimeError(
                                 "conversation disappeared during terminal projection"
                             )
+                        from backend.conversations.context_delta import apply_context_snapshot_delta
+                        expected_revision, previous_snapshot = projection_base
+                        snapshot_changes, _ = run_context_builder.export_snapshot_delta(
+                            previous_snapshot, since_revision=partial_history_revision,
+                        )
+                        saved_snapshot = apply_context_snapshot_delta(previous_snapshot, snapshot_changes)
                         _merge_ui_agent_state_into_snapshot(
                             saved_snapshot,
-                            getattr(latest_conversation, "context_snapshot", None),
+                            previous_snapshot,
                         )
-                        latest_snapshot = getattr(latest_conversation, "context_snapshot", None)
+                        latest_snapshot = previous_snapshot
                         latest_snapshot_map = (
                             latest_snapshot
                             if isinstance(latest_snapshot, dict)
@@ -5675,31 +5755,37 @@ class SessionAgentRunnerMixin:
                             raise RuntimeError(
                                 "terminal conversation projection has no execution journal owner"
                             )
-                        pending_projection = append_lifecycle(
+                        terminal_delta = {
+                            **snapshot_changes,
+                            "set": {**snapshot_changes["set"], **{
+                                key: saved_snapshot[key] for key in (UI_AGENT_STATE_SNAPSHOT_KEY, UI_AGENT_STATE_REVISION_KEY)
+                                if key in saved_snapshot
+                            }},
+                            "removed": [key for key in snapshot_changes["removed"]
+                                        if key not in {UI_AGENT_STATE_SNAPSHOT_KEY, UI_AGENT_STATE_REVISION_KEY}],
+                        }
+                        pending_projection = await to_thread_cancel_safe(append_lifecycle,
                             "conversation_projection_pending",
                             {
                                 "conversation_id": conversation.id,
                                 "assistant_message": assistant_message,
-                                "context_snapshot": saved_snapshot,
+                                "context_delta": terminal_delta,
                                 "summary": new_summary,
-                                "expected_revision": int(
-                                    getattr(latest_conversation, "revision", 0) or 0
-                                ),
+                                "expected_revision": expected_revision,
                             },
                         )
                         updated_conversation = await asyncio.to_thread(
                             self.conversation_repo.commit_turn_projection,
                             conversation.id,
                             assistant_message=assistant_message,
-                            context_snapshot=saved_snapshot,
+                            context_delta=terminal_delta,
+                            return_record=False,
                             summary=new_summary,
-                            expected_revision=int(
-                                getattr(latest_conversation, "revision", 0) or 0
-                            ),
+                            expected_revision=expected_revision,
                         )
                         if updated_conversation is None:
                             raise RuntimeError("conversation disappeared during terminal commit")
-                        append_lifecycle(
+                        await to_thread_cancel_safe(append_lifecycle,
                             "conversation_projection_committed",
                             {
                                 "conversation_id": conversation.id,

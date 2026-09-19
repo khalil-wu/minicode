@@ -197,7 +197,7 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
                 defer_start=True,
             )
             session.sync_permission_mode_with_active_conversation(source="session.restore")
-            active_payload = project_public_conversation(target)
+            active_payload = project_public_conversation(target, transcript_limit=80)
         else:
             restored_conversation_id = None
             active_payload = None

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from backend.agent.execution_journal import ExecutionJournal
 
 from backend.agent.checkpoint import (
     AgentCheckpoint,
@@ -49,6 +52,7 @@ def prepare_query_recovery(
     max_iterations_budget: int,
     current_run_id: str,
     skill_manager: Any | None = None,
+    execution_journal: ExecutionJournal | None = None,
 ) -> QueryRecoveryResult:
     """Restore one incomplete checkpoint without taking over run identity.
 
@@ -94,7 +98,7 @@ def prepare_query_recovery(
             or ""
         ).strip()
         actual_revision = context_snapshot_revision(snapshot)
-        # A schema-4 checkpoint must be self-describing.  Do not silently
+        # A schema >= 4 checkpoint must be self-describing. Do not silently
         # downgrade a corrupt full snapshot to history-only recovery: that
         # would lose read-file guards, compaction state and provenance.
         if expected_revision and expected_revision != actual_revision:
@@ -114,6 +118,17 @@ def prepare_query_recovery(
         # Schema <= 3 checkpoints only carried the history projection.
         snapshot = {"history": checkpoint.messages}
     context_builder.load_snapshot(snapshot)
+    extension_updates = 0
+    extension_messages: list[dict[str, Any]] = []
+    if execution_journal is not None:
+        extension_state, extension_cursor, extension_updates, extension_messages = execution_journal.replay_extension_state(
+            context_builder.extension_state, cursor=context_builder.extension_cursor, run_id=checkpoint.run_id,
+        )
+        if extension_updates:
+            context_builder.extension_state = extension_state
+            context_builder.extension_cursor = extension_cursor
+        for message in context_builder.deserialize_snapshot_history(extension_messages):
+            context_builder._history_store.append(message)
     # Skill instructions are already present in the restored message history.
     # Do not reactivate them: Codex treats explicit Skill selection as
     # turn-scoped input, not persistent session state.
@@ -132,6 +147,8 @@ def prepare_query_recovery(
         "timestamp": checkpoint.timestamp,
         "stopped_reason": checkpoint.stopped_reason or "",
         "schema_version": int(checkpoint.schema_version or 1),
+        "extension_updates_replayed": extension_updates,
+        "extension_messages_replayed": len(extension_messages),
         "context_snapshot_present": has_context_snapshot,
         "context_schema_version": (
             int(snapshot.get("context_schema_version") or 0)

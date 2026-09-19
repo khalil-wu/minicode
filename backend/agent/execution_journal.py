@@ -15,7 +15,7 @@ import threading
 from collections.abc import Mapping
 from copy import deepcopy
 from contextlib import contextmanager, suppress
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
@@ -24,6 +24,7 @@ from backend.agent.checkpoint import validate_storage_id
 from backend.agent.runtime_records import epoch_ms
 from backend.atomic_io import canonical_file_path_key
 from backend.config import DATA_ROOT
+from backend.conversations.projection_log import value_change, apply_value_change
 from filelock import FileLock
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ def _tail_lines(path: Path, *, limit: int = 8) -> list[str]:
 
 
 JOURNAL_ROOT = DATA_ROOT / "sidechains"
-_JOURNAL_SCHEMA_VERSION = 1
+_JOURNAL_SCHEMA_VERSION = 7
 _WRITE_LOCKS: dict[str, threading.Lock] = {}
 _WRITE_SEQUENCES: dict[str, int] = {}
 _WRITE_LOCKS_GUARD = threading.Lock()
@@ -73,6 +74,7 @@ class ExecutionJournalCorruptionError(ExecutionJournalError):
 
 
 _TOOL_USE_OPTIONAL_FIELDS = (
+    "call_source",
     "status",
     "started_at",
     "display_hint",
@@ -95,6 +97,7 @@ _TOOL_USE_OPTIONAL_FIELDS = (
 )
 
 _TOOL_RESULT_OPTIONAL_FIELDS = (
+    "call_source",
     "artifact_id",
     "artifact_kind",
     "artifact_media_type",
@@ -329,6 +332,10 @@ class ExecutionJournal:
         self._process_lock = _process_lock_for(self.path)
         self._event_cache: list[JournalEvent] | None = None
         self._event_cache_signature: tuple[int, int, int] | None = None
+        self._tool_states: dict[str, tuple[str, JournalEvent]] = {}
+        self._events_by_id: dict[str, JournalEvent] = {}
+        self._projection_heads: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
+        self._context_heads: dict[str, tuple[str, dict[str, Any], int]] = {}
         self.unacknowledged_tail_records = 0
         self.unacknowledged_tail_path: Path | None = None
         key = canonical_file_path_key(self.path)
@@ -441,6 +448,7 @@ class ExecutionJournal:
         if not self.path.exists():
             return []
         events: list[JournalEvent] = []
+        context_heads: dict[str, tuple[str, dict[str, Any], int]] = {}
         seen_event_ids: set[str] = set()
         with self.path.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
@@ -496,8 +504,50 @@ class ExecutionJournal:
                         f"Execution journal record {line_number} has an invalid event id"
                     )
                 seen_event_ids.add(event_id)
-                events.append(JournalEvent.from_dict(data))
+                event = JournalEvent.from_dict(data)
+                self._expand_context_snapshot(event, context_heads, events)
+                events.append(event)
         return events
+
+    def _expand_context_snapshot(
+        self, event: JournalEvent, heads: dict[str, tuple[str, dict[str, Any], int]],
+        events: list[JournalEvent],
+    ) -> None:
+        """Decode the physical snapshot chain into the existing logical event."""
+        payload = event.payload
+        owner = str(payload.get("conversation_id") or "")
+        if event.schema_version >= 7 and "context_snapshot_change" in payload:
+            encoded = payload.pop("context_snapshot_change")
+            head = heads.get(owner)
+            try:
+                if head is None or head[0] != encoded["base_event_id"]:
+                    raise ValueError("Context snapshot change has no matching base")
+                before = self._context_snapshot_base(head[1], events[head[2]:], owner)
+                snapshot = apply_value_change(before, encoded["change"])
+                if not isinstance(snapshot, dict):
+                    raise ValueError("Context snapshot change must produce an object")
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+                raise ExecutionJournalCorruptionError("Invalid context snapshot change") from exc
+            payload["context_snapshot"] = snapshot
+        snapshot = payload.get("context_snapshot")
+        if isinstance(snapshot, dict):
+            heads[owner] = (event.event_id, snapshot, event.seq)
+
+    def _context_snapshot_base(
+        self, snapshot: dict[str, Any], events: list[JournalEvent], owner: str,
+    ) -> dict[str, Any]:
+        # Private facts between snapshots are already durable. Reuse their
+        # existing cursor-aware replay (including checkpoint overlap), so the
+        # next snapshot need only encode state absent from those facts.
+        updates = [event for event in events
+                   if event.payload.get("lifecycle") == "extension_state_delta"
+                   and str(event.payload.get("conversation_id") or "") == owner]
+        if not updates:
+            return snapshot
+        state, cursor, _, _ = self.replay_extension_state(
+            snapshot.get("extension_state", {}), cursor=snapshot.get("extension_cursor"), events=updates,
+        )
+        return {**snapshot, "extension_state": state, "extension_cursor": cursor}
 
     def _file_signature_unlocked(self) -> tuple[int, int, int] | None:
         if not self.path.exists():
@@ -514,6 +564,15 @@ class ExecutionJournal:
             return self._event_cache
         events = self._read_events_unlocked()
         self._event_cache = events
+        self._tool_states = self._tool_lifecycle_states(events)
+        self._events_by_id = {event.event_id: event for event in events}
+        self._context_heads = {
+            str(event.payload.get("conversation_id") or ""): (event.event_id, event.payload["context_snapshot"], event.seq)
+            for event in events if isinstance(event.payload.get("context_snapshot"), dict)
+        }
+        self._projection_heads = {}
+        for _ in self._expanded_projection_events(events, self._projection_heads):
+            pass
         self._event_cache_signature = self._file_signature_unlocked()
         return events
 
@@ -554,17 +613,18 @@ class ExecutionJournal:
             clean_type = "system"
         clean_payload = deepcopy(dict(payload or {}))
         with self._locked():
-            for event in self._validated_events_unlocked():
-                if event.event_id == stable_id:
-                    if event.event_type != clean_type:
-                        raise ExecutionJournalError(
-                            f"Execution journal event id {stable_id!r} changed type"
-                        )
-                    if event.payload != clean_payload:
-                        raise ExecutionJournalError(
-                            f"Execution journal event id {stable_id!r} changed payload"
-                        )
-                    return event
+            self._validated_events_unlocked()
+            event = self._events_by_id.get(stable_id)
+            if event is not None:
+                if event.event_type != clean_type:
+                    raise ExecutionJournalError(
+                        f"Execution journal event id {stable_id!r} changed type"
+                    )
+                if event.payload != clean_payload:
+                    raise ExecutionJournalError(
+                        f"Execution journal event id {stable_id!r} changed payload"
+                    )
+                return event
             return self._append_unlocked(
                 clean_type,
                 clean_payload,
@@ -606,7 +666,21 @@ class ExecutionJournal:
             ts_ms=int(ts_ms or epoch_ms()),
             parent_event_id=str(parent_event_id or ""),
         )
-        line = json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        physical = event.to_dict()
+        # Own the serialized payload: caller mutations after append must not
+        # change the next delta's base or the warm recovery view.
+        event.payload = physical["payload"]
+        snapshot = event.payload.get("context_snapshot")
+        owner = str(event.payload.get("conversation_id") or "")
+        if isinstance(snapshot, dict) and owner in self._context_heads:
+            base_id, before, base_seq = self._context_heads[owner]
+            before = self._context_snapshot_base(before, durable_events[base_seq:], owner)
+            physical["payload"] = dict(event.payload)
+            physical["payload"].pop("context_snapshot")
+            physical["payload"]["context_snapshot_change"] = {
+                "base_event_id": base_id, "change": value_change(before, snapshot),
+            }
+        line = json.dumps(physical, ensure_ascii=False, separators=(",", ":"))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
@@ -615,6 +689,12 @@ class ExecutionJournal:
         self._seq = next_seq
         _WRITE_SEQUENCES[key] = next_seq
         durable_events.append(event)
+        self._tool_lifecycle_states((event,), self._tool_states)
+        self._events_by_id[event.event_id] = event
+        if isinstance(snapshot, dict):
+            self._context_heads[owner] = (event.event_id, snapshot, event.seq)
+        for _ in self._expanded_projection_events((event,), self._projection_heads):
+            pass
         self._event_cache_signature = self._file_signature_unlocked()
         if os.name != "nt":
             with suppress(OSError):
@@ -637,10 +717,12 @@ class ExecutionJournal:
     @staticmethod
     def _tool_lifecycle_states(
         events: Iterable[JournalEvent],
+        states: dict[str, tuple[str, JournalEvent]] | None = None,
     ) -> dict[str, tuple[str, JournalEvent]]:
         """Return the latest open/closed state for each provider call id."""
 
-        states: dict[str, tuple[str, JournalEvent]] = {}
+        if states is None:
+            states = {}
         for event in events:
             if event.event_type == "tool_use":
                 tool_call = event.payload.get("tool_call")
@@ -690,8 +772,8 @@ class ExecutionJournal:
         payload = tool_use_journal_payload(source)
         call_id = str(payload["tool_call"]["id"])
         with self._locked():
-            states = self._tool_lifecycle_states(self._validated_events_unlocked())
-            state = states.get(call_id)
+            self._validated_events_unlocked()
+            state = self._tool_states.get(call_id)
             if state is not None and state[0] == "open":
                 previous = state[1].payload.get("tool_call")
                 current = payload.get("tool_call")
@@ -723,8 +805,8 @@ class ExecutionJournal:
         call_id = str(payload["tool_call_id"])
         resolved_name = str(payload["tool_name"] or "tool")
         with self._locked():
-            events = self._validated_events_unlocked()
-            state = self._tool_lifecycle_states(events).get(call_id)
+            self._validated_events_unlocked()
+            state = self._tool_states.get(call_id)
             if state is not None and state[0] == "closed":
                 return None
             if state is None:
@@ -761,11 +843,12 @@ class ExecutionJournal:
                     f"Failed reading execution journal for {self.agent_id}"
                 ) from exc
 
-    def reconstruct_history(self) -> list[dict[str, Any]]:
+    def reconstruct_history(self, *, events: list[JournalEvent] | None = None) -> list[dict[str, Any]]:
         """Rebuild provider-shaped history from ordered journal facts."""
-        events = self.read_events()
+        events = self.read_events() if events is None else events
         history: list[dict[str, Any]] = []
         start_index = 0
+        extension_cursor: dict[str, Any] = {}
         # A context snapshot is a typed replacement item, not a second store.
         # Start from the newest replacement and apply later append-only facts.
         # This preserves opaque provider items, signatures, encrypted
@@ -795,12 +878,32 @@ class ExecutionJournal:
                     if call_id:
                         pending_tool_call_ids.discard(call_id)
             start_index = index + 1
+            extension_cursor = dict(snapshot.get("extension_cursor", {}))
             break
         else:
             pending_tool_call_ids = set()
 
         for event in events[start_index:]:
             payload = event.payload
+            if payload.get("lifecycle") == "extension_state_delta":
+                current = extension_cursor.get("revision", 0) if extension_cursor.get("run_id") == payload["run_id"] else 0
+                for change in payload["extension_changes"][max(0, current - payload["base_revision"]):]:
+                    history.extend(deepcopy(change.get("context_messages", [])))
+                extension_cursor = {"run_id": payload["run_id"], "revision": max(current, payload["revision"])}
+                continue
+            if payload.get("lifecycle") == "provider_item_committed":
+                message = payload.get("message")
+                if not isinstance(message, dict) or message.get("role") != "assistant":
+                    continue
+                stamp = message.get("timestamp_ms")
+                existing = next((item for item in reversed(history) if stamp is not None and item.get("role") == "assistant" and item.get("timestamp_ms") == stamp), None)
+                old_ids = {call.get("id") for call in (existing or {}).get("tool_calls", [])}
+                if existing is None:
+                    history.append(deepcopy(message))
+                else:
+                    existing.update(deepcopy(message))
+                pending_tool_call_ids.update(call["id"] for call in message.get("tool_calls", []) if call.get("id") and call["id"] not in old_ids)
+                continue
             if event.event_type == "user_prompt":
                 content = str(
                     payload.get("provider_content")
@@ -827,7 +930,19 @@ class ExecutionJournal:
                 continue
             if event.event_type == "tool_use":
                 tool_call = payload.get("tool_call")
+                if isinstance(tool_call, dict) and (tool_call.get("call_source") or {}).get("kind") in {"code_mode", "extension"}:
+                    continue
                 if isinstance(tool_call, dict) and tool_call.get("id"):
+                    call_id = str(tool_call["id"]).strip()
+                    if call_id in pending_tool_call_ids:
+                        # A streamed provider item already introduced this
+                        # call. Update its authorized arguments, not its count.
+                        for message in reversed(history):
+                            matched = next((call for call in message.get("tool_calls", []) if call.get("id") == call_id), None)
+                            if matched is not None:
+                                matched.update(deepcopy(tool_call))
+                                break
+                        continue
                     history.append(
                         {
                             "role": "assistant",
@@ -858,6 +973,85 @@ class ExecutionJournal:
                 if content:
                     history.append({"role": "system", "content": content})
         return history
+
+    def replay_extension_state(
+        self, state: dict[str, Any], *, cursor: dict[str, Any] | None = None,
+        run_id: str | None = None, after_seq: int = 0,
+        events: list[JournalEvent] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any], int, list[dict[str, Any]]]:
+        """Replay private updates and context deliveries newer than the supplied snapshot.
+
+        Later full snapshots may advance private state without replacing the
+        caller's model history. Track message delivery from the original
+        cursor independently so those deliveries are still recovered once.
+        """
+        from backend.conversations.projection_log import apply_value_change
+
+        events = self.read_events() if events is None else events
+        result = state
+        position = dict(cursor or {})
+        message_position = dict(position)
+        context_messages: list[dict[str, Any]] = []
+        if position and (not isinstance(position.get("run_id"), str)
+                         or isinstance(position.get("revision"), bool)
+                         or not isinstance(position.get("revision"), int) or position["revision"] < 0):
+            raise ExecutionJournalCorruptionError("Invalid extension state cursor")
+        applied = 0
+        for event in events:
+            payload = event.payload
+            snapshot = payload.get("context_snapshot")
+            captured = snapshot.get("extension_cursor", {}) if isinstance(snapshot, dict) else {}
+            event_run_id = payload.get("run_id") or captured.get("run_id")
+            if event.seq <= after_seq or (run_id is not None and event_run_id != run_id):
+                continue
+            kind = payload.get("lifecycle")
+            if captured and captured.get("run_id") == event_run_id:
+                current = position.get("revision", 0) if position.get("run_id") == event_run_id else 0
+                revision = captured.get("revision")
+                if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+                    raise ExecutionJournalCorruptionError("Invalid extension snapshot cursor")
+                if revision > current:
+                    result = deepcopy(snapshot["extension_state"])
+                    position = dict(captured)
+                    applied += 1
+            elif kind == "extension_state_committed" and run_id is None:
+                result = deepcopy(payload["context_snapshot"]["extension_state"])
+                position = dict(payload["context_snapshot"].get("extension_cursor", {}))
+                applied += 1
+            elif kind == "extension_state_delta":
+                base, revision, changes = payload["base_revision"], payload["revision"], payload["extension_changes"]
+                if (not isinstance(changes, list) or isinstance(base, bool) or not isinstance(base, int) or base < 0
+                        or isinstance(revision, bool) or not isinstance(revision, int)
+                        or revision - base != len(changes)):
+                    raise ExecutionJournalCorruptionError("Invalid extension delta revision")
+                message_revision = message_position.get("revision", 0) if message_position.get("run_id") == payload["run_id"] else 0
+                for change in changes[max(0, message_revision - base):]:
+                    context_messages.extend(deepcopy(change.get("context_messages", [])))
+                message_position = {"run_id": payload["run_id"], "revision": max(message_revision, revision)}
+                current = position.get("revision", 0) if position.get("run_id") == payload["run_id"] else 0
+                if current >= revision:
+                    continue
+                if current < base:
+                    raise ExecutionJournalCorruptionError("Extension delta is missing an earlier committed change")
+                if applied == 0:
+                    result = deepcopy(state)
+                for change in changes[current - base:]:
+                    result = apply_value_change(result, change, in_place=True)
+                position = {"run_id": payload["run_id"], "revision": revision}
+                applied += 1
+        return result, position, applied, context_messages
+
+    def reconstruct_context_snapshot(self) -> dict[str, Any]:
+        events = self.read_events()
+        base = next((event for event in reversed(events) if isinstance(event.payload.get("context_snapshot"), dict)), None)
+        snapshot = deepcopy(base.payload["context_snapshot"]) if base is not None else {}
+        snapshot["history"] = self.reconstruct_history(events=events)
+        snapshot["extension_state"], snapshot["extension_cursor"], _, _ = self.replay_extension_state(
+            snapshot.get("extension_state", {}), cursor=snapshot.get("extension_cursor"),
+            after_seq=base.seq if base is not None else 0, events=events,
+        )
+        snapshot.pop("context_revision", None)
+        return snapshot
 
     def unresolved_tool_uses(self) -> list[dict[str, Any]]:
         """Return tool_use entries that never received a matching tool_result."""
@@ -1000,13 +1194,55 @@ class ExecutionJournal:
         data = {"lifecycle": str(lifecycle or "system").strip() or "system"}
         if payload:
             data.update(payload)
+        if lifecycle == "conversation_projection_pending":
+            message_id = str((data.get("assistant_message") or {}).get("id") or "")
+            key = (str(data.get("conversation_id") or ""), message_id)
+            with self._locked():
+                self._validated_events_unlocked()
+                head = self._projection_heads.get(key)
+                if head is not None and message_id:
+                    data = {
+                        "lifecycle": "conversation_projection_delta", "conversation_id": key[0],
+                        "message_id": message_id, "base_event_id": head[0],
+                        "change": value_change(head[1], data),
+                    }
+                return self._append_unlocked("system", data)
         return self.append("system", data)
+
+    @staticmethod
+    def _expanded_projection_events(
+        events: Iterable[JournalEvent],
+        heads: dict[tuple[str, str], tuple[str, dict[str, Any]]] | None = None,
+    ) -> Iterable[JournalEvent]:
+        """Materialize projection records only for recovery and the latest write base."""
+        heads = {} if heads is None else heads
+        for event in events:
+            data = event.payload
+            lifecycle = data.get("lifecycle")
+            if lifecycle == "conversation_projection_pending":
+                key = (str(data.get("conversation_id") or ""), str((data.get("assistant_message") or {}).get("id") or ""))
+                heads[key] = (event.event_id, data)
+            elif lifecycle == "conversation_projection_delta":
+                key = (data["conversation_id"], data["message_id"])
+                head = heads.get(key)
+                if head is None or head[0] != data["base_event_id"]:
+                    raise ExecutionJournalCorruptionError("Conversation projection delta has no matching base")
+                try:
+                    payload = apply_value_change(head[1], data["change"])
+                    identity = (payload["conversation_id"], payload["assistant_message"]["id"])
+                    if identity != key or payload["lifecycle"] != "conversation_projection_pending":
+                        raise ValueError("Conversation projection delta changed its owner")
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+                    raise ExecutionJournalCorruptionError("Invalid conversation projection delta") from exc
+                heads[key] = (event.event_id, payload)
+                event = replace(event, payload=payload)
+            yield event
 
     def pending_conversation_projections(self) -> list[JournalEvent]:
         """Return terminal conversation projections without commit receipts."""
 
         pending: dict[str, JournalEvent] = {}
-        for event in self.read_events():
+        for event in self._expanded_projection_events(self.read_events()):
             lifecycle = str(event.payload.get("lifecycle") or "")
             if lifecycle == "conversation_projection_pending":
                 pending[event.event_id] = event
@@ -1042,8 +1278,8 @@ class ExecutionJournal:
         covered_ids: set[str] = set()
         for event in events:
             lifecycle = str(event.payload.get("lifecycle") or "")
-            if lifecycle == "conversation_projection_pending":
-                message = event.payload.get("assistant_message")
+            if lifecycle in {"conversation_projection_pending", "conversation_projection_delta"}:
+                message = event.payload.get("assistant_message") or {"id": event.payload.get("message_id")}
                 if isinstance(message, dict):
                     message_id = str(message.get("id") or "").strip()
                     if message_id:
@@ -1158,6 +1394,24 @@ class ExecutionJournal:
                 }
             )
             covered_ids.add(message_id)
+        # End hooks may persist private extension state after the model's
+        # terminal receipt. Apply only that private state to the same message;
+        # never replace the already-committed assistant answer or history.
+        event_sequences = {event.event_id: event.seq for event in events}
+        updates_by_message: dict[str, list[JournalEvent]] = {}
+        for event in events:
+            if event.payload.get("lifecycle") in {"extension_state_committed", "extension_state_delta"}:
+                updates_by_message.setdefault(str(event.payload.get("message_id") or ""), []).append(event)
+        for projection in projections:
+            message_id = projection["assistant_message"]["id"]
+            snapshot = projection["context_snapshot"]
+            state, cursor, count, _ = self.replay_extension_state(
+                snapshot.get("extension_state", {}), cursor=snapshot.get("extension_cursor"),
+                after_seq=event_sequences[projection["source_event_id"]], events=updates_by_message.get(message_id, []),
+            )
+            if count:
+                snapshot["extension_state"] = state
+                snapshot["extension_cursor"] = cursor
         return projections
 
 

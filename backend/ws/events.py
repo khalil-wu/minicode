@@ -35,6 +35,7 @@ ServerEventType = Literal[
     "agent.run.completed",
     "user_message.queue.updated",
     "agent.item",
+    "agent.item.delta",
     "agent.progress",
     "runtime.span",
     "task.update",

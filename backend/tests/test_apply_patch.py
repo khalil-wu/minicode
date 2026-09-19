@@ -56,6 +56,19 @@ def test_parse_rename_via_move_to():
     assert changes[0].move_to == "b.py"
 
 
+@pytest.mark.parametrize("original", [b"", b"last line", b"first\r\nsecond\nlast", b"\xef\xbb\xbfutf8\r\n"])
+def test_pure_rename_preserves_exact_file_bytes(tmp_path, original):
+    source = tmp_path / "a.txt"
+    source.write_bytes(original)
+    context = _bypass_ctx(tmp_path)
+    context.metadata["_read_file_hashes"] = {str(source.resolve()): content_hash(original.decode("utf-8"))}
+    patch = "*** Begin Patch\n*** Update File: a.txt\n*** Move to: b.txt\n*** End Patch"
+    result = asyncio.run(ApplyPatchTool().execute({"patch": patch}, context))
+    assert not result.is_error, result.content
+    assert not source.exists()
+    assert (tmp_path / "b.txt").read_bytes() == original
+
+
 @pytest.mark.parametrize(
     "bad",
     [

@@ -10,6 +10,7 @@ import {
   projectRecentMessagesToTurns,
 } from "./chatSurfaceState";
 import { ChatTurn } from "./components/ChatTurn";
+import { loadEarlierConversationMessages } from "./historyPagination";
 import { hasVisibleActiveConversation } from "./activeConversation";
 import { summarizeTurnDiff } from "../lib/turn-diff";
 import type { ChatTurnState, DiffCellState } from "./cells/cellTypes";
@@ -25,6 +26,7 @@ export const MessageList = () => {
   const messages = useAppStore((s) => s.messages);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const conversationId = useAppStore((s) => s.conversationId);
+  const historyPage = useAppStore((s) => conversationId ? s.conversationHistoryPages[conversationId] : undefined);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const conversations = useAppStore((s) => s.conversations);
   const turnDiff = useAppStore((s) => conversationId ? s.turnDiffs[conversationId] : undefined);
@@ -374,14 +376,18 @@ export const MessageList = () => {
             <EmptyState />
           ) : (
             <>
-            {hiddenTurnCount > 0 && (
+            {(hiddenTurnCount > 0 || historyPage?.hasMore) && (
               <Button
                 variant="secondary"
                 size="sm"
                 className="self-center"
-                onClick={() => setShowAllHistory(true)}
+                disabled={historyPage?.loading}
+                onClick={async () => {
+                  if (historyPage?.hasMore && conversationId) await loadEarlierConversationMessages(conversationId);
+                  setShowAllHistory(true);
+                }}
               >
-                显示更早的消息（{hiddenTurnCount}）
+                {historyPage?.loading ? "正在加载…" : historyPage?.hasMore ? "加载更早的消息" : `显示更早的消息（${hiddenTurnCount}）`}
               </Button>
             )}
             {shouldVirtualize ? (

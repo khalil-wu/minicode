@@ -12,6 +12,7 @@ export interface ToolCallRecord {
   name: string;
   args: Record<string, unknown>;
   status: ToolCallStatus;
+  callSource?: ToolCallEvent["call_source"];
   /** Backend-owned lifecycle phase; status remains the stable UI terminal/running state. */
   transition?: string;
   waitingOn?: string;
@@ -295,6 +296,7 @@ export const reduceToolCallStart = (
     inputSummary: e.input_summary ?? existing?.inputSummary,
     resultKind: e.result_kind ?? existing?.resultKind,
     activityKind: e.activity_kind ?? existing?.activityKind,
+    callSource: e.call_source ?? existing?.callSource,
     visibility: e.visibility ?? existing?.visibility,
     groupId: e.group_id ?? existing?.groupId,
     stepId: e.step_id ?? existing?.stepId,
@@ -345,6 +347,7 @@ export const reduceToolCallResult = (
     displaySummary: e.display_summary,
     resultKind: e.result_kind ?? existing.resultKind,
     activityKind: e.activity_kind ?? existing.activityKind,
+    callSource: e.call_source ?? existing.callSource,
     visibility: e.visibility ?? existing.visibility,
     groupId: e.group_id ?? existing.groupId,
     stepId: e.step_id ?? existing.stepId,

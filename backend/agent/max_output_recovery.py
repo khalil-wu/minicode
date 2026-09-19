@@ -93,7 +93,7 @@ def _continuation_provider_items(
         if not isinstance(item, dict):
             continue
         item_type = str(item.get("type") or "")
-        if item_type in {"function_call", "tool_call", "tool_use"}:
+        if item_type in {"function_call", "custom_tool_call", "tool_call", "tool_use"}:
             continue
         if item_type == "anthropic_message":
             content = item.get("content")
@@ -104,7 +104,7 @@ def _continuation_provider_items(
                 for block in content
                 if isinstance(block, dict)
                 and str(block.get("type") or "")
-                not in {"function_call", "tool_call", "tool_use"}
+                not in {"function_call", "custom_tool_call", "tool_call", "tool_use"}
             ]
             if safe_content:
                 replay_items.append(

@@ -1688,3 +1688,49 @@ def test_anthropic_rejects_unstable_or_reused_tool_use_identity() -> None:
         )
         assert result[-1].type == StreamEventType.ERROR
         assert result[-1].raw["protocol_error_code"] == expected_code
+
+
+def test_anthropic_explicit_effort_reaches_both_factories_and_respects_side_query_policy():
+    from backend.services.llm_adapter_factory import build_wire_adapter, _build_registered_provider_adapter
+    from backend.llm.provider_contracts import ProviderAdapterSpec, ReasoningPolicy
+
+    adapters = [
+        build_wire_adapter(LLMSettings(provider="custom", wire_api="anthropic", api_key="test",
+            model="glm-5.3-flash", thinking_budget=0, reasoning_effort="high",
+            reasoning_effort_levels=("low", "medium", "high"))),
+        _build_registered_provider_adapter(ProviderAdapterSpec(provider_id="custom", api="anthropic-messages",
+            api_key="test", model_id="glm-5.3-flash", base_url="https://example.invalid/v1", headers={},
+            auth_header=False, max_tokens=8000, reasoning_effort="high",
+            reasoning_effort_levels=("low", "medium", "high"))),
+    ]
+    for adapter in adapters:
+        captured = []
+        async def create(**kwargs):
+            captured.append(kwargs)
+            return _ClosableAsyncStream([
+                SimpleNamespace(type="message_start", message=SimpleNamespace(id="effort-test", usage=SimpleNamespace(input_tokens=1, output_tokens=0))),
+                SimpleNamespace(type="content_block_start", index=0, content_block=SimpleNamespace(type="text")),
+                SimpleNamespace(type="content_block_delta", index=0, delta=SimpleNamespace(type="text_delta", text='{"ok":true}')),
+                SimpleNamespace(type="content_block_stop", index=0),
+                SimpleNamespace(type="message_delta", delta=SimpleNamespace(stop_reason="end_turn"), usage=SimpleNamespace(output_tokens=4)),
+                SimpleNamespace(type="message_stop"),
+            ])
+        _install_anthropic_fake(adapter, create)
+        async def scenario():
+            messages = [LLMMessage(role="user", content="answer")]
+            await _collect_events(adapter.stream_chat(messages))
+            assert captured[-1]["output_config"] == {"effort": "high"}
+            assert "thinking" not in captured[-1]
+            assert adapter.capabilities.effective_reasoning_effort == "high"
+            assert adapter.capabilities.reasoning_effort_supported
+            await adapter.side_query(messages, options=SideQueryOptions(operation="structured",
+                disable_reasoning=True, output_schema={"type": "object"}))
+            assert "effort" not in captured[-1]["output_config"]
+            assert captured[-1]["output_config"]["format"]["type"] == "json_schema"
+            adapter.apply_reasoning_policy(ReasoningPolicy(level="off"))
+            await _collect_events(adapter.stream_chat(messages))
+            assert "output_config" not in captured[-1]
+            adapter.apply_reasoning_policy(ReasoningPolicy(level="medium", wire_level="medium"))
+            await _collect_events(adapter.stream_chat(messages))
+            assert captured[-1]["output_config"]["effort"] == "medium"
+        asyncio.run(scenario())

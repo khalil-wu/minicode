@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import threading
 import time
+from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -307,16 +307,51 @@ class WebSocketReplayEventStore:
             return events[-limit:]
 
     def append(self, payload: dict[str, Any]) -> None:
-        if is_raw_provider_reasoning_event(payload):
+        self.append_many((payload,))
+
+    def append_many(self, payloads: Iterable[dict[str, Any]]) -> None:
+        """Stage a whole drain window under one write.
+
+        The replay log is reconnect state, not the conversation transcript: the
+        authoritative copy of every event it carries lives in the conversation
+        repository, and a renderer that cannot replay falls back to the
+        ``session.restored`` snapshot. Paying an open/write/flush/close round
+        trip per event therefore charged filesystem latency per provider chunk
+        for a cache whose loss is already covered. One write per drain window
+        keeps the log's content and ordering identical while removing the
+        per-event cost.
+
+        Durability note: records reach the OS page cache on ``flush`` and are
+        not forced to disk. A power loss can drop the tail of the log, which
+        costs a snapshot-based reconnect and never transcript state. Forcing a
+        disk barrier per streamed chunk is what made this path expensive; the
+        durable conversation record is written by the conversation repository,
+        not here.
+        """
+
+        records = [
+            payload
+            for payload in payloads
+            if not is_raw_provider_reasoning_event(payload)
+        ]
+        if not records:
             return
         with self._locked():
             self.root_dir.mkdir(parents=True, exist_ok=True)
-            safe_payload = sanitize_ws_replay_payload(payload)
+            lines = []
+            for payload in records:
+                safe_payload = sanitize_ws_replay_payload(payload)
+                lines.append(
+                    json.dumps(
+                        safe_payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
             with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(safe_payload, ensure_ascii=False, separators=(",", ":")))
+                handle.write("\n".join(lines))
                 handle.write("\n")
                 handle.flush()
-                os.fsync(handle.fileno())
 
     def rewrite(self, events: list[dict[str, Any]]) -> None:
         with self._locked():

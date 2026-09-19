@@ -4,11 +4,12 @@ import asyncio
 import json
 import logging
 import uuid
-from contextlib import nullcontext
+from contextlib import AsyncExitStack, nullcontext
 from pathlib import Path
 from typing import Any
 
 from backend.agent.message import AgentEvent, UserCommand
+from backend.services.misc_command_service import is_conversation_effort_command
 from backend.ws.client_command_log import ClientCommandDedupStore, _clean_command_id
 from backend.ws.conversation_errors import emit_conversation_not_found
 from backend.ws.event_outbox import EventOutbox
@@ -109,6 +110,22 @@ def _command_targets_conversation_delete_fence(
         active = str(session.active_conversation_id or "").strip()
         if active:
             targets.add(active)
+    return tuple(sorted(targets))
+
+
+def _command_lifecycle_conversations(session: Any, command: UserCommand) -> tuple[str, ...]:
+    """Lock every addressed task, independently of delete-fence exemptions."""
+    targets = {
+        str(command.data.get(key) or "").strip()
+        for key in (
+            "conversation_id", "preferred_conversation_id", "source_conversation_id",
+            "target_conversation_id", "parent_conversation_id",
+        )
+    }
+    targets.discard("")
+    active = str(session.active_conversation_id or "").strip()
+    if active and (not targets or command.type in {"conversation.activate", "conversation.list", "session.restore", "session.sync"}):
+        targets.add(active)
     return tuple(sorted(targets))
 
 
@@ -568,12 +585,19 @@ class SessionCommandDispatcher:
           try:
             if _is_conversation_lifecycle_command(command.type):
                 manager = self._session.ws_manager
-                lifecycle_lock = (
-                    manager.conversation_lifecycle_lock()
-                    if manager is not None
-                    else self._session.conversation_lifecycle_lock()
-                )
-                async with lifecycle_lock:
+                async with AsyncExitStack() as scope:
+                    # A window's model/project selection and its following send
+                    # remain ordered. Separate windows only share task resources.
+                    await scope.enter_async_context(self._session.conversation_lifecycle_lock())
+                    if manager is not None:
+                        await scope.enter_async_context(manager.conversation_lifecycle_scope(
+                            _command_lifecycle_conversations(self._session, command),
+                            exclusive=command.type == "memory.reset" or (
+                                command.type == "llm.config.set" and not is_conversation_effort_command(
+                                    command.data, command.data.get("conversation_id") or self._session.active_conversation_id,
+                                )
+                            ),
+                        ))
                     if manager is not None:
                         fenced_conversation_id = next(
                             (
@@ -1147,6 +1171,12 @@ class SessionCommandDispatcher:
                         or command.data.get("streamingBehavior")
                         or ""
                     ).strip().lower()
+                    if streaming_behavior == "steer" and requested_permission_mode is not None:
+                        current = self._session.conversation_repo.get_conversation(target_conversation_id)
+                        if current is not None and requested_permission_mode != current.permission_mode:
+                            # Like turn/steer, live input changes the request text;
+                            # a new execution profile belongs to the next turn.
+                            streaming_behavior = "follow_up"
                     if streaming_behavior == "steer" and requested_workspace_root:
                         from backend.services.workspace_service import parse_user_message_workspace_request, workspace_path_needs_activation
 
@@ -1175,9 +1205,6 @@ class SessionCommandDispatcher:
                             target_message_id=target_message_id,
                         )
                         if steered is not None:
-                            await self._handle_user_message_permission(
-                                requested_permission_mode, target_conversation_id,
-                            )
                             await self._session.send_event(
                                 AgentEvent.user_message_queue_updated(
                                     status="dequeued",

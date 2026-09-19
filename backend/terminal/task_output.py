@@ -9,6 +9,7 @@ another chat's command output.
 from __future__ import annotations
 
 import os
+import codecs
 from pathlib import Path
 
 from backend.agent.checkpoint import validate_storage_id
@@ -135,6 +136,49 @@ class DurableTaskOutput:
         finally:
             self._closed = True
             self._file.close()
+
+
+def read_task_output_chunk(path: str | Path, cursor: int, max_chars: int) -> tuple[str, int, bool]:
+    """Read UTF-8 output from a previously returned byte cursor."""
+    with Path(path).open("rb") as stream:
+        size = os.fstat(stream.fileno()).st_size
+        if cursor < 0 or cursor > size:
+            raise ValueError("Output cursor is outside the stored command output")
+        stream.seek(cursor)
+        raw = stream.read(max_chars * 4)
+    text = codecs.getincrementaldecoder("utf-8")().decode(raw, final=False)[:max_chars]
+    next_cursor = cursor + len(text.encode("utf-8"))
+    return text, next_cursor, next_cursor < size
+
+
+def _join_output_preview(head: str, tail: str, omitted_bytes: int) -> str:
+    return f"{head}\n[{omitted_bytes} bytes omitted; full output retained]\n{tail}"
+
+
+def preview_text_output(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    head_chars = max_chars // 2
+    head, tail = text[:head_chars], text[-(max_chars - head_chars):]
+    return _join_output_preview(head, tail, len(text[head_chars:len(text) - len(tail)].encode("utf-8")))
+
+
+def read_task_output_preview(path: str | Path, max_chars: int) -> tuple[str, int, bool, int]:
+    """Bounded head/tail view; next cursor follows the head, end cursor follows the snapshot."""
+    with Path(path).open("rb") as stream:
+        size = os.fstat(stream.fileno()).st_size
+        raw = stream.read(min(size, max_chars * 4))
+        text = codecs.getincrementaldecoder("utf-8")().decode(raw, final=False)
+        if len(raw) == size and len(text) <= max_chars:
+            return text, size, False, size
+        head = text[:max_chars // 2]
+        tail_chars = max_chars - len(head)
+        tail_offset = max(0, size - tail_chars * 4 - 4)
+        stream.seek(tail_offset)
+        tail = stream.read(size - tail_offset).decode("utf-8", errors="ignore")[-tail_chars:]
+    next_cursor = len(head.encode("utf-8"))
+    omitted = size - next_cursor - len(tail.encode("utf-8"))
+    return _join_output_preview(head, tail, omitted), next_cursor, True, size
 
 
 def read_task_output_tail(path: str | Path, max_chars: int) -> tuple[str, bool]:

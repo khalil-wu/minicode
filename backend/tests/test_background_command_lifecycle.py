@@ -376,7 +376,7 @@ async def test_agent_background_command_fails_closed_when_sandbox_is_unavailable
     monkeypatch.setattr(
         SandboxRunner,
         "capability",
-        lambda self: SandboxCapability(
+        lambda self, **_kwargs: SandboxCapability(
             available=False,
             backend="unavailable",
             filesystem_isolated=False,

@@ -11,6 +11,8 @@ const BUILTIN_TOOL_LABELS: Record<string, string> = {
   web_search: "搜索网页",
   write_file: "写入文件",
   update_plan: "更新计划",
+  tool_exec: "组合工具调用",
+  tool_wait: "等待脚本",
 };
 
 const BUILTIN_TOOL_NAME_RE = new RegExp(

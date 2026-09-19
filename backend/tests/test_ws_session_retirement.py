@@ -12,9 +12,11 @@ from backend.ws.manager import WebSocketManager
 
 
 async def _emit(session, text):
+    # Durable event type: the streaming delta types are live-only
+    # (payload_contracts.LIVE_ONLY_EVENT_TYPES) and never reach the replay log.
     await session.event_outbox.send_payload({
-        "type": "agent_message.delta", "conversation_id": "conv_retirement",
-        "item_id": "message", "delta": text,
+        "type": "tool_result", "conversation_id": "conv_retirement",
+        "item_id": "message", "content": text,
     }, log_context="test")
 
 
@@ -28,14 +30,14 @@ async def _retiring_session(tmp_path, monkeypatch, *, short_drain=False):
     finish_append = threading.Event()
     cleanup_started = asyncio.Event()
     cleanup_returned = asyncio.Event()
-    append = session.event_outbox._store.append
+    append = session.event_outbox._store.append_many
     sleep = asyncio.sleep
     pending = set()
 
-    def held_append(payload):
+    def held_append(payloads):
         append_started.set()
         assert finish_append.wait(4)
-        append(payload)
+        append(payloads)
 
     async def grace_elapsed(delay, *args, **kwargs):
         return await sleep(0 if delay == 30.0 else delay, *args, **kwargs)
@@ -45,7 +47,7 @@ async def _retiring_session(tmp_path, monkeypatch, *, short_drain=False):
         await _release_session(session)
         cleanup_returned.set()
 
-    monkeypatch.setattr(session.event_outbox._store, "append", held_append)
+    monkeypatch.setattr(session.event_outbox._store, "append_many", held_append)
     monkeypatch.setattr(session.session_lifecycle, "shutdown", cleanup)
     monkeypatch.setattr("backend.ws.manager.asyncio.sleep", grace_elapsed)
     if short_drain:
@@ -105,7 +107,7 @@ async def test_expired_cleanup_remains_owned_until_real_flush(
         assert [event["seq"] for event in events] == (
             [1, 2, 3] if operation == "reconnect" else [1, 2]
         )
-        assert [event["delta"] for event in events] == (
+        assert [event["content"] for event in events] == (
             ["old-1", "old-2", "new-3"] if operation == "reconnect" else ["old-1", "old-2"]
         )
         assert context.retirement.done()

@@ -27,6 +27,8 @@ _MODEL_KNOWN_KEYS = frozenset(
         "thinkingLevelMap", "thinking_level_map", "input", "cost",
         "contextWindow", "context_window", "maxContextWindow",
         "max_context_window", "maxTokens", "max_tokens", "headers",
+        "supports_custom_tools", "model_instructions", "responses_websocket", "native_compaction",
+        "parallel_tool_calls",
     }
 )
 
@@ -55,6 +57,11 @@ class ModelDefinition:
     reasoning_effort_levels: tuple[str, ...] = ()
     default_reasoning_effort: str = ""
     default_reasoning_summary: str = ""
+    supports_custom_tools: bool = False
+    responses_websocket: bool = False
+    native_compaction: bool | None = None
+    model_instructions: str = ""
+    parallel_tool_calls: bool | None = None
     headers: Mapping[str, str] = field(default_factory=dict)
     extra: Mapping[str, Any] = field(default_factory=dict)
 
@@ -74,6 +81,16 @@ class ModelDefinition:
             result["thinkingLevelMap"] = dict(self.thinking_level_map)
         if self.headers:
             result["headers"] = dict(self.headers)
+        if self.supports_custom_tools:
+            result["supports_custom_tools"] = True
+        if self.responses_websocket:
+            result["responses_websocket"] = True
+        if self.native_compaction is not None:
+            result["native_compaction"] = self.native_compaction
+        if self.model_instructions:
+            result["model_instructions"] = self.model_instructions
+        if self.parallel_tool_calls is not None:
+            result["parallel_tool_calls"] = self.parallel_tool_calls
         return result
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -100,6 +117,11 @@ class ModelDefinition:
         }
         if self.thinking_level_map is not None:
             result["thinking_level_map"] = dict(self.thinking_level_map)
+        result["supports_custom_tools"] = self.supports_custom_tools
+        result["responses_websocket"] = self.responses_websocket
+        result["native_compaction"] = self.native_compaction
+        result["model_instructions"] = self.model_instructions
+        result["parallel_tool_calls"] = self.parallel_tool_calls
         return result
 
 
@@ -154,6 +176,11 @@ class ProviderAdapterSpec:
     default_reasoning_effort: str = ""
     default_reasoning_summary: str = ""
     extension_defined: bool = False
+    supports_custom_tools: bool = False
+    responses_websocket: bool = False
+    native_compaction: bool | None = None
+    model_instructions: str = ""
+    parallel_tool_calls: bool | None = None
 
 
 @dataclass(frozen=True)

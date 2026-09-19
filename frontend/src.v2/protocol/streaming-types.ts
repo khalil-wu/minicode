@@ -92,6 +92,7 @@ export type StreamingServerEventType =
   | "agent.run.started"
   | "agent.run.completed"
   | "agent.item"
+  | "agent.item.delta"
   | "agent.progress"
   | "runtime.span"
   | "task.update"
@@ -163,6 +164,14 @@ export interface AgentMessageDeltaEvent {
   message_id?: string;
 }
 
+export interface AgentItemDeltaEvent {
+  type: "agent.item.delta";
+  conversation_id: string;
+  item_id: string;
+  delta: string;
+  message_id?: string;
+}
+
 export interface ItemCompletedEvent {
   type: "item.completed";
   conversation_id: string;
@@ -218,11 +227,19 @@ export interface ThinkingDeltaEvent {
   lifecycle?: "start" | "delta" | "end" | string;
 }
 
+export interface ToolCallSourcePayload {
+  kind: "code_mode" | "extension";
+  cell_id: string;
+  parent_call_id: string;
+  runtime_call_id?: string;
+}
+
 export interface ToolCallEvent {
   type: "tool_call";
   id: string;
   name: string;
   args: Record<string, unknown>;
+  call_source?: ToolCallSourcePayload;
   status?: "running" | string;
   started_at?: number;
   display_hint?: string;
@@ -257,6 +274,7 @@ export interface ToolResultEvent {
   type: "tool_result";
   id: string;
   summary: string;
+  call_source?: ToolCallSourcePayload;
   artifact_id?: string;
   /** Metadata for a tool-owned artifact; the binary body stays off the WS. */
   artifact_kind?: "file" | "diff" | "image" | "json" | "code" | "text" | string;

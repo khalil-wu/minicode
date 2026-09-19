@@ -19,6 +19,7 @@ from backend.llm.capabilities import (
     require_tool_calling,
 )
 from backend.tools.toolsets import ACTIVE_TOOLSET_POLICY_METADATA_KEY, ToolsetPolicy
+from backend.tools.registry import ToolRegistry
 
 
 @dataclass(slots=True)
@@ -43,7 +44,7 @@ class TurnIterationRuntime:
         context: Any,
         state: Any,
         llm: Any,
-        tool_registry: Any,
+        tool_registry: ToolRegistry,
         permission_checker: Any,
         tool_context: Any,
         turn_kernel: Any,
@@ -60,6 +61,7 @@ class TurnIterationRuntime:
         self.state = state
         self.llm = llm
         self.tool_registry = tool_registry
+        self.base_tool_registry = tool_registry
         self.permission_checker = permission_checker
         self.tool_context = tool_context
         self.turn_kernel = turn_kernel
@@ -73,23 +75,27 @@ class TurnIterationRuntime:
         self.agent_session = agent_session
 
     def sync_active_session_model(self) -> Any:
-        """Project Pi's mutable AgentSession model into this iteration."""
+        """Capture the selection before context preparation and provider I/O."""
 
         owner = self.agent_session
-        active_llm = getattr(owner, "llm", None) if owner is not None else None
+        snapshot = self.tool_context.run_context.model_execution
+        self.tool_context.run_context.active_model_execution = snapshot
+        self.tool_context.model_execution = snapshot
+        active_llm = snapshot.llm if snapshot is not None else getattr(owner, "llm", None)
+        if snapshot is not None and owner is not None:
+            owner.llm = snapshot.llm
+            owner.token_budget = snapshot.config.token_budget
         if active_llm is not None:
             self.llm = active_llm
             self.tool_context.llm = active_llm
             self.context.bind_llm(active_llm)
-        active_budget = getattr(owner, "token_budget", None)
+        active_budget = snapshot.config.token_budget if snapshot is not None else getattr(owner, "token_budget", None)
         if active_budget is not None:
             self.context.bind_budget(active_budget)
         active_registry = (
             getattr(owner, "tool_registry", None) if owner is not None else None
-        )
-        if active_registry is not None:
-            self.tool_registry = active_registry
-            self.tool_context.tool_registry = active_registry
+        ) or self.base_tool_registry
+        self.base_tool_registry = active_registry
         return self.llm
 
     async def prepare(
@@ -99,8 +105,20 @@ class TurnIterationRuntime:
         initial_turn_pending: bool,
         pending_turn_context: list[str],
     ) -> TurnIterationPreparation:
+        run_context = self.tool_context.run_context
+        if run_context.refresh_model_auth is not None:
+            while (snapshot := run_context.model_execution) is not None:
+                refreshed = await run_context.refresh_model_auth(snapshot, False, run_context.model_owner_task)
+                if run_context.model_execution is snapshot:
+                    run_context.model_execution = refreshed
+                    break
+                # A host selection published during the await owns the next
+                # step. Refresh that choice under the same admission deadline.
         self.sync_active_session_model()
-        mcp_version, mcp_instructions = self.mcp_catalog(self.tool_registry)
+        mcp_version, mcp_instructions = self.mcp_catalog(self.base_tool_registry)
+        self.tool_registry = self.base_tool_registry.fork()
+        self.tool_context.tool_registry = self.tool_registry
+        self.tool_context.run_context.active_tool_registry = self.tool_registry
         self.state.loaded_deferred_tools.intersection_update(self.tool_registry.list_tools())
         self.turn_kernel.refresh_live_permission_context()
         base_policy = self.active_toolset_policy_factory(
@@ -183,6 +201,8 @@ class TurnIterationRuntime:
         )
 
         tool_schemas = schema_state.tool_schemas
+        if self.tool_context.run_context.extension_actions is not None:
+            self.tool_context.run_context.extension_actions.tool_schemas = tool_schemas
         self.state.prompt_context["tool_names"] = schema_state.tool_names
         self.state.tool_runtime_guidance = schema_state.runtime_guidance
         self.state.prompt_context["deferred_tools_prompt_block"] = (

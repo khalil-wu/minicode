@@ -486,6 +486,20 @@ def _safe_provider_request_summary(value: Any) -> dict[str, Any]:
     for key in ("prompt_cache_key_present", "turn_aborted_marker_present"):
         if isinstance(source.get(key), bool):
             result[key] = bool(source.get(key))
+    transport = source.get("transport")
+    if isinstance(transport, Mapping):
+        safe_transport: dict[str, Any] = {}
+        if transport.get("mode") in ("http", "websocket"):
+            safe_transport["mode"] = transport["mode"]
+        for key in ("incremental", "connection_reused", "response_items_complete"):
+            if isinstance(transport.get(key), bool):
+                safe_transport[key] = transport[key]
+        for key in ("input_items_logical_len", "input_items_sent_len", "request_json_bytes", "fallback_status"):
+            count = _safe_nonnegative_int(transport.get(key))
+            if count is not None:
+                safe_transport[key] = count
+        if safe_transport:
+            result["transport"] = safe_transport
     for key in ("tool_names", "metadata_keys", "request_param_keys"):
         values = public_string_list(source.get(key), item_max_chars=256)
         if values:
@@ -509,8 +523,13 @@ def _safe_provider_request_summary(value: Any) -> dict[str, Any]:
         result["largest_tools"] = largest_tools
     largest_inputs = _safe_named_count_rows(
         source.get("largest_input_items"),
-        string_fields=("type", "role", "name", "content_hash"),
-        numeric_fields=("index", "chars"),
+        string_fields=(
+            "type", "role", "name", "content_hash",
+            "runtime_context_content_hash", "user_input_content_hash",
+        ),
+        numeric_fields=(
+            "index", "chars", "runtime_context_chars", "user_input_chars",
+        ),
     )
     if largest_inputs:
         result["largest_input_items"] = largest_inputs

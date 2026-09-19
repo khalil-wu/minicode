@@ -11,11 +11,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import Counter
+from contextlib import aclosing
 import hashlib
 import json
 import math
 import os
 import statistics
+import shutil
 import sys
 import time
 from dataclasses import asdict
@@ -279,7 +281,7 @@ def _runtime_elapsed_ms(
     event_names: set[str],
 ) -> int:
     return sum(
-        max(0, int(span.get("duration_ms") or 0))
+        max(0, int((span.get("data") or {}).get("service_duration_ms", span.get("duration_ms")) or 0))
         for span in spans
         if str(span.get("event") or "") in event_names
     )
@@ -547,6 +549,7 @@ async def _run(prompt: str) -> int:
     )
 
     state = AgentState(user_message=prompt, max_iterations=agent_settings.max_iterations, workspace_root=workspace)
+    state.conversation_id = f"eval-{os.environ.get('MINICODE_EVAL_TASK_ID', 'task')}"
     runtime_spans: list[dict[str, object]] = []
     runtime_subagent_events: list[tuple[str, dict[str, object]]] = []
     task_tool_subagent_events: list[tuple[str, dict[str, object]]] = []
@@ -575,6 +578,7 @@ async def _run(prompt: str) -> int:
         emit_event=capture_runtime_event,
         metadata={
             "eval": True,
+            "conversation_id": state.conversation_id,
             "workspace_root": str(workspace),
             # An evaluator has no interactive user to approve a model-authored
             # draft plan. Keep plan events visible, but do not turn the run
@@ -625,104 +629,118 @@ async def _run(prompt: str) -> int:
     thinking_chars = 0
     submitted_at = time.monotonic()
     first_tool_ms: int | None = None
-    async for event in QueryEngine().submit(submission):
-        event_counts[event.type] += 1
-        event_data = event.data if isinstance(event.data, dict) else {}
-        if event.type == "tool_call":
-            if first_tool_ms is None and event_data.get("status") == "running":
-                first_tool_ms = round((time.monotonic() - submitted_at) * 1000)
-            _observe_tool_call(tool_call_names, event_data)
-            projected = _subagent_event_from_task_tool(
-                event.type,
-                event_data,
-                tool_call_names,
-            )
-            if projected is not None:
-                task_tool_subagent_events.append(projected)
-        elif event.type == "tool_result":
-            tool_result_statuses[str(event_data.get("status") or "unknown")] += 1
-            error_kind = str(event_data.get("error_kind") or "").strip()
-            if error_kind:
-                tool_error_kinds[error_kind] += 1
-            tool_name = tool_call_names.get(str(event_data.get("id") or ""), "")
-            if tool_name in {"grep_files", "glob_files", "fuzzy_search"} and event_data.get("is_error"):
-                invalid_search_count += 1
-            projected = _subagent_event_from_task_tool(
-                event.type,
-                event_data,
-                tool_call_names,
-            )
-            if projected is not None:
-                task_tool_subagent_events.append(projected)
-        elif event.type == "subagent.start":
-            subagent_id = str(event_data.get("subagent_id") or "").strip()
-            if subagent_id:
-                subagents_started.add(subagent_id)
-                active_subagents.add(subagent_id)
-                peak_parallel_subagents = max(
-                    peak_parallel_subagents,
-                    len(active_subagents),
+    async with aclosing(submission.session), aclosing(QueryEngine().submit(submission)) as stream:
+        try:
+            async for event in stream:
+                event_counts[event.type] += 1
+                event_data = event.data if isinstance(event.data, dict) else {}
+                if event.type == "tool_call":
+                    if first_tool_ms is None and event_data.get("status") == "running":
+                        first_tool_ms = round((time.monotonic() - submitted_at) * 1000)
+                    _observe_tool_call(tool_call_names, event_data)
+                    projected = _subagent_event_from_task_tool(
+                        event.type,
+                        event_data,
+                        tool_call_names,
+                    )
+                    if projected is not None:
+                        task_tool_subagent_events.append(projected)
+                elif event.type == "tool_result":
+                    tool_result_statuses[str(event_data.get("status") or "unknown")] += 1
+                    error_kind = str(event_data.get("error_kind") or "").strip()
+                    if error_kind:
+                        tool_error_kinds[error_kind] += 1
+                    tool_name = tool_call_names.get(str(event_data.get("id") or ""), "")
+                    if tool_name in {"grep_files", "glob_files", "fuzzy_search"} and event_data.get("is_error"):
+                        invalid_search_count += 1
+                    projected = _subagent_event_from_task_tool(
+                        event.type,
+                        event_data,
+                        tool_call_names,
+                    )
+                    if projected is not None:
+                        task_tool_subagent_events.append(projected)
+                elif event.type == "subagent.start":
+                    subagent_id = str(event_data.get("subagent_id") or "").strip()
+                    if subagent_id:
+                        subagents_started.add(subagent_id)
+                        active_subagents.add(subagent_id)
+                        peak_parallel_subagents = max(
+                            peak_parallel_subagents,
+                            len(active_subagents),
+                        )
+                elif event.type == "subagent.done":
+                    subagent_id = str(event_data.get("subagent_id") or "").strip()
+                    status = str(event_data.get("status") or "unknown").strip() or "unknown"
+                    subagent_statuses[status] += 1
+                    if subagent_id and status == "completed":
+                        subagents_completed.add(subagent_id)
+                    active_subagents.discard(subagent_id)
+                elif event.type == "item.completed":
+                    message_item = event_data.get("item") if isinstance(event_data.get("item"), dict) else {}
+                    if message_item.get("type") == "agent_message":
+                        final_text_parts[:] = [str(message_item.get("text") or "")]
+                elif event.type in {"thinking_delta", "thinking"}:
+                    chunk = str(event_data.get("content") or "")
+                    if chunk and thinking_chars < 120_000:
+                        remaining = 120_000 - thinking_chars
+                        kept = chunk[:remaining]
+                        thinking_text_parts.append(kept)
+                        thinking_chars += len(kept)
+                elif event.type == "stream_event":
+                    provider_usage = _usage_from_provider_stream_event(event_data)
+                    for key, value in provider_usage.items():
+                        usage_totals[key] += value
+                event_payload = (
+                    event_data.get("payload")
+                    if isinstance(event_data.get("payload"), dict)
+                    else {}
                 )
-        elif event.type == "subagent.done":
-            subagent_id = str(event_data.get("subagent_id") or "").strip()
-            status = str(event_data.get("status") or "unknown").strip() or "unknown"
-            subagent_statuses[status] += 1
-            if subagent_id and status == "completed":
-                subagents_completed.add(subagent_id)
-            active_subagents.discard(subagent_id)
-        elif event.type == "item.completed":
-            message_item = event_data.get("item") if isinstance(event_data.get("item"), dict) else {}
-            if message_item.get("type") == "agent_message":
-                final_text_parts[:] = [str(message_item.get("text") or "")]
-        elif event.type in {"thinking_delta", "thinking"}:
-            chunk = str(event_data.get("content") or "")
-            if chunk and thinking_chars < 120_000:
-                remaining = 120_000 - thinking_chars
-                kept = chunk[:remaining]
-                thinking_text_parts.append(kept)
-                thinking_chars += len(kept)
-        elif event.type == "stream_event":
-            provider_usage = _usage_from_provider_stream_event(event_data)
-            for key, value in provider_usage.items():
-                usage_totals[key] += value
-        event_payload = (
-            event_data.get("payload")
-            if isinstance(event_data.get("payload"), dict)
-            else {}
-        )
-        raw_iteration = str(
-            event_data.get("iteration_id")
-            or event_payload.get("iteration_id")
-            or ""
-        )
-        if raw_iteration.startswith("iter:"):
-            try:
-                max_iteration = max(max_iteration, int(raw_iteration.split(":", 1)[1]))
-            except ValueError:
-                pass
-        metrics = _event_loop_metrics(event_data)
-        if metrics:
-            last_loop_metrics = metrics
-        if str(event_data.get("phase") or "").lower() in {"recover", "recovery"}:
-            recovery_events.add(str(event_data.get("id") or event_data.get("event_id") or len(recovery_events)))
+                raw_iteration = str(
+                    event_data.get("iteration_id")
+                    or event_payload.get("iteration_id")
+                    or ""
+                )
+                if raw_iteration.startswith("iter:"):
+                    try:
+                        max_iteration = max(max_iteration, int(raw_iteration.split(":", 1)[1]))
+                    except ValueError:
+                        pass
+                metrics = _event_loop_metrics(event_data)
+                if metrics:
+                    last_loop_metrics = metrics
+                if str(event_data.get("phase") or "").lower() in {"recover", "recovery"}:
+                    recovery_events.add(str(event_data.get("id") or event_data.get("event_id") or len(recovery_events)))
 
-        # JSONL remains human-auditable, but excludes token deltas and duplicate
-        # raw artifact bodies so a bounded report retains the complete run.
-        if _should_emit_trace_event(event.type, event_data):
-            print(
-                json.dumps(
-                    {"type": event.type, "data": _trace_event_data(event.type, event_data)},
-                    ensure_ascii=False,
-                ),
-                flush=True,
-            )
-        if event.type == "done":
-            terminal = str(event_data.get("status") or "")
-            terminal_reason = str(event_data.get("reason") or "")
-            final_usage = _usage_from_done_event(event_data)
-            for key, value in final_usage.items():
-                if value > 0 or usage_totals[key] == 0:
-                    usage_totals[key] = value
+                # JSONL remains human-auditable, but excludes token deltas and duplicate
+                # raw artifact bodies so a bounded report retains the complete run.
+                if _should_emit_trace_event(event.type, event_data):
+                    print(
+                        json.dumps(
+                            {"type": event.type, "data": _trace_event_data(event.type, event_data)},
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+                if event.type == "done":
+                    terminal = str(event_data.get("status") or "")
+                    terminal_reason = str(event_data.get("reason") or "")
+                    final_usage = _usage_from_done_event(event_data)
+                    for key, value in final_usage.items():
+                        if value > 0 or usage_totals[key] == 0:
+                            usage_totals[key] = value
+        finally:
+            output_dir = os.environ.get("MINICODE_EVAL_COMMAND_OUTPUT_DIR")
+            if output_dir:
+                destination = Path(output_dir)
+                destination.mkdir(parents=True, exist_ok=True)
+                commands = submission.session.command_manager(runtime.session_id).list_commands(
+                    include_completed=True, conversation_id=state.conversation_id,
+                )
+                for command in commands:
+                    if command["output_path"]:
+                        shutil.copyfile(command["output_path"], destination / f"{command['command_id']}.log")
+                (destination / "commands.json").write_text(json.dumps(commands, ensure_ascii=False, indent=2), encoding="utf-8")
     turn_elapsed_ms = round((time.monotonic() - submitted_at) * 1000)
     runtime_metrics = _subagent_metrics_from_runtime_events(runtime_subagent_events)
     if runtime_metrics is None:
@@ -820,6 +838,10 @@ async def _run(prompt: str) -> int:
                     "tool_occupied_ms": _runtime_occupied_ms(runtime_spans, {"tool.completed"}),
                     "provider_or_tool_occupied_ms": _runtime_occupied_ms(runtime_spans, provider_terminal_events | {"tool.completed"}),
                     "runtime_configuration": {
+                        "llm": {name: getattr(settings, name) for name in (
+                            "model", "wire_api", "max_tokens", "context_window", "thinking_budget",
+                            "reasoning_effort", "model_instructions", "supports_custom_tools", "native_compaction",
+                        )},
                         "agent": asdict(agent_settings),
                         "token_budget": asdict(token_budget),
                         "profile_supplied": bool(profile),

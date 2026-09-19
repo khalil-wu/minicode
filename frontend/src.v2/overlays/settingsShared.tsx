@@ -15,6 +15,10 @@ export type ProviderModelMetadata = {
   reasoning_effort_levels?: EffortLevel[];
   default_reasoning_effort?: string;
   default_reasoning_summary?: string;
+  supports_custom_tools?: boolean;
+  responses_websocket?: boolean;
+  native_compaction?: boolean | null;
+  model_instructions?: string;
   source?: string;
 };
 

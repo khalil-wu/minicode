@@ -123,7 +123,7 @@ def test_event_outbox_delivers_raw_reasoning_live_but_does_not_replay_it(tmp_pat
     asyncio.run(scenario())
 
     assert websocket.sent[0]["content"] == "live reasoning"
-    assert outbox._events == []
+    assert not outbox._events
     assert outbox.load_persisted_window(limit=10)[0] == []
 
 
@@ -414,10 +414,13 @@ def test_replay_persistence_does_not_block_later_websocket_send(tmp_path: Path) 
             self.persisted: list[int] = []
 
         def append(self, payload) -> None:
+            self.append_many([payload])
+
+        def append_many(self, payloads) -> None:
             if not self.persisted:
                 self.started.set()
                 self.release.wait(timeout=5)
-            self.persisted.append(int(payload["seq"]))
+            self.persisted.extend(int(payload["seq"]) for payload in payloads)
 
         def rewrite(self, events) -> None:
             self.persisted = [int(event["seq"]) for event in events]
@@ -440,10 +443,13 @@ def test_replay_persistence_does_not_block_later_websocket_send(tmp_path: Path) 
 
         first = asyncio.create_task(outbox.send_payload(
             {
-                "type": "agent_message.delta",
+                # A durable type: streaming deltas are live-only
+                # (payload_contracts.LIVE_ONLY_EVENT_TYPES) and are never
+                # staged, so they could not hold the writer open here.
+                "type": "tool_result",
                 "conversation_id": "conv",
                 "item_id": "agent-message",
-                "delta": "one",
+                "content": "one",
             },
             log_context="first",
         ))

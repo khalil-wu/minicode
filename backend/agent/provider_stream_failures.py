@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import Context
 import logging
 from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass
@@ -37,13 +38,16 @@ class ProviderStreamExceptionResult:
     cancelled: bool = False
 
 
-async def close_provider_stream(stream: Any | None) -> None:
+async def close_provider_stream(stream: Any | None, *, read_context: Context | None = None) -> None:
     """Detach and close a provider iterator without masking its root failure."""
 
     close = getattr(stream, "aclose", None) if stream is not None else None
     if callable(close):
         try:
-            await close()
+            if read_context is None:
+                await close()
+            else:
+                await asyncio.create_task(close(), context=read_context)
         except Exception:
             logger.debug("Provider stream close failed", exc_info=True)
 

@@ -1,4 +1,5 @@
 import type { StateCreator } from "zustand";
+import { inheritMessageTopology, recordStreamingTextUpdate, recordStreamingThinkingUpdate, recordStreamingProgressUpdate, recordStreamingToolUpdate } from "../lib/message-changes";
 import type {
   AppStore,
   ChatSlice,
@@ -28,6 +29,7 @@ import {
   getThinkingFromMessage,
   getToolCallsFromMessage,
   stripLegacyContentFields,
+  toolCallLocations,
 } from "../lib/content-blocks";
 import {
   uniqueMessageId,
@@ -229,7 +231,9 @@ const mergeProgressBlockIntoAssistant = (
   } else {
     blocks.push(incoming);
   }
-  return { ...message, blocks };
+  const updated = { ...message, blocks };
+  if (existingIdx >= 0) recordStreamingProgressUpdate(message, updated, existingIdx);
+  return updated;
 };
 
 /**
@@ -303,6 +307,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   activeGoal: null,
   messages: [],
   conversationMessages: {},
+  conversationHistoryPages: {},
   conversationStreaming: {},
   pendingProviderProgress: {},
   conversationRecallTruncations: {},
@@ -777,6 +782,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           };
       return {
         ...(activate ? { conversationId: id, messages: guardedMessages, isStreaming: nextStreaming, toolCallCount: computeToolCallCount(guardedMessages) } : {}),
+        ...(options?.historyPage ? { conversationHistoryPages: { ...s.conversationHistoryPages, [id]: options.historyPage } } : {}),
         conversationMessages: {
           ...cachedCurrent.conversationMessages,
           [id]: guardedMessages,
@@ -873,6 +879,8 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         });
       }
       next[idx] = { ...msg, isThinkingStreaming: false, blocks };
+      recordStreamingTextUpdate(msg, next[idx], blockIndex);
+      inheritMessageTopology(messages, next);
       return next;
     }));
     if (droppedDelta) {
@@ -972,6 +980,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           blocks.push({ type: "thinking", content, ...thinkingMetadata });
         }
         next[idx] = { ...msg, isThinkingStreaming: true, blocks };
+        if (fallbackIndex >= 0) recordStreamingThinkingUpdate(msg, next[idx], fallbackIndex);
         return next;
       });
     }),
@@ -1049,6 +1058,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         const message = messages[idx];
         const next = messages.slice();
         next[idx] = mergeProgressBlockIntoAssistant(message, incoming);
+        inheritMessageTopology(messages, next);
         return next;
       });
 
@@ -1119,6 +1129,28 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       }
       return { pendingProviderProgress };
     }),
+  appendProcessItemDelta: (itemId, delta, conversationId, messageId) =>
+    set((s) => {
+      const targetItemId = itemId.trim();
+      if (!targetItemId || !delta) return {};
+      return updateMessagesForConversation(s, conversationId, (messages) => {
+        const idx = findStreamingIndexForMessage(messages, messageId);
+        if (idx < 0) return null;
+        const message = messages[idx];
+        const blocks = message.blocks ?? [];
+        const blockIdx = blocks.findIndex((block) =>
+          block.type === "process" && block.id === targetItemId,
+        );
+        if (blockIdx < 0) return null;
+        const existing = blocks[blockIdx];
+        if (existing.type !== "process") return null;
+        const nextBlocks = blocks.slice();
+        nextBlocks[blockIdx] = { ...existing, content: `${existing.content}${delta}` };
+        const next = messages.slice();
+        next[idx] = { ...message, blocks: nextBlocks };
+        return next;
+      });
+    }),
   removeProcessItem: (itemId, conversationId, messageId) =>
     set((s) => {
       const targetItemId = itemId.trim();
@@ -1153,6 +1185,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         blocks.push({ type: "tool_call", record: tc });
         const baseMsg = stripLegacyContentFields(msg);
         next[idx] = { ...baseMsg, isThinkingStreaming: false, blocks };
+        inheritMessageTopology(messages, next);
         return next;
       });
       const targetId = conversationId || s.conversationId;
@@ -1174,14 +1207,8 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         return true;
       };
       return updateMessagesForConversation(s, conversationId, (messages) => {
-        const candidates = messages.flatMap((message, messageIndex) => {
-          if (messageId && message.id !== messageId) return [];
-          return getContentBlocks(message).flatMap((block, blockIndex) =>
-            block.type === "tool_call" && matchesScope(block.record)
-              ? [{ messageIndex, blockIndex, record: block.record }]
-              : [],
-          );
-        });
+        const candidates = toolCallLocations(messages, id, messageId)
+          .filter(({ record }) => matchesScope(record));
         // A lifecycle id is only safe when it resolves to exactly one block.
         // Counting messages alone allowed duplicate ids inside one message to
         // be updated together, which corrupted parallel/legacy tool records.
@@ -1214,6 +1241,8 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           ...baseMsg,
           blocks,
         };
+        recordStreamingToolUpdate(msg, next[idx], blockIndex);
+        inheritMessageTopology(messages, next);
         return next;
       });
     }),

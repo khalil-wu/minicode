@@ -5,8 +5,10 @@ import logging
 import re
 import threading
 import uuid
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from weakref import WeakValueDictionary
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -87,30 +89,57 @@ class WebSocketManager:
         self._conversation_delete_cleanup_tasks: dict[str, set[Any]] = {}
         self._conversation_delete_release_tasks: dict[str, asyncio.Task[Any]] = {}
         self._conversation_lifecycle_loop: asyncio.AbstractEventLoop | None = None
-        self._shared_conversation_lifecycle_lock: asyncio.Lock | None = None
+        self._lifecycle_resource_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self._lifecycle_condition = asyncio.Condition()
+        self._lifecycle_readers = 0
+        self._lifecycle_writer = False
+        self._lifecycle_waiting_writers = 0
         self._conversation_projection_loop: asyncio.AbstractEventLoop | None = None
         self._shared_conversation_projection_locks: dict[str, asyncio.Lock] = {}
         self._conversation_resource_lock = threading.RLock()
         self._attachment_upload_owners: dict[str, str] = {}
         self._conversation_delete_fences: dict[str, str] = {}
 
-    def conversation_lifecycle_lock(self) -> asyncio.Lock:
-        """Return the one lifecycle lock shared by every live renderer.
-
-        Test clients can recreate their event loop while retaining the global
-        manager. Replace an idle lock when that happens, but never detach a
-        lock that still protects an in-flight mutation.
-        """
-
+    @asynccontextmanager
+    async def conversation_lifecycle_scope(self, conversation_ids: tuple[str, ...], *, exclusive: bool = False):
+        """Serialize task resources; only global maintenance excludes all tasks."""
+        # Reuse the manager's loop lifetime, including test-loop replacement.
         loop = asyncio.get_running_loop()
-        lock = self._shared_conversation_lifecycle_lock
-        if lock is None or self._conversation_lifecycle_loop is not loop:
-            if lock is not None and lock.locked():
+        if self._conversation_lifecycle_loop is not loop:
+            if self._lifecycle_readers or self._lifecycle_writer or self._lifecycle_waiting_writers:
                 raise RuntimeError("Conversation lifecycle loop changed during a mutation")
-            lock = asyncio.Lock()
-            self._shared_conversation_lifecycle_lock = lock
             self._conversation_lifecycle_loop = loop
-        return lock
+            self._lifecycle_condition = asyncio.Condition()
+            self._lifecycle_resource_locks.clear()
+        condition = self._lifecycle_condition
+        async with condition:
+            if exclusive:
+                self._lifecycle_waiting_writers += 1
+                try:
+                    await condition.wait_for(lambda: not self._lifecycle_writer and self._lifecycle_readers == 0)
+                    self._lifecycle_writer = True
+                finally:
+                    self._lifecycle_waiting_writers -= 1
+                    condition.notify_all()
+            else:
+                await condition.wait_for(lambda: not self._lifecycle_writer and self._lifecycle_waiting_writers == 0)
+                self._lifecycle_readers += 1
+        try:
+            async with AsyncExitStack() as stack:
+                for conversation_id in sorted(set(conversation_ids)):
+                    lock = self._lifecycle_resource_locks.get(conversation_id)
+                    if lock is None:
+                        lock = asyncio.Lock()
+                        self._lifecycle_resource_locks[conversation_id] = lock
+                    await stack.enter_async_context(lock)
+                yield
+        finally:
+            async with condition:
+                if exclusive:
+                    self._lifecycle_writer = False
+                else:
+                    self._lifecycle_readers -= 1
+                condition.notify_all()
 
     def conversation_projection_lock(self, conversation_id: str) -> asyncio.Lock:
         owner = str(conversation_id or "").strip()
@@ -364,6 +393,12 @@ class WebSocketManager:
     def iter_sessions(self) -> tuple[WebSocketSession, ...]:
         return tuple(self._sessions.values())
 
+    def running_session_for_conversation(self, conversation_id: str) -> WebSocketSession | None:
+        for session in self._sessions.values():
+            if session.run_manager.running_task_for(conversation_id) is not None:
+                return session
+        return None
+
     def disconnect(self, session_id: str, *, connection_generation: int | None = None) -> None:
         session = self._sessions.get(session_id)
         if session is None:
@@ -556,10 +591,10 @@ class WebSocketManager:
         with self._conversation_resource_lock:
             self._attachment_upload_owners.clear()
             self._conversation_delete_fences.clear()
-        lifecycle_lock = self._shared_conversation_lifecycle_lock
-        if lifecycle_lock is None or not lifecycle_lock.locked():
-            self._shared_conversation_lifecycle_lock = None
+        if not (self._lifecycle_readers or self._lifecycle_writer or self._lifecycle_waiting_writers):
             self._conversation_lifecycle_loop = None
+            self._lifecycle_condition = asyncio.Condition()
+            self._lifecycle_resource_locks.clear()
         if not any(
             lock.locked() for lock in self._shared_conversation_projection_locks.values()
         ):
