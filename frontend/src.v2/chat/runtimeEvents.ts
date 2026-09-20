@@ -1185,9 +1185,11 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const checkpointId = maybeString((e as unknown as Record<string, unknown>).checkpoint_id);
       const timedOut = Boolean(e.timed_out);
       const failed = Boolean(eventError || resultError || eventStatus === "failed" || eventStatus === "error");
+      // A child interrupted by process shutdown never finished; it must not
+      // render as a successful completion.
       const uiStatus = eventStatus === "partial" || timedOut
         ? "partial"
-        : eventStatus === "cancelled"
+        : eventStatus === "cancelled" || eventStatus === "interrupted"
           ? "cancelled"
           : failed
             ? "error"

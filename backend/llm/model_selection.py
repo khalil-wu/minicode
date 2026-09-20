@@ -10,7 +10,7 @@ from backend.llm.provider_contracts import ReasoningPolicy
 
 
 REASONING_LEVEL_ORDER = (
-    "off", "minimal", "low", "medium", "high", "xhigh", "max"
+    "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
 )
 
 
@@ -71,7 +71,7 @@ def model_thinking_levels(model: Any, adapter: Any | None = None) -> tuple[str, 
             mapped_value = mapping.get(level) if has_mapping else None
             if has_mapping and mapped_value is None:
                 continue
-            if level in {"xhigh", "max"} and not has_mapping:
+            if level in {"xhigh", "max", "ultra"} and not has_mapping:
                 continue
             levels.append(level)
         return tuple(levels)

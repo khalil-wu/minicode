@@ -320,8 +320,8 @@ class AgentMessageItemData(TypedDict, total=False):
     id: str
     type: Literal["agent_message"]
     text: str
-    source: Literal["model_final", "reply", "partial", "commentary", "cancelled"]
-    status: Literal["in_progress", "completed", "partial"]
+    source: Literal["pending", "model_final", "reply", "partial", "commentary", "cancelled"]
+    status: Literal["in_progress", "completed", "partial", "cancelled", "failed"]
 
 
 class ItemStartedData(TypedDict, total=False):
@@ -374,9 +374,9 @@ class AgentProgressData(TypedDict, total=False):
     conversation_id: str
     message_id: str
     id: str
-    stage: Literal["status", "planning", "tool", "approval", "verification", "final"]
-    phase: Literal["orienting", "planning", "model", "tool", "approval", "verify", "final", "recover", "status", "iteration", "subagent", "cache"]
-    status: Literal["running", "completed", "failed", "info"]
+    stage: Literal["status", "planning", "tool", "approval", "verification", "image_generation", "cache", "final"]
+    phase: Literal["orienting", "planning", "model", "tool", "approval", "verify", "final", "recover", "status", "iteration", "subagent", "cache", "image_generation"]
+    status: Literal["running", "completed", "partial", "failed", "info"]
     message: str
     label: str
     summary: str
@@ -409,7 +409,7 @@ class RuntimeSpanData(TypedDict, total=False):
     message_id: str
     iteration_id: str
     phase: str
-    status: Literal["running", "completed", "failed", "info"]
+    status: Literal["running", "completed", "failed", "cancelled", "interrupted", "superseded", "partial", "info"]
     label: str
     summary: str
     started_at: int
@@ -462,7 +462,7 @@ class AgentRunData(TypedDict, total=False):
     conversation_id: str
     parent_run_id: str
     role: str
-    phase: Literal["plan", "execute", "verify", "recover", "final"]
+    phase: Literal["plan", "execute", "recover", "final"]
     status: Literal["running", "completed", "partial", "failed", "cancelled", "interrupted"]
     budget: dict[str, Any]
     started_at: int
@@ -480,10 +480,10 @@ class AgentItemData(TypedDict, total=False):
     loop_id: str
     iteration_id: str
     parent_id: str
-    kind: Literal["process_text", "observation", "status", "plan", "tool_group", "skill"]
+    kind: Literal["process_text", "observation", "status", "plan", "tool_group", "skill", "hook_response", "async_hook"]
     role: Literal["assistant", "runtime", "system", "tool"]
     source: Literal["model", "runtime", "system", "tool"]
-    status: Literal["running", "completed", "failed", "info"]
+    status: Literal["running", "completed", "partial", "failed", "cancelled", "info", "retracted"]
     title: str
     content: str
     summary: str
@@ -610,7 +610,7 @@ class SubagentDoneData(TypedDict, total=False):
     iterations: int
     tool_call_count: int
     timed_out: bool
-    status: Literal["completed", "partial", "failed", "cancelled"]
+    status: Literal["completed", "partial", "failed", "cancelled", "interrupted"]
     termination_reason: str
     initiator: str
     result: dict[str, Any]
@@ -736,6 +736,7 @@ class InspectorUpdateData(TypedDict, total=False):
         "subagent",
         "budget",
         "provider",
+        "cache",
         "permission",
         "checkpoint",
         "workspace",
@@ -862,6 +863,11 @@ class ControlProviderAuthPromptRequestData(TypedDict):
     options: NotRequired[list[dict[str, str]]]
 
 
+class ControlConversationResourcesCleanupRequestData(TypedDict):
+    subtype: Literal["conversation_resources_cleanup"]
+    workspace_root: str
+
+
 class ProviderOAuthAuthEventData(TypedDict):
     conversation_id: str
     provider: str
@@ -903,6 +909,7 @@ class ControlRequestData(TypedDict):
         ControlCanUseToolRequestData
         | ControlElicitationRequestData
         | ControlProviderAuthPromptRequestData
+        | ControlConversationResourcesCleanupRequestData
     )
     turn_id: NotRequired[str]
     message_id: NotRequired[str]

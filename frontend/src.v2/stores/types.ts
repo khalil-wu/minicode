@@ -30,7 +30,7 @@ export type SessionFilter = "all" | "running" | "waiting" | "idle" | "archived";
 export type SessionGroupBy = "none" | "project" | "branch";
 export type RightStackTab = "preview" | "browser" | "terminal" | "sidechat" | "tasks" | "diff" | "plan" | "subagents" | "artifacts" | "inspector" | "diagnostics";
 export type EffortLevel =
-  | "none"
+  | "off"
   | "minimal"
   | "low"
   | "medium"

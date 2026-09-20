@@ -144,8 +144,8 @@ export interface AgentMessageItem {
   id: string;
   type: "agent_message";
   text: string;
-  source?: "model_final" | "reply" | "partial" | "commentary" | "model_preamble" | "post_tool" | "runtime" | string;
-  status?: "in_progress" | "completed" | "partial" | string;
+  source?: "pending" | "model_final" | "reply" | "partial" | "commentary" | "cancelled" | string;
+  status?: "in_progress" | "completed" | "partial" | "cancelled" | "failed" | string;
 }
 
 export interface ItemStartedEvent {
@@ -450,7 +450,7 @@ export interface AgentRunRecordPayload {
   parent_run_id?: string;
   turn_id?: string;
   role?: string;
-  phase?: "plan" | "execute" | "verify" | "recover" | "final" | string;
+  phase?: "plan" | "execute" | "recover" | "final" | string;
   status?: "running" | "completed" | "partial" | "failed" | "cancelled" | "interrupted" | string;
   budget?: Record<string, unknown>;
   started_at?: number;
@@ -521,7 +521,7 @@ export interface DoneEvent {
   type: "done";
   conversation_id: string;
   message_id: string;
-  status: "completed" | "partial" | "failed" | "cancelled" | "interrupted";
+  status: "completed" | "partial" | "failed" | "cancelled";
   reason?: string;
   duration_ms?: number;
   failure_recoverable?: boolean;
@@ -704,7 +704,7 @@ export interface SubagentDoneEvent {
   iterations?: number;
   tool_call_count?: number;
   timed_out?: boolean;
-  status?: "completed" | "partial" | "failed" | "cancelled";
+  status?: "completed" | "partial" | "failed" | "cancelled" | "interrupted";
   termination_reason?: string;
   initiator?: string;
   result?: Record<string, unknown>;

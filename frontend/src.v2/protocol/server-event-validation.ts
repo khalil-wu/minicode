@@ -724,7 +724,7 @@ const isAgentMessageItem = (
       && value.status === "in_progress"
       && (!("source" in value) || isBoundedString(value.source, 256));
   }
-  return ["completed", "partial", "cancelled", "failed"].includes(String(value.status))
+  return AGENT_MESSAGE_COMPLETION_STATUSES.has(String(value.status))
     && isBoundedString(value.source, 256);
 };
 
@@ -766,6 +766,26 @@ const AGENT_PROGRESS_STAGE_SET = new Set<string>(AGENT_PROGRESS_STAGES);
 const AGENT_PROGRESS_STATUS_SET = new Set<string>(AGENT_PROGRESS_STATUSES);
 const AGENT_PROGRESS_PHASE_SET = new Set<string>(AGENT_PROGRESS_PHASES);
 const AGENT_PROGRESS_PROVIDER_STATE_SET = new Set<string>(AGENT_PROGRESS_PROVIDER_STATES);
+// Mirrors of the backend's authoritative value sets in backend/agent/message.py.
+// scripts/check-protocol-sync.py keeps each pair identical.
+const AGENT_MESSAGE_COMPLETION_STATUSES = new Set([
+  "completed",
+  "partial",
+  "cancelled",
+  "failed",
+]);
+const THINKING_LIFECYCLES = new Set(["start", "delta", "end"]);
+const AGENT_ITEM_STATUSES = new Set([
+  "running",
+  "completed",
+  "partial",
+  "failed",
+  "cancelled",
+  "info",
+  "retracted",
+]);
+const AGENT_ITEM_VISIBILITIES = new Set(["timeline", "compact", "debug"]);
+const DONE_STATUSES = new Set(["completed", "partial", "cancelled", "failed"]);
 const RUNTIME_SPAN_STATUSES = new Set([
   "running",
   "completed",
@@ -1203,7 +1223,7 @@ const hasValidSemanticPayload = (
       && typeof value.content === "string"
       && value.content.length <= MAX_STREAM_DELTA_CHARS
       && (allowsEmpty || value.content.length > 0)
-      && ["start", "delta", "end"].includes(String(lifecycle))
+      && THINKING_LIFECYCLES.has(String(lifecycle))
       && (!("source" in value) || isBoundedString(value.source, 256))
       && (!("visibility" in value) || [
         "timeline",
@@ -1220,7 +1240,7 @@ const hasValidSemanticPayload = (
   }
   if (type === "tool_call") {
     valid = valid
-      && (!("visibility" in value) || ["timeline", "compact", "debug"].includes(String(value.visibility)));
+      && (!("visibility" in value) || AGENT_ITEM_VISIBILITIES.has(String(value.visibility)));
   }
   if (type === "tool_result") {
     const retryableArtifactFields = [
@@ -1237,7 +1257,7 @@ const hasValidSemanticPayload = (
       ))
       && (!('artifact_bytes' in value) || isNonNegativeSafeInteger(value.artifact_bytes))
       && (!('is_error' in value) || typeof value.is_error === "boolean")
-      && (!('visibility' in value) || ["timeline", "compact", "debug"].includes(String(value.visibility)))
+      && (!('visibility' in value) || AGENT_ITEM_VISIBILITIES.has(String(value.visibility)))
       && (!('output_files' in value) || (
         Array.isArray(value.output_files)
         && value.output_files.length <= 2_048
@@ -1254,8 +1274,8 @@ const hasValidSemanticPayload = (
       && isBoundedString(value.id, 1_024)
       && (!("item_id" in value) || value.item_id === value.id)
       && isBoundedString(value.kind, 256)
-      && ["running", "completed", "partial", "failed", "cancelled", "info", "retracted"].includes(status)
-      && ["timeline", "compact", "debug"].includes(visibility)
+      && AGENT_ITEM_STATUSES.has(status)
+      && AGENT_ITEM_VISIBILITIES.has(visibility)
       && (status === "retracted" || visibility === "debug" || hasContent || hasSummary)
       && (!("content" in value) || isBoundedString(value.content, MAX_EVENT_CONTENT_CHARS, { allowEmpty: true }))
       && (!("summary" in value) || isBoundedString(value.summary, MAX_EVENT_SUMMARY_CHARS))
@@ -1295,7 +1315,7 @@ const hasValidSemanticPayload = (
       && AGENT_PROGRESS_STATUS_SET.has(String(value.status))
       && isBoundedString(value.message, MAX_EVENT_SUMMARY_CHARS)
       && AGENT_PROGRESS_PHASE_SET.has(String(value.phase))
-      && ["timeline", "compact", "debug"].includes(String(value.visibility))
+      && AGENT_ITEM_VISIBILITIES.has(String(value.visibility))
       && (!("label" in value) || isBoundedString(value.label, 4_096))
       && (!("summary" in value) || isBoundedString(value.summary, MAX_EVENT_SUMMARY_CHARS))
       && (!("detail" in value) || isBoundedString(value.detail, MAX_EVENT_SUMMARY_CHARS))
@@ -1367,7 +1387,7 @@ const hasValidSemanticPayload = (
     const status = String(value.status);
     valid = isBoundedString(value.conversation_id, 1_024)
       && isBoundedString(value.message_id, 1_024)
-      && ["completed", "partial", "failed", "cancelled", "interrupted"].includes(status)
+      && DONE_STATUSES.has(status)
       && isRecord(usage)
       && [
         "input_tokens",

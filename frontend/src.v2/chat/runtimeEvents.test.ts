@@ -1246,6 +1246,18 @@ describe("runtime capability events", () => {
 });
 
 describe("runtime subagent events", () => {
+  it("renders a child interrupted by process shutdown as cancelled, not done", () => {
+    useAppStore.setState({ conversationId: "conv-contract", messages: [], conversationMessages: {},
+      subagents: [], conversationAgentStates: {}, inspectorEntries: [] });
+    handleRuntimeEvent({ type: "subagent.done", subagent_id: "interrupted-child", status: "interrupted",
+      summary: "Interrupted because the previous MiniCode process ended before completion.",
+      termination_reason: "runtime_interrupted", result: {},
+    } as unknown as ServerEvent, "conv-contract");
+    expect(useAppStore.getState().subagents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "interrupted-child", status: "cancelled" }),
+    ]));
+  });
+
   it("projects the backend completion summary and top-level error into available results", () => {
     useAppStore.setState({ conversationId: "conv-contract", messages: [], conversationMessages: {},
       subagents: [], conversationAgentStates: {}, inspectorEntries: [] });
