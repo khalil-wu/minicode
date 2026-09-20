@@ -1073,6 +1073,7 @@ def test_run_command_tool_does_not_infer_background_mode_from_command_text(
         *,
         escalated=False,
         env_overrides=None,
+        max_chars=None,
     ):
         return ToolResult(content=f"foreground: {command}")
 
@@ -1122,6 +1123,7 @@ def test_run_command_tool_does_not_rewrite_windows_start_b(monkeypatch) -> None:
         *,
         escalated=False,
         env_overrides=None,
+        max_chars=None,
     ):
         foreground.append(command)
         return ToolResult(content="foreground")

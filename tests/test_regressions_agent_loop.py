@@ -2485,7 +2485,14 @@ def test_run_agent_loop_retries_clean_idle_timeout_before_any_output() -> None:
     assert any(event.type == "done" for event in events)
 
 
-def test_run_agent_loop_does_not_replay_timeout_after_partial_text() -> None:
+def test_run_agent_loop_retracts_partial_text_before_replaying_timeout() -> None:
+    """Text is speculative until the attempt is accepted.
+
+    A timeout after visible text still gets the transport retry budget; each
+    abandoned attempt's message item is closed as cancelled so the renderer
+    retracts it, and only the surviving attempt's text remains visible.
+    """
+
     class _PartialThenTimeoutLLM(LLMAdapter):
         def __init__(self) -> None:
             self.calls = 0
@@ -2519,13 +2526,18 @@ def test_run_agent_loop_does_not_replay_timeout_after_partial_text() -> None:
         )
     )
 
-    assert llm.calls == 1
-    assert sum(
-        event.data.get("delta", "").count("partial")
+    # Original attempt plus stream_max_attempts retries.
+    assert llm.calls == 4
+    completed_items = [
+        event.data["item"]
         for event in events
-        if event.type == "agent_message.delta"
-    ) <= 1
-    assert any(event.type in {"error", "done"} for event in events)
+        if event.type == "item.completed" and event.data.get("item", {}).get("type") == "agent_message"
+    ]
+    assert [item["status"] for item in completed_items] == ["cancelled", "cancelled", "cancelled", "partial"]
+    assert [item["text"] for item in completed_items] == ["", "", "", "partial"]
+    done = [event for event in events if event.type == "done"]
+    assert len(done) == 1
+    assert done[0].data["status"] == "partial"
 
 
 def test_run_agent_loop_uses_tool_results_when_final_model_stream_errors() -> None:

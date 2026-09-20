@@ -916,6 +916,11 @@ export const hydrateMessages = (
       mergedToolResultIndexes.add(pending.projectedIndex);
       pendingToolResults.delete(block.record.id);
     }
+    // An assistant record that ended without producing anything is still a
+    // turn the user saw end: a failure with its message, or an interruption.
+    // Dropping the interrupted record here left the user message rendered as
+    // an unanswered turn after reload while the live view had shown it as
+    // stopped.
     if (
       !message.content
       && !(message.blocks?.length)
@@ -923,6 +928,7 @@ export const hydrateMessages = (
       && !message.attachmentRefs?.length
       && !message.replyAttachments?.length
       && !(message.terminalStatus === "failed" && message.failureMessage)
+      && message.terminalStatus !== "interrupted"
     ) continue;
     projected.push(message);
   }

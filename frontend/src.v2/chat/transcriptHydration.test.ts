@@ -489,6 +489,24 @@ describe("hydrateMessages", () => {
     expect(messages[0]?.completedAt).toBe(Date.parse("2026-06-21T00:00:28.000Z"));
   });
 
+  it("keeps an interrupted assistant record that produced nothing", () => {
+    const messages = hydrateMessages([
+      { id: "user-1", role: "user", content: "Read the files" },
+      {
+        id: "assistant-stopped",
+        role: "assistant",
+        content: "",
+        terminal_status: "cancelled",
+        termination_reason: "user_interrupted",
+        completed_at: 1789886811527,
+      },
+    ]);
+
+    expect(messages.map((message) => message.id)).toEqual(["user-1", "assistant-stopped"]);
+    expect(messages[1]?.terminalStatus).toBe("interrupted");
+    expect(messages[1]?.isStreaming).toBeUndefined();
+  });
+
   it("keeps interrupted persisted work partial after reload", () => {
     const [message] = hydrateMessages([{
       id: "assistant-interrupted",

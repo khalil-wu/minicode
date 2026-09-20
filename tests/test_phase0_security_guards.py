@@ -439,6 +439,7 @@ def test_reasoning_effort_config_is_not_persisted_for_deepseek_chat(monkeypatch,
             self.models_source = ""
             self.selected_model = ""
             self.active_conversation_id = ""
+            self.ws_manager = None
             self._model_override_active = False
             self._provider_override_active = False
             self.session_lifecycle = SimpleNamespace(

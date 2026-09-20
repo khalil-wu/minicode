@@ -420,8 +420,8 @@ def test_websocket_emits_control_requests_for_approvals_and_elicitations(monkeyp
 
             ws.send_json({"type": "user_message", "content": "trigger control request"})
 
-            approval = _receive_next_non_task_update(ws)
-            ask = _receive_next_non_task_update(ws)
+            approval = _receive_control_request(ws, "tool_confirm_1")
+            ask = _receive_control_request(ws, "ask_1")
 
     assert approval["type"] == "control_request"
     assert approval["request_id"] == "tool_confirm_1"
@@ -687,7 +687,7 @@ def test_websocket_can_load_approval_file_diff_on_demand(monkeypatch) -> None:
             _assert_startup_events(ws)
 
             ws.send_json({"type": "user_message", "content": "trigger large approval"})
-            approval = _receive_next_non_task_update(ws)
+            approval = _receive_next_type(ws, "control_request")
 
             assert approval["type"] == "control_request"
             assert approval["request"]["diff"]["files"][0]["path"] == "demo.txt"
