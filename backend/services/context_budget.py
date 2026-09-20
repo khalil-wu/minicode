@@ -215,12 +215,16 @@ async def _run_normal_compaction(
             if callable(append_system_note):
                 append_system_note(system_message)
     if ctx.needs_compaction(state, tool_schemas=tool_schemas):
-        yield AgentEvent.error(
-            message="压缩后上下文仍超过模型窗口。请使用 /clear。",
-            recoverable=True,
-            error_type="budget",
+        # The local estimate can still sit above the trigger after a successful
+        # compaction (tool schemas are over-counted by roughly a tenth), while
+        # the provider accepts the same prompt. The provider is the only
+        # authority on fit: send the request and let a real prompt-too-long
+        # response drive the reactive recovery instead of failing the turn on
+        # arithmetic.
+        logger.info(
+            "Context estimate still above the compaction trigger after compaction; "
+            "proceeding and letting the provider decide"
         )
-        state.stopped_reason = "budget_exceeded"
 
 
 async def _run_post_compact_hook(

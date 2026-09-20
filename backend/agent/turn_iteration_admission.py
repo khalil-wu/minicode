@@ -244,14 +244,6 @@ class TurnIterationAdmission:
                 run_id=self.run_record.run_id,
             )
 
-            if self.context.needs_compaction(
-                self.state, tool_schemas=tool_schemas, messages=prepared_context.messages,
-            ):
-                _set_terminal_reason(self.state, "budget_exceeded", status="failed")
-                yield AgentEvent.error(
-                    message="压缩后最终模型输入仍超出上下文窗口，请缩小本次输入或上下文扩展内容。",
-                    recoverable=True, error_type="budget",
-                )
         if self.state.stopped_reason:
             if self.state.stopped_reason == "budget_exceeded":
                 _, budget_events = await self.budget_runtime.apply_boundary(

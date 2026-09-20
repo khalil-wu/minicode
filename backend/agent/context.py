@@ -2785,8 +2785,16 @@ class ContextBuilder:
         tools_tokens = estimate_tool_schema_tokens(tool_schemas)
         observed_actual = self._last_actual_prompt_tokens
         estimated = system_tokens + developer_tokens + history_tokens + tools_tokens
-        correction = max(0, observed_actual - self._observed_prompt_estimate) if self._observed_prompt_estimate else 0
-        used = max(estimated + correction, observed_actual)
+        # Anchor on the provider's last reported prompt size and estimate only
+        # what changed since that request. The correction is signed: the
+        # byte-based estimate over-counts tool schemas by roughly a tenth, and
+        # an upward-only correction left the estimate permanently above the
+        # compaction trigger after a compaction, so every following iteration
+        # compacted again while the provider was accepting the prompt.
+        if observed_actual > 0 and self._observed_prompt_estimate:
+            used = max(0, estimated + (observed_actual - self._observed_prompt_estimate))
+        else:
+            used = max(estimated, observed_actual)
         self._last_estimated_prompt_tokens = used
         return {
             "used": used,

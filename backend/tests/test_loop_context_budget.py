@@ -63,17 +63,24 @@ def test_manage_context_budget_does_nothing_below_pi_reserve_boundary() -> None:
     assert ctx.compact_calls == 0
 
 
-def test_manage_context_budget_stops_immediately_if_compaction_is_insufficient() -> None:
+def test_manage_context_budget_lets_the_provider_decide_when_the_estimate_stays_high() -> None:
+    """A compaction that leaves the local estimate above the trigger is not a failure.
+
+    The estimate over-counts tool schemas; the provider accepted prompts the
+    estimate rejected. The turn proceeds and a real prompt-too-long response
+    drives reactive recovery instead.
+    """
+
     ctx = _BudgetCtx(token_usage=900, after_compact_usage=870)
     state = AgentState(user_message="continue")
 
     events = asyncio.run(_collect(ctx, state, TokenBudget(total=1000)))
 
-    assert [event.type for event in events] == ["context_compacted", "error"]
+    assert [event.type for event in events] == ["context_compacted"]
     assert events[0].data["before_tokens"] == 900
     assert events[0].data["after_tokens"] == 870
     assert events[0].data["retained_categories"] == ["history"]
-    assert state.stopped_reason == "budget_exceeded"
+    assert state.stopped_reason is None
     assert ctx.compact_calls == 1
 
 
