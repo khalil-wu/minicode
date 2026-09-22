@@ -750,7 +750,10 @@ describe("SettingsCenter reasoning effort visibility", () => {
       source: "settings.provider",
     }, { silent: true });
     expect(screen.getByDisplayValue("https://api.deepseek.com/v1")).toBeTruthy();
-    expect(screen.getByDisplayValue("deepseek-v4-flash")).toBeTruthy();
+    // The saved model shows in two controls: the default-model select and the
+    // per-model request-id mapping row. Assert each by its own label.
+    expect((screen.getByLabelText("默认模型") as HTMLSelectElement).value).toBe("deepseek-v4-flash");
+    expect((screen.getByLabelText("deepseek-v4-flash 实际请求模型") as HTMLInputElement).value).toBe("deepseek-v4-flash");
     const apiKeyInput = screen.getByLabelText("API 密钥") as HTMLInputElement;
     expect(apiKeyInput.type).toBe("text");
     expect(apiKeyInput.value).toBe("sk-deepseek-visible");
@@ -856,7 +859,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
     fireEvent.click(screen.getByRole("button", { name: "编辑 OpenRouter" }));
 
     expect(screen.getByDisplayValue("https://openrouter.ai/api/v1")).toBeTruthy();
-    expect(screen.getByDisplayValue("anthropic/claude-sonnet-4")).toBeTruthy();
+    expect((screen.getByLabelText("默认模型") as HTMLSelectElement).value).toBe("anthropic/claude-sonnet-4");
+    expect((screen.getByLabelText("anthropic/claude-sonnet-4 实际请求模型") as HTMLInputElement).value).toBe("anthropic/claude-sonnet-4");
     expect((screen.getByLabelText("API 密钥") as HTMLInputElement).value).toBe("sk-openrouter-visible");
     expect(screen.getAllByText("OpenRouter").length).toBeGreaterThan(0);
   });
@@ -1610,17 +1614,20 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "编辑 bbe.to" }));
 
-    expect(screen.getByDisplayValue("mimo-v2.5-pro")).toBeTruthy();
-    expect(screen.getByDisplayValue("gpt-5.5")).toBeTruthy();
-    expect(screen.getByDisplayValue("gpt-5.4")).toBeTruthy();
+    const mappingValue = (modelId: string) =>
+      (screen.getByLabelText(`${modelId} 实际请求模型`) as HTMLInputElement).value;
+    expect((screen.getByLabelText("默认模型") as HTMLSelectElement).value).toBe("mimo-v2.5-pro");
+    expect(mappingValue("mimo-v2.5-pro")).toBe("mimo-v2.5-pro");
+    expect(mappingValue("gpt-5.5")).toBe("gpt-5.5");
+    expect(mappingValue("gpt-5.4")).toBe("gpt-5.4");
 
     fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(screen.getByText(/Provider 返回了空模型列表/)).toBeTruthy();
     expect(screen.getByText(/已保留手动输入的模型/)).toBeTruthy();
-    expect(screen.getByDisplayValue("gpt-5.5")).toBeTruthy();
-    expect(screen.getByDisplayValue("gpt-5.4")).toBeTruthy();
+    expect(mappingValue("gpt-5.5")).toBe("gpt-5.5");
+    expect(mappingValue("gpt-5.4")).toBe("gpt-5.4");
   });
 
   it("keeps connection checks scoped to each configured model", async () => {
