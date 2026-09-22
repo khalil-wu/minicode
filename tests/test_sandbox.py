@@ -359,6 +359,7 @@ def test_unavailable_restricted_sandbox_fails_before_process_creation(
         "_bubblewrap_capability",
         lambda: (False, "test bubblewrap unavailable"),
     )
+    monkeypatch.setattr(runner_module, "_low_integrity_supported", lambda: False)
     runner = SandboxRunner(SandboxPolicy.workspace_default(tmp_path))
 
     result = asyncio.run(runner.run("echo must-not-run", cwd=tmp_path))

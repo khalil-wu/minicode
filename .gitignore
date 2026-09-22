@@ -179,3 +179,4 @@ pelican-bike.html
 # Local audit artifacts and tool state
 engineering/
 frontend/.playwright-cli/
+data/sandbox-temp/

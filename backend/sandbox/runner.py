@@ -450,6 +450,7 @@ class SandboxRunner:
         self._synthetic_mount_targets: list[_SyntheticMountTarget] = []
         self._synthetic_mount_overrides: dict[str, Path] = {}
         self._sandbox_ready_file: Path | None = None
+        self._low_integrity_temp_dir: Path | None = None
 
     def capability(self, *, cwd: str | Path | None = None) -> SandboxCapability:
         """Report the isolation that will actually be enforced.
@@ -519,12 +520,27 @@ class SandboxRunner:
                 deny_read_isolated=True,
                 protected_paths_isolated=_protected_paths_fully_isolated(resolved),
             )
+        low_integrity_reason = ""
+        if sys.platform == "win32" and not policy_preflight_error:
+            low_integrity_reason = _low_integrity_unavailable_reason(resolved)
+            if not low_integrity_reason:
+                return SandboxCapability(
+                    available=True,
+                    backend="low-integrity",
+                    filesystem_isolated=True,
+                    # Network denial is an environment rewrite (dead proxy,
+                    # offline flags, ssh stubs), not a packet filter.
+                    network_isolated=False,
+                    deny_read_isolated=False,
+                    protected_paths_isolated=_protected_paths_fully_isolated(resolved),
+                )
         if sys.platform == "win32":
             reason = "; ".join(
                 part
                 for part in (
                     policy_preflight_error,
                     container_reason,
+                    low_integrity_reason,
                 )
                 if part
             ) or "No enforceable Windows sandbox backend is available"
@@ -1119,6 +1135,41 @@ class SandboxRunner:
                 resolved=resolved,
             )
 
+        if capability.backend == "low-integrity":
+            from backend.sandbox import win_low_integrity
+
+            effective_cwd = (
+                Path(cwd).expanduser().resolve()
+                if cwd
+                else (self._policy.workspace_root or Path.cwd()).expanduser().resolve()
+            )
+            deny_write = [
+                path
+                for path, access in _resolved_path_events(resolved)
+                if access is not FileSystemAccessMode.WRITE
+                and any(_policy_path_is_writable(resolved, parent) for parent in path.parents)
+            ]
+            # The child gets a private TEMP; labelling the host temp directory
+            # (a default writable root) would make every other process's temp
+            # files writable from the sandbox.
+            host_temp = Path(tempfile.gettempdir()).resolve()
+            labelled_roots = [
+                root.root for root in resolved.writable_roots
+                if root.root.expanduser().resolve() != host_temp
+            ]
+            try:
+                spec_path, temp_dir = win_low_integrity.prepare_launch(
+                    command_line=host_command or command,
+                    cwd=effective_cwd,
+                    writable_roots=labelled_roots,
+                    deny_write_paths=deny_write,
+                    allow_network=resolved.allow_network,
+                )
+            except win_low_integrity.LabelError as exc:
+                raise SandboxUnavailableError(str(exc)) from exc
+            self._low_integrity_temp_dir = temp_dir
+            return win_low_integrity.launcher_argv(spec_path)
+
         raise SandboxUnavailableError(
             capability.reason or f"Unsupported sandbox backend: {capability.backend}"
         )
@@ -1241,6 +1292,10 @@ class SandboxRunner:
         if ready_file is not None:
             with suppress(OSError):
                 ready_file.unlink()
+        low_integrity_temp = self._low_integrity_temp_dir
+        self._low_integrity_temp_dir = None
+        if low_integrity_temp is not None:
+            shutil.rmtree(low_integrity_temp, ignore_errors=True)
 
     async def _kill_tree(self, proc: asyncio.subprocess.Process) -> bool:
         # The sandbox owns container cleanup, while the host child still uses
@@ -1902,6 +1957,30 @@ def _policy_path_is_writable(
     path: Path,
 ) -> bool:
     return resolved.resolve_access(path) is FileSystemAccessMode.WRITE
+
+
+def _low_integrity_supported() -> bool:
+    from backend.sandbox import win_low_integrity
+
+    return win_low_integrity.is_supported()
+
+
+def _low_integrity_unavailable_reason(resolved: ResolvedSandboxPolicy) -> str:
+    """Why the Windows low-integrity backend cannot represent this policy."""
+    if not _low_integrity_supported():
+        return "pywin32 is required for the Windows low-integrity sandbox"
+    if _has_filesystem_root_write(resolved):
+        return "low-integrity sandbox cannot grant write access to a whole drive"
+    if resolved.has_denied_read_restrictions:
+        return "low-integrity sandbox cannot enforce deny-read paths"
+    if not resolved.writable_roots:
+        return "low-integrity sandbox requires at least one writable root"
+    from backend.sandbox import win_low_integrity
+
+    for root in resolved.writable_roots:
+        if not win_low_integrity.volume_supports_labels(root.root):
+            return f"low-integrity sandbox needs an NTFS volume for {root.root}"
+    return ""
 
 
 def _has_filesystem_root_write(resolved: ResolvedSandboxPolicy) -> bool:

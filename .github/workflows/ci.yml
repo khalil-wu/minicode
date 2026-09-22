@@ -93,6 +93,7 @@ jobs:
           backend/tests/test_terminal_service_canonical_exec.py
           backend/tests/test_background_command_lifecycle.py
           backend/tests/test_apply_patch.py
+          tests/test_windows_low_integrity_sandbox.py
           --maxfail=1 --tb=short
 
   frontend:
