@@ -88,8 +88,8 @@ class WriteFileTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string"},
-                    "content": {"type": "string"},
+                    "file_path": {"type": "string", "description": "Absolute or workspace-relative output path."},
+                    "content": {"type": "string", "description": "Complete UTF-8 file content, with actual newlines."},
                 },
                 "required": ["file_path", "content"],
             },

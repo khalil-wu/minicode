@@ -48,12 +48,10 @@ const KNOWN_EFFORT_OPTIONS: Record<string, Omit<EffortOption, "id">> = {
   ultra: { label: "Ultra", description: "Ultra 推理强度" },
 };
 
-const STANDARD_EFFORT_LEVELS: EffortLevel[] = ["low", "medium", "high"];
-const EXTREME_EFFORT_LEVELS: EffortLevel[] = ["xhigh", "max", "ultra"];
-
 export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, minimal = false }: Props) => {
   const permissionMode = useAppStore((s) => s.permissionMode);
   const effortLevel = useAppStore((s) => s.effortLevel);
+  const conversationId = useAppStore((s) => s.conversationId);
   const currentModel = useAppStore((s) => s.currentModel);
   const currentProvider = useAppStore((s) => s.currentProvider);
   const availableModels = useAppStore((s) => s.availableModels);
@@ -68,28 +66,35 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   const [modelOpen, setModelOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
+  const [effortDraft, setEffortDraft] = useState<{ level: EffortLevel; model: string; owner: string | null | undefined; accepted: boolean } | null>(null);
+  const effortRequest = useRef(0);
+  const displayedEffort = effortDraft?.model === currentModel && effortDraft.owner === conversationId
+    ? effortDraft.level : effortLevel;
+  useEffect(() => {
+    if (effortDraft && (effortDraft.model !== currentModel || effortDraft.owner !== conversationId
+      || (effortDraft.accepted && effortDraft.level === effortLevel))) setEffortDraft(null);
+  }, [currentModel, conversationId, effortLevel, effortDraft]);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const permissionRef = useRef<HTMLDivElement>(null);
-  const effortRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const close = (e: MouseEvent) => {
-      if (modelOpen && dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) setModelOpen(false);
+      if ((modelOpen || effortOpen) && dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setModelOpen(false);
+        setEffortOpen(false);
+      }
       if (permissionOpen && permissionRef.current && !permissionRef.current.contains(e.target as Node)) setPermissionOpen(false);
-      if (effortOpen && effortRef.current && !effortRef.current.contains(e.target as Node)) setEffortOpen(false);
     };
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [modelOpen, permissionOpen, effortOpen]);
 
   useEffect(() => {
-    const root = modelOpen
+    const root = modelOpen || effortOpen
       ? dropdownRef.current
       : permissionOpen
         ? permissionRef.current
-        : effortOpen
-          ? effortRef.current
-          : null;
+        : null;
     if (!root) return;
     const trigger = root.querySelector<HTMLButtonElement>(':scope > button[aria-expanded]');
     const options = () => Array.from(root.querySelectorAll<HTMLButtonElement>('[role="option"]:not(:disabled)'));
@@ -166,9 +171,13 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   };
 
   const switchEffort = (level: EffortLevel) => {
-    setEffortLevel(level);
-    setEffortOpen(false);
-    queueMicrotask(() => effortRef.current?.querySelector<HTMLButtonElement>(':scope > button')?.focus());
+    if (level === displayedEffort) return;
+    const request = ++effortRequest.current;
+    const draft = { level, model: currentModel, owner: conversationId, accepted: false };
+    setEffortDraft(draft);
+    void setEffortLevel(level).then((accepted) => {
+      if (request === effortRequest.current) setEffortDraft(accepted ? { ...draft, accepted: true } : null);
+    });
   };
 
   const switchPermissionMode = async (mode: PermissionMode) => {
@@ -230,7 +239,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   const supportsReasoningEffort = capabilityBool(
     providerCapabilities?.reasoning_effort_supported ?? providerCapabilities?.reasoning_effort,
   ) && capabilityEffortLevels.length > 0;
-  const composerEffortLevels = standardComposerEffortLevels(capabilityEffortLevels, effortLevel);
+  const composerEffortLevels = capabilityEffortLevels;
   const effortOptions = supportsReasoningEffort
     ? composerEffortLevels.map(effortOption)
     : [];
@@ -238,9 +247,9 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   // declared default (the old `?? medium` fallback) reported 中 for a session
   // configured at `minimal`, put the checkmark on the wrong row, and left the
   // real level unreachable from the menu.
-  const effortIsDeclared = capabilityEffortLevels.includes(effortLevel);
-  const selectedEffort = effortOptions.find((option) => option.id === effortLevel)
-    ?? effortOption(effortLevel);
+  const effortIsDeclared = capabilityEffortLevels.includes(displayedEffort);
+  const selectedEffort = effortOptions.find((option) => option.id === displayedEffort)
+    ?? effortOption(displayedEffort);
   const effortTitle = supportsReasoningEffort && !effortIsDeclared
     ? `模型推理强度：${selectedEffort.description}。当前 Provider 未声明支持该强度，请改选下方受支持的档位。`
     : `模型推理强度：${selectedEffort.description}。仅在当前 Provider/模型支持时生效，不改变工具迭代预算。`;
@@ -348,21 +357,22 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             type="button"
             onClick={() => {
               setPermissionOpen(false);
-              setEffortOpen(false);
-              setModelOpen(!modelOpen);
+              const open = !(modelOpen || effortOpen);
+              setEffortOpen(open && supportsReasoningEffort);
+              setModelOpen(open && !supportsReasoningEffort);
             }}
             className="composer-model-select"
-            aria-expanded={modelOpen}
-            aria-haspopup="listbox"
-            style={{ ...pill, background: modelOpen ? "var(--surface-page)" : "var(--surface-soft)", borderColor: modelOpen ? "var(--border-subtle)" : "transparent" }}
+            aria-expanded={modelOpen || effortOpen}
+            aria-haspopup={modelOpen || !supportsReasoningEffort ? "listbox" : "dialog"}
+            style={pill}
             title={currentModel || "选择模型"}
           >
-            <ModelBrandIcon model={currentModel} size={15} />
             <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{modelLabel}</span>
-            <ChevronDown size={14} className="opacity-55 ml-0.5 flex-shrink-0" />
+            {supportsReasoningEffort && <span className="composer-effort-label" title={effortTitle}>{effortLabel}</span>}
           </button>
           {modelOpen && (
             <div className="mc-dropdown-menu composer-picker-menu" role="listbox" aria-label="选择模型" style={dropdownStyle("right")}>
+              <div className="composer-menu-heading">选择模型</div>
               {selectableModels.length === 0 && <div className="composer-menu-empty">尚未配置模型</div>}
               {selectableModels.map((m) => (
                   <button key={m} type="button" role="option" aria-selected={m === currentModel} onClick={() => switchModel(m)} style={{ ...dropdownItem, background: m === currentModel ? dropdownActiveBg : "transparent" }}>
@@ -387,27 +397,22 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
               </div>
             </div>
           )}
-        </div>
-        {supportsReasoningEffort && (
-          <Picker
-            refEl={effortRef}
-            open={effortOpen}
-            className="composer-effort-picker"
-            menuRole="dialog"
-            align="right"
-            setOpen={(open) => {
-              if (open) {
-                setModelOpen(false);
-                setPermissionOpen(false);
-              }
-              setEffortOpen(open);
-            }}
-            label={effortLabel}
-            title={effortTitle}
-          >
-            <EffortControl key={`${currentModel}:${effortLevel}:${composerEffortLevels.join(",")}`} options={effortOptions} selected={selectedEffort} modelLabel={modelLabel} onSelect={switchEffort} />
-          </Picker>
+        {supportsReasoningEffort && effortOpen && (
+          <div className="mc-dropdown-menu composer-picker-menu" role="dialog" aria-label={effortTitle} style={dropdownStyle("right")}>
+            <EffortControl
+              key={`${currentModel}:${conversationId}:${composerEffortLevels.join(",")}`}
+              options={effortOptions}
+              selected={selectedEffort}
+              modelLabel={modelLabel}
+              onSelect={switchEffort}
+              onChooseModel={() => {
+                setEffortOpen(false);
+                setModelOpen(true);
+              }}
+            />
+          </div>
         )}
+        </div>
         </div>
 
         {sendState === "queue" && onStop ? (
@@ -471,39 +476,59 @@ const Picker = ({
   </div>
 );
 
-function EffortControl({ options, selected, modelLabel, onSelect }: {
+function EffortControl({ options, selected, modelLabel, onSelect, onChooseModel }: {
   options: EffortOption[];
   selected: EffortOption;
   modelLabel: string;
   onSelect: (level: EffortLevel) => void;
+  onChooseModel: () => void;
 }) {
   const selectedIndex = options.findIndex((option) => option.id === selected.id);
-  const [index, setIndex] = useState(Math.max(0, selectedIndex));
-  const [showChoices, setShowChoices] = useState(selectedIndex < 0 || options.length === 1);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const index = dragIndex ?? Math.max(0, selectedIndex);
+  const [dragging, setDragging] = useState(false);
   const canSlide = selectedIndex >= 0 && options.length > 1;
   const current = canSlide ? options[index] : selected;
   const commit = () => {
     if (options[index].id !== selected.id) onSelect(options[index].id);
+    setDragIndex(null);
+    setDragging(false);
   };
   return <div className="composer-effort-control">
     <div className="composer-effort-heading">
-      <button type="button" className="composer-effort-value" aria-label="选择推理档位" aria-expanded={showChoices} onClick={() => setShowChoices((value) => !value)}>
-        {current.label}<ChevronRight size={14} aria-hidden="true" />
+      <span className="composer-effort-value">{current.label}</span>
+      <button type="button" className="composer-effort-model-toggle" aria-label="选择模型" aria-haspopup="listbox" onClick={onChooseModel}>
+        <ChevronRight size={14} aria-hidden="true" />
       </button>
       {options.some((option) => option.id === "medium") && <button type="button" className="composer-effort-reset" title="恢复中等推理强度" aria-label="恢复中等推理强度" onClick={() => onSelect("medium")}><RotateCcw size={16} /></button>}
     </div>
     <div className="composer-effort-model" title={modelLabel}>{modelLabel}</div>
-    {canSlide && <input
+    {canSlide && <div
       className="composer-effort-slider"
-      type="range" min={0} max={options.length - 1} step={1} value={index}
-      aria-label="推理强度" aria-valuetext={current.label}
+      data-dragging={dragging}
       style={{ "--effort-progress": `${index / (options.length - 1) * 100}%` } as React.CSSProperties}
-      onChange={(event) => setIndex(Number(event.target.value))}
-      onPointerUp={commit}
-      onPointerCancel={() => setIndex(selectedIndex)}
-      onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) commit(); }}
-    />}
-    {showChoices && <div role="listbox" aria-label="推理档位" className="composer-effort-options">
+    >
+      <div className="composer-effort-track" aria-hidden="true">
+        <div className="composer-effort-rail"><span className="composer-effort-fill" /></div>
+      </div>
+      <div className="composer-effort-rail" aria-hidden="true">
+        {options.map((option, step) => <span key={option.id} className="composer-effort-dot" data-active={step <= index} style={{ left: `${step / (options.length - 1) * 100}%` }} />)}
+        <span className="composer-effort-thumb" />
+      </div>
+      <input
+        className="composer-effort-input"
+        type="range" min={0} max={options.length - 1} step={1} value={index}
+        aria-label="推理强度" aria-valuetext={current.label}
+        onChange={(event) => setDragIndex(Number(event.target.value))}
+        onPointerDown={(event) => event.currentTarget.setPointerCapture(event.pointerId)}
+        onPointerMove={(event) => { if (event.buttons === 1) setDragging(true); }}
+        onPointerUp={commit}
+        onPointerCancel={() => { setDragIndex(null); setDragging(false); }}
+        onBlur={commit}
+        onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) commit(); }}
+      />
+    </div>}
+    {!canSlide && <div role="listbox" aria-label="推理档位" className="composer-effort-options">
       {options.map((option) => <MenuChoice key={option.id} label={option.label} active={selected.id === option.id} onClick={() => onSelect(option.id)} />)}
     </div>}
   </div>;
@@ -571,22 +596,6 @@ const normalizeCapabilityEffortLevels = (value: unknown): EffortLevel[] => {
       .map((item) => String(item || "").trim().toLowerCase())
       .filter(Boolean),
   )) as EffortLevel[];
-};
-
-const standardComposerEffortLevels = (
-  levels: EffortLevel[],
-  current: EffortLevel,
-): EffortLevel[] => {
-  const declared = new Set(levels);
-  if (!STANDARD_EFFORT_LEVELS.every((level) => declared.has(level))) return levels;
-  const keep = new Set<EffortLevel>(STANDARD_EFFORT_LEVELS);
-  const extreme = EXTREME_EFFORT_LEVELS.find((level) => declared.has(level));
-  if (extreme) keep.add(extreme);
-  // Narrowing the menu must never hide the level the session is actually using:
-  // that is what made a `minimal` configuration unreselectable while the pill
-  // claimed 中. Provider order is preserved so the menu reads low → high.
-  if (declared.has(current)) keep.add(current);
-  return levels.filter((level) => keep.has(level));
 };
 
 const ContextUsageRing = memo(() => {

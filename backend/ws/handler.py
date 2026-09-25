@@ -519,7 +519,7 @@ class WebSocketSession(
             items.append(item)
         return items
 
-    def runtime_snapshot(self) -> dict[str, Any]:
+    def runtime_snapshot(self, *, include_capabilities: bool = True) -> dict[str, Any]:
         task_summary = self.task_manager.summary()
         running_tasks = [
             task.to_dict()
@@ -584,7 +584,8 @@ class WebSocketSession(
             "workspace_scope": workspace_scope,
             "sandbox_status": permission_payload["sandbox_status"],
             "mcp": self._mcp_summary(),
-            "capabilities": self.runtime_capability_summary(permission_payload=permission_payload),
+            **({"capabilities": self.runtime_capability_summary(permission_payload=permission_payload)}
+               if include_capabilities else {}),
             "task_summary": task_summary,
             "running_tasks": running_tasks[:5],
             "pending_approval_count": len(pending_approvals),

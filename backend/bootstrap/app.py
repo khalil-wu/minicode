@@ -167,7 +167,12 @@ class AppBootstrap:
     async def _run_scheduled_task(self, task: Any, run: Any) -> dict[str, Any]:
         from backend.services.scheduled_task_runner import run_scheduled_task
 
-        return await run_scheduled_task(task, run, bootstrap=self)
+        return await run_scheduled_task(
+            task,
+            run,
+            bootstrap=self,
+            bind_conversation=self.task_scheduler.bind_run_conversation,
+        )
 
     async def _broadcast_scheduled_task_state(self) -> None:
         if self.task_scheduler is None:

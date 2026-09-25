@@ -53,13 +53,13 @@ class SkillExecutor:
             max_chars=max_chars,
             context_window_tokens=context_window_tokens,
         )
-        summary = _format_minicode_skills_within_budget(metas, max_chars=budget)
-        return (
+        prefix = (
             "\n\n## Skills\n"
             "A skill is a set of instructions provided through a `SKILL.md` source. Below is the list of skills that can be used. Each entry includes a name, description, and source locator.\n"
             "### Available skills\n"
-            + summary
-            + "\n### How to use skills\n"
+        )
+        suffix = (
+            "\n### How to use skills\n"
             "- Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.\n"
             "- Missing/blocked: If a named skill is unavailable or its `SKILL.md` cannot be read, say so briefly and continue with the best fallback.\n"
             "- After deciding to use a skill, read its `SKILL.md` completely before taking task actions. Resolve relative references against the directory containing that `SKILL.md`.\n"
@@ -67,6 +67,12 @@ class SkillExecutor:
             "- Prefer provided scripts, assets, and templates over recreating them. Normal tool permissions still apply.\n"
             "- If multiple skills apply, use the smallest set that covers the request and state the order."
         )
+        if budget <= len(prefix) + len(suffix):
+            return ""
+        summary = _format_minicode_skills_within_budget(
+            metas, max_chars=budget - len(prefix) - len(suffix)
+        )
+        return prefix + summary + suffix if summary else ""
 
 
 def _minicode_skill_char_budget(

@@ -237,7 +237,7 @@ def test_context_builder_compaction_counts_tool_schema_budget() -> None:
 
 
 def test_context_builder_uses_actual_provider_usage_as_budget_floor() -> None:
-    builder = ContextBuilder(token_budget=TokenBudget(total=100_000))
+    builder = ContextBuilder(token_budget=TokenBudget(total=100_000, response_reserve=16_384))
     state = AgentState(user_message="continue")
 
     before = builder.get_budget_snapshot(state)["used"]
@@ -285,7 +285,9 @@ def test_context_builder_does_not_share_compaction_results_through_process_cache
 def test_context_builder_compact_preserves_recent_message_objects() -> None:
     llm = _SummaryLLM(model="model-a", response="cache-safe summary")
     builder = ContextBuilder(
-        agent_settings=AgentSettings(compaction_keep_recent_tokens=8), llm=llm
+        # The tail budget must fit both recent messages. Object identity is
+        # the contract here, not exceeding the configured retention budget.
+        agent_settings=AgentSettings(compaction_keep_recent_tokens=32), llm=llm
     )
     old_tool = LLMMessage(
         role="tool",
@@ -584,7 +586,7 @@ def test_context_builder_compact_restores_recent_workspace_files(
     builder.append_assistant("old answer")
     builder.append_user("recent request")
     state = AgentState(user_message="continue")
-    state.workspace_context = SimpleNamespace(root_path=tmp_path)
+    state.workspace_root = tmp_path
     state.record_tool_call("read_file", {"file_path": "src/app.py"}, "ok")
 
     summary = asyncio.run(builder.compact(focus="continue", restore_state=state))
@@ -614,7 +616,7 @@ def test_context_builder_compact_restore_ignores_paths_outside_workspace(
     builder.append_assistant("old answer")
     builder.append_user("recent request")
     state = AgentState(user_message="continue")
-    state.workspace_context = SimpleNamespace(root_path=tmp_path)
+    state.workspace_root = tmp_path
     state.record_tool_call("read_file", {"file_path": str(outside)}, "ok")
 
     asyncio.run(builder.compact(focus="continue", restore_state=state))

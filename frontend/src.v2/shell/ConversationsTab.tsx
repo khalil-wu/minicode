@@ -24,6 +24,7 @@ import { isConversationRunning } from "./sessionStatus";
 import { readableToolLabel } from "../chat/toolDisplayName";
 import { pushToast } from "../overlays/ToastContainer";
 import { safeJsonParse } from "../lib/safe-parse";
+import { WorkspaceContextMenu } from "../workspace/WorkspaceContextMenu";
 
 const CONVERSATION_UI_STATE_KEY = "minicode.sidebar.conversations.state";
 const CONVERSATION_UI_PERSIST_DELAY_MS = 140;
@@ -186,6 +187,7 @@ export const ConversationsTab = ({
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(initialUiState.collapsedGroups);
   const listRef = useRef<HTMLDivElement | null>(null);
   const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [workspaceMenu, setWorkspaceMenu] = useState<{ path: string; x: number; y: number } | null>(null);
 
   useEffect(() => {
     if (isConnected) wsOutbox.sendClientCommand({ type: "workspace.recent" });
@@ -280,7 +282,11 @@ export const ConversationsTab = ({
 
   const filtered = useMemo(() => enrichedConversations.filter((conversation) => !conversation.archived), [enrichedConversations]);
 
-  const workspaceConversations = useMemo(() => filtered.filter(isWorkspaceConversation), [filtered]);
+  const workspaceConversations = useMemo(() => {
+    const opened = new Set(recentWorkspaces.map((workspace) => workspaceGroupIdentity(workspace.path)));
+    return filtered.filter((conversation) => isWorkspaceConversation(conversation)
+      && opened.has(workspaceGroupIdentity(conversationWorkspacePath(conversation))));
+  }, [filtered, recentWorkspaces]);
   const ordinaryConversations = useMemo(() => filtered.filter((conversation) => !isWorkspaceConversation(conversation)), [filtered]);
   const projectGroups = useMemo(() => groupByWorkspace(workspaceConversations, recentWorkspaces.map((workspace) => workspace.path)), [workspaceConversations, recentWorkspaces]);
   const orderedProjectGroups = useMemo(() => (
@@ -522,7 +528,7 @@ export const ConversationsTab = ({
     startRename,
   ]);
 
-  if (filtered.length === 0 && projectGroups.size === 0) {
+  if (ordinaryConversations.length === 0 && projectGroups.size === 0) {
     return (
       <EmptyState
         icon={<SquarePen size={22} />}
@@ -555,7 +561,10 @@ export const ConversationsTab = ({
       >
         {orderedProjectGroups.map(({ projectKey, group, conversations: orderedConversations }) => (
           <section key={projectKey} aria-label={`工作区 ${group.label}`} style={taskSectionStyle}>
-            <div className="mc-workspace-group-header">
+            <div className="mc-workspace-group-header" onContextMenu={(event) => {
+              event.preventDefault();
+              setWorkspaceMenu({ path: group.path, x: event.clientX, y: event.clientY });
+            }}>
               <button
                 type="button"
                 aria-label={group.label}
@@ -615,7 +624,7 @@ export const ConversationsTab = ({
           </section>
         )}
       </div>
-
+      {workspaceMenu && <WorkspaceContextMenu path={workspaceMenu.path} position={workspaceMenu} onClose={() => setWorkspaceMenu(null)} />}
     </>
   );
 };

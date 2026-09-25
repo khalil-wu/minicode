@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizeInboundServerEvent } from "./server-event-validation";
 
+it("distinguishes an unavailable turn diff from an exact empty diff", () => {
+  const event = { type: "turn.diff.updated", thread_id: "c", conversation_id: "c", turn_id: "t" };
+  expect(normalizeInboundServerEvent({ ...event, diff: null })).toMatchObject({ diff: null });
+  expect(normalizeInboundServerEvent({ ...event, diff: "" })).toMatchObject({ diff: "" });
+  expect(normalizeInboundServerEvent(event)).toBeNull();
+});
+
 const checkpointEvent = (overrides: Record<string, unknown> = {}) => ({
   type: "checkpoint.created",
   id: "cp-1",

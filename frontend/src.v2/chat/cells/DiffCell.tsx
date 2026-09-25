@@ -95,14 +95,14 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
         <div className="diff-cell-header-button diff-cell-header-static">
           <span className="diff-cell-icon-tile" aria-hidden="true"><FileDiff size={15} /></span>
           <span className="diff-cell-heading">
-            <span className="diff-cell-title">{diffCellTitle(cell)} {cell.files.length} 个文件</span>
+            <span className="diff-cell-title" title={cell.historical ? "后续操作可能改变文件；这里展示编辑完成时的记录。" : undefined}>{diffCellTitle(cell)} {cell.files.length} 个文件</span>
             <span className="diff-cell-stats diff-cell-header-stats">
               <RollingNumber value={cell.summary.added} prefix="+" className="diff-cell-added" />
               <RollingNumber value={cell.summary.deleted} prefix="-" className="diff-cell-removed" />
             </span>
           </span>
         </div>
-        {showActions && (
+        {showActions && !cell.historical && (
           <div className="diff-cell-header-actions">
             <button
               type="button"

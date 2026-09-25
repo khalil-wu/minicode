@@ -12,8 +12,9 @@ terminal_manager, permission_context) are NOT checkpointed — they must be
 re-provided when resuming.
 
 Usage:
-  - Auto-checkpoint: loop.py calls save_checkpoint() after each iteration
-  - Resume: /resume command or auto-detect incomplete checkpoint at loop start
+  - TurnKernel saves stopped turns and explicitly retained idle turns.
+  - QueryEngine restores a checkpoint when resume_from_checkpoint is requested.
+  - ExecutionJournal owns the incremental facts recorded during execution.
 """
 
 from __future__ import annotations
@@ -61,6 +62,8 @@ MAX_CHECKPOINT_TOOL_CALLS = 200
 MAX_CHECKPOINT_TEXT_CHARS = 32 * 1024
 MAX_CHECKPOINT_COLLECTION_ITEMS = 256
 MAX_CHECKPOINT_NESTING = 8
+# Bound auxiliary diagnostics and legacy message-only checkpoints. Canonical
+# model context is already owned by compaction and must survive resume intact.
 MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024
 _STORAGE_ID_RE = re.compile(r"^[A-Za-z0-9_.@-]+$")
 _WINDOWS_RESERVED_NAMES = {
@@ -241,10 +244,12 @@ def _fit_checkpoint_payload(
     *,
     authoritative_snapshot: bool = True,
 ) -> dict[str, Any]:
-    """Bound traversal and final JSON with one shared checkpoint byte budget.
+    """Bound auxiliary data without truncating canonical model context.
 
     ``authoritative_snapshot`` marks a caller-supplied context snapshot: that
-    structure is the provider replay authority and may only fit whole or fail.
+    structure is the provider replay authority and is stored whole, separately
+    from the diagnostic byte budget. Like Codex's replacement_history, only
+    context compaction may replace it with a shorter representation.
     A snapshot synthesized here from ``messages`` carries no such authority and
     is bounded by the same rules as the ``messages`` field itself.
     """
@@ -268,34 +273,16 @@ def _fit_checkpoint_payload(
             value = value[-MAX_CHECKPOINT_TOOL_CALLS:]
         elif isinstance(value, set):
             value = sorted(value, key=str)
-        # ContextBuilder's snapshot is the authoritative provider replay
-        # structure.  Never recursively truncate encrypted reasoning,
-        # signatures, tool arguments, or message content here.  It either
-        # fits as one JSON value or is omitted as a whole so recovery can
-        # reject the incomplete checkpoint instead of accepting a
-        # syntactically valid but semantically corrupted continuation.
-        if field == "context_snapshot":
-            if authoritative_snapshot:
-                bounded = value if budget.reserve(value) else _CHECKPOINT_OMITTED
-            else:
-                bounded = _bounded_checkpoint_value(value, budget=budget)
-        else:
-            bounded = _bounded_checkpoint_value(value, budget=budget)
+        if field == "context_snapshot" and authoritative_snapshot:
+            continue
+        bounded = _bounded_checkpoint_value(value, budget=budget)
         if bounded is not _CHECKPOINT_OMITTED:
             fitted[field] = bounded
 
-    if (
-        authoritative_snapshot
-        and isinstance(original_dynamic.get("context_snapshot"), dict)
-        and original_dynamic["context_snapshot"]
-        and fitted.get("context_snapshot") != original_dynamic["context_snapshot"]
-    ):
-        raise ValueError(
-            "authoritative context snapshot exceeds checkpoint byte budget"
-        )
-
     encoded = json.dumps(fitted, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if len(encoded) <= MAX_CHECKPOINT_BYTES:
+        if authoritative_snapshot:
+            fitted["context_snapshot"] = original_dynamic["context_snapshot"]
         return fitted
 
     # Conservative accounting above should make this unreachable. A context
@@ -495,7 +482,7 @@ def save_checkpoint(
     resume_payload: dict[str, Any] | None = None,
     context_snapshot: dict[str, Any] | None = None,
 ) -> Path:
-    """Save checkpoint after each iteration."""
+    """Save one durable run-resume boundary."""
     checkpoint_dir = get_checkpoint_dir(session_id, base_dir)
     with _checkpoint_write_lock(checkpoint_dir):
         sequence = _next_sequence(checkpoint_dir)

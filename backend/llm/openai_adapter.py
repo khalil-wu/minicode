@@ -1367,8 +1367,8 @@ def _responses_provider_item_from_output(item: Any) -> dict[str, Any] | None:
             detached_summary = _responses_detach_provider_json(summary)
         except (TypeError, ValueError, RecursionError):
             return None
-        if isinstance(detached_summary, list) and detached_summary:
-            result["summary"] = detached_summary
+        # Responses requires this field even when no public summary was emitted.
+        result["summary"] = detached_summary
         return result
     if item_type in {"function_call", "custom_tool_call"}:
         call_id = str(_get_attr_or_item(item, "call_id", "") or item_id).strip()
@@ -4791,6 +4791,8 @@ class OpenAIAdapter(LLMAdapter):
                 raw={
                     "provider": "openai_responses",
                     "event_type": "eof_without_terminal",
+                    "provider_error_type": "network",
+                    "provider_error_code": "eof_without_terminal",
                 },
             )
             return
@@ -5180,6 +5182,9 @@ class OpenAIAdapter(LLMAdapter):
                 )
                 for item in provider_items:
                     if item.get("type") == "reasoning":
+                        # Repair history saved before empty summaries were kept.
+                        # These are copied wire items, not mutations of history.
+                        item.setdefault("summary", [])
                         result.append(item)
                 assistant_text = _message_content_text(msg.content)
                 if assistant_text:
@@ -5584,6 +5589,8 @@ class OpenAIAdapter(LLMAdapter):
                 raw={
                     "provider": "openai_chat_completions",
                     "event_type": "eof_without_terminal",
+                    "provider_error_type": "network",
+                    "provider_error_code": "eof_without_terminal",
                     "request_summary": request_summary or {},
                     "safety": _provider_trace_safety(),
                     "provider_timeline": provider_timeline,

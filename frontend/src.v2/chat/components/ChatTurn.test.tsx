@@ -24,6 +24,14 @@ import { useAppStore } from "../../stores";
 
 afterEach(() => cleanup());
 
+it("shows the stopped state when a restored interrupted turn has no retained content", () => {
+  render(<ChatTurn turn={{
+    id: "empty-interrupted", userCell: null, committedCells: [], activeCell: null,
+    finalAnswerCell: null, status: "interrupted", startedAt: 1, completedAt: 2,
+  }} />);
+  expect(screen.getByRole("status").textContent).toContain("已停止");
+});
+
 describe("HistoryCellRenderer", () => {
   it.each<HistoryCellState>([
     {

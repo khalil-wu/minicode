@@ -9,6 +9,11 @@ Drives a running backend through the lifecycle the desktop renderer performs:
                   -> socket dropped
     connection 1: reconnect -> session.restore(last_seq, last_conversation_id)
                   -> user_message -> done
+    connection 2: restore -> conversation.create (permission_mode=confirm)
+                  -> user_message needing run_command -> control_request
+                  -> socket dropped with the approval pending
+    connection 3: restore -> the same control_request re-emitted -> approve
+                  -> done -> user_message -> control_request -> reject -> done
 
 Every client command and every server event is recorded verbatim, per
 connection, into a JSON fixture that
@@ -164,8 +169,8 @@ async def capture(port: int, workspace: str, out: Path, prompts: dict[str, str])
     uri = f"ws://127.0.0.1:{port}/ws?session_id={session_id}&protocol=control_v1"
     connections: list[Connection] = []
     turn_id_second = ""
-    assistant_ids = {"first": "a_gate_1", "second": "a_gate_2", "third": "a_gate_3"}
-    user_ids = {"first": "u_gate_1", "second": "u_gate_2", "third": "u_gate_3"}
+    assistant_ids = {"first": "a_gate_1", "second": "a_gate_2", "third": "a_gate_3", "fourth": "a_gate_4", "fifth": "a_gate_5"}
+    user_ids = {"first": "u_gate_1", "second": "u_gate_2", "third": "u_gate_3", "fourth": "u_gate_4", "fifth": "u_gate_5"}
 
     def user_message(key: str, conversation_id: str) -> dict[str, Any]:
         return {
@@ -270,12 +275,126 @@ async def capture(port: int, workspace: str, out: Path, prompts: dict[str, str])
         assert await c1.recv_until(_is_done_for(conv_a), timeout=300, label="turn 3")
         await c1.drain(2, "after turn 3")
 
+    # ── connection 2: confirm-mode conversation, approval left pending on drop ──
+    conv_c = "conv_gate_" + uuid.uuid4().hex[:8]
+    approval_ids: dict[str, str | list[str]] = {}
+
+    def _is_control_request(e: dict[str, Any]) -> bool:
+        return (
+            e.get("type") == "control_request"
+            and e.get("conversation_id") == conv_c
+            and (e.get("request") or {}).get("subtype") == "can_use_tool"
+        )
+
+    async with websockets.connect(uri, max_size=None, origin="file://") as ws:
+        c2 = Connection(2, ws)
+        connections.append(c2)
+        restore = await c2.send({
+            "type": "session.restore",
+            "last_seq": c1.cursor,
+            "last_conversation_id": conv_a,
+            "last_workspace_root": workspace,
+        })
+        await c2.send({"type": "commands.list"})
+        await c2.send({"type": "skills.list"})
+        await c2.recv_until(
+            lambda e: e.get("type") == "conversation.switched" and e.get("client_command_id") == restore,
+            timeout=30, label="restore before confirm conversation",
+        )
+        await c2.send({"type": "conversation.list"})
+        await c2.drain(2, "after restore 2")
+        create_c = await c2.send({
+            "type": "conversation.create",
+            "conversation_id": conv_c,
+            "title": "New chat",
+            "conversation_type": "main",
+            "workspace_root": workspace,
+            "permission_mode": "confirm",
+        })
+        assert await c2.recv_until(_is_result_for(create_c), timeout=20, label="create C")
+        await c2.drain(2, "after create C")
+        fourth = dict(user_message("fourth", conv_c))
+        fourth["permission_mode"] = "confirm"
+        await c2.send(fourth)
+        request = await c2.recv_until(_is_control_request, timeout=120, label="approval request 1")
+        assert request, "no approval request for the first confirm-mode command"
+        approval_ids["first"] = str(request["request_id"])
+        await c2.drain(1.5, "approval pending; dropping socket")
+
+    # ── connection 3: reconnect with the approval pending, approve, then reject one ──
+    async with websockets.connect(uri, max_size=None, origin="file://") as ws:
+        c3 = Connection(3, ws)
+        connections.append(c3)
+        restore = await c3.send({
+            "type": "session.restore",
+            "last_seq": c2.cursor,
+            "last_conversation_id": conv_c,
+            "last_workspace_root": workspace,
+        })
+        await c3.send({"type": "commands.list"})
+        await c3.send({"type": "skills.list"})
+        await c3.recv_until(
+            lambda e: e.get("type") == "conversation.switched" and e.get("client_command_id") == restore,
+            timeout=30, label="restore with pending approval",
+        )
+        await c3.send({"type": "conversation.list"})
+        reemitted = await c3.recv_until(
+            lambda e: _is_control_request(e) and e.get("request_id") == approval_ids["first"],
+            timeout=15, label="re-emitted approval request",
+        )
+        assert reemitted, "backend did not re-emit the pending approval after reconnect"
+        await c3.drain(1, "after reemit")
+
+        async def answer_until_done(first_request: dict[str, Any], *, action: str, feedback: str = "", label: str) -> list[str]:
+            """Respond to every approval the turn raises with ``action`` until it ends."""
+            answered: list[str] = []
+            request = first_request
+            while True:
+                response: dict[str, Any] = {"action": action}
+                if feedback:
+                    response["feedback"] = feedback
+                await c3.send({
+                    "type": "control_response",
+                    "request_id": request["request_id"],
+                    "conversation_id": conv_c,
+                    **({"turn_id": request["turn_id"]} if request.get("turn_id") else {}),
+                    **({"message_id": request["message_id"]} if request.get("message_id") else {}),
+                    "response": {"subtype": "success", "response": response},
+                })
+                answered.append(str(request["request_id"]))
+                event = await c3.recv_until(
+                    lambda e: _is_control_request(e) or _is_done_for(conv_c)(e),
+                    timeout=300, label=label,
+                )
+                assert event, f"{label}: neither done nor another approval request arrived"
+                if event.get("type") == "done":
+                    return answered
+                request = event
+
+        approval_ids["approved"] = await answer_until_done(reemitted, action="approve", label="turn 4 (approved)")
+        await c3.drain(2, "after turn 4")
+
+        fifth = dict(user_message("fifth", conv_c))
+        fifth["permission_mode"] = "confirm"
+        await c3.send(fifth)
+        request = await c3.recv_until(_is_control_request, timeout=120, label="approval request 2")
+        assert request, "no approval request for the second confirm-mode command"
+        await c3.drain(1, "before reject")
+        approval_ids["rejected"] = await answer_until_done(
+            request, action="reject",
+            feedback="Do not run commands; just answer from the files you already read.",
+            label="turn 5 (rejected)",
+        )
+        await c3.drain(2, "after turn 5")
+
     fixture = {
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "session_id": session_id,
         "workspace_root": workspace,
         "conversation_a": conv_a,
         "conversation_b": conv_b,
+        "conversation_c": conv_c,
+        "approval_request_ids": approval_ids,
         "turn_id_second": turn_id_second,
         "assistant_message_ids": assistant_ids,
         "user_message_ids": user_ids,
@@ -305,6 +424,8 @@ def main() -> None:
         "first": "Run pytest in this workspace, find why it fails, fix the bug in calc.py, then rerun pytest and report.",
         "second": "Read README.md, calc.py and test_calc.py one at a time with the read tool, then explain each function in detail and finally propose three additional tests.",
         "third": "Reply with the single word OK.",
+        "fourth": "Run `python -m pytest -q` in this workspace with the run_command tool and report the pass/fail counts.",
+        "fifth": "Run `python -m pytest -q` again with the run_command tool to confirm the suite is still green.",
     }
     asyncio.run(capture(args.port, args.workspace, args.out, prompts))
 

@@ -933,7 +933,7 @@ class SessionLifecycle:
         existing = self._task_runtime_update_task
         if existing is not None and not existing.done():
             return
-        coroutine = self.send_task_runtime_update()
+        coroutine = self.send_task_runtime_update(include_capabilities=False)
         try:
             task = loop.create_task(coroutine)
         except RuntimeError:
@@ -947,12 +947,19 @@ class SessionLifecycle:
 
         task.add_done_callback(_clear_runtime_update)
 
-    async def send_task_runtime_update(self) -> None:
+    async def send_task_runtime_update(self, *, include_capabilities: bool = True) -> None:
         try:
+            if not include_capabilities:
+                data = {
+                    "partial": True,
+                    "session": self._session.runtime_snapshot(include_capabilities=False),
+                }
+            else:
+                data = {"session": self._session.runtime_snapshot()}
             await self._session.send_event(
                 AgentEvent(
                     type="task.update",
-                    data={"session": self._session.runtime_snapshot()},
+                    data=data,
                 )
             )
         except Exception:

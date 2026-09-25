@@ -132,7 +132,7 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   },
   setEffortLevel: (e) => {
     const before = get();
-    void reportCommandOutcome(
+    return reportCommandOutcome(
       sendClientCommandAwaitResult({
         type: "llm.config.set",
         provider: before.currentProvider || "openai",

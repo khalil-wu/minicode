@@ -191,6 +191,74 @@ def test_retry_and_cancel_preserve_run_history(monkeypatch, tmp_path) -> None:
     asyncio.run(scenario())
 
 
+def test_failed_one_shot_can_retry_in_its_original_conversation(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(scheduler_module, "SCHEDULE_FILE", tmp_path / "scheduled_tasks.json")
+    project = tmp_path / "project"
+    project.mkdir()
+    observed: list[str] = []
+
+    async def on_fire(_task, run):
+        observed.append(run.conversation_id)
+        return {
+            "status": "failed" if len(observed) == 1 else "completed",
+            "conversation_id": "conv_previous_work",
+        }
+
+    async def scenario() -> None:
+        scheduler = TaskScheduler(on_fire=on_fire)
+        task = scheduler.add_task(
+            "One shot", "Finish work", "0 0 1 1 *",
+            workspace_root=str(project), recurring=False,
+        )
+        first = scheduler.run_now(task.id)
+        assert first is not None
+        await scheduler._run_tasks[first.id]
+        assert task.deleted_at is not None
+        assert scheduler.list_tasks(workspace_root=str(project)) == []
+
+        restored = TaskScheduler(on_fire=on_fire)
+        retry = restored.retry_run(first.id, workspace_root=str(project))
+        assert retry is not None and retry.id != first.id
+        assert retry.conversation_id == "conv_previous_work"
+        await restored._run_tasks[retry.id]
+
+        assert observed == ["", "conv_previous_work"]
+        assert retry.status == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_new_scheduled_conversation_binding_is_durable_during_the_run(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(scheduler_module, "SCHEDULE_FILE", tmp_path / "scheduled_tasks.json")
+    project = tmp_path / "project"
+    project.mkdir()
+
+    async def scenario() -> None:
+        ready = asyncio.Event()
+        release = asyncio.Event()
+
+        async def on_fire(_task, run):
+            scheduler.bind_run_conversation(run.id, "conv_new_work")
+            ready.set()
+            await release.wait()
+            return {"status": "completed", "conversation_id": "conv_new_work"}
+
+        scheduler = TaskScheduler(on_fire=on_fire)
+        task = scheduler.add_task("Detached", "Inspect", "0 * * * *", workspace_root=str(project))
+        run = scheduler.run_now(task.id)
+        assert run is not None
+        await asyncio.wait_for(ready.wait(), timeout=1)
+
+        restored = TaskScheduler()
+        assert restored._runs[run.id].status == "running"
+        assert restored._runs[run.id].conversation_id == "conv_new_work"
+
+        release.set()
+        await scheduler._run_tasks[run.id]
+
+    asyncio.run(scenario())
+
+
 def test_scheduler_persists_each_workspace_in_its_own_store(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(scheduler_module, "SCHEDULE_FILE", tmp_path / "scheduler" / "legacy.json")
     project_one = tmp_path / "project-one"

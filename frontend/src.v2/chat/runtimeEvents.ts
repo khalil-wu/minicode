@@ -561,6 +561,18 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
     : conversationId?.trim() || undefined;
   const s = useAppStore.getState();
   const messageId = eventMessageId(e);
+  if (e.type === "agent.run.started" && conversationId && messageId) {
+    const target = assistantForMessage(conversationId, messageId);
+    const turnId = eventTurnIdentity(e);
+    // A restore snapshot can settle the optimistic placeholder before the
+    // server admits its new run. Run-start is the authority for that message,
+    // not the renderer's earlier optimistic streaming flag.
+    if (target && !target.isStreaming && !target.isThinkingStreaming
+      && !target.terminalStatus && target.completedAt == null
+      && (!target.turnId || target.turnId === turnId)) {
+      s.resumeStreaming(conversationId, undefined, messageId, turnId);
+    }
+  }
   const globalSessionSnapshot = e.type === "task.update"
     && Boolean((e as unknown as { session?: unknown }).session);
   const providerFenceReason = isProviderProgressEvent(e)
@@ -934,7 +946,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const ev = e as TaskUpdateEvent;
 
       if ("session" in ev && ev.session) {
-        s.setRuntimeSession(ev.session);
+        s.setRuntimeSession(ev.partial ? { ...s.runtimeSession, ...ev.session } : ev.session);
         if (ev.session.permission_mode) {
           useAppStore.setState({ permissionMode: fromBackendPermissionMode(ev.session.permission_mode) });
         }

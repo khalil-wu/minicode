@@ -191,8 +191,17 @@ class SendMessageTool(_AgentCoordinationTool):
         "Use for parent-to-subagent or subagent-to-parent updates that should be visible in the Agents panel."
     )
     permission = PermissionLevel.AUTO
+    # Read-only delegation restricts workspace/external mutations, not reports
+    # to the parent. Mail delivery still has a non-idempotent coordination effect.
+    read_only = True
+    idempotent = False
     result_kind = "subagent"
     activity_kind = "genericTool"
+
+    def is_concurrency_safe(self, args: dict[str, Any] | None = None) -> bool:
+        # Two mailbox sends may carry an ordered handoff even when neither
+        # touches the workspace. Preserve the model's call order.
+        return False
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(

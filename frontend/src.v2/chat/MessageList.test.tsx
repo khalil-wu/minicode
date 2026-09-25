@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import type { ChatMessage } from "../stores/types";
 import { MessageList } from "./MessageList";
+import { handleDiffEvent } from "./diffEvents";
 
 vi.mock("../workspace/openWorkspaceFolder", () => ({
   openWorkspaceFolder: vi.fn(),
@@ -120,7 +121,7 @@ describe("MessageList cell UI", () => {
     expect(scroll.className).not.toContain("transition-opacity");
   });
 
-  it("keeps tool edit events inside the processing trace and out of the reply", () => {
+  it.each(["exact", "unavailable", "empty"] as const)("shows committed edit evidence after the reply: %s", (aggregate) => {
     useAppStore.setState({
       messages: [
         { ...conversationMessages[0], turnId: "turn-file-summary" },
@@ -150,17 +151,30 @@ describe("MessageList cell UI", () => {
       ],
     });
 
+    if (aggregate !== "exact") handleDiffEvent({
+      type: "turn.diff.updated", thread_id: "conv-message-list-test",
+      conversation_id: "conv-message-list-test", turn_id: "turn-file-summary",
+      diff: aggregate === "unavailable" ? null : "", revision: 2,
+    });
     render(<MessageList />);
 
     const work = screen.getByLabelText("Agent 处理进度");
     const reply = screen.getByLabelText("Agent 回复");
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+    if (aggregate === "empty") {
+      expect(screen.queryByLabelText("文件修改")).toBeNull();
+      return;
+    }
     const diff = screen.getByLabelText("文件修改");
     expect(work.querySelector(".diff-cell")).toBeNull();
     expect(diff.querySelector(".diff-cell")).toBeTruthy();
     expect(reply.compareDocumentPosition(diff) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getAllByText("src/app.ts").length).toBe(2);
     expect(work.querySelector(".activity-cell")).toBeTruthy();
+    if (aggregate === "unavailable") {
+      expect(screen.getByText("编辑记录 1 个文件")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "撤销" })).toBeNull();
+    }
   });
 
   it("marks Code mode for the wide conversation axis", () => {

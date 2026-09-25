@@ -125,7 +125,7 @@ class RunCommandTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string"},
+                    "command": {"type": "string", "description": "Shell command in the host's shell syntax (PowerShell on Windows)."},
                     "max_chars": {
                         "type": "integer", "minimum": 1, "maximum": TASK_OUTPUT_MAX_CHARS,
                         "description": f"Output preview character budget, default {TASK_OUTPUT_DEFAULT_CHARS}. Preserves the beginning and end; full output remains readable with monitor. Use this instead of shell tail/grep filters.",
@@ -134,7 +134,7 @@ class RunCommandTool(BaseTool):
                         "type": "integer", "minimum": 0, "maximum": MAX_COMMAND_YIELD_MS,
                         "description": "How long to wait before returning a live command id (default 10000 ms). Continue with monitor; this does not stop the process.",
                     },
-                    "cwd": {"type": "string"},
+                    "cwd": {"type": "string", "description": "Working directory; defaults to the active workspace."},
                     "env": {
                         "type": "object",
                         "additionalProperties": {"type": "string"},

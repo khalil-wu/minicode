@@ -57,6 +57,7 @@ import {
 } from "./fileTreeHelpers";
 import { TreeNode } from "./FileTreeNode";
 import { FileContextMenu } from "./FileTreeContextMenu";
+import { WorkspaceContextMenu } from "../workspace/WorkspaceContextMenu";
 import { SearchResultRow } from "./FileTreeSearchResult";
 import {
   normalizeWorkspaceRoot,
@@ -94,6 +95,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const [searchError, setSearchError] = useState("");
   const [searchVersion, setSearchVersion] = useState(0);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [workspaceMenu, setWorkspaceMenu] = useState<{ x: number; y: number } | null>(null);
   const [toolbarMenuOpen, setToolbarMenuOpen] = useState(false);
   const toolbarTriggerRef = useRef<HTMLButtonElement | null>(null);
   const toolbarMenuRef = useRef<HTMLDivElement | null>(null);
@@ -589,11 +591,16 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
 
   return (
     <div style={fileTreeRootStyle}>
-      <div style={fileTreeHeaderStyle}>
+      <div style={fileTreeHeaderStyle} onContextMenu={(event) => {
+        if (!workingDirectory) return;
+        event.preventDefault();
+        setWorkspaceMenu({ x: event.clientX, y: event.clientY });
+      }}>
         <div title={workingDirectory || tree.path} style={fileTreeRootLabelStyle}>
           {workspaceLabel(workingDirectory || tree.path)}
         </div>
       </div>
+      {workspaceMenu && <WorkspaceContextMenu path={workingDirectory || tree.path} position={workspaceMenu} onClose={() => setWorkspaceMenu(null)} />}
       <div style={fileTreeToolbarStyle}>
         <div style={fileTreeSearchStyle}>
           <Search size={14} aria-hidden="true" />

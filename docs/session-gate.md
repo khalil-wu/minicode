@@ -5,6 +5,25 @@
 `frontend/src.v2/hooks/__fixtures__session_gate.json`（新）、`frontend/src.v2/chat/transcriptHydration.ts`（修）
 前置：`docs/harness-audit-2026-09-19.md` §8（同类方法首次用于定位「点新建任务没反应」P0）
 
+### 2026-09-22：审批回放纳入门禁
+
+保留原 `__fixtures__session_gate.json` 的修文件回合，另外回放
+`__fixtures__approval_gate.json`（09-22 真后端抓包，四条连接）。新增两条连接：
+
+- c2：新建 confirm 会话，发起 `run_command`，收到审批后断连，不发送决定。
+- c3：恢复同一会话，收到同一 request id 的重发；点击真实 `InlineAgentPrompt`
+  的「允许」。下一回合点击「拒绝并发送说明」。
+
+测试断言：断连游标与恢复命令一致、重发后审批不重复、审批响应由实际卡片构造且与
+抓包逐字段相等、提交后卡片和队列清空、允许的工具成功、拒绝的工具失败且保留
+`Operation rejected` 原因、两个回合完成且无残留 streaming 状态。新 fixture
+包含非空初始会话列表，因此回放按命令类型、会话和序号关联响应，避免渲染端自动
+激活历史会话的命令错占槽位。流缓冲在交互边界刷新，避免按每个 SSE delta 推进
+60ms 虚构数分钟的心跳空闲。
+
+两份 fixture 都随 `npm run test` 进入 CI。它们验证渲染端对已捕获事件的处理；
+当前后端的真实行为仍需运行抓包脚本或桌面真机用例验证。
+
 ---
 
 ## 1. 为什么要这道门禁

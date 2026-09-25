@@ -7,6 +7,12 @@ import subprocess
 import pytest
 
 from backend.agent.tool_execution import generate_diff
+from backend.agent.tool_execution import _invalidate_turn_diff_after_inexact_mutation
+from backend.llm.base import ToolCallEvent
+from backend.tools.base import ToolResult
+from backend.tools.command_tool import RunCommandTool
+from backend.tools.registry import ToolRegistry
+from backend.artifact.store import ArtifactStore
 from backend.agent.turn_diff_tracker import TurnDiffTracker
 from backend.atomic_io import canonical_file_path_key
 from backend.permissions.context import PermissionContext, ToolExecutionContext
@@ -15,6 +21,31 @@ from backend.tools.edit_file import EditFileTool
 from backend.tools.apply_patch import ApplyPatchTool
 from backend.tools.file_tools_common import _generate_limited_unified_diff, content_hash
 from backend.tools.write_file import WriteFileTool
+
+
+@pytest.mark.parametrize("has_prior_diff", [False, True])
+def test_command_marks_aggregate_unknown_without_claiming_edits_were_reverted(tmp_path, has_prior_diff):
+    tracker = TurnDiffTracker()
+    if has_prior_diff:
+        tracker.track_change(old_path="a.py", new_path="a.py", old_content="old", new_content="new")
+    events = []
+
+    async def emit(event, data):
+        events.append((event, data))
+
+    context = ToolExecutionContext(permission=PermissionContext(mode="bypass"), workspace_root=tmp_path)
+    context.turn_diff_tracker = tracker
+    context.emit_event = emit
+    context.conversation_id = "conversation-diff"
+    context.metadata["run_id"] = "turn-diff"
+    registry = ToolRegistry()
+    registry.register(RunCommandTool(ArtifactStore()))
+    asyncio.run(_invalidate_turn_diff_after_inexact_mutation(
+        ToolCallEvent(id="test-command", name="run_command", arguments={"command": "node --test"}),
+        ToolResult(content="Tests passed"), tool_registry=registry, tool_ctx=context,
+    ))
+    assert events[-1][0] == "turn.diff.updated"
+    assert events[-1][1]["diff"] is None
 
 
 @pytest.mark.parametrize("old,new", [

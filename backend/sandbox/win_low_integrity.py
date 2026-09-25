@@ -21,7 +21,7 @@ Windows mandatory integrity control:
 
 The backend process cannot hand a foreign primary token to ``asyncio``'s
 subprocess machinery, so ``SandboxRunner`` spawns this module as a launcher
-(``python -m backend.sandbox.win_low_integrity <launch.json>``). The
+(``python -I /absolute/path/win_low_integrity.py <launch.json>``). The
 launcher inherits the runner's stdio pipes, creates the Low child with those
 handles, waits, and exits with the child's exit code. Killing the launcher's
 tree (the runner's normal teardown) kills the child through both the parent
@@ -222,7 +222,10 @@ def prepare_launch(
 
 
 def launcher_argv(spec_path: Path) -> list[str]:
-    return [sys.executable, "-m", "backend.sandbox.win_low_integrity", str(spec_path)]
+    # The command cwd is the user's workspace, not the installed backend.
+    # Resolve this standalone launcher by path and keep workspace/PYTHONPATH
+    # modules out of the host process that creates the restricted token.
+    return [sys.executable, "-I", str(Path(__file__).resolve()), str(spec_path)]
 
 
 # ── launcher (child side) ───────────────────────────────────────────────

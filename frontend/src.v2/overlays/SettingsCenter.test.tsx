@@ -182,6 +182,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     fetchLLMSettingsMock.mockReset();
     vi.clearAllMocks();
     vi.restoreAllMocks();
@@ -189,9 +190,10 @@ describe("SettingsCenter reasoning effort visibility", () => {
   });
 
   it("hides reasoning effort for DeepSeek chat completions because runtime will ignore it", async () => {
+    vi.useFakeTimers();
     render(<SettingsCenter />);
-
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(fetchLLMSettingsMock).toHaveBeenCalled();
 
     expect(screen.queryByText("推理强度")).toBeNull();
     expect(screen.queryByRole("button", { name: "Low" })).toBeNull();

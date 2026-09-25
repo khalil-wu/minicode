@@ -291,6 +291,9 @@ export const reduceToolCallStart = (
       : e.status === "pending"
         ? "pending"
         : "running",
+    transition: terminal || e.status === "pending" ? existing?.transition : "running",
+    waitingOn: terminal || e.status === "pending" ? existing?.waitingOn : undefined,
+    blockingReason: terminal || e.status === "pending" ? existing?.blockingReason : undefined,
     startedAt: existing?.startedAt ?? e.started_at ?? now,
     displayHint: e.display_hint ?? existing?.displayHint,
     inputSummary: e.input_summary ?? existing?.inputSummary,
@@ -320,21 +323,15 @@ export const reduceToolCallResult = (
   const existing = prev.get(e.id);
   if (!existing) return new Map(prev);
   const next = new Map(prev);
+  const status = e.status === "blocked" || e.status === "failed" || e.status === "timeout"
+    || e.status === "partial" || e.status === "cancelled"
+    ? e.status : e.is_error ? "failed" : "success";
   const incoming: ToolCallRecord = {
     ...existing,
-    status: e.status === "blocked"
-      ? "blocked"
-      : e.status === "failed"
-        ? "failed"
-        : e.status === "timeout"
-          ? "timeout"
-          : e.status === "partial"
-            ? "partial"
-            : e.status === "cancelled"
-              ? "cancelled"
-            : e.is_error
-              ? "failed"
-              : "success",
+    status,
+    transition: status === "success" || status === "partial" ? "completed" : status,
+    waitingOn: undefined,
+    blockingReason: undefined,
     summary: e.summary,
     artifactId: e.artifact_id ?? existing.artifactId,
     artifactKind: e.artifact_kind ?? existing.artifactKind,

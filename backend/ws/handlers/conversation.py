@@ -3473,14 +3473,15 @@ async def handle_context_compact(session: "WebSocketSession", data: dict[str, An
             )
         )
         return True
-    from backend.ws.compaction_coordinator import compact_conversation
+    from backend.ws.compaction_coordinator import (
+        CompactionCommittedProjectionError,
+        compact_conversation,
+    )
 
-    before_ledger = context_ledger_snapshot(ctx)
+    projection_error: CompactionCommittedProjectionError | None = None
     try:
+        before_ledger = context_ledger_snapshot(ctx)
         before_budget = build_context_budget_snapshot(session, ctx)
-    except Exception:
-        before_budget = None
-    try:
         committed = await compact_conversation(
             session,
             conversation_id=conversation_id,
@@ -3488,51 +3489,10 @@ async def handle_context_compact(session: "WebSocketSession", data: dict[str, An
             focus=focus,
             restore_state=state,
         )
-        summary_text = committed.summary
-        after_ledger = context_ledger_snapshot(ctx)
-        try:
-            after_budget = build_context_budget_snapshot(session, ctx)
-        except Exception:
-            after_budget = None
-        compacted_event = build_context_compacted_event(
-            summary_text,
-            before_ledger,
-            after_ledger,
-        )
-        compacted_event.data["conversation_id"] = conversation_id
-        if isinstance(before_budget, dict):
-            compacted_event.data["before_tokens"] = max(
-                0, int(before_budget.get("used") or 0)
-            )
-        if isinstance(after_budget, dict):
-            compacted_event.data["after_tokens"] = max(
-                0, int(after_budget.get("used") or 0)
-            )
-        await session.send_event(compacted_event)
-        if isinstance(after_budget, dict):
-            used = max(0, int(after_budget.get("used") or 0))
-            total = max(0, int(after_budget.get("total") or 0))
-            raw_breakdown = after_budget.get("breakdown")
-            breakdown = {
-                str(name): max(0, int(tokens or 0))
-                for name, tokens in raw_breakdown.items()
-            } if isinstance(raw_breakdown, dict) else {}
-            await session.send_event(
-                AgentEvent.budget_update(
-                    used=used,
-                    total=total,
-                    breakdown=breakdown,
-                    conversation_id=conversation_id,
-                )
-            )
-            await session.send_event(
-                AgentEvent.context_usage(
-                    used=used,
-                    limit=total,
-                    conversation_id=conversation_id,
-                    ledger=after_ledger,
-                )
-            )
+    except CompactionCommittedProjectionError as exc:
+        logger.exception("Manual compaction committed but live context refresh failed for %s", conversation_id)
+        committed = exc.committed
+        projection_error = exc
     except CompactionNoopError as exc:
         error_event = AgentEvent.error(
             str(exc),
@@ -3542,6 +3502,7 @@ async def handle_context_compact(session: "WebSocketSession", data: dict[str, An
         )
         error_event.data["conversation_id"] = conversation_id
         await session.send_event(error_event)
+        return True
     except RuntimeError as exc:
         if "active turn" in str(exc):
             error_event = AgentEvent.error(
@@ -3562,6 +3523,7 @@ async def handle_context_compact(session: "WebSocketSession", data: dict[str, An
         )
         error_event.data["conversation_id"] = conversation_id
         await session.send_event(error_event)
+        return True
     except Exception as exc:
         logger.warning("Manual compact failed: %s", exc)
         error_event = AgentEvent.error(
@@ -3572,6 +3534,70 @@ async def handle_context_compact(session: "WebSocketSession", data: dict[str, An
         )
         error_event.data["conversation_id"] = conversation_id
         await session.send_event(error_event)
+        return True
+
+    summary_text = committed.summary
+    await session.send_event(AgentEvent(
+        type="conversation.compaction.updated",
+        data={
+            "conversation_id": conversation_id,
+            "state": "compacted",
+            "summary": summary_text,
+        },
+    ))
+    if projection_error is not None:
+        error_event = AgentEvent.error(
+            str(projection_error),
+            recoverable=False,
+            error_type="context",
+            error_code="context.live_projection_failed",
+        )
+        error_event.data["conversation_id"] = conversation_id
+        await session.send_event(error_event)
+        return True
+
+    try:
+        after_ledger = context_ledger_snapshot(ctx)
+        after_budget = build_context_budget_snapshot(session, ctx)
+        compacted_event = build_context_compacted_event(
+            summary_text,
+            before_ledger,
+            after_ledger,
+        )
+        compacted_event.data["conversation_id"] = conversation_id
+        compacted_event.data["before_tokens"] = before_budget["used"]
+        compacted_event.data["after_tokens"] = after_budget["used"]
+        used = after_budget["used"]
+        total = after_budget["total"]
+        breakdown = after_budget["breakdown"]
+    except Exception as exc:
+        logger.exception("Manual compaction committed but budget refresh failed for %s", conversation_id)
+        error_event = AgentEvent.error(
+            f"Context was compacted and saved, but its token budget could not be refreshed: {exc}",
+            recoverable=False,
+            error_type="context",
+            error_code="context.budget_refresh_failed",
+        )
+        error_event.data["conversation_id"] = conversation_id
+        await session.send_event(error_event)
+        return True
+    await session.send_event(compacted_event)
+    await session.send_event(
+        AgentEvent.budget_update(
+            used=used,
+            total=total,
+            breakdown=breakdown,
+            conversation_id=conversation_id,
+        )
+    )
+    await session.send_event(
+        AgentEvent.context_usage(
+            used=used,
+            limit=total,
+            conversation_id=conversation_id,
+            ledger=after_ledger,
+        )
+    )
     return True
 
 

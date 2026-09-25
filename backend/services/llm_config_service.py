@@ -218,8 +218,8 @@ def llm_model_updated_payload(
         )
         try:
             max_context_window = max(
-                context_window,
-                int(payload_section.get("max_context_window") or 0),
+                0,
+                int(payload_section.get("max_context_window") or context_window),
             )
         except (TypeError, ValueError):
             max_context_window = context_window

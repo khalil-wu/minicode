@@ -1944,11 +1944,11 @@ class ModelRuntime:
                 else {}
             ),
             context_window=context_window,
-            context_window_source="models_json",
-            context_window_verified=True,
+            context_window_source="models_json" if definition.get("context_window") is not None else "fallback",
+            context_window_verified=definition.get("context_window") is not None,
             max_context_window=max_context_window,
-            max_context_window_source="models_json",
-            max_context_window_verified=True,
+            max_context_window_source="models_json" if definition.get("context_window") is not None else "fallback",
+            max_context_window_verified=definition.get("context_window") is not None,
             max_tokens=max_tokens,
             max_output_tokens=max_tokens,
             max_output_tokens_source="models_json",
@@ -2093,7 +2093,7 @@ class ModelRuntime:
             )
             if float(context_window).is_integer():
                 context_window = int(context_window)
-            max_context_window = max(model.max_context_window, context_window)
+            max_context_window = model.max_context_window or context_window
             max_tokens = (
                 _finite_number(
                     override.get("max_tokens"),
@@ -3300,4 +3300,3 @@ __all__ = [
     "model_thinking_levels",
     "resolve_config_value",
 ]
-

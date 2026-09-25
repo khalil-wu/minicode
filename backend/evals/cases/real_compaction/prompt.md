@@ -1,0 +1,3 @@
+MiniCode has a long-session failure. After a successful automatic context compaction, a coding turn can end with `budget_exceeded` before sending the next request to the model. In one observed run the local estimate was 20,390 tokens, the response-reserve trigger was 19,616, and the provider accepted the same prompt while reporting 18,757 input tokens. Another run repeatedly compacted the same turn.
+
+Investigate the request-admission and context-budget path end to end. Fix the root cause so a successful compaction lets the task continue, while a real provider rejection for an oversized prompt still follows the existing recovery path. Preserve the existing tests, add focused regression coverage in new test files, run relevant tests, and report what you verified.

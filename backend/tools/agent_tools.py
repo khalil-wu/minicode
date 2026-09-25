@@ -2673,6 +2673,12 @@ class TaskTool(BaseTool):
                 }
 
             async def subagent_event_bridge(event_type: str, data: dict[str, Any]) -> None:
+                if event_type == "subagent.event":
+                    # Coordination tools already committed the mailbox entry.
+                    # Forward its UI notification under this child's incarnation
+                    # fence, just like progress and completion.
+                    await _emit_incarnation_event(event_type, data)
+                    return
                 if event_type not in {"tool_call", "agent.progress"}:
                     return
                 if not _accepts_current_incarnation():

@@ -244,17 +244,21 @@ def capabilities_from_anthropic_adapter(adapter: Any) -> ProviderCapabilities:
         reasoning_effort_supported=effort_control,
         context_window=max(0, getattr(adapter, "_context_window", 0) or 0),
         context_window_source=(
-            "provider" if getattr(adapter, "_context_window", 0) else ""
+            adapter._context_window_source if adapter._context_window else ""
         ),
-        context_window_verified=bool(getattr(adapter, "_context_window", 0)),
+        context_window_verified=bool(adapter._context_window and adapter._context_window_verified),
         max_context_window=max(
             0,
-            getattr(adapter, "_context_window", 0) or 0,
+            adapter._max_context_window or adapter._context_window,
         ),
         max_context_window_source=(
-            "provider" if getattr(adapter, "_context_window", 0) else ""
+            adapter._max_context_window_source if adapter._max_context_window
+            else adapter._context_window_source if adapter._context_window else ""
         ),
-        max_context_window_verified=bool(getattr(adapter, "_context_window", 0)),
+        max_context_window_verified=(
+            adapter._max_context_window_verified if adapter._max_context_window
+            else bool(adapter._context_window and adapter._context_window_verified)
+        ),
         max_output_tokens=max(0, getattr(adapter, "_max_tokens", 0) or 0),
         max_output_tokens_source="provider",
         max_output_tokens_verified=True,

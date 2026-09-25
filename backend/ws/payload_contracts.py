@@ -335,7 +335,8 @@ LIVE_ONLY_EVENT_TYPES = frozenset({
     # A reconnect receives the accumulated text of an in-flight assistant item
     # from the `stream_resume` snapshot, which carries the ordered content
     # blocks (ws/stream_state.py:get_stream_content_blocks) and is emitted
-    # unconditionally after replay (ws/handlers/session.py reemit_pending_state).
+    # after replay for the current non-terminal stream
+    # (ws/handlers/session.py reemit_pending_state).
     # The accumulated item itself still replays through `item.completed`.
     "agent_message.delta",
     # A process item's running `agent.item` snapshot precedes its deltas and

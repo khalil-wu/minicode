@@ -1197,11 +1197,11 @@ class AgentEvent:
         *,
         thread_id: str,
         turn_id: str,
-        diff: str,
+        diff: str | None,
         revision: int | None = None,
         tool_call_id: str = "",
     ) -> AgentEvent:
-        """Codex app-server ``turn/diff/updated`` notification."""
+        """Turn diff: None means unavailable; an empty string means net zero."""
 
         data: dict[str, Any] = {
             "thread_id": thread_id,

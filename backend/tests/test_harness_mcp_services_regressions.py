@@ -364,8 +364,14 @@ async def test_heartbeat_reads_and_persists_its_existing_model_context(tmp_path,
         transcript=[{"role": "user", "content": "prior task context"}], context_snapshot={})
     class Repository:
         def get_conversation(self, identity): return conversation
-        def append_transcript_message(self, identity, message): conversation.transcript.append(message)
-        def patch_context_snapshot(self, identity, snapshot): conversation.context_snapshot.update(snapshot)
+        def append_transcript_message(self, identity, message):
+            conversation.transcript.append(message)
+            return SimpleNamespace(revision=1)
+        def commit_turn_projection(self, identity, *, assistant_message, context_snapshot, expected_revision):
+            assert expected_revision == 1
+            conversation.transcript.append(assistant_message)
+            conversation.context_snapshot = context_snapshot
+            return conversation
     class Engine:
         def submit(self, submission):
             context = submission.session.context_builder

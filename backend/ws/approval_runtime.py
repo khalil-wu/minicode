@@ -597,11 +597,8 @@ class SessionApprovalRuntimeMixin:
     async def reemit_pending_state(
         self,
         conversation_id: str | None = None,
-        *,
-        skip_stream_conversation_ids: set[str] | None = None,
     ) -> None:
         target_conversation_id = str(conversation_id or "").strip()
-        skip_stream_conversation_ids = skip_stream_conversation_ids or set()
         for payload in list(self.turn_wait_state.pending_approval_payloads.values()):
             if target_conversation_id:
                 payload_conversation_id = str(payload.get("conversation_id") or "").strip()
@@ -612,17 +609,17 @@ class SessionApprovalRuntimeMixin:
             except Exception as exc:
                 logger.debug("reemit approval failed: %s", exc)
 
-        emitted_conversations: set[str] = set()
         stream_states = getattr(self, "_conversation_streams", {})
         for stream_conversation_id, task in list(self.run_manager.run_tasks.items()):
             if not stream_conversation_id or task is None or task.done():
                 continue
-            if stream_conversation_id in skip_stream_conversation_ids:
-                continue
             if target_conversation_id and stream_conversation_id != target_conversation_id:
                 continue
             stream_state = stream_states.get(stream_conversation_id)
-            if not stream_state:
+            # The stream slot is owned by the current turn. An older replayed
+            # done for this conversation cannot decide whether that turn is
+            # still running; only the slot's own terminal fence can.
+            if not stream_state or stream_state.get("terminal_fenced"):
                 continue
             tool_calls = stream_state.get("tool_calls")
             all_tool_states = list(tool_calls.values()) if isinstance(tool_calls, dict) else []
@@ -646,8 +643,6 @@ class SessionApprovalRuntimeMixin:
                     tool_states=all_tool_states,
                 )
             )
-            emitted_conversations.add(stream_conversation_id)
-
         # Legacy fallback removed: only per-conversation stream state is authoritative
 
     def _clone_json_dict(self, payload: dict[str, Any]) -> dict[str, Any]:

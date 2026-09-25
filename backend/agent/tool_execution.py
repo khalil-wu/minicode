@@ -438,16 +438,17 @@ async def _invalidate_turn_diff_after_inexact_mutation(
         # exact before/after content is unknown always invalidates everything
         # committed before it. Exact file mutations that acquire the lock later
         # see the invalid tracker and cannot recreate a misleading partial diff.
-        had_diff = bool(tracker.has_unified_diff())
         tracker.invalidate()
-        if not had_diff or emit is None:
+        if emit is None:
             return
         await emit(
             "turn.diff.updated",
             AgentEvent.turn_diff_updated(
                 thread_id=str(getattr(tool_ctx, "conversation_id", "") or ""),
                 turn_id=_tool_turn_id(tool_ctx),
-                diff="",
+                # Unknown current contents are not an exact empty change set.
+                # Keep committed tool receipts available as historical edits.
+                diff=None,
                 revision=tracker.revision,
                 tool_call_id=tc.id,
             ).data,

@@ -90,14 +90,14 @@ def test_unknown_image_named_gateway_model_remains_capability_unknown() -> None:
     assert capabilities.image_generation is None
 
 
-def test_known_family_resolves_window() -> None:
-    assert resolve_context_window("claude-3-5-sonnet") == 200_000
-    assert resolve_context_window("gpt-4o") == 128_000
-    assert resolve_context_window("deepseek-r1") == 128_000
+def test_known_family_uses_application_default() -> None:
+    assert resolve_context_window("claude-3-5-sonnet") == 1_000_000
+    assert resolve_context_window("gpt-4o") == 1_000_000
+    assert resolve_context_window("deepseek-r1") == 1_000_000
 
     details = resolve_context_window_details("gpt-4o")
-    assert details.source == "known_model"
-    assert details.verified is True
+    assert details.source == "fallback"
+    assert details.verified is False
 
 
 def test_provider_metadata_beats_known_model_table() -> None:
@@ -165,11 +165,11 @@ def test_selected_model_metadata_does_not_leak_across_model_override() -> None:
     assert "context_window_fallback_unverified" in capabilities.limitations
 
 
-def test_current_openai_api_models_use_published_context_windows() -> None:
-    assert resolve_context_window("gpt-5.6-sol") == 272_000
-    assert resolve_context_window("gpt-5.6-terra") == 272_000
-    assert resolve_context_window("gpt-5.5") == 272_000
-    assert resolve_context_window("gpt-5.4-mini") == 272_000
+def test_current_openai_models_use_common_default_window() -> None:
+    assert resolve_context_window("gpt-5.6-sol") == 1_000_000
+    assert resolve_context_window("gpt-5.6-terra") == 1_000_000
+    assert resolve_context_window("gpt-5.5") == 1_000_000
+    assert resolve_context_window("gpt-5.4-mini") == 1_000_000
 
 
 def test_custom_responses_settings_use_exact_known_gpt56_reasoning_levels(
@@ -210,21 +210,43 @@ def test_custom_responses_settings_use_exact_known_gpt56_reasoning_levels(
 
 
 def test_provider_namespaced_model_resolves_terminal_model_id() -> None:
-    assert resolve_context_window("openai/gpt-5.6-sol") == 272_000
-    assert resolve_context_window("openrouter/openai/gpt-5.4-mini") == 272_000
+    assert resolve_context_window("openai/gpt-5.6-sol") == 1_000_000
+    assert resolve_context_window("openrouter/openai/gpt-5.4-mini") == 1_000_000
 
 
-def test_small_local_model_not_over_budgeted() -> None:
-    # The 200K default breaks compaction for small-window local models; a
-    # recognized small model must get its real (small) window.
-    assert resolve_context_window("llama-3-8b") == 8_000
-    assert resolve_context_window("gemma-7b") == 8_000
-    assert resolve_context_window("phi-4") == 16_000
+@pytest.mark.parametrize("model", ["gpt-6-astra", "openai/gpt-6-astra"])
+def test_astra_reasoning_controls_resolve_without_gateway_capability_metadata(model):
+    settings = _openai_compatible_settings({"api_key": "test-key", "base_url": "http://127.0.0.1:8317/v1",
+        "model": model, "wire_api": "responses", "model_metadata": {}}, provider="custom", model_override=model)
+    capabilities = capabilities_from_openai_settings(settings, provider="custom")
+    assert capabilities.reasoning_effort_supported is True
+    assert capabilities.reasoning_effort_levels == ("low", "medium", "high", "xhigh", "max")
+    assert capabilities.effective_reasoning_effort == "low"
+    assert capabilities.max_context_window == 1_050_000
 
 
-def test_longest_prefix_wins_over_family() -> None:
-    # llama-3.1 (128K) must not be matched by the generic llama-3 (8K) family.
-    assert resolve_context_window("llama-3.1-70b") == 128_000
+def test_small_local_models_follow_requested_default() -> None:
+    # The product default is explicitly 1M, even for known small-window models.
+    assert resolve_context_window("llama-3-8b") == 1_000_000
+    assert resolve_context_window("gemma-7b") == 1_000_000
+    assert resolve_context_window("phi-4") == 1_000_000
+
+
+@pytest.mark.parametrize("model", ["gpt-6-luna", "openai/gpt-6-luna"])
+def test_luna_explicit_reasoning_reaches_responses_request(model):
+    from backend.llm.openai_adapter import _responses_reasoning_request
+    settings = _openai_compatible_settings({"api_key": "test-key", "base_url": "http://127.0.0.1:8317/v1",
+        "model": model, "wire_api": "responses", "reasoning_effort": "high", "model_metadata": {}},
+        provider="custom", model_override=model)
+    capabilities = capabilities_from_openai_settings(settings, provider="custom")
+    assert capabilities.effective_reasoning_effort == "high"
+    assert capabilities.max_context_window == 1_050_000
+    assert _responses_reasoning_request(settings)["effort"] == "high"
+
+
+def test_family_variants_share_the_same_default() -> None:
+    # Published family limits are projected separately as max_context_window.
+    assert resolve_context_window("llama-3.1-70b") == 1_000_000
 
 
 def test_1m_suffix_opts_in() -> None:

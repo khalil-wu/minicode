@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
@@ -25,6 +25,7 @@ vi.mock("../hooks/useWebSocket", () => ({
 
 vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommand: vi.fn(() => true),
+  commandResultSucceeded: (result: { level?: string }) => !["error", "failed"].includes(result.level ?? ""),
   sendClientCommandAwaitResult: vi.fn(async (_command, expectedCommand) => ({
     type: "command.result",
     command: expectedCommand,
@@ -361,9 +362,9 @@ describe("FooterRow permission picker", () => {
     // `max` is not among the provider's declared levels. Previously the pill
     // silently rendered the nearest extreme level (极高) as if it were the
     // configured value; it now names the real level and says it is unsupported.
-    expect((screen.getByTitle(
+    expect(screen.getByTitle(
       "模型推理强度：最大推理强度。当前 Provider 未声明支持该强度，请改选下方受支持的档位。",
-    ) as HTMLElement).style.color).toBe("var(--text-secondary)");
+    ).tagName).toBe("SPAN");
     expect(screen.getByText("最大（不支持）")).toBeTruthy();
   });
 
@@ -420,13 +421,13 @@ describe("FooterRow permission picker", () => {
     render(<FooterRow sendState="disabled" onSend={() => {}} />);
 
     fireEvent.click(screen.getByTitle("模型推理强度：Provider 声明的推理强度：focused。仅在当前 Provider/模型支持时生效，不改变工具迭代预算。"));
-    fireEvent.click(screen.getByRole("button", { name: "选择推理档位" }));
-
-    expect(screen.getByText("低")).toBeTruthy();
-    expect(screen.getAllByText("focused").length).toBeGreaterThan(0);
-    expect(screen.getByText("Ultra")).toBeTruthy();
-    expect(screen.queryByText("中")).toBeNull();
-    expect(screen.queryByText("极高")).toBeNull();
+    const slider = screen.getByRole("slider");
+    expect(slider.getAttribute("max")).toBe("2");
+    for (const [index, label] of ["低", "focused", "Ultra"].entries()) {
+      fireEvent.change(slider, { target: { value: String(index) } });
+      expect(slider.getAttribute("aria-valuetext")).toBe(label);
+    }
+    expect(screen.queryByRole("button", { name: "恢复中等推理强度" })).toBeNull();
   });
 
   it("selects the model-declared xhigh effort from the Composer", async () => {
@@ -443,8 +444,8 @@ describe("FooterRow permission picker", () => {
     render(<FooterRow sendState="idle" onSend={() => {}} />);
 
     fireEvent.click(screen.getByTitle("模型推理强度：中等推理强度。仅在当前 Provider/模型支持时生效，不改变工具迭代预算。"));
-    fireEvent.click(screen.getByRole("button", { name: "选择推理档位" }));
-    fireEvent.click(screen.getByText("极高"));
+    fireEvent.change(screen.getByRole("slider"), { target: { value: "3" } });
+    fireEvent.pointerUp(screen.getByRole("slider"));
 
     await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({
       type: "llm.config.set",
@@ -455,7 +456,7 @@ describe("FooterRow permission picker", () => {
     }, "effort"));
   });
 
-  it("keeps a standard reasoning ladder compact but never hides the live level", () => {
+  it("keeps every declared level selectable and the slider mounted when leaving ultra", () => {
     useAppStore.setState({
       effortLevel: "ultra",
       runtimeCapabilities: {
@@ -468,19 +469,17 @@ describe("FooterRow permission picker", () => {
 
     render(<FooterRow sendState="idle" onSend={() => {}} />);
 
-    // The pill names the configured level. It used to display 极高 (xhigh)
-    // because narrowing dropped `ultra` from the ladder, which also made the
-    // real level impossible to reselect.
     fireEvent.click(screen.getByTitle("模型推理强度：Ultra 推理强度。仅在当前 Provider/模型支持时生效，不改变工具迭代预算。"));
-    fireEvent.click(screen.getByRole("button", { name: "选择推理档位" }));
-
-    expect(screen.getByText("低")).toBeTruthy();
-    expect(screen.getByText("中")).toBeTruthy();
-    expect(screen.getByText("高")).toBeTruthy();
-    expect(screen.getByText("极高")).toBeTruthy();
-    expect(screen.getAllByText("Ultra").length).toBeGreaterThan(0);
-    // Still narrowed: `max` is declared but neither standard nor selected.
-    expect(screen.queryByText("最大")).toBeNull();
+    const slider = screen.getByRole("slider");
+    expect(slider.getAttribute("aria-valuetext")).toBe("Ultra");
+    expect(slider.getAttribute("max")).toBe("5");
+    fireEvent.change(slider, { target: { value: "4" } });
+    fireEvent.pointerUp(slider);
+    expect(screen.getByRole("slider")).toBe(slider);
+    expect(slider.getAttribute("aria-valuetext")).toBe("最大");
+    fireEvent.change(slider, { target: { value: "5" } });
+    fireEvent.pointerUp(slider);
+    expect(slider.getAttribute("aria-valuetext")).toBe("Ultra");
   });
 
   // Regression: narrowing the ladder to low/medium/high plus one extreme level
@@ -507,13 +506,14 @@ describe("FooterRow permission picker", () => {
     expect(screen.queryByText("中（不支持）")).toBeNull();
 
     fireEvent.click(pill);
-    fireEvent.click(screen.getByRole("button", { name: "选择推理档位" }));
-
-    const choices = screen.getAllByRole("button").filter((node) => node.textContent === "最低");
-    expect(choices.length).toBeGreaterThan(0);
-    expect(screen.getByText("低")).toBeTruthy();
-    expect(screen.getByText("中")).toBeTruthy();
-    expect(screen.getByText("高")).toBeTruthy();
+    const slider = screen.getByRole("slider");
+    expect(slider.getAttribute("aria-valuetext")).toBe("最低");
+    fireEvent.change(slider, { target: { value: "2" } });
+    fireEvent.pointerUp(slider);
+    expect(screen.getByRole("slider")).toBe(slider);
+    fireEvent.change(slider, { target: { value: "0" } });
+    fireEvent.pointerUp(slider);
+    expect(slider.getAttribute("aria-valuetext")).toBe("最低");
   });
 
   it("shows model reasoning effort in the minimal empty-conversation Composer", () => {
@@ -535,7 +535,9 @@ describe("FooterRow permission picker", () => {
   it("commits a supported slider value once after dragging, not on every move", async () => {
     useAppStore.setState({ effortLevel: "medium", runtimeCapabilities: { provider_capabilities: { reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high", "xhigh"] } } });
     render(<FooterRow sendState="idle" onSend={() => {}} />);
-    expect(screen.getByRole("group", { name: "模型与推理强度" }).querySelectorAll(':scope > div')).toHaveLength(2);
+    const modelControl = screen.getByRole("group", { name: "模型与推理强度" });
+    expect(modelControl.querySelectorAll('button')).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "中", exact: true })).toBeNull();
     fireEvent.click(screen.getByTitle(/模型推理强度：中等/));
     const slider = screen.getByRole("slider", { name: "推理强度" });
     fireEvent.change(slider, { target: { value: "2" } });
@@ -545,6 +547,103 @@ describe("FooterRow permission picker", () => {
     fireEvent.pointerUp(slider);
     await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({ reasoning_effort: "xhigh" }), "effort"));
     expect(sendClientCommandAwaitResult).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the model list from the effort chevron and switches the conversation model", async () => {
+    useAppStore.setState({
+      availableModels: ["gpt-5", "gpt-5.5"],
+      runtimeCapabilities: { provider_capabilities: {
+        reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"],
+      } },
+    });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    expect(screen.queryByRole("button", { name: "高", exact: true })).toBeNull();
+    fireEvent.click(screen.getByTitle("gpt-5"));
+    expect(screen.queryByRole("button", { name: "高", exact: true })).toBeNull();
+    expect(document.querySelector('.composer-effort-value')?.tagName).toBe("SPAN");
+    fireEvent.click(screen.getByRole("button", { name: "选择模型" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("listbox", { name: "推理档位" })).toBeNull();
+    expect(screen.getByRole("listbox", { name: "选择模型" })).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("option", { name: "gpt-5", exact: true })));
+    fireEvent.click(screen.getByRole("option", { name: "gpt-5.5", exact: true }));
+    expect(sendClientCommand).toHaveBeenCalledWith({ type: "llm.model.set", model: "gpt-5.5", conversation_id: "conv-footer" });
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    expect(screen.queryByRole("listbox")).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTitle("gpt-5")));
+  });
+
+  it("cancels a slider preview and commits keyboard changes once", async () => {
+    useAppStore.setState({ effortLevel: "medium", runtimeCapabilities: { provider_capabilities: {
+      reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"],
+    } } });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByTitle(/模型推理强度：中等/));
+    const slider = screen.getByRole("slider");
+    fireEvent.change(slider, { target: { value: "2" } });
+    fireEvent.pointerCancel(slider);
+    expect(slider.getAttribute("aria-valuetext")).toBe("中");
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    fireEvent.change(slider, { target: { value: "0" } });
+    fireEvent.keyUp(slider, { key: "Home" });
+    fireEvent.blur(slider);
+    await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({ reasoning_effort: "low" }), "effort"));
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers declared choices when the current effort is unsupported", () => {
+    useAppStore.setState({ effortLevel: "max", runtimeCapabilities: { provider_capabilities: {
+      reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"],
+    } } });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByTitle(/模型推理强度：最大/));
+    expect(screen.queryByRole("slider")).toBeNull();
+    fireEvent.click(screen.getByRole("option", { name: "中" }));
+    expect(screen.getByRole("slider").getAttribute("aria-valuetext")).toBe("中");
+  });
+
+  it("keeps the picker and latest selection stable while earlier effort replies arrive", async () => {
+    const replies: Array<(result: any) => void> = [];
+    vi.mocked(sendClientCommandAwaitResult)
+      .mockImplementationOnce(() => new Promise(resolve => replies.push(resolve)))
+      .mockImplementationOnce(() => new Promise(resolve => replies.push(resolve)));
+    useAppStore.setState({ effortLevel: "medium", runtimeCapabilities: { provider_capabilities: {
+      reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"],
+    } } });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByTitle(/模型推理强度：中等/));
+    const slider = screen.getByRole("slider");
+    fireEvent.change(slider, { target: { value: "0" } });
+    fireEvent.pointerUp(slider);
+    expect(screen.getByTitle(/模型推理强度：低/)).toBeTruthy();
+    fireEvent.change(slider, { target: { value: "2" } });
+    fireEvent.pointerUp(slider);
+    expect(screen.getByTitle(/模型推理强度：高/)).toBeTruthy();
+    await act(async () => {
+      useAppStore.setState({ effortLevel: "low" });
+      replies[0]({ type: "command.result", command: "effort", level: "success" });
+    });
+    expect(screen.getByRole("slider")).toBe(slider);
+    expect(slider.getAttribute("aria-valuetext")).toBe("高");
+    await act(async () => {
+      replies[1]({ type: "command.result", command: "effort", level: "success" });
+      useAppStore.setState({ effortLevel: "high" });
+    });
+    expect(screen.getByRole("slider")).toBe(slider);
+    expect(slider.getAttribute("aria-valuetext")).toBe("高");
+  });
+
+  it("returns to the acknowledged effort when a selection is refused", async () => {
+    vi.mocked(sendClientCommandAwaitResult).mockResolvedValueOnce({ type: "command.result", command: "effort", level: "error", message: "refused" });
+    useAppStore.setState({ effortLevel: "medium", runtimeCapabilities: { provider_capabilities: {
+      reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"],
+    } } });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByTitle(/模型推理强度：中等/));
+    fireEvent.change(screen.getByRole("slider"), { target: { value: "2" } });
+    fireEvent.pointerUp(screen.getByRole("slider"));
+    await waitFor(() => expect(screen.getByTitle(/模型推理强度：中等/)).toBeTruthy());
+    expect(screen.getByRole("slider").getAttribute("aria-valuetext")).toBe("中");
   });
 
   it("does not display an unknown usage placeholder in the footer", () => {

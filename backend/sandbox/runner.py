@@ -618,25 +618,35 @@ class SandboxRunner:
             if os.name == "nt"
             else shlex.join(argv)
         )
-        wrapped = self._wrap_command(
-            command,
-            capability,
-            cwd=cwd,
-            host_command=host_command,
-        )
-        spawn_kwargs = {
-            "stdin": stdin,
-            "stdout": stdout,
-            "stderr": stderr,
-            "cwd": str(cwd) if cwd else None,
-            "env": self._build_env(),
-        }
-        if isinstance(wrapped, list):
-            process = await spawn_exec(*wrapped, **spawn_kwargs)
-        else:
-            process = await spawn_shell(wrapped, **spawn_kwargs)
-        await self._await_sandbox_ready(process)
-        return process
+        process: asyncio.subprocess.Process | None = None
+        try:
+            wrapped = self._wrap_command(
+                command,
+                capability,
+                cwd=cwd,
+                host_command=host_command,
+            )
+            spawn_kwargs = {
+                "stdin": stdin,
+                "stdout": stdout,
+                "stderr": stderr,
+                "cwd": str(cwd) if cwd else None,
+                "env": self._build_env(),
+            }
+            if isinstance(wrapped, list):
+                process = await spawn_exec(*wrapped, **spawn_kwargs)
+            else:
+                process = await spawn_shell(wrapped, **spawn_kwargs)
+            self.process = process
+            await self._await_sandbox_ready(process)
+            return process
+        except BaseException as exc:
+            if process is None:
+                self._cleanup_sandbox_setup_state()
+            else:
+                reaped = await asyncio.shield(self._kill_tree(process))
+                record_unproven_cleanup(exc, reaped=reaped, proc=process)
+            raise
 
     async def spawn_shell_interactive(
         self,
@@ -652,20 +662,30 @@ class SandboxRunner:
         if not str(command or "").strip():
             raise ValueError("Sandbox shell command must not be empty")
         wrapped, _ = self.prepare_command(command, cwd=cwd, host_command=command)
-        spawn_kwargs = {
-            "stdin": stdin,
-            "stdout": stdout,
-            "stderr": stderr,
-            "cwd": str(cwd) if cwd else None,
-            "env": self._build_env(),
-            "on_exit": on_exit,
-        }
-        if isinstance(wrapped, list):
-            process = await spawn_exec(*wrapped, **spawn_kwargs)
-        else:
-            process = await spawn_shell(wrapped, **spawn_kwargs)
-        await self._await_sandbox_ready(process)
-        return process
+        process: asyncio.subprocess.Process | None = None
+        try:
+            spawn_kwargs = {
+                "stdin": stdin,
+                "stdout": stdout,
+                "stderr": stderr,
+                "cwd": str(cwd) if cwd else None,
+                "env": self._build_env(),
+                "on_exit": on_exit,
+            }
+            if isinstance(wrapped, list):
+                process = await spawn_exec(*wrapped, **spawn_kwargs)
+            else:
+                process = await spawn_shell(wrapped, **spawn_kwargs)
+            self.process = process
+            await self._await_sandbox_ready(process)
+            return process
+        except BaseException as exc:
+            if process is None:
+                self._cleanup_sandbox_setup_state()
+            else:
+                reaped = await asyncio.shield(self._kill_tree(process))
+                record_unproven_cleanup(exc, reaped=reaped, proc=process)
+            raise
 
     async def terminate(self, process: asyncio.subprocess.Process) -> bool:
         """Terminate an owned interactive process and release sandbox state.

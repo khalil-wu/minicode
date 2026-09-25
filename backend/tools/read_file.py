@@ -108,7 +108,13 @@ class ReadFileTool(BaseTool):
         self._artifact_store = artifact_store
 
     def model_description(self) -> str:
-        return "Read a text file with line numbers and content_hash."
+        return (
+            "Read a text file with line numbers and content_hash. For large source files, "
+            "locate the relevant symbols with grep_files, then read a focused start_line/end_line range. "
+            "A focused read supplies the current full-file hash for editing when available. If output is truncated "
+            "or persisted, narrow the range or read the saved output; repeating the same unbounded read "
+            "returns the same preview."
+        )
 
     def model_schema(self) -> ToolSchema:
         return ToolSchema(

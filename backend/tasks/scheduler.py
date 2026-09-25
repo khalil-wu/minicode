@@ -647,9 +647,27 @@ class TaskScheduler:
         if previous is None or not self._workspace_matches(previous.workspace_root, workspace_root):
             return None
         task = self._tasks.get(previous.task_id)
-        if task is None or task.deleted_at is not None:
+        if task is None or (task.deleted_at is not None and task.recurring):
             return None
-        return self.run_now(previous.task_id, workspace_root=workspace_root)
+        active = self._active_run_for_task(task.id)
+        if active is not None:
+            return active
+        # A one-shot schedule is hidden after its first claim, but its saved
+        # definition and run history still own an explicit retry. Reuse the
+        # prior conversation so a retry can continue from its saved context.
+        return self._schedule_fire(
+            task,
+            datetime.now(UTC),
+            consume_schedule=False,
+            retry_conversation_id=previous.conversation_id,
+            allow_deleted=not task.recurring,
+        )
+
+    def bind_run_conversation(self, run_id: str, conversation_id: str) -> None:
+        """Persist the new conversation before its model turn can be interrupted."""
+        run = self._runs[run_id]
+        run.conversation_id = conversation_id
+        self._save()
 
     def cancel_run(self, run_id: str, *, workspace_root: str | None = None) -> bool:
         active = self._run_tasks.get(run_id)
@@ -867,14 +885,16 @@ class TaskScheduler:
         due_at: datetime,
         *,
         consume_schedule: bool,
+        retry_conversation_id: str = "",
+        allow_deleted: bool = False,
     ) -> ScheduledTaskRun:
-        if task.deleted_at is not None:
+        if task.deleted_at is not None and not allow_deleted:
             raise ValueError(f"Cannot schedule deleted task '{task.id}'")
         run = ScheduledTaskRun(
             task_id=task.id,
             scheduled_at=due_at.astimezone(UTC).isoformat(),
             workspace_root=task.workspace_root,
-            conversation_id=task.conversation_id,
+            conversation_id=retry_conversation_id or task.conversation_id,
         )
         previous = (
             task.last_run_at,

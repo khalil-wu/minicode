@@ -2,7 +2,7 @@ import { _electron as electron, expect, test } from "@playwright/test";
 import { createServer } from "node:net";
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -72,6 +72,16 @@ async function launchRealProvider(userDataDir: string, backendPort: number) {
     cwd: desktopEntry,
     env: realProviderEnv({ userDataDir, backendPort, frontendPort }),
   });
+}
+
+async function captureDesktop(app: Awaited<ReturnType<typeof electron.launch>>, filePath: string) {
+  // Electron owns the native compositor. Its capture API also works when CDP's
+  // full-page screenshot stalls after a window/side-panel resize on Windows.
+  const png = await app.evaluate(async ({ BrowserWindow }) => {
+    const image = await BrowserWindow.getAllWindows()[0].capturePage();
+    return image.toPNG().toString("base64");
+  });
+  await writeFile(filePath, Buffer.from(png, "base64"));
 }
 
 async function prepareRealWorkspace(testRoot: string, name: string) {
@@ -218,8 +228,18 @@ test.describe("real provider desktop multi-agent path", () => {
           peakRunningSubagents: 0,
           samples: [],
           collaborationDomSamples: [],
+          longTasks: [],
           streamingTransitions: [{ value: Boolean(store.getState().isStreaming), at: Date.now() }],
         };
+        const longTaskObserver = new PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) {
+            (window as any).__realProviderEvidence.longTasks.push({
+              startTime: entry.startTime, duration: entry.duration,
+            });
+          }
+        });
+        longTaskObserver.observe({ type: "longtask" });
+        (window as any).__realProviderLongTaskObserver = longTaskObserver;
         const sampleCollaborationDom = () => {
           const evidence = (window as any).__realProviderEvidence;
           const cells = Array.from(document.querySelectorAll<HTMLElement>(".collaboration-cell"))
@@ -277,10 +297,12 @@ test.describe("real provider desktop multi-agent path", () => {
 
       const assignments = Array.from({ length: requestedSubagents }, (_, offset) => {
         const index = offset + 1;
-        return `${index}. one subagent reads only fact-${index}.txt and returns its exact FACT_${index} line`;
+        return `${index}. one subagent reads only fact-${index}.txt, sends its exact FACT_${index} line to recipient parent using send_message, then returns that exact line`;
       }).join("\n");
       const prompt = [
-        `Use exactly ${requestedSubagents} subagents in one parallel task call.`,
+        `Use exactly ${requestedSubagents} subagents in one parallel foreground task call (run_in_background=false), each with agent_type="general-purpose" and read_only=true.`,
+        "Keep read_only=true: each child must report through the internal parent mailbox without gaining write permission.",
+        "Each child must use send_message to report its fact before returning. They must only read files for this task.",
         "Before that tool call, emit one short public progress sentence describing the delegation.",
         "Do not read the files in the parent agent and do not replace delegation with direct tools.",
         assignments,
@@ -333,13 +355,12 @@ test.describe("real provider desktop multi-agent path", () => {
       ).toBe(false);
 
       // Codex replays a parent-owned child through the ordinary chat renderer.
-      // Exercise that production path after completion so durable replay,
-      // default expansion, and the direct-input fence are all real-provider evidence.
-      await window.getByRole("button", { name: "打开右侧栏" }).click();
+      // Exercise durable replay, expansion, and the direct-input fence.
+      // Incoming mailbox messages can already have opened the Agents panel.
+      const openSidebar = window.getByRole("button", { name: "打开右侧栏" });
+      if (await openSidebar.isVisible()) await openSidebar.click();
       await window.getByRole("button", { name: "添加面板" }).click();
-      await window.getByRole("navigation", { name: "面板选择" })
-        .getByRole("button", { name: "子智能体" })
-        .click();
+      await window.getByRole("menuitem", { name: "子智能体", exact: true }).click();
       const firstChildRow = window.locator(".subagents-row").first();
       await expect(firstChildRow).toBeVisible({ timeout: 30_000 });
       await firstChildRow.click();
@@ -350,6 +371,7 @@ test.describe("real provider desktop multi-agent path", () => {
       await expect(childTranscript.locator(".chat-turn").first()).toBeVisible();
       await expect(childDetail.locator("textarea")).toHaveCount(0);
       await expect(childDetail.locator("details")).toHaveCount(0);
+      await childDetail.getByRole("button", { name: "展开处理步骤" }).first().click();
       const childProcess = childDetail.locator('.chat-turn-process[data-collapsed="false"]').first();
       await expect(childProcess).toBeVisible();
       const childReplayEvidence = await childDetail.evaluate((element) => ({
@@ -428,6 +450,7 @@ test.describe("real provider desktop multi-agent path", () => {
           .join("\n");
         return {
           model: state.currentModel,
+          usage: state.usageTotals,
           messages,
           assistantText,
           processText: renderedProcessText.length ? renderedProcessText : processText,
@@ -446,6 +469,7 @@ test.describe("real provider desktop multi-agent path", () => {
           collaborationCells: Array.from(document.querySelectorAll<HTMLElement>(".collaboration-cell"))
             .map((element) => ({
               action: element.dataset.action ?? "",
+              status: element.dataset.status ?? "",
               summary: element.querySelector(".collaboration-cell-summary")?.textContent?.trim() ?? "",
               details: Array.from(element.querySelectorAll(".collaboration-cell-detail"))
                 .map((detail) => detail.textContent?.trim() ?? "")
@@ -462,11 +486,9 @@ test.describe("real provider desktop multi-agent path", () => {
         ["done", "partial", "cancelled", "error"].includes(item.status),
       );
       const successfulSubagents = evidence.subagents.filter((item: any) => item.status === "done");
-      const cacheReadInputTokens = evidence.messages
-        .flatMap((message: any) => Array.isArray(message.blocks) ? message.blocks : [])
-        .map((block: any) => Number(block.providerRaw?.usage?.cache_read_input_tokens ?? 0))
-        .filter((value: number) => Number.isFinite(value) && value > 0)
-        .reduce((total: number, value: number) => total + value, 0);
+      // Use the same normalized usage as the UI. Responses raw usage calls
+      // this cached_prompt_tokens; reading an Anthropic-only field reported 0.
+      const cacheReadInputTokens = evidence.usage.cacheRead;
       const evidencePayload = {
         capturedAt: new Date().toISOString(),
         baseHost: new URL(baseUrl).host,
@@ -475,6 +497,7 @@ test.describe("real provider desktop multi-agent path", () => {
         requestedSubagents,
         modelProcessTextProduced: evidence.processText.length > 0,
         cacheReadInputTokens,
+        usage: evidence.usage,
         assistantText: evidence.assistantText,
         processText: evidence.processText,
         messages: evidence.messages,
@@ -499,10 +522,7 @@ test.describe("real provider desktop multi-agent path", () => {
         JSON.stringify(evidencePayload, null, 2),
         "utf8",
       );
-      await window.screenshot({
-        path: path.join(evidenceRoot, "last-run.png"),
-        fullPage: true,
-      });
+      await captureDesktop(app, path.join(evidenceRoot, "last-run.png"));
 
       expect(evidence.subagents.length).toBeGreaterThanOrEqual(requestedSubagents);
       expect(terminalSubagents.length).toBeGreaterThanOrEqual(requestedSubagents);
@@ -522,7 +542,8 @@ test.describe("real provider desktop multi-agent path", () => {
       if (requireProcessText) expect(evidence.processText.length).toBeGreaterThan(0);
       if (requireCacheRead) expect(cacheReadInputTokens).toBeGreaterThan(0);
       expect(evidence.toolCalls.some((record: any) => record?.name === "task" && record?.status === "success")).toBe(true);
-      const sentMessageCells = evidence.collaborationCells.filter((cell: any) => cell.action === "sent_message");
+      const sentMessageCells = evidence.collaborationCells.filter((cell: any) =>
+        cell.action === "sent_message" && cell.status === "success");
       expect(sentMessageCells).toHaveLength(1);
       expect(sentMessageCells[0].summary).toContain(`已发送消息 ${requestedSubagents} 个智能体`);
       expect(sentMessageCells[0].details).toHaveLength(requestedSubagents);
@@ -541,13 +562,56 @@ test.describe("real provider desktop multi-agent path", () => {
         expect(evidence.assistantText).toContain(`FACT_${index}=value-${index * 17}`);
       }
       expect(evidence.assistantText).toContain("REAL_PROVIDER_E2E_OK");
+      for (let index = 1; index <= requestedSubagents; index += 1) {
+        const fact = `FACT_${index}=value-${index * 17}`;
+        const reports = successfulSubagents.flatMap((child: any) => (child.messages ?? [])
+          .filter((message: any) => message.senderId === child.id && message.recipientId === "parent"
+            && message.content.includes(fact)));
+        expect(new Set(reports.map((message: any) => message.messageId)).size).toBe(1);
+      }
+
+      // Resume a completed child through the deliberately restricted background
+      // surface. The fact is created after the original run and never supplied
+      // to the parent, so a repeated old result cannot satisfy the assertion.
+      const resumedId = successfulSubagents[0].id;
+      const previousEpoch = successfulSubagents[0].mailboxEpoch;
+      const mailboxFact = `MAILBOX_FACT=${Date.now()}`;
+      await writeFile(path.join(workspace, "mailbox-followup.txt"), mailboxFact + "\n", "utf8");
+      await composer.fill([
+        `Use send_message to resume the existing agent ${resumedId}.`,
+        "Tell it to read only mailbox-followup.txt and return its exact line, then finish.",
+        "Wait for the renewed result. Do not spawn another agent or read the file yourself.",
+        "Report the returned exact line and the marker MAILBOX_E2E_OK.",
+      ].join("\n"));
+      await composer.press("Enter");
+      await expect.poll(() => window.evaluate(({ resumedId, previousEpoch, mailboxFact }) => {
+        const state = (window as any).__zustandStore.getState();
+        const child = state.subagents.find((item: any) => item.id === resumedId);
+        return !state.isStreaming && child?.status === "done" && child.mailboxEpoch > previousEpoch
+          && state.messages.filter((message: any) => message.role === "assistant").at(-1)?.content.includes(mailboxFact);
+      }, { resumedId, previousEpoch, mailboxFact }), { timeout: 180_000 }).toBe(true);
+      const mailbox = await window.evaluate(({ resumedId }) => {
+        const state = (window as any).__zustandStore.getState();
+        return {
+          child: state.subagents.find((item: any) => item.id === resumedId),
+          childCount: state.subagents.length,
+          answer: state.messages.filter((message: any) => message.role === "assistant").at(-1)?.content ?? "",
+        };
+      }, { resumedId });
+      expect(mailbox.child.mailboxEpoch).toBeGreaterThan(previousEpoch);
+      expect(mailbox.child.id).toBe(resumedId);
+      expect(mailbox.child.resultContent).toContain(mailboxFact);
+      expect(mailbox.answer).toContain(mailboxFact);
+      expect(mailbox.answer).toContain("MAILBOX_E2E_OK");
+      expect(JSON.stringify(mailbox)).not.toContain(apiKey);
+      await writeFile(path.join(evidenceRoot, "mailbox-resume.json"), JSON.stringify(mailbox, null, 2), "utf8");
     } finally {
       await app.close().catch(() => undefined);
       await rm(testRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 
-  test("real provider completes a multi-file coding fix and keeps the diff in the process trace", async () => {
+  test("real provider completes a multi-file coding fix and shows the diff with the reply", async () => {
     test.setTimeout(Number(process.env.MINICODE_REAL_E2E_CODING_TIMEOUT_MS ?? "600000"));
     const testRoot = await mkdtemp(path.join(tmpdir(), "minicode-real-coding-e2e-"));
     const { userDataDir, workspace } = await prepareRealWorkspace(testRoot, "workspace");
@@ -619,7 +683,9 @@ test.describe("real provider desktop multi-agent path", () => {
       if (await workArea.getAttribute("data-collapsed") === "true") {
         await workArea.getByRole("button", { name: "展开处理步骤" }).click();
       }
-      await expect(workArea.locator(".diff-cell")).toHaveCount(1);
+      for (const group of await workArea.getByRole("button", { name: /^读取了文件/ }).all()) {
+        if (await group.getAttribute("aria-expanded") === "false") await group.click();
+      }
       const commandResult = await window.evaluate(() => {
         const state = (window as any).__zustandStore?.getState();
         const messages = Array.isArray(state?.messages) ? state.messages : [];
@@ -645,6 +711,7 @@ test.describe("real provider desktop multi-agent path", () => {
           answerCount: document.querySelectorAll('.chat-turn-answer-zone').length,
           outcomeCount: document.querySelectorAll('[data-zone="outcome"]').length,
           processDiffCount: document.querySelectorAll('[data-zone="work"] .diff-cell').length,
+          replyDiffCount: document.querySelectorAll('[data-zone="reply"] .diff-cell').length,
           processEditActivityCount: document.querySelectorAll('[data-zone="work"] [data-activity-kind="fileChange"]').length,
           readActivityTexts: Array.from(document.querySelectorAll<HTMLElement>('[data-zone="work"] [data-activity-kind="fileRead"]'))
             .map((element) => element.innerText),
@@ -677,6 +744,7 @@ test.describe("real provider desktop multi-agent path", () => {
         answerCount: commandResult.answerCount,
         outcomeCount: commandResult.outcomeCount,
         processDiffCount: commandResult.processDiffCount,
+        replyDiffCount: commandResult.replyDiffCount,
         processEditActivityCount: commandResult.processEditActivityCount,
         readActivityTexts: commandResult.readActivityTexts,
         errorToasts: commandResult.errorToasts,
@@ -684,12 +752,16 @@ test.describe("real provider desktop multi-agent path", () => {
       expect(JSON.stringify(evidence)).not.toContain(apiKey);
       await mkdir(evidenceRoot, { recursive: true });
       await writeFile(path.join(evidenceRoot, "coding-task.json"), JSON.stringify(evidence, null, 2), "utf8");
-      await window.getByLabel("Agent 回复").last().scrollIntoViewIfNeeded();
-      await window.screenshot({ path: path.join(evidenceRoot, "coding-task.png"), fullPage: false });
+      await window.getByLabel("文件修改").scrollIntoViewIfNeeded();
+      await captureDesktop(app, path.join(evidenceRoot, "coding-task.png"));
 
+      await expect(window.getByLabel("文件修改").locator(".diff-cell")).toHaveCount(1);
       expect(source).toMatch(/reduce\(\(sum, value\) => sum \+ value/);
       expect(testSource).toMatch(/empty list|empty array|\[\], 0/i);
       expect(successfulCommand).toBeTruthy();
+      expect(successfulCommand?.waitingOn).toBeUndefined();
+      expect(successfulCommand?.blockingReason).toBeUndefined();
+      expect(successfulCommand?.transition).toBe("completed");
       expect(String(successfulCommand?.arguments?.command ?? successfulCommand?.args?.command ?? ""))
         .toContain("node --test test/calculator.test.mjs");
       expect(commandResult.isStreaming).toBe(false);
@@ -697,11 +769,11 @@ test.describe("real provider desktop multi-agent path", () => {
       expect(commandResult.processCount).toBe(1);
       expect(commandResult.answerCount).toBe(1);
       expect(commandResult.outcomeCount).toBe(0);
-      expect(commandResult.processDiffCount).toBe(1);
+      expect(commandResult.processDiffCount).toBe(0);
+      expect(commandResult.replyDiffCount).toBe(1);
       expect(commandResult.processEditActivityCount).toBe(0);
-      expect(commandResult.readActivityTexts.some((text: string) =>
-        text.includes("src/calculator.mjs") && text.includes("test/calculator.test.mjs"),
-      )).toBe(true);
+      expect(commandResult.readActivityTexts.join("\n")).toContain("src/calculator.mjs");
+      expect(commandResult.readActivityTexts.join("\n")).toContain("test/calculator.test.mjs");
       expect(commandResult.errorToasts).toEqual([]);
       expect(commandResult.assistantText).toMatch(/pass|修复|test/i);
     } finally {
@@ -778,9 +850,18 @@ test.describe("real provider desktop multi-agent path", () => {
     const testRoot = await mkdtemp(path.join(tmpdir(), "minicode-real-cancel-e2e-"));
     const { userDataDir, workspace } = await prepareRealWorkspace(testRoot, "workspace");
     const app = await launchRealProvider(userDataDir, await availablePort());
+    const frames: unknown[] = [];
 
     try {
       const window = await app.firstWindow();
+      window.on("websocket", (socket) => socket.on("framereceived", ({ payload }) => {
+        const event = JSON.parse(String(payload));
+        if (["done", "error", "agent.run.started", "agent.run.completed", "conversation.switched", "session.restored", "agent_message.delta", "command.result"].includes(event.type)) {
+          frames.push({ type: event.type, seq: event.seq, conversationId: event.conversation_id,
+            turnId: event.turn_id, messageId: event.message_id, status: event.status,
+            delta: event.delta, message: event.message, data: event.type === "command.result" ? event.data : undefined });
+        }
+      }));
       await initializeRealSession(window, workspace);
       const composer = realComposer(window);
       await expect(composer).toBeVisible({ timeout: 30_000 });
@@ -794,7 +875,7 @@ test.describe("real provider desktop multi-agent path", () => {
         () => window.evaluate(() => Boolean((window as any).__zustandStore?.getState().isStreaming)),
         { timeout: 30_000 },
       ).toBe(true);
-      // Wait until the real provider has produced assistant content. An
+      // Wait until the provider has produced visible text or reasoning. An
       // interrupt sent during the short pre-assistant race can legitimately
       // leave only the user message, which does not exercise partial-turn
       // persistence.
@@ -804,7 +885,7 @@ test.describe("real provider desktop multi-agent path", () => {
           return messages.some((message: any) => {
             if (message.role !== "assistant") return false;
             const projectedText = (Array.isArray(message.blocks) ? message.blocks : [])
-              .filter((block: any) => block.type === "text")
+              .filter((block: any) => block.type === "text" || block.type === "thinking")
               .map((block: any) => String(block.content ?? block.text ?? ""))
               .join("");
             return `${String(message.content ?? "")}${projectedText}`.length > 0;
@@ -828,7 +909,7 @@ test.describe("real provider desktop multi-agent path", () => {
         const messages = (window as any).__zustandStore?.getState().messages ?? [];
         const assistant = [...messages].reverse().find((message: any) => message.role === "assistant");
         const projectedText = (Array.isArray(assistant?.blocks) ? assistant.blocks : [])
-          .filter((block: any) => block.type === "text")
+          .filter((block: any) => block.type === "text" || block.type === "thinking")
           .map((block: any) => String(block.content ?? block.text ?? ""))
           .join("");
         return {
@@ -844,8 +925,15 @@ test.describe("real provider desktop multi-agent path", () => {
         "provider finished the turn before Stop could be clicked; interruption was not exercised",
       );
       expect(["interrupted", "partial"]).toContain(state.terminalStatus);
-      expect(state.contentLength).toBeGreaterThan(0);
       expect(state.errorToasts).toEqual([]);
+      // Provider reasoning is transient. Even if interruption leaves no final
+      // text, the stopped turn itself must survive renderer restoration.
+      await window.reload();
+      await expect.poll(() => window.evaluate(() => {
+        const current = (window as any).__zustandStore?.getState();
+        return current?.isConnected && [...current.messages].reverse()
+          .find((message: any) => message.role === "assistant")?.terminalStatus;
+      }), { timeout: 30_000 }).toBe(state.terminalStatus);
 
       await composer.fill("Reply with exactly CANCEL_RECOVERY_E2E_OK and no tool calls.");
       await composer.press("Enter");
@@ -854,8 +942,20 @@ test.describe("real provider desktop multi-agent path", () => {
         { timeout: 30_000 },
       ).toBe(true);
       await expect.poll(
-        () => window.evaluate(() => (window as any).__zustandStore?.getState().messages
-          ?.some((message: any) => String(message.content ?? "").includes("CANCEL_RECOVERY_E2E_OK"))),
+        async () => {
+          const snapshot = await window.evaluate(() => {
+            const state = (window as any).__zustandStore.getState();
+            return { conversationId: state.conversationId, isStreaming: state.isStreaming,
+              messages: state.messages.map((m: any) => ({ id: m.id, role: m.role, content: m.content,
+                terminalStatus: m.terminalStatus, turnId: m.turnId, isStreaming: m.isStreaming,
+                blocks: m.blocks?.filter((b: any) => b.type !== "thinking") })) };
+          });
+          await mkdir(evidenceRoot, { recursive: true });
+          expect(JSON.stringify({ snapshot, frames })).not.toContain(apiKey);
+          await writeFile(path.join(evidenceRoot, "interrupt-recovery.json"), JSON.stringify({ snapshot, frames }, null, 2), "utf8");
+          return snapshot.messages.some((message: any) => message.role === "assistant"
+            && message.terminalStatus === "completed" && String(message.content ?? "").includes("CANCEL_RECOVERY_E2E_OK"));
+        },
         { timeout: 120_000 },
       ).toBe(true);
       await expect.poll(
@@ -878,6 +978,8 @@ test.describe("real provider desktop multi-agent path", () => {
       expect(recovery.isStreaming).toBe(false);
     } finally {
       await app.close().catch(() => undefined);
+      await mkdir(evidenceRoot, { recursive: true });
+      await copyFile(path.join(userDataDir, "desktop.log"), path.join(evidenceRoot, "interrupt-backend.log"));
       await rm(testRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });

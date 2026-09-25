@@ -5,8 +5,42 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 
 const security = require("./security");
+
+test("runtime bootstrap accepts the owned main frame before URL commit and rejects foreign senders", () => {
+  const listeners = new Map();
+  const moduleBox = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "ipc-handlers.js"), "utf8"), {
+    module: moduleBox, process, console,
+    require(name) {
+      if (name === "electron") return { ipcMain: {
+        on(channel, handler) { listeners.set(channel, handler); }, handle() {},
+      } };
+      return require(name);
+    },
+  });
+  const mainFrame = { url: "" };
+  const webContents = { mainFrame, getURL: () => "" };
+  const win = { webContents, isDestroyed: () => false };
+  const runtime = { apiBaseUrl: "http://127.0.0.1:8123", wsBaseUrl: "ws://127.0.0.1:8123", runtimeToken: "test-token" };
+  moduleBox.exports.init({ getMainWindow: () => win, getRuntimeConfig: () => runtime });
+  moduleBox.exports.registerIpcHandlers();
+  const bootstrap = listeners.get("minicode:runtime:get");
+  const event = { sender: webContents, senderFrame: mainFrame };
+  bootstrap(event);
+  assert.equal(event.returnValue, runtime);
+  for (const foreign of [
+    { sender: webContents, senderFrame: { url: "" } },
+    { sender: { mainFrame }, senderFrame: mainFrame },
+  ]) {
+    assert.throws(() => bootstrap(foreign), { code: "ERR_UNTRUSTED_IPC_SENDER" });
+    assert.equal(foreign.returnValue, undefined);
+  }
+  win.isDestroyed = () => true;
+  assert.throws(() => bootstrap(event), { code: "ERR_UNTRUSTED_IPC_SENDER" });
+});
 
 test("sandboxed renderer preload only imports Electron's supported bridge", () => {
   const preloadSource = fs.readFileSync(path.join(__dirname, "preload.js"), "utf8");

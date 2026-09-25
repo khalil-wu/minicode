@@ -13,6 +13,8 @@ import asyncio
 from collections import Counter
 from contextlib import aclosing
 import hashlib
+import gc
+import inspect
 import json
 import math
 import os
@@ -488,6 +490,9 @@ def _subagent_event_from_task_tool(
 async def _run(prompt: str) -> int:
     workspace = Path(_required("MINICODE_EVAL_WORKSPACE")).resolve()
     initial_test_snapshot = _test_file_snapshot(workspace)
+    protect_existing_tests = _env_bool("MINICODE_EVAL_PROTECT_EXISTING_TESTS", default=True)
+    if protect_existing_tests:
+        prompt += "\n\nEvaluation rule: Leave pre-existing test files unchanged; add regression tests in new test files."
     profile = json.loads(os.environ.get("MINICODE_EVAL_PROFILE_JSON", "{}"))
     if not isinstance(profile, dict):
         raise ValueError("MINICODE_EVAL_PROFILE_JSON must be an object")
@@ -516,6 +521,45 @@ async def _run(prompt: str) -> int:
     llm_values["default_headers"] = tuple(tuple(item) for item in llm_values.get("default_headers", ()))
     settings = LLMSettings(**llm_values)
     llm = build_wire_adapter(settings, provider_id=settings.provider)
+    request_output = os.environ.get("MINICODE_EVAL_REQUEST_OUTPUT_DIR")
+    if request_output:
+        request_directory = Path(request_output)
+        request_directory.mkdir(parents=True, exist_ok=True)
+        request_number = 0
+
+        async def capture_request(request) -> None:
+            nonlocal request_number
+            request_number += 1
+            # Capture only the JSON model payload, never Authorization headers.
+            body = json.loads(request.content)
+            path = request_directory / f"{request_number:04d}.json"
+            await asyncio.to_thread(path.write_text, json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        llm._http_client.event_hooks["request"].append(capture_request)
+
+        async def capture_active_tasks() -> None:
+            while True:
+                await asyncio.sleep(30)
+                snapshots = []
+                for task in asyncio.all_tasks():
+                    current = task.get_coro()
+                    frames = []
+                    for _ in range(40):
+                        frame = getattr(current, "cr_frame", None) or getattr(current, "ag_frame", None)
+                        if frame is not None:
+                            frames.append(f"{frame.f_code.co_filename}:{frame.f_lineno}:{frame.f_code.co_name}")
+                        awaited = getattr(current, "cr_await", None) or getattr(current, "ag_await", None)
+                        if awaited is None:
+                            awaited = next((value for value in gc.get_referents(current)
+                                            if inspect.isasyncgen(value)), None)
+                        if awaited is None:
+                            break
+                        current = awaited
+                    snapshots.append({"task": task.get_name(), "frames": frames})
+                await asyncio.to_thread((request_directory / "active-tasks.json").write_text,
+                                        json.dumps(snapshots, indent=2), encoding="utf-8")
+
+        asyncio.create_task(capture_active_tasks(), name="eval-request-diagnostics")
     agent_values = dict(profile.get("agent", {}))
     for env_name, field in (
         ("MINICODE_EVAL_MAX_ITERATIONS", "max_iterations"),
@@ -578,6 +622,7 @@ async def _run(prompt: str) -> int:
         emit_event=capture_runtime_event,
         metadata={
             "eval": True,
+            "resume_from_checkpoint": _env_bool("MINICODE_EVAL_RESUME_FROM_CHECKPOINT"),
             "conversation_id": state.conversation_id,
             "workspace_root": str(workspace),
             # An evaluator has no interactive user to approve a model-authored
@@ -810,7 +855,6 @@ async def _run(prompt: str) -> int:
         max(0, int(item.get("elapsed_ms") or 0)) for item in side_calls
     )
     test_integrity = _test_integrity_violations(initial_test_snapshot, workspace)
-    protect_existing_tests = _env_bool("MINICODE_EVAL_PROTECT_EXISTING_TESTS", default=True)
     # SWE-bench supplies an external oracle and permits regression test edits.
     # Keep the edits in the trace without treating them as a failed agent run.
     test_integrity_satisfied = not protect_existing_tests or not any(test_integrity.values())

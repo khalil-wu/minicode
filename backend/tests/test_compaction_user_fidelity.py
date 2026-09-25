@@ -36,10 +36,17 @@ def test_two_compactions_preserve_user_constraints_and_tool_pairs_through_cold_r
         builder.append_assistant("analysis " * 1000)
         builder.append_assistant_tool_calls([ToolCallEvent(id="verify", name="run_command", arguments={"command": "pytest"})])
         builder.append_tool_result("verify", "run_command", ToolResult(content="tail output " * 10))
+        # Reserve exactly the complete final pair. An intentionally smaller
+        # budget now summarizes the pair, covered by the oversized-group test.
+        builder._agent_settings = AgentSettings(
+            compaction_keep_recent_tokens=sum(builder._history_token_estimates[-2:])
+        )
         before = builder.export_snapshot()
         for _ in range(2):
             await builder.compact()
             assert [m.content for m in builder._history if m.is_user_input] == [original, current]
+            handoff = next(i for i, m in enumerate(builder._history) if m.content.startswith(COMPACTION_SUMMARY_PREFIX))
+            assert all(i < handoff for i, m in enumerate(builder._history) if m.is_user_input)
             assert [m.role for m in builder._history[-2:]] == ["assistant", "tool"]
             assert builder._history[-1].tool_call_id == "verify"
             assert not any("custom verification hook" in m.content for m in builder._history if m.is_user_input)

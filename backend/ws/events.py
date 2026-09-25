@@ -345,6 +345,8 @@ class ItemCompletedData(TypedDict, total=False):
 
 
 class TaskUpdateData(TypedDict, total=False):
+    session: dict[str, Any]
+    partial: bool
     todo_id: str
     status: Literal["pending", "in_progress", "completed", "blocked"]
     content: str
@@ -357,7 +359,7 @@ class TurnDiffUpdatedData(TypedDict):
     thread_id: str
     conversation_id: str
     turn_id: str
-    diff: str
+    diff: str | None
 
 
 AgentProgressProviderState = Literal[

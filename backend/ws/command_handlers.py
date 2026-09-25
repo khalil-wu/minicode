@@ -195,6 +195,7 @@ class SessionCommandHandlersMixin:
         conversation_id: str | None = None,
         reasoning_effort: str | None = None,
         config_override: Any | None = None,
+        refresh_auth: bool = True,
     ) -> bool:
         from backend.config import load_config
         from backend.ws.agent_runner import _resolver_accepts_positional_arguments
@@ -246,8 +247,9 @@ class SessionCommandHandlersMixin:
         if model_runtime is not None:
             if config_override is not None:
                 model_runtime.refresh(settings_snapshot=scoped_settings)
-            await model_runtime.refresh_oauth_credentials(normalized_provider)
-            await model_runtime.refresh_provider_auth(normalized_provider)
+            if refresh_auth:
+                await model_runtime.refresh_oauth_credentials(normalized_provider)
+                await model_runtime.refresh_provider_auth(normalized_provider)
             runtime_models = model_runtime.get_models(normalized_provider)
             available_models = [item.id for item in runtime_models]
             selected_runtime_model = model_runtime.get_model(
@@ -343,6 +345,9 @@ class SessionCommandHandlersMixin:
         return await self._set_selected_provider_model(
             provider, model or current_model, manual_override=manual_override,
             conversation_id=owner_id, reasoning_effort=reasoning_effort,
+            # Effort-only edits use the selected model's resolved capabilities.
+            # Request-time auth refresh still owns actual provider calls.
+            refresh_auth=bool(model) or reasoning_effort is None,
         )
 
     async def send_llm_state(self, *, force: bool = False) -> None:

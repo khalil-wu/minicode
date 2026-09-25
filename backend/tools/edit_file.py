@@ -307,9 +307,9 @@ class EditFileTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string"},
-                    "old_string": {"type": "string"},
-                    "new_string": {"type": "string"},
+                    "file_path": {"type": "string", "description": "Absolute or workspace-relative path to the file already read."},
+                    "old_string": {"type": "string", "description": "Exact existing text to replace, including whitespace; unique unless replace_all is true."},
+                    "new_string": {"type": "string", "description": "Replacement text; an empty string deletes the matched text."},
                     # Without this the model must issue one call per occurrence
                     # for a rename. expected_hash stays out of the model-facing
                     # schema because the runtime injects the read-time hash.

@@ -257,16 +257,15 @@ function registerIpcHandlers() {
 
   const assertWindowSender = (event, win, channel) => {
     const webContents = win && !win.isDestroyed() ? win.webContents : null;
-    const expectedUrl = webContents && typeof webContents.getURL === "function"
-      ? webContents.getURL()
-      : "";
     const actualUrl = senderUrl(event);
+    // Preload runs before navigation commits, when both URL snapshots can be
+    // empty. Authenticate the owned window and its main frame; navigation to
+    // other origins is restricted by window-manager, not by comparing a frame
+    // URL to another snapshot of that same frame's URL.
     const isTrusted =
       Boolean(webContents) &&
       event?.sender === webContents &&
-      event?.senderFrame === webContents.mainFrame &&
-      Boolean(expectedUrl) &&
-      actualUrl === expectedUrl;
+      event?.senderFrame === webContents.mainFrame;
     if (isTrusted) {
       return;
     }

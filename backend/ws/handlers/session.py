@@ -153,12 +153,6 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
         # already-hydrated state. Fall back as one indivisible snapshot instead.
         replay_candidates = []
     replay_can_cover_miss = bool(replay_candidates) and not event_log_gap
-    replay_terminal_conversation_ids = {
-        str(payload.get("conversation_id") or "").strip()
-        for payload in replay_candidates
-        if payload.get("type") == "done" and str(payload.get("conversation_id") or "").strip()
-    }
-
     restore_manager = SessionRestoreManager(session.conversation_repo)
     result = await restore_manager.restore_session(
         session_id=session.session_id,
@@ -279,9 +273,7 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
         )
     # Replay the frozen incremental window first, then replace it with the
     # authoritative accumulated stream snapshot. This avoids duplicated text.
-    await session.reemit_pending_state(
-        skip_stream_conversation_ids=replay_terminal_conversation_ids,
-    )
+    await session.reemit_pending_state()
     if restored_conversation_id:
         # Durable follow-ups survive a process/WebSocket restart. Dispatch only
         # after the authoritative session snapshot and replay have been applied.
@@ -307,12 +299,6 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
     if event_log_gap:
         replay_candidates = []
     replay_can_cover_miss = bool(replay_candidates) and not event_log_gap
-    replay_terminal_conversation_ids = {
-        str(payload.get("conversation_id") or "").strip()
-        for payload in replay_candidates
-        if payload.get("type") == "done" and str(payload.get("conversation_id") or "").strip()
-    }
-
     restore_manager = SessionRestoreManager(session.conversation_repo)
     result = await restore_manager.sync_session(
         session_id=session.session_id,
@@ -362,9 +348,7 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
     # A stream or approval can change without changing transcript length.  The
     # replay log is the source of truth for those mutations; this snapshot is
     # only the authoritative fallback when the bounded log has a gap.
-    await session.reemit_pending_state(
-        skip_stream_conversation_ids=replay_terminal_conversation_ids,
-    )
+    await session.reemit_pending_state()
     active_conversation_id = str(session.active_conversation_id or "").strip()
     if active_conversation_id:
         session.schedule_next_queued_user_message(active_conversation_id)

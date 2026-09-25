@@ -69,6 +69,7 @@ describe("SidebarLeft session status", () => {
         },
       ],
       conversationMessages: {},
+      recentWorkspaces: [],
       conversationStreaming: {},
       messages: [],
       pendingApproval: null,
@@ -432,6 +433,7 @@ describe("SidebarLeft session status", () => {
 
   it("separates workspace tasks from ordinary tasks", () => {
     useAppStore.setState({
+      recentWorkspaces: [{ path: "C:\\Desktop\\MiniCode", name: "MiniCode", projectType: "unknown", lastOpened: 1 }],
       conversations: [
         {
           id: "conv-workspace",
@@ -611,6 +613,7 @@ describe("SidebarLeft session status", () => {
 
   it("keeps tasks from all projects visible in their workspace groups", () => {
     useAppStore.setState({
+      recentWorkspaces: ["C:\\Desktop\\MiniCode", "C:\\Desktop\\Other"].map(path => ({ path, name: path, projectType: "unknown", lastOpened: 1 })),
       appMode: "cowork",
       workingDirectory: "C:\\Desktop\\MiniCode",
       workspaceGit: {
@@ -646,6 +649,7 @@ describe("SidebarLeft session status", () => {
 
   it("uses open and closed folder icons for workspace groups", () => {
     useAppStore.setState({
+      recentWorkspaces: [{ path: "C:\\Desktop\\MiniCode", name: "MiniCode", projectType: "unknown", lastOpened: 1 }],
       appMode: "cowork",
       workingDirectory: "C:\\Desktop\\MiniCode",
       conversations: [
@@ -676,6 +680,7 @@ describe("SidebarLeft session status", () => {
 
   it("starts a workspace-bound task from the project row", async () => {
     useAppStore.setState({
+      recentWorkspaces: [{ path: "C:\\Desktop\\MiniCode", name: "MiniCode", projectType: "unknown", lastOpened: 1 }],
       appMode: "cowork",
       workingDirectory: "C:\\Desktop\\MiniCode",
       conversations: [

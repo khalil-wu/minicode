@@ -72,6 +72,7 @@ export function projectChatTurnToAgentLoop(
     hasProcessContent:
       projectedProcessCells.length > 0
       || Boolean(turn.toolPage?.remaining)
+      || turn.status === "interrupted"
       || (turn.status === "streaming" && !answerCell),
     durationMs,
     failureMessage: turn.finalAnswerCell?.failureMessage

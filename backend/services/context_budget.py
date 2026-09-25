@@ -20,14 +20,10 @@ def build_context_budget_snapshot(session: Any, builder: ContextBuilder) -> dict
     state = session.last_agent_state
     if state is None:
         state = AgentState(user_message="")
-    tool_schemas = None
-    try:
-        tool_schemas = session.tool_registry.get_schemas(
-            permission_checker=session.permission_checker,
-            permission_context=session.permission_context,
-        )
-    except Exception:
-        tool_schemas = None
+    tool_schemas = session.tool_registry.get_schemas(
+        permission_checker=session.permission_checker,
+        permission_context=session.permission_context,
+    )
     return builder.get_budget_snapshot(state=state, tool_schemas=tool_schemas)
 
 def _hook_manager_has_hooks(hook_mgr: Any, event: HookEvent) -> bool:
@@ -110,8 +106,8 @@ def _pre_compaction_warning(
     arithmetic beside the only caller that decides to compact.
     """
 
-    trigger = budget.total - budget.response_reserve
-    band_floor = trigger - _WARNING_BAND_TOKENS
+    trigger = budget.total - budget.reserved_response_tokens
+    band_floor = trigger - min(_WARNING_BAND_TOKENS, budget.total // 10)
     if band_floor <= 0:
         # The reserve alone fills the window, so there is no span between
         # "roomy" and "compacting" to warn about.

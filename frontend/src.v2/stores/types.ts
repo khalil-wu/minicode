@@ -307,7 +307,7 @@ export interface TurnDiffState {
   turnId: string;
   messageId?: string;
   taskId?: string;
-  diff: string;
+  diff: string | null;
   revision?: number;
   toolCallId?: string;
   updatedAt: number;
@@ -1461,7 +1461,7 @@ export interface ComposerSlice {
   clearAttachments: () => void;
   setPermissionMode: (m: PermissionMode) => void;
   setAgentMode: (m: AgentMode) => void;
-  setEffortLevel: (e: EffortLevel) => void;
+  setEffortLevel: (e: EffortLevel) => Promise<boolean>;
   setPRMonitor: (pr: PRMonitorState | null) => void;
   setActionChip: (c: ComposerSlice["actionChip"]) => void;
   setMentionResults: (items: ComposerSlice["mentionResults"]) => void;

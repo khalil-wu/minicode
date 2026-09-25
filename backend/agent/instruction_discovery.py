@@ -26,6 +26,7 @@ PROJECT_INSTRUCTIONS_LOCAL_FILENAME = Path(".minicode") / "INSTRUCTIONS.local.md
 # the wider ecosystem rather than deference to one tool. MiniCode reads it and
 # never writes it; a repository that has one keeps working unchanged.
 SHARED_INSTRUCTIONS_FILENAME = "AGENTS.md"
+SHARED_INSTRUCTIONS_OVERRIDE_FILENAME = "AGENTS.override.md"
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,7 @@ def guideline_change_metadata(path: str | Path) -> dict[str, str] | None:
             PROJECT_INSTRUCTIONS_FILENAME.name,
             PROJECT_INSTRUCTIONS_LOCAL_FILENAME.name,
             SHARED_INSTRUCTIONS_FILENAME,
+            SHARED_INSTRUCTIONS_OVERRIDE_FILENAME,
         }
         or (resolved.suffix.lower() == ".md" and ".minicode" in normalized_parts)
     )
@@ -321,6 +323,7 @@ def _instruction_candidates(
         for candidate in (
             directory / PROJECT_INSTRUCTIONS_LOCAL_FILENAME,
             directory / PROJECT_INSTRUCTIONS_FILENAME,
+            directory / SHARED_INSTRUCTIONS_OVERRIDE_FILENAME,
             directory / SHARED_INSTRUCTIONS_FILENAME,
             *(
                 directory / ".minicode" / filename
@@ -491,6 +494,8 @@ def _extract_include_paths(content: str, source_path: Path) -> list[Path]:
 
 def _expand_guideline_imports(
     specs: list[tuple[Path, str, str, int, str]],
+    *,
+    project_root_markers: tuple[str, ...],
 ) -> list[tuple[Path, str, str, int, str]]:
     """Expand MiniCode instruction imports with bounded depth and deduplication."""
     expanded: list[tuple[Path, str, str, int, str]] = []
@@ -520,7 +525,10 @@ def _expand_guideline_imports(
             _, conditional_paths = _parse_rule_content(content)
             if conditional_paths:
                 return
-        allowed_root = Path(scope).resolve()
+        scope_dir = Path(scope).resolve()
+        allowed_root = scope_dir
+        if source_kind.startswith("project_"):
+            allowed_root = _find_project_root(scope_dir, project_root_markers) or scope_dir
         for included in _extract_include_paths(content, resolved):
             suffix = included.suffix.lower()
             if suffix and suffix not in TEXT_FILE_EXTENSIONS:
@@ -559,8 +567,7 @@ def _read_blocks(
                 continue
             try:
                 raw_content = path.read_bytes()
-            except Exception as exc:
-                logger.debug("Failed to read %s: %s", path, exc)
+            except FileNotFoundError:
                 continue
             truncated = raw_content[:remaining]
             content = truncated.decode("utf-8", errors="replace")
@@ -576,8 +583,7 @@ def _read_blocks(
         else:
             try:
                 content = path.read_text(encoding="utf-8", errors="ignore").strip()
-            except Exception as exc:
-                logger.debug("Failed to read %s: %s", path, exc)
+            except FileNotFoundError:
                 continue
         if source_kind.endswith("_rule"):
             content, conditional_paths = _parse_rule_content(content)
@@ -701,7 +707,8 @@ def load_project_guideline_bundle(
             extra_paths,
             project_root_markers=root_markers,
             project_doc_fallback_filenames=fallback_filenames,
-        )
+        ),
+        project_root_markers=root_markers,
     )
     signature = _build_signature(specs)
 

@@ -110,6 +110,15 @@ describe("FileTree directory request ownership", () => {
     });
   });
 
+  it("offers workspace removal on the root title without a file deletion action", async () => {
+    mocks.listWorkspaceTree.mockResolvedValue(rootNode("workspace-a"));
+    render(<FileTree />);
+    await waitFor(() => expect(screen.getByTitle("workspace-a")).toBeTruthy());
+    fireEvent.contextMenu(screen.getByTitle("workspace-a"));
+    expect(screen.getByRole("menuitem", { name: "移除工作区" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "删除" })).toBeNull();
+  });
+
   it("shows search errors and retries the same query", async () => {
     mocks.listWorkspaceTree.mockResolvedValue(rootNode("workspace-a"));
     mocks.searchWorkspaceFiles.mockRejectedValueOnce(new Error("Search permission denied"))

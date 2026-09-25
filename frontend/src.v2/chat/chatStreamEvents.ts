@@ -14,7 +14,6 @@ import { getToolCallsFromMessage, messageIndices, toolCallLocations } from "../l
 import {
   isCommandToolRecord,
   isTerminalToolCallStatus,
-  normalizeToolDiff,
   reduceToolCallResult,
   reduceToolCallStart,
   type ToolCallRecord,
@@ -871,27 +870,8 @@ export const handleChatStreamEvent = (
       );
       const existing = resolution.record;
       if (existing) {
-        const nextStatus = isTerminalToolCallStatus(existing.status)
-          ? existing.status
-          : e.status === "pending"
-            ? "pending"
-            : "running";
         const patch: Partial<ToolCallRecord> = {
-          args: e.args ?? {},
-          status: nextStatus,
-          displayHint: e.display_hint ?? existing.displayHint,
-          inputSummary: e.input_summary ?? existing.inputSummary,
-          resultKind: e.result_kind ?? existing.resultKind,
-          activityKind: e.activity_kind ?? existing.activityKind,
-          callSource: e.call_source ?? existing.callSource,
-          visibility: e.visibility ?? existing.visibility,
-          groupId: e.group_id ?? existing.groupId,
-          stepId: e.step_id ?? existing.stepId,
-          turnId: e.turn_id ?? existing.turnId,
-          iterationId: e.iteration_id ?? existing.iterationId,
-          phase: e.phase ?? existing.phase,
-          diff: normalizeToolDiff(e.diff) ?? existing.diff,
-          seq: e.seq ?? existing.seq,
+          ...reduceToolCallStart(new Map([[e.id, existing]]), e).get(e.id),
           ...(resolution.migrated
             ? { scopeMigrationCount: (existing.scopeMigrationCount ?? 0) + 1 }
             : {}),
@@ -1421,6 +1401,15 @@ export const handleChatStreamEvent = (
         }
         return true;
       }
+      const commandError = e as unknown as { error_code?: string; message?: string };
+      if (
+        commandError.error_code === "context.budget_refresh_failed"
+        || commandError.error_code === "context.live_projection_failed"
+      ) {
+        if (conversationId === useAppStore.getState().conversationId) s.setContextUsage(null);
+        if (!replayed) pushToast(normalizeAgentErrorMessage(commandError.message || "Token budget unavailable."), "error", 6000);
+        return true;
+      }
       if (replayed && !messageId && !turnId) {
         const replayError = e as unknown as {
           message?: string;
@@ -1548,13 +1537,6 @@ export const handleChatStreamEvent = (
           reason: rejectionReason,
           replayed: isReplayedChatEvent(e),
         });
-        return true;
-      }
-      if (
-        (snapshotBlocks?.length ?? 0) === 0 &&
-        toolStates.length === 0 &&
-        !hasStreamingAssistantForConversation(resumeConversationId, messageId)
-      ) {
         return true;
       }
       s.resumeStreaming(resumeConversationId, toolStates, messageId, ev.turn_id, snapshotBlocks);

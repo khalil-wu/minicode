@@ -737,24 +737,30 @@ def test_manual_context_compact_emits_owned_lifecycle_then_authoritative_usage()
 
     events = [call.args[0] for call in session.send_event.await_args_list]
     assert [event.type for event in events] == [
+        "conversation.compaction.updated",
         "context_compacted",
         "budget_update",
         "context_usage",
     ]
-    assert events[0].data["conversation_id"] == "conversation-1"
-    assert events[0].data["before_tokens"] == 900
-    assert events[0].data["after_tokens"] == 240
-    assert events[0].data["retained_categories"] == ["history"]
-    assert events[0].data["ledger"]["actual_tokens"] == 240
-    assert events[1].data == {
+    assert events[0].data == {
+        "conversation_id": "conversation-1",
+        "state": "compacted",
+        "summary": "Retained release goal and latest verification evidence.",
+    }
+    assert events[1].data["conversation_id"] == "conversation-1"
+    assert events[1].data["before_tokens"] == 900
+    assert events[1].data["after_tokens"] == 240
+    assert events[1].data["retained_categories"] == ["history"]
+    assert events[1].data["ledger"]["actual_tokens"] == 240
+    assert events[2].data == {
         "used": 240,
         "total": 1_000,
         "breakdown": {"history": 240},
         "conversation_id": "conversation-1",
     }
-    assert events[2].data["used"] == 240
-    assert events[2].data["limit"] == 1_000
-    assert events[2].data["ledger"]["actual_tokens"] == 240
+    assert events[3].data["used"] == 240
+    assert events[3].data["limit"] == 1_000
+    assert events[3].data["ledger"]["actual_tokens"] == 240
     assert repo.committed == (
         "conversation-1",
         {"compaction_count": 1, "preserved": True},

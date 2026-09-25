@@ -660,6 +660,7 @@ class CapabilityRegistry:
             if cancel_event is not None
             else None
         )
+        cancel_reason = "cancelled"
         try:
             if cancel_wait_task is None:
                 result = await execution_task
@@ -671,22 +672,16 @@ class CapabilityRegistry:
                 if execution_task in done:
                     result = execution_task.result()
                 else:
-                    receipt = await cancel_and_drain_receipt(
-                        [execution_task],
-                        timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
-                        label=f"interrupted registry tool {name}",
-                        owner=getattr(context, "pending_cleanup_tasks", None),
-                    )
-                    _publish_registry_cleanup_receipt(context, name, receipt, reason="interrupted")
+                    cancel_reason = "interrupted"
                     raise asyncio.CancelledError
         except asyncio.CancelledError:
             receipt = await cancel_and_drain_receipt(
                 [execution_task],
                 timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
-                label=f"cancelled registry tool {name}",
+                label=f"{cancel_reason} registry tool {name}",
                 owner=getattr(context, "pending_cleanup_tasks", None),
             )
-            _publish_registry_cleanup_receipt(context, name, receipt, reason="cancelled")
+            _publish_registry_cleanup_receipt(context, name, receipt, reason=cancel_reason)
             raise
         except Exception as exc:
             return execution_exception_result(exc, label=f"Tool '{name}' execution")

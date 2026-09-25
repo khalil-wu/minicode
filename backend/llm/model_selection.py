@@ -31,13 +31,12 @@ def config_with_model_budget(
     budget = getattr(config, "token_budget", None)
     if budget is None or context_window < 2:
         return config
-    response_reserve = min(
-        max(1, int(getattr(budget, "response_reserve", 1) or 1)),
-        context_window - 1,
-    )
+    response_reserve = budget.response_reserve
+    if response_reserve is not None:
+        response_reserve = min(response_reserve, context_window - 1)
     if (
         int(getattr(budget, "total", 0) or 0) == context_window
-        and int(getattr(budget, "response_reserve", 0) or 0) == response_reserve
+        and budget.response_reserve == response_reserve
     ):
         return config
     return replace(

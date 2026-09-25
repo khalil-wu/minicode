@@ -137,6 +137,11 @@ class AnthropicAdapter(LLMAdapter):
         model_instructions: str = "",
         reasoning_effort: str = "",
         reasoning_effort_levels: tuple[str, ...] = (),
+        context_window_source: str = "provider",
+        context_window_verified: bool = True,
+        max_context_window: int | float = 0,
+        max_context_window_source: str = "",
+        max_context_window_verified: bool = False,
     ) -> None:
         self._api_key = api_key
         self._provider_id = str(provider_id or "anthropic").strip() or "anthropic"
@@ -147,6 +152,11 @@ class AnthropicAdapter(LLMAdapter):
         self._base_url = base_url
         self._max_tokens = max(1, max_tokens or 8_000)
         self._context_window = context_window
+        self._context_window_source = context_window_source
+        self._context_window_verified = context_window_verified
+        self._max_context_window = max_context_window
+        self._max_context_window_source = max_context_window_source
+        self._max_context_window_verified = max_context_window_verified
         self._thinking_budget = thinking_budget
         self._configured_thinking_budget = thinking_budget
         self._configured_reasoning_effort = reasoning_effort.strip().lower()

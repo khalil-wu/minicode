@@ -226,7 +226,7 @@ class ReadArtifactTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "artifact_id": {"type": "string"},
+                    "artifact_id": {"type": "string", "description": "Exact artifact_id returned by a previous tool result."},
                     "offset": {
                         "type": "integer",
                         "description": "Optional 1-indexed first line; page through artifacts too large for one result.",

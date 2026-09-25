@@ -894,6 +894,8 @@ export interface RuntimeSessionSnapshot {
 export interface SessionTaskUpdateEvent {
   type: "task.update";
   session: RuntimeSessionSnapshot;
+  /** Runtime updates preserve the capability catalog when it is omitted. */
+  partial?: boolean;
 }
 
 export type TaskUpdateEvent = TodoTaskUpdateEvent | TodoTaskSnapshotEvent | SessionTaskUpdateEvent;
@@ -921,7 +923,8 @@ export interface TurnDiffUpdatedEvent {
   turn_id: string;
   message_id?: string;
   task_id?: string;
-  diff: string;
+  /** null: current aggregate unavailable; empty string: exact net-zero diff. */
+  diff: string | null;
   revision?: number;
   tool_call_id?: string;
 }

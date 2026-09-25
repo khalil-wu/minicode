@@ -332,7 +332,7 @@ class ToolSearchTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string"},
+                    "query": {"type": "string", "description": "Tool name or keywords describing the capability needed."},
                     "max_results": {
                         "type": "integer",
                         "minimum": 1,

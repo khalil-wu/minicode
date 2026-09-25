@@ -73,7 +73,6 @@ class SkillLoader:
 
     def __init__(self, project_root: Path | str | None = None) -> None:
         self._project_root = self._normalize_project_root(project_root)
-        self._cache: dict[str, SkillMeta] = {}
         self._catalog: list[SkillMeta] = []
         self._path_cache: dict[str, SkillMeta] = {}
         self._full_cache: dict[str, SkillFull] = {}
@@ -84,7 +83,6 @@ class SkillLoader:
         if normalized == self._project_root:
             return
         self._project_root = normalized
-        self._cache.clear()
         self._catalog.clear()
         self._path_cache.clear()
         self._full_cache.clear()
@@ -244,7 +242,6 @@ class SkillLoader:
             SkillMeta 列表（已去重，高优先级优先）
         """
         catalog: list[SkillMeta] = []
-        primary_by_name: dict[str, SkillMeta] = {}
         seen_paths: set[str] = set()
 
         # Search roots are already ordered from nearest workspace scope to
@@ -263,10 +260,8 @@ class SkillLoader:
                         continue
                     seen_paths.add(path_key)
                     catalog.append(meta)
-                    primary_by_name.setdefault(meta.name, meta)
 
         self._catalog = catalog
-        self._cache = primary_by_name
         self._path_cache = {self._path_key(meta.source_path): meta for meta in catalog}
         self._full_cache.clear()
         logger.info("发现 %d 个 Skills: %s", len(catalog), ", ".join(meta.name for meta in catalog))
@@ -393,7 +388,7 @@ class SkillLoader:
     def get_metas(self, skill_name: str) -> list[SkillMeta]:
         if not self._catalog:
             self.discover()
-        return [meta for meta in self._catalog if meta.name == skill_name]
+        return [meta for meta in self._catalog if meta.name.casefold() == skill_name.casefold()]
 
     def get_unambiguous_meta(self, skill_name: str) -> SkillMeta | None:
         matches = self.get_metas(skill_name)
@@ -413,9 +408,7 @@ class SkillLoader:
 
     def get_meta(self, skill_name: str) -> SkillMeta | None:
         """获取 Skill 元数据。"""
-        if not self._cache:
-            self.discover()
-        return self._cache.get(skill_name)
+        return self.get_unambiguous_meta(skill_name)
 
     @staticmethod
     def _path_key(path: Path) -> str:

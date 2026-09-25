@@ -14,8 +14,7 @@ export function diffFileChangeType(file: DiffFileChange): DiffChangeType {
 }
 
 export function diffCellTitle(cell: DiffCellState): string {
-  void cell;
-  return "已编辑";
+  return cell.historical ? "编辑记录" : "已编辑";
 }
 
 export function diffChangeBreakdown(files: DiffFileChange[]): Record<DiffChangeType, number> {

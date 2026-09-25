@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+MODEL_CONTEXT_WINDOW_DEFAULT = 1_000_000
+
+
 @dataclass(frozen=True)
 class ResponsesModelCatalogEntry:
     context_window: int
@@ -15,50 +18,66 @@ class ResponsesModelCatalogEntry:
 
 
 _RESPONSES_MODEL_CATALOG: dict[str, ResponsesModelCatalogEntry] = {
+    # https://developers.openai.com/api/docs/models/gpt-6-luna
+    # The application default is independent of the provider's published maximum.
+    "gpt-6-luna": ResponsesModelCatalogEntry(
+        context_window=MODEL_CONTEXT_WINDOW_DEFAULT,
+        max_context_window=1_050_000,
+        reasoning_effort_levels=("low", "medium", "high", "xhigh", "max"),
+        default_reasoning_effort="medium",
+        default_reasoning_summary="none",
+    ),
+    "gpt-6-astra": ResponsesModelCatalogEntry(
+        context_window=MODEL_CONTEXT_WINDOW_DEFAULT,
+        max_context_window=1_050_000,
+        reasoning_effort_levels=("low", "medium", "high", "xhigh", "max"),
+        default_reasoning_effort="low",
+        default_reasoning_summary="none",
+    ),
     "gpt-5.6-sol": ResponsesModelCatalogEntry(
-        context_window=272_000,
+        context_window=MODEL_CONTEXT_WINDOW_DEFAULT,
         max_context_window=272_000,
         reasoning_effort_levels=("low", "medium", "high", "xhigh", "max", "ultra"),
         default_reasoning_effort="low",
         default_reasoning_summary="none",
     ),
     "gpt-5.6-terra": ResponsesModelCatalogEntry(
-        context_window=272_000,
+        context_window=MODEL_CONTEXT_WINDOW_DEFAULT,
         max_context_window=272_000,
         reasoning_effort_levels=("low", "medium", "high", "xhigh", "max", "ultra"),
         default_reasoning_effort="medium",
         default_reasoning_summary="none",
     ),
     "gpt-5.6-luna": ResponsesModelCatalogEntry(
-        context_window=272_000,
+        context_window=MODEL_CONTEXT_WINDOW_DEFAULT,
         max_context_window=272_000,
         reasoning_effort_levels=("low", "medium", "high", "xhigh", "max"),
         default_reasoning_effort="medium",
         default_reasoning_summary="none",
     ),
     "gpt-5.5": ResponsesModelCatalogEntry(
-        context_window=272_000,
+        context_window=MODEL_CONTEXT_WINDOW_DEFAULT,
         max_context_window=272_000,
         reasoning_effort_levels=("low", "medium", "high", "xhigh"),
         default_reasoning_effort="medium",
         default_reasoning_summary="none",
     ),
     "gpt-5.4": ResponsesModelCatalogEntry(
-        context_window=272_000,
+        context_window=MODEL_CONTEXT_WINDOW_DEFAULT,
         max_context_window=1_000_000,
         reasoning_effort_levels=("low", "medium", "high", "xhigh"),
         default_reasoning_effort="medium",
         default_reasoning_summary="none",
     ),
     "gpt-5.4-mini": ResponsesModelCatalogEntry(
-        context_window=272_000,
+        context_window=MODEL_CONTEXT_WINDOW_DEFAULT,
         max_context_window=272_000,
         reasoning_effort_levels=("low", "medium", "high", "xhigh"),
         default_reasoning_effort="medium",
         default_reasoning_summary="none",
     ),
     "gpt-5.2": ResponsesModelCatalogEntry(
-        context_window=272_000,
+        context_window=MODEL_CONTEXT_WINDOW_DEFAULT,
         max_context_window=272_000,
         reasoning_effort_levels=("low", "medium", "high", "xhigh"),
         default_reasoning_effort="medium",
@@ -78,6 +97,7 @@ def responses_model_catalog_entry(
 
 
 __all__ = [
+    "MODEL_CONTEXT_WINDOW_DEFAULT",
     "ResponsesModelCatalogEntry",
     "responses_model_catalog_entry",
     "terminal_model_id",

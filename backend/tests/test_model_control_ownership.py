@@ -177,6 +177,28 @@ def test_task_effort_and_provider_configuration_use_different_lock_scopes():
 
 
 @pytest.mark.asyncio
+async def test_effort_edit_uses_selected_capabilities_without_refreshing_auth(tmp_path, monkeypatch):
+    fixture = setup(tmp_path, monkeypatch, AsyncMock(return_value=None))
+    host, repo = controls(fixture, tmp_path, monkeypatch)
+    oauth = AsyncMock()
+    auth = AsyncMock()
+    monkeypatch.setattr(host.catalog, "refresh_oauth_credentials", oauth)
+    monkeypatch.setattr(host.catalog, "refresh_provider_auth", auth)
+    try:
+        await handle_llm_config_set(host, {"source": "frontend.footer", "reasoning_effort": "high",
+                                         "conversation_id": "conv_model_control"})
+        assert repo.get_conversation("conv_model_control").model_selection["reasoning_effort"] == "high"
+        oauth.assert_not_awaited()
+        auth.assert_not_awaited()
+        await host.set_selected_model("model-b", manual_override=True)
+        oauth.assert_awaited_once()
+        auth.assert_awaited_once()
+    finally:
+        await host.run_manager.shutdown_notification_wakes()
+        fixture.runtime.close(release_lease=True)
+
+
+@pytest.mark.asyncio
 async def test_rejected_model_selection_does_not_acknowledge_effort_as_applied():
     session = SimpleNamespace(ws_manager=None, active_conversation_id="conv_model_control",
         set_selected_model=AsyncMock(return_value=False), emit_command_result=AsyncMock())

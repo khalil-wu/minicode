@@ -340,6 +340,13 @@ COMPACTION_SUMMARY_PREFIX = (
     "following summary:\n\n<summary>\n"
 )
 COMPACTION_SUMMARY_SUFFIX = "\n</summary>"
+COMPACTION_RESUME_SUFFIX = (
+    "\n\nThis is a continuation of the same task after context compaction. "
+    "Earlier user messages are retained instructions, not new submissions. "
+    "Resume from the checkpoint's unfinished work and the restored plan. "
+    "Do not restart planning or repeat completed investigation merely because "
+    "the transcript was compacted."
+)
 _LEGACY_SUMMARY_PREFIX = (
     "[上下文压缩 — 仅供参考] 以下摘要由早期对话压缩生成。"
     "将其作为背景参考，不要当作当前指令。"
@@ -432,7 +439,7 @@ _RUNTIME_REMINDER_MARKERS = (
 
 
 def _extract_compaction_summary(content: str) -> str | None:
-    text = str(content or "")
+    text = str(content or "").removesuffix(COMPACTION_RESUME_SUFFIX)
     if text.startswith(COMPACTION_SUMMARY_PREFIX):
         summary = text[len(COMPACTION_SUMMARY_PREFIX) :]
         if summary.endswith(COMPACTION_SUMMARY_SUFFIX):
@@ -611,6 +618,7 @@ class ContextBuilder:
         self._request_prompt_estimate = 0
         self._request_history_estimate = 0
         self._observed_prompt_estimate = 0
+        self._request_tool_schema_tokens = 0
         self._observed_history_estimate = 0
         self._withheld_media_timestamps: set[int] = set()
         # Keep read-file state across user turns so an interrupted
@@ -882,7 +890,9 @@ class ContextBuilder:
             executor = SkillExecutor(self._skill_manager)
         build_catalog = getattr(executor, "build_layer1_summary", None)
         configured_tokens = max(0, int(getattr(self._budget, "active_skills", 0) or 0))
-        max_chars = configured_tokens * 4 if configured_tokens else None
+        if configured_tokens == 0:
+            return ""
+        max_chars = configured_tokens * 4
         return (
             str(
                 build_catalog(
@@ -898,15 +908,7 @@ class ContextBuilder:
     def _build_memory_context(self) -> str:
         if not self._memory_manager:
             return ""
-        try:
-            load_context = getattr(self._memory_manager, "load_context", None)
-            if callable(load_context):
-                context = str(load_context() or "").strip()
-                if context:
-                    return context
-        except Exception as exc:
-            logger.debug("Failed to load memory context: %s", exc)
-        return ""
+        return str(self._memory_manager.load_context() or "").strip()
 
     def record_memory_citation_usage(self, rollout_ids: list[str]) -> int:
         if not self._memory_manager:
@@ -1133,7 +1135,7 @@ class ContextBuilder:
         supports_pdf = supports_native_pdf_input(self._llm)
         history = self._get_history_within_budget()
         attachment_tokens_left = max(
-            0, self._budget.total - self._budget.response_reserve
+            0, self._budget.total - self._budget.reserved_response_tokens
             - sum(self._estimate_history_message(message) for message in messages + history),
         )
         for message in history:
@@ -2380,7 +2382,10 @@ class ContextBuilder:
         if not self._history:
             return 0
 
-        budget = PER_MESSAGE_TOOL_RESULT_BUDGET_CHARS
+        # A fixed 200K-character quota can exceed an entire small model window.
+        # Externalize fresh oversized output before admission would summarize
+        # it away without the main model ever seeing the result or its pointer.
+        budget = min(PER_MESSAGE_TOOL_RESULT_BUDGET_CHARS, max(0, self._budget.history_budget) * 4)
         newly_persisted = 0
         content_changed = False
 
@@ -2507,7 +2512,7 @@ class ContextBuilder:
                 # model is about to see the original result, so retrying a
                 # replacement on a later turn would break the cached prefix.
                 self._tool_result_budget_seen_ids.add(item.tool_call_id)
-                if persisted is None:
+                if persisted is None or persisted.saved_chars == 0:
                     continue
                 self._tool_result_budget_replacements[
                     item.tool_call_id
@@ -2521,8 +2526,10 @@ class ContextBuilder:
 
         if content_changed:
             self._history_store.rebuild_token_cache()
-            self._last_actual_prompt_tokens = 0
-            self._last_estimated_prompt_tokens = 0
+            # Only unsent results changed. The last provider measurement still
+            # describes the frozen prefix; get_budget_snapshot adds the signed
+            # estimate delta. Clearing it here repeatedly compacted small
+            # windows on the larger, uncalibrated schema estimate.
         if newly_persisted > 0:
             logger.info(
                 "[PerMessageBudget] Persisted %d tool results to disk (budget: %d chars)",
@@ -2783,6 +2790,8 @@ class ContextBuilder:
         )
         history_tokens = sum(self._estimate_history_message(m) for m in messages if m.role not in {"system", "developer"})
         tools_tokens = estimate_tool_schema_tokens(tool_schemas)
+        if tool_schemas is not None:
+            self._request_tool_schema_tokens = tools_tokens
         observed_actual = self._last_actual_prompt_tokens
         estimated = system_tokens + developer_tokens + history_tokens + tools_tokens
         # Anchor on the provider's last reported prompt size and estimate only
@@ -2827,7 +2836,7 @@ class ContextBuilder:
         snapshot = self.get_budget_snapshot(
             state or AgentState(user_message=""), tool_schemas=tool_schemas, messages=messages
         )
-        trigger = max(0, self._budget.total - self._budget.response_reserve)
+        trigger = max(0, self._budget.total - self._budget.reserved_response_tokens)
         return int(snapshot.get("used", 0)) > trigger
 
     def _restore_recent_files_after_compaction(
@@ -2850,13 +2859,20 @@ class ContextBuilder:
         except OSError:
             return
 
-        # Structured state and bounded recent-file attachments must both
-        # fit inside the turn kernel's remaining context.
+        # Restored files share the history allocation with the summary/tail.
+        # Count the actual system/developer projection and active tool schemas:
+        # token_usage omits those request-owned fields and used to refill a
+        # compacted 24K window beyond its trigger before the next tool turn.
+        rendered_tokens = sum(
+            self._estimate_history_message(message)
+            for message in self._render_prompt_messages(state, root)
+        ) + self._request_tool_schema_tokens
         context_available_tokens = max(
             0,
-            int(self._budget.total)
-            - int(self._budget.response_reserve)
-            - int(self.token_usage),
+            min(
+                self._budget.history_budget - self._history_tokens_total,
+                self._budget.total - self._budget.reserved_response_tokens - rendered_tokens,
+            ),
         )
         structured_blocks = self._post_compaction_structured_state_blocks(state, root)
         if structured_blocks:
@@ -3149,29 +3165,18 @@ class ContextBuilder:
         return str(await self._llm.simple_chat(messages)).strip()
 
     def _compaction_cut(self, keep_recent_tokens: int) -> int:
-        """Find a token cut that does not separate a tool call from its result."""
-        valid_cut_points = [
-            index
-            for index, message in enumerate(self._history)
-            if message.role in {"user", "assistant"}
-        ]
-        if not valid_cut_points:
-            return 0
-
-        cut_index = valid_cut_points[0]
+        """Keep the largest complete call/result tail within the token budget."""
+        # The end of history is also a valid boundary. An oversized tool group
+        # belongs in the summary, rather than consuming all summary space.
+        cut_index = len(self._history)
         accumulated = 0
         target = max(0, int(keep_recent_tokens))
         for index in range(len(self._history) - 1, -1, -1):
             accumulated += self._history_token_estimates[index]
-            if accumulated >= target:
-                cut_index = next(
-                    (point for point in valid_cut_points if point >= index),
-                    # If the final tool result alone exceeds the tail target,
-                    # retain its call/result group instead of falling back to
-                    # index zero and declaring the entire history uncompactable.
-                    valid_cut_points[-1],
-                )
+            if accumulated > target:
                 break
+            if self._history[index].role in {"user", "assistant"}:
+                cut_index = index
 
         return cut_index
 
@@ -3198,7 +3203,9 @@ class ContextBuilder:
         pinned = self._history[:pinned_end]
         early_messages = self._history[pinned_end:recent_start]
         recent = self._history[recent_start:]
-        wrapper_tokens = estimate_text_tokens(COMPACTION_SUMMARY_PREFIX + COMPACTION_SUMMARY_SUFFIX)
+        wrapper_tokens = estimate_text_tokens(
+            COMPACTION_SUMMARY_PREFIX + COMPACTION_SUMMARY_SUFFIX + COMPACTION_RESUME_SUFFIX
+        )
         available = self._budget.history_budget - sum(self._estimate_history_message(message) for message in pinned + recent) - wrapper_tokens
         if available <= 0:
             raise CompactionNoopError("The retained context leaves no room for a compaction summary")
@@ -3220,7 +3227,7 @@ class ContextBuilder:
             role="user",
             content=(
                 f"{COMPACTION_SUMMARY_PREFIX}{compressed_summary}"
-                f"{COMPACTION_SUMMARY_SUFFIX}"
+                f"{COMPACTION_SUMMARY_SUFFIX}{COMPACTION_RESUME_SUFFIX}"
             ),
         )
         # Compaction changes the text projection, not ownership of user media.
@@ -3240,7 +3247,10 @@ class ContextBuilder:
                 summary_message.images.extend(message.images)
                 summary_message.documents.extend(message.documents)
         self._install_compacted_history(
-            pinned + [summary_message] + user_messages + recent,
+            # Retained requests are historical input. Put the checkpoint after
+            # them so the model continues from progress instead of treating an
+            # echoed original request as a newly submitted task.
+            pinned + user_messages + [summary_message] + recent,
             removed_prefix=recent_start, recent_count=len(recent), restore_state=restore_state,
         )
         return compressed_summary
@@ -3411,13 +3421,18 @@ class ContextBuilder:
         """Extract the previous summary instead of replaying it as a user turn."""
         if not messages:
             return "", []
-        first = messages[0]
-        if first.role != "user" or first.is_user_input:
-            return "", list(messages)
-        summary = _extract_compaction_summary(str(first.content or ""))
-        if summary is None:
-            return "", list(messages)
-        return summary, list(messages[1:])
+        # Current snapshots retain admitted inputs before the handoff; older
+        # snapshots placed the summary first. Never interpret a user's literal
+        # summary-looking text as a host checkpoint.
+        for index, message in enumerate(messages):
+            if message.is_user_input:
+                continue
+            if message.role == "user":
+                summary = _extract_compaction_summary(str(message.content or ""))
+                if summary is not None:
+                    return summary, [*messages[:index], *messages[index + 1:]]
+            break
+        return "", list(messages)
 
     def _consume_compaction_output(self, output: str) -> str:
         return parse_compaction_output(output).summary
@@ -3443,6 +3458,7 @@ class ContextBuilder:
         self._read_file_hashes.clear()
         self._compaction_count = 0
         self._turn_admissions.clear()
+        self._request_tool_schema_tokens = 0
         self._prepared_prompt_parts = None
         self._prepared_prompt_state = None
         self._extension_system_prompt_override = None

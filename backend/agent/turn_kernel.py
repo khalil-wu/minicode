@@ -16,8 +16,6 @@ from typing import Any, Callable
 from backend.agent.context import ContextBuilder
 from backend.agent.message import AgentEvent
 from backend.agent.checkpoint import (
-    MAX_CHECKPOINT_HISTORY_MESSAGES,
-    MAX_CHECKPOINT_TEXT_CHARS,
     clear_checkpoints,
     context_snapshot_revision,
     save_run_checkpoint,
@@ -946,10 +944,9 @@ class TurnKernel:
         self.metadata.pop("checkpoint_sequence", None)
         self.metadata.pop("checkpoint_schema_version", None)
         try:
-            snapshot = context_builder.export_snapshot(
-                max_messages=MAX_CHECKPOINT_HISTORY_MESSAGES,
-                max_chars=MAX_CHECKPOINT_TEXT_CHARS * 4,
-            )
+            # Resume must restore the same provider context, not an unsummarized
+            # suffix that loses the original request and completed work.
+            snapshot = context_builder.export_snapshot()
             receipt: dict[str, Any] = {}
             context_revision = context_snapshot_revision(snapshot)
             checkpoint_origin = self.metadata.get("checkpoint_origin")

@@ -122,7 +122,7 @@ def test_model_updated_event_distinguishes_saved_and_effective_reasoning(monkeyp
     assert payload["effective_reasoning_effort"] == ""
     assert payload["reasoning_effort_supported"] is False
     assert payload["reasoning_effort_levels"] == []
-    assert payload["context_window"] == 200_000
+    assert payload["context_window"] == 1_000_000
     assert payload["context_window_source"] == "fallback"
     assert payload["context_window_verified"] is False
 

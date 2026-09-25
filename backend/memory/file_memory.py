@@ -155,7 +155,7 @@ class FileMemory:
         summary_path = resolve_memory_path(self._dir, "memory_summary.md")
         try:
             summary = summary_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        except FileNotFoundError:
             return ""
         if summary.splitlines()[:1] != ["v1"]:
             return ""

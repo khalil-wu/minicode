@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from backend.agent.conversation_query_guard import (
     ConversationQueryClaim,
@@ -26,6 +26,7 @@ async def run_scheduled_task(
     run: Any,
     *,
     bootstrap: Any,
+    bind_conversation: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
     """Run one task and persist a self-contained conversation transcript."""
 
@@ -43,7 +44,11 @@ async def run_scheduled_task(
 
     # Scheduled runs use the same explicit MiniCode permission tokens.
     permission_mode = scheduled_permission_mode(getattr(task, "permission_mode", "confirm"))
-    requested_conversation_id = str(getattr(task, "conversation_id", "") or "").strip()
+    requested_conversation_id = str(
+        getattr(run, "conversation_id", "")
+        or getattr(task, "conversation_id", "")
+        or ""
+    ).strip()
     conversation = repository.get_conversation(requested_conversation_id) if requested_conversation_id else None
     invalid_conversation_reason = ""
     if requested_conversation_id and conversation is None:
@@ -71,6 +76,10 @@ async def run_scheduled_task(
             git_branch=git_branch_for(workspace_root),
             permission_mode=permission_mode,
         )
+    if str(getattr(run, "conversation_id", "") or "") != conversation.id:
+        run.conversation_id = conversation.id
+        if bind_conversation is not None:
+            bind_conversation(run.id, conversation.id)
 
     query_guards = conversation_query_guards()
     query_claim = query_guards.try_start(
@@ -168,7 +177,7 @@ async def _run_scheduled_task_owned(
             and isinstance(item.get("content"), str)
             and item["content"]
         ]
-    repository.append_transcript_message(
+    admitted = repository.append_transcript_message(
         conversation.id,
         {
             "id": f"schedule_{getattr(run, 'id', '')}",
@@ -182,6 +191,8 @@ async def _run_scheduled_task_owned(
             },
         },
     )
+    if admitted is None:
+        raise RuntimeError("The scheduled conversation disappeared before its prompt was saved.")
 
     result = await run_owned_rest_chat(
         message=str(getattr(task, "prompt", "") or ""),
@@ -215,27 +226,25 @@ async def _run_scheduled_task_owned(
     )
     reply = str(result.get("reply") or "")
     errors = [str(item) for item in result.get("errors", []) if str(item).strip()]
-    repository.append_transcript_message(
-        conversation.id,
-        {
-            "id": f"assistant_schedule_{getattr(run, 'id', '')}",
-            "role": "assistant",
-            "content": reply,
-            "timestamp": datetime.now(UTC).isoformat(),
-            "terminal_status": status,
-            "termination_reason": stopped_reason,
-            **({"failure_message": errors[-1]} if status == "failed" and errors else {}),
-            "metadata": {
-                "source": "scheduled_task",
-                "scheduled_task_id": str(getattr(task, "id", "")),
-                "scheduled_run_id": str(getattr(run, "id", "")),
-                "stopped_reason": stopped_reason,
-                "iterations": int(result.get("iterations") or 0),
-                "errors": errors,
-            },
+    assistant_message = {
+        "id": f"assistant_schedule_{getattr(run, 'id', '')}",
+        "role": "assistant",
+        "content": reply,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "terminal_status": status,
+        "termination_reason": stopped_reason,
+        **({"failure_message": errors[-1]} if status == "failed" and errors else {}),
+        "metadata": {
+            "source": "scheduled_task",
+            "scheduled_task_id": str(getattr(task, "id", "")),
+            "scheduled_run_id": str(getattr(run, "id", "")),
+            "stopped_reason": stopped_reason,
+            "iterations": int(result.get("iterations") or 0),
+            "errors": errors,
         },
-    )
-    snapshot_patch = {
+    }
+    next_snapshot = {
+        **snapshot,
         **result.get("context_snapshot", {}),
         "scheduled_task": {
             "task_id": str(getattr(task, "id", "")),
@@ -244,19 +253,14 @@ async def _run_scheduled_task_owned(
             "stopped_reason": stopped_reason,
         }
     }
-    patch_snapshot = getattr(repository, "patch_context_snapshot", None)
-    if callable(patch_snapshot):
-        patch_snapshot(conversation.id, snapshot_patch)
-    else:
-        # Keep older repository adapters usable without erasing concurrent
-        # snapshot fields: merge against the latest record before saving.
-        get_conversation = getattr(repository, "get_conversation", None)
-        save_snapshot = getattr(repository, "save_context_snapshot", None)
-        record = get_conversation(conversation.id) if callable(get_conversation) else None
-        if callable(save_snapshot):
-            snapshot = dict(getattr(record, "context_snapshot", {}) or {})
-            snapshot.update(snapshot_patch)
-            save_snapshot(conversation.id, snapshot)
+    committed = repository.commit_turn_projection(
+        conversation.id,
+        assistant_message=assistant_message,
+        context_snapshot=next_snapshot,
+        expected_revision=admitted.revision,
+    )
+    if committed is None:
+        raise RuntimeError("The scheduled conversation disappeared before its result was saved.")
     return {
         "status": status,
         "conversation_id": conversation.id,

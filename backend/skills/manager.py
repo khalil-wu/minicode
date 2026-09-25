@@ -56,9 +56,10 @@ class SkillManager:
         if isinstance(loader, SkillLoader) and project_root is not None:
             root = Path(project_root).expanduser().resolve()
             if root != loader._project_root:
-                snapshot.set_project_root(root)
-        if not snapshot._discovered:
-            snapshot.discover()
+                loader.set_project_root(root)
+        # Discovery belongs to the turn boundary. A new turn sees installed,
+        # edited and removed skills; the in-flight snapshot remains stable.
+        snapshot.discover()
         return snapshot
 
     def _resolve_invocation_meta(self, skill_name: str) -> SkillMeta | None:

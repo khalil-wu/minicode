@@ -106,7 +106,7 @@ async def test_cancelling_latest_cold_connection_does_not_revive_superseded_one(
         await asyncio.gather(older, newer, return_exceptions=True)
 
 
-def _delayed_socket():
+def _delayed_socket(*, ack_release: asyncio.Event | None = None):
     incoming = asyncio.Queue()
     incoming.put_nowait({"type": "websocket.connect"})
     awaiting_message = asyncio.Event()
@@ -122,6 +122,8 @@ def _delayed_socket():
             payload = json.loads(message["text"])
             if payload["type"] == "client.command.ack":
                 sent_ack.set()
+                if ack_release is not None:
+                    await ack_release.wait()
 
     websocket = WebSocket(
         {"type": "websocket", "headers": [], "query_string": b"session_id=cold-session"},
@@ -182,7 +184,8 @@ async def test_replaced_asgi_reader_cannot_admit_late_input(tmp_path, frame_kind
 async def test_replacement_preserves_work_already_durably_admitted(tmp_path):
     first = _connection(tmp_path / "first")
     newer = _connection(tmp_path / "newer")
-    websocket, incoming, _awaiting_message, sent_ack = _delayed_socket()
+    ack_release = asyncio.Event()
+    websocket, incoming, _awaiting_message, sent_ack = _delayed_socket(ack_release=ack_release)
     first["websocket"] = websocket
     manager = WebSocketManager()
     session, generation = await manager.connect(**first)
@@ -193,6 +196,7 @@ async def test_replacement_preserves_work_already_durably_admitted(tmp_path):
         await asyncio.wait_for(sent_ack.wait(), 2)
         assert session.run_manager.durable_queue.has_client_command("old-input-command")
         await manager.connect(**newer)
+        ack_release.set()
         session.command_dispatcher.command_semaphore.release()
         # The reader is still suspended inside the acknowledgement it just sent,
         # so the durable command is scheduled only on a later loop pass, and its

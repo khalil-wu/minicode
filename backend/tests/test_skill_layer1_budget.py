@@ -62,6 +62,23 @@ def test_executor_renders_minicode_available_skill_catalog(tmp_path) -> None:
     assert "Do not carry skills across turns unless re-mentioned." in result
 
 
+def test_skill_catalog_budget_covers_guidance_and_zero_disables_it(tmp_path) -> None:
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root, "verify", "Verify " + "x" * 1_000, "Run the checks.")
+    manager = SkillManager(_loader(("workspace", skills_root)))
+    executor = SkillExecutor(manager)
+
+    assert executor.build_layer1_summary(max_chars=0) == ""
+    capped = executor.build_layer1_summary(max_chars=2_000)
+    assert "## Skills" in capped
+    assert "- verify:" in capped
+    assert "### How to use skills" in capped
+    assert len(capped) <= 2_000
+    assert ContextBuilder(
+        skill_manager=manager, token_budget=TokenBudget(active_skills=0)
+    )._build_skill_catalog() == ""
+
+
 def test_executor_has_one_canonical_catalog_for_all_providers(tmp_path) -> None:
     skills_root = tmp_path / "skills"
     skill_path = _write_skill(

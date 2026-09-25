@@ -20,7 +20,7 @@
  * capture's command id to the id the renderer actually generated, matched by
  * command type and order on the same connection.
  */
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
@@ -43,6 +43,7 @@ import type { ClientCommand } from "../protocol/events";
 import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { sendChatMessage } from "../chat/sendChatMessage";
 import { buildInterruptCommand } from "../lib/interrupt-command";
+import { InlineAgentPrompt } from "../chat/InlineAgentPrompt";
 import {
   getLastReceivedServerSeqForTests,
   resetPendingClientCommandAcksForTests,
@@ -58,6 +59,8 @@ type Fixture = {
   workspace_root: string;
   conversation_a: string;
   conversation_b: string;
+  conversation_c: string;
+  approval_request_ids: { first: string; approved: string[]; rejected: string[] };
   turn_id_second: string;
   assistant_message_ids: Record<string, string>;
   user_message_ids: Record<string, string>;
@@ -92,14 +95,14 @@ class MockWebSocket {
   }
 }
 
-const Harness = () => { useWebSocketConnection(); return null; };
+const Harness = () => { useWebSocketConnection(); return <InlineAgentPrompt />; };
 
-// Stream buffers flush on rAF or a 50ms fallback; advancing past the fallback
-// inside act() makes every delta land before the next event is applied.
+// Flush at client interaction boundaries, not once per SSE delta. Otherwise
+// a large capture invents minutes of idle time and trips the heartbeat timeout.
 const FLUSH_MS = 60;
 
-const loadFixture = (): Fixture =>
-  JSON.parse(fs.readFileSync(path.join(__dirname, "__fixtures__session_gate.json"), "utf8")) as Fixture;
+const loadFixture = (name: string): Fixture =>
+  JSON.parse(fs.readFileSync(path.resolve(__dirname, name), "utf8")) as Fixture;
 
 /** Re-key one captured event from the capture's command ids to the renderer's. */
 const rekeyEvent = (
@@ -112,11 +115,16 @@ const rekeyEvent = (
     if (typeof id !== "string" || !id) return id;
     const commandIndex = captured.commands.findIndex((c) => c.command.client_command_id === id);
     if (commandIndex < 0) return id;
-    const type = String(captured.commands[commandIndex].command.type);
+    const source = captured.commands[commandIndex].command;
+    const type = String(source.type);
+    // A nonempty initial inventory can make the renderer activate an older
+    // conversation on its own. It must not consume this conversation's slot.
+    const matches = (command: Wire) => command.type === type
+      && (!source.conversation_id || command.conversation_id === source.conversation_id);
     const ordinal = captured.commands
       .slice(0, commandIndex)
-      .filter((c) => c.command.type === type).length;
-    const rendererCommand = socket.sent.filter((c) => c.type === type)[ordinal];
+      .filter((c) => matches(c.command)).length;
+    const rendererCommand = socket.sent.filter(matches)[ordinal];
     if (!rendererCommand) {
       unmapped.add(`${type}#${ordinal}`);
       return id;
@@ -149,13 +157,17 @@ describe("session gate replay", () => {
       isConnected: false, conversationId: null, conversations: [], messages: [], conversationMessages: {},
       conversationStreaming: {}, isStreaming: false, connectionPhase: "connecting", reconnectAttempt: 0,
       reconnectMaxAttempts: null, connectionError: null,
+      pendingApproval: null, approvalQueue: [], pendingAskUser: null, askUserQueue: [],
+      pendingDiffReview: null, diffReviewQueue: [],
     });
   });
   afterEach(() => { cleanup(); vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
-  it("reaches the captured terminal state across tool turn, create/switch during run, interrupt and reconnect", async () => {
-    const fixture = loadFixture();
-    const [c0, c1] = fixture.connections;
+  it.each(process.env.MINICODE_SESSION_GATE_FIXTURE
+    ? [process.env.MINICODE_SESSION_GATE_FIXTURE]
+    : ["__fixtures__session_gate.json", "__fixtures__approval_gate.json"])("replays real session and approval behavior: %s", async (name) => {
+    const fixture = loadFixture(name);
+    const [c0, c1, c2, c3] = fixture.connections;
     const logs: string[] = [];
     const fmt = (args: unknown[]) => args.map((x) => (typeof x === "object" ? JSON.stringify(x) : String(x))).join(" ");
     vi.spyOn(console, "error").mockImplementation((...args) => { logs.push("ERR " + fmt(args)); });
@@ -168,7 +180,7 @@ describe("session gate replay", () => {
     // mode from its store when it builds user_message.
     useAppStore.setState({ permissionMode: "bypass" });
 
-    const drive = (captured: CapturedCommand): void => {
+    const drive = async (captured: CapturedCommand): Promise<void> => {
       const command = captured.command;
       switch (command.type) {
         case "conversation.list":
@@ -182,6 +194,7 @@ describe("session gate replay", () => {
           );
           return;
         case "user_message":
+          useAppStore.setState({ permissionMode: command.permission_mode as "bypass" | "confirm" });
           expect(sendChatMessage({
             displayContent: String(command.content),
             conversationId: String(command.conversation_id),
@@ -196,6 +209,22 @@ describe("session gate replay", () => {
           interruptCommand = buildInterruptCommand(useAppStore.getState());
           expect(sendClientCommand(interruptCommand)).toBe(true);
           return;
+        case "control_response": {
+          const request = useAppStore.getState().pendingApproval;
+          expect(request?.requestId).toBe(command.request_id);
+          expect(useAppStore.getState().approvalQueue).toEqual([]);
+          expect(screen.getAllByRole("region", { name: "Agent is waiting for input" })).toHaveLength(1);
+          const response = (command.response as { response: { action: string; feedback?: string } }).response;
+          if (response.action === "approve") {
+            await step(() => { fireEvent.click(screen.getByRole("button", { name: "允许使用工具" })); });
+          } else {
+            await step(() => { fireEvent.click(screen.getByRole("button", { name: "补充说明" })); });
+            await step(() => { fireEvent.change(screen.getByRole("textbox", { name: "给 Agent 补充说明" }), { target: { value: response.feedback } }); });
+            await step(() => { fireEvent.click(screen.getByRole("button", { name: "拒绝并发送说明" })); });
+          }
+          expect(useAppStore.getState().pendingApproval).toBeNull();
+          return;
+        }
         default:
           throw new Error(`capture drove an unexpected command ${String(command.type)}`);
       }
@@ -204,17 +233,21 @@ describe("session gate replay", () => {
     // Coalesced client commands are flushed on a microtask, so every step
     // awaits one: the renderer must have sent a command before the captured
     // answer to it can be re-keyed.
-    const step = async (fn: () => void): Promise<void> => {
-      await act(async () => { fn(); });
+    const step = async (fn: () => void | Promise<void>): Promise<void> => {
+      await act(async () => { await fn(); });
     };
     const replayConnection = async (captured: CapturedConnection, socket: MockWebSocket): Promise<void> => {
       for (const [index, event] of captured.events.entries()) {
         for (const command of captured.commands) {
-          if (command.sent_after_events === index) await step(() => drive(command));
+          if (command.sent_after_events === index) {
+            await step(() => vi.advanceTimersByTime(FLUSH_MS));
+            if (command.command.type === "control_response") await drive(command);
+            else await step(() => drive(command));
+          }
         }
         await step(() => socket.emitMessage(rekeyEvent(event, captured, socket, unmapped)));
-        await step(() => vi.advanceTimersByTime(FLUSH_MS));
       }
+      await step(() => vi.advanceTimersByTime(FLUSH_MS));
       for (const command of captured.commands) {
         if (command.sent_after_events >= captured.events.length) await step(() => drive(command));
       }
@@ -295,12 +328,73 @@ describe("session gate replay", () => {
     );
     expect(new Set(toolRecords.map((r) => r.id))).toEqual(capturedToolIds);
     expect(toolRecords.every((r) => r.status !== "running" && r.status !== "pending")).toBe(true);
-    expect(toolRecords.some((r) => r.name === "edit_file")).toBe(true);
+    if (!c2) expect(toolRecords.some((r) => r.name === "edit_file")).toBe(true);
     expect(secondTurn?.terminalStatus).toBe("interrupted");
     expect(secondTurn?.isStreaming).toBeFalsy();
     expect(thirdTurn?.terminalStatus).toBe("completed");
     expect(thirdTurn?.content).toMatch(/OK/);
     expect(messagesFor(A).filter((m) => m.role === "user").map((m) => m.id))
       .toEqual([fixture.user_message_ids.first, fixture.user_message_ids.second, fixture.user_message_ids.third]);
+
+    if (!c2) return;
+    const reconnect = async (previous: MockWebSocket, captured: CapturedConnection, conversationId: string) => {
+      await step(() => previous.emit("close", 1006));
+      expect(useAppStore.getState().connectionPhase).toBe("reconnecting");
+      await step(() => vi.advanceTimersByTime(2_000));
+      const socket = MockWebSocket.instances[captured.index];
+      await step(() => socket.emit("open"));
+      await step(() => vi.advanceTimersByTime(0));
+      expect(socket.sent.find((c) => c.type === "session.restore")).toMatchObject({
+        last_seq: captured.commands.find((c) => c.command.type === "session.restore")!.command.last_seq,
+        last_conversation_id: conversationId,
+      });
+      return socket;
+    };
+    const third = await reconnect(second, c2, A);
+    await replayConnection(c2, third);
+    const C = fixture.conversation_c;
+    expect(useAppStore.getState().pendingApproval).toMatchObject({
+      requestId: fixture.approval_request_ids.first, conversationId: C,
+    });
+    expect(useAppStore.getState().approvalQueue).toEqual([]);
+    expect(third.sent.filter((c) => c.type === "control_response")).toEqual([]);
+    expect(getLastReceivedServerSeqForTests()).toBe(c2.cursor_after);
+
+    const fourth = await reconnect(third, c3, C);
+    await replayConnection(c3, fourth);
+    await act(async () => { await Promise.all(pendingResults); });
+    const responses = fourth.sent.filter((c) => c.type === "control_response");
+    const expected = c3.commands.filter((c) => c.command.type === "control_response");
+    expect(responses).toHaveLength(expected.length);
+    responses.forEach((response, index) => {
+      const { client_command_id: _sent, ...sent } = response;
+      const { client_command_id: _captured, ...captured } = expected[index].command;
+      expect(sent).toEqual(captured);
+    });
+    const final = useAppStore.getState();
+    expect(final.pendingApproval).toBeNull();
+    expect(final.approvalQueue).toEqual([]);
+    expect(screen.queryByRole("region", { name: "Agent is waiting for input" })).toBeNull();
+    expect(final.connectionPhase).toBe("connected");
+    expect(final.conversationId).toBe(C);
+    expect(final.isStreaming).toBe(false);
+    expect(Object.values(final.conversationStreaming).some(Boolean)).toBe(false);
+    expect(getLastReceivedServerSeqForTests()).toBe(c3.cursor_after);
+    expect(fourth.close).not.toHaveBeenCalled();
+    expect(unmapped).toEqual(new Set());
+    expect(logs.filter((l) => l.startsWith("ERR"))).toEqual([]);
+    for (const [turn, requestIds, status] of [
+      ["fourth", fixture.approval_request_ids.approved, "success"],
+      ["fifth", fixture.approval_request_ids.rejected, "failed"],
+    ] as const) {
+      const message = messagesFor(C).find((m) => m.id === ids[turn])!;
+      expect(message.terminalStatus).toBe("completed");
+      const records = message.blocks!.filter((b) => b.type === "tool_call").map((b) => b.record);
+      for (const id of requestIds) {
+        expect(records.find((r) => r.id === id)).toMatchObject({ name: "run_command", status });
+      }
+      expect(records.every((r) => r.status !== "running" && r.status !== "pending")).toBe(true);
+      if (turn === "fifth") expect(records.find((r) => r.id === requestIds[0])?.summary).toMatch(/Operation rejected/);
+    }
   });
 });

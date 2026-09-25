@@ -501,13 +501,19 @@ const applyAuthoritativeTurnDiff = (
   turns: ChatTurnState[],
   turnDiff: ReturnType<typeof useAppStore.getState>["turnDiffs"][string] | undefined,
 ): ChatTurnState[] => {
-  // Presence of a turn-diff state is authoritative, including an empty diff:
-  // the backend uses diff="" to retract an earlier tool-aggregated preview.
-  // Only an absent state means that the fallback projection is still allowed.
+  // An exact empty diff retracts the preview. An unavailable aggregate retains
+  // the tool receipts as history, without claiming they match current files.
   if (!turnDiff?.turnId) return turns;
   const index = turns.findIndex((turn) => turn.turnId === turnDiff.turnId);
   if (index < 0) return turns;
   const turn = turns[index];
+  if (turnDiff.diff === null) {
+    const next = turns.slice();
+    next[index] = { ...turn, committedCells: turn.committedCells.map((cell) =>
+      cell.kind === "diff" ? { ...cell, historical: true } : cell,
+    ) };
+    return next;
+  }
   const summary = summarizeTurnDiff(turnDiff);
   if (!summary) {
     const withoutFallback = turn.committedCells.filter((cell) => cell.kind !== "diff");

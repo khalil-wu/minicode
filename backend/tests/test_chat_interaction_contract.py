@@ -205,7 +205,12 @@ def test_common_direct_tool_model_descriptions_stay_short() -> None:
     patch_description = ApplyPatchTool().model_schema().description
     assert "actual newlines" in patch_description
     assert "*** Begin Patch" in patch_description and "*** End Patch" in patch_description
-    assert ReadFileTool(artifact_store).model_schema().description == "Read a text file with line numbers and content_hash."
+    read_description = ReadFileTool(artifact_store).model_schema().description
+    assert read_description.startswith("Read a text file with line numbers and content_hash.")
+    assert "grep_files" in read_description and "start_line/end_line" in read_description
+    assert "full-file hash for editing when available" in read_description
+    assert "read the saved output" in read_description
+    assert len(read_description) < 400
     assert ListFilesTool().model_schema().description == "List files and directories to inspect project structure."
     assert ReadArtifactTool(artifact_store).model_schema().description == (
         "Read full content by artifact_id or a shown MiniCode persisted-result cache filename."

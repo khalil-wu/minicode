@@ -103,7 +103,7 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
                 "type": "object",
                 "required": ["url", "prompt"],
                 "properties": {
-                    "url": {"type": "string"},
+                    "url": {"type": "string", "description": "HTTP or HTTPS URL of the page to fetch."},
                     "prompt": {
                         "type": "string",
                         "description": "The prompt to run on the fetched content.",

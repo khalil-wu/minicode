@@ -1478,6 +1478,6 @@ def test_configured_reasoning_preference_is_not_reported_as_effective_without_me
     assert payload["configured_reasoning_effort"] == "low"
     assert payload["effective_reasoning_effort"] == ""
     assert payload["reasoning_effort_supported"] is False
-    assert payload["context_window"] == 200_000
+    assert payload["context_window"] == 1_000_000
     assert payload["context_window_source"] == "fallback"
     assert payload["context_window_verified"] is False

@@ -21,6 +21,14 @@ class CompactionCommit:
     after_snapshot: dict[str, Any]
 
 
+class CompactionCommittedProjectionError(RuntimeError):
+    """The durable compaction committed, but its live builder did not refresh."""
+
+    def __init__(self, committed: CompactionCommit) -> None:
+        super().__init__("Context compaction was saved, but the active context could not be refreshed")
+        self.committed = committed
+
+
 def _publish_snapshot_to_live_builder(
     session: Any,
     *,
@@ -154,6 +162,11 @@ async def compact_conversation(
                 previous_snapshot,
                 saved_snapshot,
             )
+            if callable(load_snapshot):
+                # The live builder clears itself before decoding. Verify the
+                # committed snapshot on the transaction clone first, so bad
+                # serialized context never reaches disk or a live builder.
+                transaction_builder.load_snapshot(deepcopy(saved_snapshot))
             committed = await asyncio.to_thread(
                 session.conversation_repo.commit_compaction,
                 clean_id,
@@ -166,17 +179,32 @@ async def compact_conversation(
                 raise RuntimeError(
                     "Conversation disappeared while committing compaction"
                 )
-            _publish_snapshot_to_live_builder(
-                session,
-                conversation_id=clean_id,
-                context_builder=context_builder,
-                snapshot=saved_snapshot,
-            )
-            return CompactionCommit(
+            result = CompactionCommit(
                 summary=summary_text,
                 before_snapshot=before_snapshot,
                 after_snapshot=saved_snapshot,
             )
+            try:
+                _publish_snapshot_to_live_builder(
+                    session,
+                    conversation_id=clean_id,
+                    context_builder=context_builder,
+                    snapshot=saved_snapshot,
+                )
+            except Exception as exc:
+                if (
+                    conversation_runtime is not None
+                    and context_builder is getattr(conversation_runtime, "_context_builder", None)
+                ):
+                    # A failed load may have cleared or partially populated the
+                    # shared builder. Its next query must hydrate from the CAS
+                    # committed repository snapshot before constructing a prompt.
+                    conversation_runtime.defer_repository_hydration(
+                        clean_id,
+                        on_hydration_complete=session._on_conversation_hydration_complete,
+                    )
+                raise CompactionCommittedProjectionError(result) from exc
+            return result
     except ConversationWriteConflict:
         current = await asyncio.to_thread(
             session.conversation_repo.get_conversation,

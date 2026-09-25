@@ -313,7 +313,7 @@ def test_live_refresh_clears_stale_capabilities_when_provider_declares_none(
     assert result["configured_reasoning_effort"] == "low"
     assert result["effective_reasoning_effort"] == ""
     assert result["reasoning_effort_supported"] is False
-    assert result["context_window"] == 200_000
+    assert result["context_window"] == 1_000_000
     assert result["context_window_source"] == "fallback"
     assert result["context_window_verified"] is False
 

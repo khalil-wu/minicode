@@ -3,11 +3,15 @@ import json
 import threading
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from backend.services.session_restore_service import seq_from_restore_payload as _seq_from_restore_payload
 from backend.ws.event_outbox import EventOutbox
 from backend.ws.handler import WebSocketSession
+from backend.ws.handlers.session import handle_session_sync
+from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
 from backend.ws.session_lifecycle import SessionLifecycle
+from backend.ws.turn_wait_state import TurnWaitState
 
 
 def test_seq_from_restore_payload_uses_single_last_seq_field() -> None:
@@ -361,6 +365,86 @@ def test_replay_window_requires_the_chain_to_reach_the_durable_high_water() -> N
     )
 
     assert outbox.replay_window_after(5) == ([], True)
+
+
+def test_sync_replays_old_done_and_resumes_new_turn_in_same_conversation() -> None:
+    class Session(SessionApprovalRuntimeMixin):
+        session_id = "session"
+        active_conversation_id = None
+        active_conversation = None
+        selected_model = "model"
+        provider = "provider"
+        available_models = ["model"]
+        models_source = "test"
+        conversation_repo = None
+
+        def __init__(self, run_task: asyncio.Task[None]) -> None:
+            self.sent: list[dict] = []
+            self.turn_wait_state = TurnWaitState()
+            self.run_manager = SimpleNamespace(run_tasks={"conv": run_task})
+            self.session_lifecycle = SimpleNamespace(current_workspace_root=lambda: None)
+            self._conversation_streams = {
+                "conv": {
+                    "conversation_id": "conv",
+                    "message_id": "assistant-new",
+                    "turn_id": "turn-new",
+                    "content_blocks": [{
+                        "type": "text", "itemId": "answer-new", "content": "new answer so far",
+                    }],
+                    "tool_calls": {},
+                    "status": "running",
+                    "terminal_fenced": False,
+                },
+            }
+            self.event_outbox = SimpleNamespace(
+                current_replay_seq=3,
+                replay_log_degraded=False,
+                replay_window_after=lambda _seq: ([{
+                    "type": "done", "conversation_id": "conv",
+                    "message_id": "assistant-old", "seq": 3,
+                    "previous_replay_seq": 1,
+                }], False),
+                replay_missed_events=self.replay_missed_events,
+            )
+
+        def runtime_snapshot(self) -> dict:
+            return {"session_id": self.session_id}
+
+        async def send_payload(self, payload: dict, **_kwargs) -> bool:
+            self.sent.append(payload)
+            return True
+
+        async def send_event(self, event) -> None:
+            self.sent.append(event.to_ws_message())
+
+        async def replay_missed_events(self, _last_seq: int, *, events: list[dict], current_seq: int) -> int:
+            self.sent.append({"type": "session.replay", "events": events, "current_seq": current_seq})
+            return len(events)
+
+        def schedule_next_queued_user_message(self, _conversation_id: str) -> None:
+            return None
+
+    async def scenario() -> tuple[list[dict], list[dict]]:
+        run_task = asyncio.create_task(asyncio.sleep(10))
+        session = Session(run_task)
+        try:
+            await handle_session_sync(session, {"last_seq": 1})
+            first = list(session.sent)
+            session._conversation_streams["conv"]["terminal_fenced"] = True
+            await session.reemit_pending_state()
+            return first, session.sent
+        finally:
+            run_task.cancel()
+            try:
+                await run_task
+            except asyncio.CancelledError:
+                pass
+
+    first, after_terminal = asyncio.run(scenario())
+    assert [event["type"] for event in first] == ["session.synced", "session.replay", "stream_resume"]
+    assert first[-1]["message_id"] == "assistant-new"
+    assert first[-1]["content_blocks"][0]["content"] == "new answer so far"
+    assert after_terminal == first
 
 
 def test_guideline_file_change_emits_actionable_reload_metadata(

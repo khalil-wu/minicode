@@ -130,6 +130,8 @@ def _build_preview(
     parts = [
         "<persisted-output>",
         f"Output too large ({len(content)} chars). Full output saved to: {filepath}",
+        "Use read_file on the saved path with start_line/end_line, or narrow the original read/search. "
+        "Do not repeat the same unbounded call to retrieve the missing content.",
         "",
         f"Preview (first {PERSISTED_PREVIEW_CHARS} chars):",
         preview,

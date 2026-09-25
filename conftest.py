@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 
 @pytest.fixture(autouse=True)
 def isolate_all_runtime_data_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """One isolation owner for both test trees and every mutable runtime path."""
+    scoped_key_prefixes = (
+        "OPENAI_API_KEY_", "ANTHROPIC_API_KEY_", "CUSTOM_API_KEY_",
+        "MINICODE_OPENAI_IMAGE_API_KEY_", "MINICODE_ANTHROPIC_IMAGE_API_KEY_",
+        "MINICODE_CUSTOM_IMAGE_API_KEY_",
+    )
+    for name in tuple(os.environ):
+        if name.startswith(scoped_key_prefixes):
+            monkeypatch.delenv(name)
     conversations = tmp_path / "conversations"
     data_root = tmp_path / "state" / "data"
     monkeypatch.setattr("backend.memory.file_memory.DATA_ROOT", data_root)
@@ -48,6 +58,9 @@ def isolate_all_runtime_data_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
     clear_active_workspace_root()
     yield
+    for name in tuple(os.environ):
+        if name.startswith(scoped_key_prefixes):
+            os.environ.pop(name)
     clear_active_workspace_root()
     for manager_path in ("backend.main._ws_manager", "backend.api._state.ws_manager"):
         module_name, attr = manager_path.rsplit(".", 1)

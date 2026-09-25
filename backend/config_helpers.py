@@ -11,7 +11,7 @@ from backend.atomic_io import (
     file_mutation_locks,
 )
 from backend.feature_flags import coerce_feature_bool
-from backend.llm.model_catalog import responses_model_catalog_entry
+from backend.llm.model_catalog import MODEL_CONTEXT_WINDOW_DEFAULT, responses_model_catalog_entry
 from backend.llm.proxy_policy import normalize_provider_proxy_mode
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -46,10 +46,7 @@ _SETTINGS_WRITE_LOCK = threading.RLock()
 # OpenAI Responses/Chat APIs leave the field out when the user did not set it.
 MINICODE_CAPPED_DEFAULT_MAX_TOKENS = 8_000
 
-# MiniCode's default when a provider does not publish a context window.
-MODEL_CONTEXT_WINDOW_DEFAULT = 200_000
-
-
+# Published family capacities; these describe limits, not application defaults.
 _KNOWN_MODEL_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
     # Anthropic Claude 4 / 3.x families
     ("claude-opus-4", 200_000),
@@ -65,8 +62,7 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
     ("o1-", 200_000),
     ("o3-", 200_000),
     ("o4-", 200_000),
-    # Small local / open models — the ones a 200K default actively breaks
-    # compaction for. Longest-prefix-first means a variant id beats the family.
+    # Small local / open models. A specific variant beats the family.
     ("qwen3-32b", 128_000),
     ("qwen-32b", 128_000),
     ("qwen2.5-", 128_000),
@@ -160,10 +156,8 @@ def resolve_context_window_details(
 ) -> ContextWindowResolution:
     """Resolve context size with MiniCode-style model-metadata precedence.
 
-    The numeric fallback remains necessary for budgeting, but provenance is
-    retained so an unknown model is never presented as a provider-verified
-    200K model.  An explicit host override wins, followed by live provider
-    metadata, a known model-family value, and finally the conservative fallback.
+    Explicit host and provider settings take precedence over the common 1M
+    application default. The default is not a verified provider capacity.
     """
 
     model_id = str(model or "").strip()
@@ -198,42 +192,6 @@ def resolve_context_window_details(
     if provider_value > 0:
         return ContextWindowResolution(provider_value, "provider", True)
 
-    if not model_id:
-        return ContextWindowResolution(
-            MODEL_CONTEXT_WINDOW_DEFAULT,
-            "fallback",
-            False,
-        )
-    lowered = model_id.lower()
-    # Gateways commonly namespace direct-provider ids (for example
-    # ``openai/gpt-5.6-sol``). Capability matching is about the terminal model
-    # id, not the routing namespace, so consider both without weakening the
-    # unknown-model fallback.
-    model_candidates = (lowered, lowered.rsplit("/", 1)[-1])
-    # Explicit [1m] suffix opt-in wins over the family window (MiniCode's
-    # has1mContext behavior). e.g. claude-opus-4-1m → 1M, not the 200K family.
-    # cc marks 1M-context models with the "[1m]" suffix (context.ts); the
-    # legacy "-1m" spelling stays accepted for older settings.
-    if any(
-        "[1m]" in candidate or candidate.endswith("-1m") or "-1m-" in candidate
-        for candidate in model_candidates
-    ):
-        return ContextWindowResolution(1_000_000, "known_model", True)
-    if catalog_entry is not None:
-        return ContextWindowResolution(
-            catalog_entry.context_window,
-            "known_model",
-            True,
-        )
-    # Longest prefix wins so a specific id beats its family.
-    matched = 0
-    for prefix, window in _KNOWN_MODEL_CONTEXT_WINDOWS:
-        if any(candidate.startswith(prefix) for candidate in model_candidates):
-            if len(prefix) > matched:
-                matched = len(prefix)
-                result = window
-    if matched:
-        return ContextWindowResolution(result, "known_model", True)
     return ContextWindowResolution(
         MODEL_CONTEXT_WINDOW_DEFAULT,
         "fallback",
@@ -715,12 +673,25 @@ def get_provider_model_metadata(
         provider_context_window=declared.get("context_window", 0),
         provider_max_context_window=declared_max_context,
     )
+    terminal_id = model_id.lower().rsplit("/", 1)[-1]
+    family_capacity = next(
+        (window for prefix, window in sorted(
+            _KNOWN_MODEL_CONTEXT_WINDOWS, key=lambda item: len(item[0]), reverse=True
+        ) if terminal_id.startswith(prefix)),
+        0,
+    )
+    if "[1m]" in terminal_id or terminal_id.endswith("-1m") or "-1m-" in terminal_id:
+        family_capacity = 1_000_000
     if declared_max_context > 0:
-        max_context_window = max(declared_max_context, resolution.tokens)
+        max_context_window = declared_max_context
         max_context_window_source = "provider"
         max_context_window_verified = True
     elif known is not None:
-        max_context_window = max(known.max_context_window, resolution.tokens)
+        max_context_window = known.max_context_window
+        max_context_window_source = "known_model"
+        max_context_window_verified = True
+    elif family_capacity:
+        max_context_window = family_capacity
         max_context_window_source = "known_model"
         max_context_window_verified = True
     else:
@@ -1990,6 +1961,5 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
         image_size=str(image_config["size"] if image_config else openai["image_size"]),
         image_quality=str(image_config["quality"] if image_config else openai["image_quality"]),
     )
-
 
 

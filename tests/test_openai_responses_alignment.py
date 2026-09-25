@@ -368,6 +368,27 @@ def test_responses_authoritative_continuation_keeps_all_output_items() -> None:
     assert len(captured) == 65
 
 
+@pytest.mark.parametrize("summary", [[], [SimpleNamespace(type="summary_text", text="Brief summary")]])
+def test_reasoning_replay_keeps_the_required_summary_field(summary):
+    captured = _responses_provider_item_from_output(SimpleNamespace(
+        type="reasoning", id="rs-luna", encrypted_content="opaque-state", summary=summary,
+    ))
+    adapter, _ = _adapter([])
+    history = LLMMessage(role="assistant", content="answer", provider_items=[captured])
+    replay = adapter._build_responses_input([history])
+    assert replay[0]["summary"] == _jsonable(summary)
+    assert replay[0]["encrypted_content"] == "opaque-state"
+
+
+def test_saved_reasoning_without_summary_is_repaired_only_on_the_wire():
+    adapter, _ = _adapter([])
+    saved = {"type": "reasoning", "id": "rs-old", "encrypted_content": "opaque-state"}
+    history = LLMMessage(role="assistant", content="old answer", provider_items=[saved])
+    replay = adapter._build_responses_input([history, LLMMessage(role="user", content="continue")])
+    assert replay[0] == {**saved, "summary": []}
+    assert "summary" not in saved
+
+
 def test_openai_explicit_cache_uses_utf8_bytes_for_multilingual_prefix() -> None:
     """CJK stable text must not be rejected by a Unicode code-point estimate."""
 
@@ -2718,4 +2739,3 @@ def test_response_completed_without_a_response_object_is_refused() -> None:
     assert len(errors) == 1
     assert errors[0].raw["protocol_error_code"] == "terminal_event_without_response"
     assert errors[0].raw["provider_error_type"] == "protocol"
-

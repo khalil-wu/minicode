@@ -1337,6 +1337,7 @@ async def _test_running_subagent_receives_parent_mailbox_messages(tmp_path):
 
 async def _test_task_tool_bridges_subagent_internal_progress(monkeypatch, tmp_path):
     events: list[tuple[str, dict]] = []
+    bridges = []
 
     async def emit(event_type: str, data: dict) -> None:
         events.append((event_type, data))
@@ -1344,6 +1345,12 @@ async def _test_task_tool_bridges_subagent_internal_progress(monkeypatch, tmp_pa
     async def fake_run_agent_loop(**kwargs):
         bridge = kwargs["session_context"].emit_event
         assert bridge is not None
+        bridges.append(bridge)
+        child_id = kwargs["session_context"].metadata["agent_id"]
+        await bridge("subagent.event", {"subagent_id": child_id, "event": {
+            "type": "message", "message": {"message_id": "child-report", "sender_id": child_id,
+                "recipient_id": "parent", "content": "FACT_1=value-17"},
+        }})
         await bridge("tool_call", {"id": "child-tool-1", "name": "read_file"})
         await bridge(
             "agent.progress",
@@ -1406,6 +1413,13 @@ async def _test_task_tool_bridges_subagent_internal_progress(monkeypatch, tmp_pa
     )
     assert process_progress["detail"] == "I am narrowing the search to the authentication path."
     assert process_progress["waiting_on"] == "model"
+    mailbox_events = [data for event_type, data in events if event_type == "subagent.event"]
+    assert len(mailbox_events) == 1
+    assert mailbox_events[0]["event"]["message"]["content"] == "FACT_1=value-17"
+    assert mailbox_events[0]["agent_path"] == progress_events[0]["agent_path"]
+    assert mailbox_events[0]["mailbox_epoch"] == progress_events[0]["mailbox_epoch"]
+    await bridges[0]("subagent.event", mailbox_events[0])
+    assert len([event for event in events if event[0] == "subagent.event"]) == 1
 
 
 def test_subagent_push_transcript_is_monotonic_and_terminally_complete(

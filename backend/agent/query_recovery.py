@@ -77,9 +77,10 @@ def prepare_query_recovery(
         checkpoint.iterations,
     )
     state.iterations = checkpoint.iterations
-    state.max_iterations = max(
-        state.max_iterations,
-        checkpoint.iterations + max_iterations_budget,
+    state.max_iterations = (
+        max(state.max_iterations, checkpoint.iterations + max_iterations_budget)
+        if max_iterations_budget > 0
+        else 0
     )
     state.reply = checkpoint.reply
     state.active_skills = list(checkpoint.active_skills)

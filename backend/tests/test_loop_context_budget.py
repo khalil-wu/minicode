@@ -1,8 +1,11 @@
 import asyncio
+from types import SimpleNamespace
+
+import pytest
 
 from backend.agent.state import AgentState
 from backend.config import TokenBudget
-from backend.services.context_budget import manage_context_budget
+from backend.services.context_budget import build_context_budget_snapshot, manage_context_budget
 from backend.hooks.manager import HookEvent, HookResult
 
 
@@ -11,6 +14,22 @@ async def _collect(ctx, state, budget):
         event
         async for event in manage_context_budget(ctx, state, budget, tool_schemas=[])
     ]
+
+
+def test_context_budget_snapshot_does_not_hide_tool_schema_failure() -> None:
+    class _Registry:
+        def get_schemas(self, **_kwargs):
+            raise RuntimeError("tool schema discovery failed")
+
+    session = SimpleNamespace(
+        last_agent_state=None,
+        tool_registry=_Registry(),
+        permission_checker=None,
+        permission_context=None,
+    )
+
+    with pytest.raises(RuntimeError, match="tool schema discovery failed"):
+        build_context_budget_snapshot(session, object())
 
 
 class _BudgetCtx:
@@ -30,6 +49,9 @@ class _BudgetCtx:
 
     def needs_compaction(self, state=None, *, tool_schemas=None):
         return self.token_usage > 850
+
+    def get_budget_snapshot(self, state=None, *, tool_schemas=None):
+        return {"used": self.token_usage, "total": 1000, "breakdown": {}}
 
     async def compact(self, *args, **kwargs):
         self.compact_calls += 1
@@ -250,3 +272,14 @@ def test_budget_warning_stays_silent_below_the_band_and_re_arms() -> None:
 
     ctx.used = 170_000
     assert [e.type for e in asyncio.run(_collect(ctx, state, budget))] == ["budget.warning"]
+
+
+def test_small_context_warning_does_not_start_at_half_full_or_disappear() -> None:
+    from backend.services.context_budget import _pre_compaction_warning
+    for total in (16_000, 24_000):
+        budget = TokenBudget(total=total)
+        ctx = _SnapshotCtx(used=total // 2, total=total)
+        state = AgentState(user_message="continue")
+        assert _pre_compaction_warning(ctx, state, budget, []) is None
+        ctx.used = total * 84 // 100
+        assert _pre_compaction_warning(ctx, state, budget, []).type == "budget.warning"

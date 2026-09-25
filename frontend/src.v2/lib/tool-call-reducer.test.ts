@@ -9,6 +9,27 @@ import {
 } from "./tool-call-reducer";
 
 describe("toolCallReducer", () => {
+  it("clears approval waits when execution starts or settles without a start frame", () => {
+    const waiting: ToolCallRecord = {
+      id: "approved", name: "run_command", args: {}, startedAt: 1, seq: 1,
+      status: "pending", transition: "waiting_approval", waitingOn: "approval", blockingReason: "Approval required",
+    };
+    const running = reduceToolCallStart(new Map([[waiting.id, waiting]]), {
+      type: "tool_call", id: waiting.id, name: waiting.name, args: {}, status: "running", seq: 2,
+    }).get(waiting.id)!;
+    expect(running).toMatchObject({ status: "running", transition: "running", waitingOn: undefined, blockingReason: undefined });
+    for (const status of ["success", "blocked", "failed", "partial", "cancelled", "timeout"] as const) {
+      const result = reduceToolCallResult(new Map([[waiting.id, waiting]]), {
+        type: "tool_result", id: waiting.id, status, summary: "settled", seq: 3,
+      }).get(waiting.id)!;
+      expect(result).toMatchObject({ status, waitingOn: undefined, blockingReason: undefined });
+      expect(result.transition).not.toBe("waiting_approval");
+      expect(reduceToolCallStart(new Map([[result.id, result]]), {
+        type: "tool_call", id: result.id, name: result.name, args: {}, status: "pending", seq: 2,
+      }).get(result.id)).toEqual(result);
+    }
+  });
+
   it("start adds an entry and never decreases the map size", () => {
     fc.assert(
       fc.property(

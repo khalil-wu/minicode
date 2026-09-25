@@ -155,9 +155,7 @@ _load_env_file(PROJECT_ROOT / "backend" / ".env")
 
 # MiniCode's default when a provider does not publish a context window.
 
-# Other established model-family windows, matched longest-prefix-first. OpenAI
-# GPT-5 records deliberately stay out of this table because MiniCode publishes
-# them as exact catalog entries with materially different default/max windows.
+# Published model capacities live separately from the common application default.
 
 def resolve_context_window(model: str) -> int:
     """Backward-compatible numeric context-window resolver."""
@@ -175,7 +173,15 @@ class TokenBudget:
     memory_index: int = 1_000
     tool_schemas: int = 6_000
     agent_state: int = 2_000
-    response_reserve: int = 16_384
+    # None follows the window on model switches; explicit values stay explicit.
+    response_reserve: int | None = None
+
+    @property
+    def reserved_response_tokens(self) -> int:
+        """Leave 10% for output by default, capped at the large-window reserve."""
+        if self.response_reserve is not None:
+            return self.response_reserve
+        return min(16_384, self.total // 10)
 
     @property
     def history_budget(self) -> int:
@@ -186,7 +192,7 @@ class TokenBudget:
             + self.memory_index
             + self.tool_schemas
             + self.agent_state
-            + self.response_reserve
+            + self.reserved_response_tokens
         )
         return self.total - used
 
@@ -782,10 +788,11 @@ def load_config(*, cwd: Path | None = None) -> AppConfig:
     total = _coerce_nonnegative_int(budget_data.get("total"), default_total)
     if total < 2:
         total = default_total
-    response_reserve = _coerce_nonnegative_int(
-        budget_data.get("response_reserve"), TokenBudget.response_reserve
+    response_reserve = (
+        _coerce_nonnegative_int(budget_data["response_reserve"], 16_384)
+        if budget_data.get("response_reserve") is not None else None
     )
-    if response_reserve >= total:
+    if response_reserve is not None and response_reserve >= total:
         response_reserve = max(1, total - 1)
     token_budget = TokenBudget(
         total=total,

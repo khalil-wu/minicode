@@ -353,6 +353,13 @@ def _build_tool_runtime_guidance_uncached(
         )
 
     if "run_command" in names:
+        tool_items.append(
+            "- Sandbox permissions: when the current policy permits approval and a necessary "
+            "command needs access outside the sandbox, use run_command's "
+            "with_escalated_permissions with a concrete justification. If a sandbox denial "
+            "occurs, retry that command through the same approval path; do not change tools "
+            "or shell syntax to bypass it. Under a never-approve policy, report the restriction."
+        )
         # Keep the canonical MiniCode git-safety protocol explicit whenever
         # run_command is exposed.
         tool_items.append(
@@ -991,6 +998,12 @@ _SYSTEM_AND_HOOKS_PROMPT = """\
   conventions before editing. For output changes, preserve unaffected message
   formats, layout, ordering, and whitespace. Change existing test expectations
   only when the requested behavior requires it, explaining that requirement.
+- Turn every reported symptom and constraint into a concrete acceptance check,
+  including secondary symptoms and numerical examples. Trace the shared data
+  and state through affected callers; repair the cause, not just the branch
+  that reports an error. Before finishing, compare the implementation and
+  verification against the entire request. Passing tests for only the edited
+  branch does not establish that the other reported failures were resolved.
 - Complete related implementation changes together, then add regression coverage
   and run focused validation. Use the repository's documented test entry point;
   do not assume that pytest is installed or that a module invocation runs tests.

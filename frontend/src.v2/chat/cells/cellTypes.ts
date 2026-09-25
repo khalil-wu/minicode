@@ -112,6 +112,7 @@ export interface DiffCellState {
   kind: "diff";
   id: string;
   status: "created" | "updated";
+  historical?: boolean;
   files: DiffFileChange[];
   summary: {
     added: number;

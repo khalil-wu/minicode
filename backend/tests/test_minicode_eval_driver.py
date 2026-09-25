@@ -144,12 +144,52 @@ def test_repository_eval_allows_new_tests_without_changing_existing_tests(tmp_pa
     }
 
 
+@pytest.mark.parametrize("resume", [False, True])
+def test_eval_resume_uses_production_checkpoint_history(tmp_path, monkeypatch, capsys, resume):
+    from backend.agent.checkpoint import save_checkpoint
+    from backend.agent.context import ContextBuilder
+
+    context = ContextBuilder()
+    context.append_user("Original acceptance: never reserve stock before validating every quote.")
+    context.append_assistant("Diagnosis complete; implement the numeric price comparison next.")
+    snapshot = context.export_snapshot()
+    monkeypatch.setenv("MINICODE_EVAL_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("MINICODE_EVAL_API_KEY", "local-eval-fixture")
+    monkeypatch.setenv("MINICODE_EVAL_MODEL", "fixture")
+    monkeypatch.setenv("MINICODE_EVAL_TASK_ID", "resume-check")
+    monkeypatch.setenv("MINICODE_EVAL_RESUME_FROM_CHECKPOINT", str(resume))
+    save_checkpoint(session_id="eval-resume-check", conversation_id="eval-resume-check", run_id="original-run",
+        user_message="Original acceptance", iterations=3, reply="", messages=snapshot["history"],
+        context_snapshot=snapshot, tool_calls=[], active_skills=[], disabled_tools=set(),
+        stopped_reason="timeout", last_mutation_index=0)
+
+    class FixtureLLM(LLMAdapter):
+        async def stream_chat(self, messages, tools=None):
+            contents = [message.content for message in messages]
+            original = [content for content in contents if "Original acceptance: never reserve" in content]
+            assert len(original) == int(resume)
+            assert ("numeric price comparison next" in str(contents)) is resume
+            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="Finished the original task.")
+            yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop")
+
+        async def simple_chat(self, messages):
+            return "Finished the original task."
+
+    monkeypatch.setattr(driver, "build_wire_adapter", lambda *_args, **_kwargs: FixtureLLM())
+    monkeypatch.setattr(driver, "ArtifactStore", lambda: ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    assert asyncio.run(driver._run("Continue.")) == 0
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    notices = [r for r in records if r["type"] == "system_notice" and r["data"].get("title") == "Resumed from checkpoint"]
+    assert bool(notices) is resume
+
+
 @pytest.mark.parametrize("protect,expected_exit", [(True, 1), (False, 0)])
 def test_external_oracle_keeps_test_changes_observable_without_failing_a_completed_run(tmp_path, monkeypatch, capsys, protect, expected_exit):
     test_file = tmp_path / "test_original.py"
     test_file.write_text("def test_original():\n    assert True\n")
     class FixtureLLM(LLMAdapter):
         async def stream_chat(self, messages, tools=None):
+            assert ("Leave pre-existing test files unchanged; add regression tests in new test files." in str(messages)) is protect
             test_file.write_text("def test_original():\n    assert True\n\ndef test_regression():\n    assert 1 + 1 == 2\n")
             yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="Added regression coverage.")
             yield StreamEvent(type=StreamEventType.DONE)

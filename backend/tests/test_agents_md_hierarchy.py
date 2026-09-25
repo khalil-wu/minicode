@@ -192,6 +192,29 @@ def test_agents_md_is_loaded_root_first_without_minicode_wrapper(tmp_path):
     )
 
 
+def test_root_agents_imports_remain_available_from_nested_cwd(tmp_path):
+    root = tmp_path / "repo"
+    nested = root / "pkg" / "service"
+    nested.mkdir(parents=True)
+    (root / ".git").mkdir()
+    (root / "AGENTS.md").write_text(
+        "@docs/workflow.md\n@../outside.md", encoding="utf-8"
+    )
+    shared = root / "docs" / "workflow.md"
+    shared.parent.mkdir()
+    shared.write_text("shared project workflow", encoding="utf-8")
+    (tmp_path / "outside.md").write_text("outside project", encoding="utf-8")
+
+    bundle = load_project_guideline_bundle(workspace_dir=nested)
+
+    assert [block.path for block in bundle.blocks if block.source_kind == "project_instruction"] == [
+        root / "AGENTS.md",
+        shared,
+    ]
+    assert "shared project workflow" in bundle.rendered_markdown
+    assert "outside project" not in bundle.rendered_markdown
+
+
 def test_minicode_instruction_overrides_agents_file_in_same_scope(tmp_path):
     root = tmp_path / "repo"
     (root / ".git").mkdir(parents=True)
@@ -227,18 +250,20 @@ def test_shared_agents_file_is_read_without_deprecation_warning(tmp_path, caplog
     assert "deprecated" not in caplog.text
 
 
-def test_agents_override_is_not_a_minicode_instruction_source(tmp_path, caplog):
-    # AGENTS.override.md is not part of MiniCode's instruction protocol.
+def test_agents_override_replaces_shared_instructions_at_the_same_scope(tmp_path, caplog):
     root = tmp_path / "repo"
     (root / ".git").mkdir(parents=True)
     (root / "AGENTS.override.md").write_text("legacy override", encoding="utf-8")
+    (root / "AGENTS.md").write_text("base instructions", encoding="utf-8")
 
     with caplog.at_level(logging.WARNING, logger="backend.agent.instruction_discovery"):
         bundle = load_project_guideline_bundle(workspace_dir=root)
 
-    assert _agent_blocks(bundle) == []
-    assert "legacy override" not in bundle.rendered_markdown
+    assert [block.path for block in _agent_blocks(bundle)] == [root / "AGENTS.override.md"]
+    assert "legacy override" in bundle.rendered_markdown
+    assert "base instructions" not in bundle.rendered_markdown
     assert "AGENTS.override.md" not in caplog.text
+    assert guideline_change_metadata(root / "AGENTS.override.md")["source_kind"] == "direct"
 
 
 def test_project_doc_fallback_filename_is_used_after_instruction_candidates():

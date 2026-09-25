@@ -47,6 +47,25 @@ describe("runtime compaction events", () => {
     });
   });
 
+  it("admits a new run after a restore snapshot cleared its optimistic streaming flag", () => {
+    useAppStore.setState({ isStreaming: false, messages: [{
+      id: "new-assistant", role: "assistant", content: "", timestamp: 1, isStreaming: false,
+    }] });
+    handleRuntimeEvent({ type: "agent.run.started", conversation_id: "conv-runtime",
+      message_id: "new-assistant", turn_id: "new-run", run_id: "new-run", status: "running",
+    } as ServerEvent, "conv-runtime");
+    expect(useAppStore.getState().messages[0]).toMatchObject({ isStreaming: true, turnId: "new-run" });
+    expect(useAppStore.getState().isStreaming).toBe(true);
+    handleRuntimeEvent({ type: "agent.run.completed", conversation_id: "conv-runtime",
+      message_id: "new-assistant", turn_id: "new-run", run_id: "new-run", status: "completed",
+    } as ServerEvent, "conv-runtime");
+    expect(useAppStore.getState().messages[0].terminalStatus).toBe("completed");
+    handleRuntimeEvent({ type: "agent.run.started", conversation_id: "conv-runtime",
+      message_id: "new-assistant", turn_id: "new-run", run_id: "new-run", status: "running",
+    } as ServerEvent, "conv-runtime");
+    expect(useAppStore.getState().messages[0]).toMatchObject({ terminalStatus: "completed", isStreaming: false });
+  });
+
   it("combines conversation compaction state and runtime compacted notice without duplicate transcript entries", () => {
     expect(handleNoticeEvent({
       type: "conversation.compaction.updated",

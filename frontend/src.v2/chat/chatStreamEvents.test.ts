@@ -137,6 +137,58 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     expect(turns[0]?.finalAnswerCell?.markdownSource).toBe("Done");
   });
 
+  it("restores a newly started run before it has produced visible content", () => {
+    useAppStore.setState({
+      messages: [{
+        id: "assistant-old", role: "assistant", content: "Done", blocks: [],
+        artifacts: [], timestamp: 1, isStreaming: false, terminalStatus: "completed",
+      }],
+      conversationMessages: {},
+      conversationStreaming: { "conv-stream": false },
+      isStreaming: false,
+    });
+
+    expect(handle({
+      type: "stream_resume",
+      conversation_id: "conv-stream",
+      message_id: "assistant-new",
+      turn_id: "turn-new",
+      stream_status: "running",
+      event_seq: 1,
+      content_blocks: [],
+      tool_states: [],
+      tool_calls_pending: [],
+    } as ServerEvent)).toBe(true);
+
+    expect(useAppStore.getState().messages.map((message) => [message.id, message.isStreaming])).toEqual([
+      ["assistant-old", false],
+      ["assistant-new", true],
+    ]);
+    expect(useAppStore.getState().isStreaming).toBe(true);
+  });
+
+  it.each([
+    ["context.budget_refresh_failed", false],
+    ["context.budget_refresh_failed", true],
+    ["context.live_projection_failed", false],
+    ["context.live_projection_failed", true],
+  ])("clears an obsolete token budget after %s (replayed=%s)", (errorCode, replayed) => {
+    useAppStore.getState().setContextUsage({ used: 900, limit: 1000 });
+
+    expect(handle({
+      type: "error",
+      conversation_id: "conv-stream",
+      error_code: errorCode,
+      error_type: "context",
+      message: "Context was compacted and saved, but its token budget could not be refreshed",
+      recoverable: false,
+      replayed,
+    } as ServerEvent)).toBe(true);
+
+    expect(useAppStore.getState().contextUsage).toBeNull();
+    expect(useAppStore.getState().messages[0].isStreaming).toBe(true);
+  });
+
   it("streams provisional text as live narration and keeps it out of the answer surface", () => {
     handle({
       type: "item.started",

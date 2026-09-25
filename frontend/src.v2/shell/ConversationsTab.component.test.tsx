@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { sendClientCommandMock } = vi.hoisted(() => ({
@@ -20,6 +20,8 @@ vi.mock('../protocol/ws-outbox', () => ({
 
 import { useAppStore } from '../stores'
 import { ConversationsTab } from './ConversationsTab'
+import { sendClientCommandAwaitResult, sendConversationDeleteCommand } from '../protocol/ws-outbox'
+import { pushToast } from '../overlays/ToastContainer'
 
 describe('ConversationsTab project navigation', () => {
   beforeEach(() => {
@@ -45,6 +47,36 @@ describe('ConversationsTab project navigation', () => {
   })
 
   afterEach(() => { cleanup(); vi.useRealTimers() })
+
+  it('removes a workspace through its context menu while retaining conversations across reopen', async () => {
+    const { unmount } = render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
+    fireEvent.contextMenu(screen.getByRole('button', { name: 'Represented', exact: true }), { clientX: 40, clientY: 80 })
+    fireEvent.click(screen.getByRole('menuitem', { name: '移除工作区' }))
+    await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({
+      type: 'workspace.recent.remove', path: 'C:\\Represented', preserve_history: true,
+    }, 'workspace.recent.remove'))
+    const workspaces = useAppStore.getState().recentWorkspaces
+    act(() => useAppStore.getState().setRecentWorkspaces(workspaces.filter(item => item.path !== 'C:\\Represented')))
+    expect(screen.queryByRole('region', { name: '工作区 Represented' })).toBeNull()
+    expect(useAppStore.getState().conversations[0].archived).toBeUndefined()
+    expect(sendConversationDeleteCommand).not.toHaveBeenCalled()
+    unmount()
+    render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
+    expect(screen.queryByText('Existing workspace task')).toBeNull()
+    act(() => useAppStore.getState().setRecentWorkspaces(workspaces))
+    expect(screen.getByText('Existing workspace task')).toBeTruthy()
+  })
+
+  it('keeps the workspace visible if preserving history fails', async () => {
+    vi.mocked(sendClientCommandAwaitResult).mockResolvedValueOnce({
+      type: 'command.result', command: 'workspace.recent.remove', level: 'error', message: '无法保存历史会话',
+    })
+    render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
+    fireEvent.contextMenu(screen.getByRole('button', { name: 'Represented', exact: true }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '移除工作区' }))
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith('无法保存历史会话', 'error', 5000))
+    expect(screen.getByText('Existing workspace task')).toBeTruthy()
+  })
 
   it('uses one project list and refreshes its saved folders after connecting', () => {
     render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)

@@ -245,7 +245,7 @@ def test_aggregate_tool_budget_never_replaces_an_already_seen_result(
     result_dir = tmp_path / "tool-results"
     monkeypatch.setattr(persistence, "TOOL_RESULT_DATA_DIR", result_dir)
     monkeypatch.setattr(persistence, "_INITIALIZED", False)
-    monkeypatch.setattr(context_module, "PER_MESSAGE_TOOL_RESULT_BUDGET_CHARS", 200)
+    monkeypatch.setattr(context_module, "PER_MESSAGE_TOOL_RESULT_BUDGET_CHARS", 10_000)
 
     builder = ContextBuilder(
         token_budget=TokenBudget(total=200_000, response_reserve=1_000)
@@ -255,7 +255,7 @@ def test_aggregate_tool_budget_never_replaces_an_already_seen_result(
         [ToolCallEvent(id="call-old", name="web_fetch", arguments={})]
     )
     builder.append_tool_result(
-        "call-old", "web_fetch", ToolResult(content="o" * 70)
+        "call-old", "web_fetch", ToolResult(content="o" * 7000)
     )
     old_content = str(builder._history[-1].content or "")
     assert not old_content.startswith("<persisted-output>")
@@ -264,7 +264,7 @@ def test_aggregate_tool_budget_never_replaces_an_already_seen_result(
         [ToolCallEvent(id="call-new", name="web_fetch", arguments={})]
     )
     builder.append_tool_result(
-        "call-new", "web_fetch", ToolResult(content="n" * 70)
+        "call-new", "web_fetch", ToolResult(content="n" * 7000)
     )
 
     tool_contents = {
@@ -284,7 +284,7 @@ def test_snapshot_restore_freezes_existing_inline_tool_results(
     result_dir = tmp_path / "tool-results"
     monkeypatch.setattr(persistence, "TOOL_RESULT_DATA_DIR", result_dir)
     monkeypatch.setattr(persistence, "_INITIALIZED", False)
-    monkeypatch.setattr(context_module, "PER_MESSAGE_TOOL_RESULT_BUDGET_CHARS", 200)
+    monkeypatch.setattr(context_module, "PER_MESSAGE_TOOL_RESULT_BUDGET_CHARS", 10_000)
 
     original = ContextBuilder(
         token_budget=TokenBudget(total=200_000, response_reserve=1_000)
@@ -294,7 +294,7 @@ def test_snapshot_restore_freezes_existing_inline_tool_results(
         [ToolCallEvent(id="call-old", name="web_fetch", arguments={})]
     )
     original.append_tool_result(
-        "call-old", "web_fetch", ToolResult(content="o" * 70)
+        "call-old", "web_fetch", ToolResult(content="o" * 7000)
     )
 
     restored = ContextBuilder(
@@ -305,7 +305,7 @@ def test_snapshot_restore_freezes_existing_inline_tool_results(
         [ToolCallEvent(id="call-new", name="web_fetch", arguments={})]
     )
     restored.append_tool_result(
-        "call-new", "web_fetch", ToolResult(content="n" * 70)
+        "call-new", "web_fetch", ToolResult(content="n" * 7000)
     )
 
     tool_contents = {
@@ -315,6 +315,19 @@ def test_snapshot_restore_freezes_existing_inline_tool_results(
     }
     assert not tool_contents["call-old"].startswith("<persisted-output>")
     assert tool_contents["call-new"].startswith("<persisted-output>")
+
+
+def test_aggregate_budget_does_not_expand_a_small_result(tmp_path, monkeypatch):
+    monkeypatch.setattr(persistence, "TOOL_RESULT_DATA_DIR", tmp_path / "tool-results")
+    monkeypatch.setattr(persistence, "_INITIALIZED", False)
+    monkeypatch.setattr(context_module, "PER_MESSAGE_TOOL_RESULT_BUDGET_CHARS", 1)
+    builder = ContextBuilder()
+    builder.append_user("inspect")
+    builder.append_assistant_tool_calls([ToolCallEvent(id="tiny", name="read_file", arguments={})])
+    builder.append_tool_result("tiny", "read_file", ToolResult(content="small useful result"))
+    content = builder._history[-1].content
+    assert "small useful result" in content
+    assert "persisted-output" not in content
 
 
 def test_structured_tool_error_metadata_survives_copy_checkpoint_and_rest_payload(tmp_path) -> None:

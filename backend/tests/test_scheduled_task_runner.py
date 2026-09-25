@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from backend.agent.message import AgentEvent
+from backend.conversations.repository import ConversationRepository
 from backend.services import scheduled_task_runner as runner
 
 
@@ -14,6 +15,7 @@ class _Repository:
         self.created = []
         self.messages = []
         self.snapshots = []
+        self.turn_commits = []
 
     def get_conversation(self, conversation_id: str):
         return self.conversation if self.conversation and self.conversation.id == conversation_id else None
@@ -41,9 +43,17 @@ class _Repository:
 
     def append_transcript_message(self, conversation_id: str, message: dict):
         self.messages.append((conversation_id, message))
+        self.conversation.transcript.append(message)
+        self.conversation.revision = getattr(self.conversation, "revision", 0) + 1
+        return self.conversation
 
-    def save_context_snapshot(self, conversation_id: str, snapshot: dict):
-        self.snapshots.append((conversation_id, snapshot))
+    def commit_turn_projection(self, conversation_id: str, *, assistant_message: dict, context_snapshot: dict, expected_revision: int):
+        self.turn_commits.append((conversation_id, assistant_message, context_snapshot, expected_revision))
+        self.messages.append((conversation_id, assistant_message))
+        self.snapshots.append((conversation_id, context_snapshot))
+        self.conversation.transcript.append(assistant_message)
+        self.conversation.context_snapshot = context_snapshot
+        return self.conversation
 
 
 def _task(workspace: Path, **overrides):
@@ -136,8 +146,10 @@ def test_scheduled_runner_executes_in_managed_worktree(monkeypatch, tmp_path) ->
         ),
     )
     observed = {}
+    bindings = []
 
     async def fake_run_rest_chat(**kwargs):
+        assert bindings == [("run_4", "conv_scheduled")]
         observed.update(kwargs)
         return {"stopped_reason": "completed", "reply": "All checks passed", "iterations": 2}
 
@@ -147,6 +159,7 @@ def test_scheduled_runner_executes_in_managed_worktree(monkeypatch, tmp_path) ->
         _task(tmp_path, isolation="worktree"),
         SimpleNamespace(id="run_4"),
         bootstrap=_bootstrap(),
+        bind_conversation=lambda run_id, conversation_id: bindings.append((run_id, conversation_id)),
     ))
 
     assert result["status"] == "completed"
@@ -188,6 +201,84 @@ def test_scheduled_runner_persists_partial_status_reason_and_errors(monkeypatch,
         "Provider retry exhausted after evidence was collected."
     ]
     assert "failure_message" not in assistant
+    assert len(repository.turn_commits) == 1
+    committed_conversation_id, committed_message, committed_snapshot, expected_revision = repository.turn_commits[0]
+    assert committed_conversation_id == result["conversation_id"]
+    assert committed_message is assistant
+    assert committed_snapshot["scheduled_task"]["status"] == "partial"
+    assert expected_revision == 1
+
+
+def test_scheduled_retry_uses_the_prior_run_conversation(monkeypatch, tmp_path) -> None:
+    conversation = SimpleNamespace(
+        id="conv_retry",
+        archived=False,
+        workspace_root=str(tmp_path),
+        worktree_path="",
+        git_isolated=False,
+        context_snapshot={"history": [{"role": "user", "content": "Prior work"}]},
+        transcript=[],
+    )
+    repository = _Repository(conversation)
+    monkeypatch.setattr(runner, "ConversationRepository", lambda: repository)
+    monkeypatch.setattr(runner, "main_worktree_root", lambda path: Path(path).resolve())
+    observed = {}
+
+    async def fake_run_rest_chat(**kwargs):
+        observed.update(kwargs)
+        return {
+            "status": "completed",
+            "stopped_reason": "completed",
+            "reply": "Finished prior work",
+            "context_snapshot": {"history": [{"role": "assistant", "content": "Finished prior work"}]},
+        }
+
+    monkeypatch.setattr(runner, "run_owned_rest_chat", fake_run_rest_chat)
+    result = asyncio.run(runner.run_scheduled_task(
+        _task(tmp_path),
+        SimpleNamespace(id="run_retry", conversation_id="conv_retry"),
+        bootstrap=_bootstrap(),
+    ))
+
+    assert result["status"] == "completed"
+    assert repository.created == []
+    assert observed["conversation_id"] == "conv_retry"
+    assert observed["conversation_snapshot"]["history"][0]["content"] == "Prior work"
+    assert repository.turn_commits[0][2]["history"][0]["content"] == "Finished prior work"
+
+
+def test_scheduled_terminal_message_and_context_survive_reopen_together(monkeypatch, tmp_path) -> None:
+    store = tmp_path / "conversations"
+    repository = ConversationRepository(store)
+    conversation = repository.create_conversation(workspace_root=str(tmp_path))
+    monkeypatch.setattr(runner, "ConversationRepository", lambda: repository)
+    monkeypatch.setattr(runner, "main_worktree_root", lambda path: Path(path).resolve())
+
+    async def fake_run_rest_chat(**_kwargs):
+        return {
+            "status": "completed",
+            "stopped_reason": "completed",
+            "reply": "Checks passed",
+            "context_snapshot": {"history": [
+                {"role": "user", "content": "Run the checks"},
+                {"role": "assistant", "content": "Checks passed"},
+            ]},
+        }
+
+    monkeypatch.setattr(runner, "run_owned_rest_chat", fake_run_rest_chat)
+    result = asyncio.run(runner.run_scheduled_task(
+        _task(tmp_path, conversation_id=conversation.id),
+        SimpleNamespace(id="run_persisted"),
+        bootstrap=_bootstrap(),
+    ))
+
+    reopened = ConversationRepository(store).get_conversation(conversation.id)
+    assert result["status"] == "completed"
+    assert reopened is not None
+    assert [message["role"] for message in reopened.transcript] == ["user", "assistant"]
+    assert reopened.transcript[-1]["content"] == "Checks passed"
+    assert reopened.context_snapshot["history"][-1]["content"] == "Checks passed"
+    assert reopened.context_snapshot["scheduled_task"]["run_id"] == "run_persisted"
 
 
 def test_scheduled_runner_rejects_busy_conversation_before_side_effects(monkeypatch, tmp_path) -> None:

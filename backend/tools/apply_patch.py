@@ -123,6 +123,7 @@ class ApplyPatchTool(BaseTool):
                 "properties": {
                     "patch": {
                         "type": "string",
+                        "description": "Complete *** Begin Patch ... *** End Patch envelope with actual newlines; not a unified diff.",
                     },
                 },
                 "required": ["patch"],

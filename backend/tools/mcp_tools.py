@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from backend.permissions.context import ToolExecutionContext
@@ -11,9 +10,6 @@ from backend.tools.base import (
     ToolSchema,
 )
 from backend.tools.contracts import ToolSpec
-
-logger = logging.getLogger(__name__)
-
 
 class _McpBridgeTool(BaseTool):
     mcp_capability = ""
@@ -80,18 +76,27 @@ class ListMcpResourcesTool(_McpBridgeTool):
             return self._error_result("MCP Manager is not initialized or connected.")
 
         all_resources = []
+        failures: list[str] = []
         for name, client in self._mcp_manager.iter_connected_clients():
             try:
                 resources = await client.list_resources()
                 for r in resources:
                     all_resources.append(f"- URI: {r.uri} | Name: {r.name} | MimeType: {r.mime_type} | Server: {name}")
             except Exception as e:
-                logger.warning(f"Error fetching resources from {name}: {e}")
+                failures.append(f"{name}: {type(e).__name__}: {e}")
 
         if not all_resources:
+            if failures:
+                return self._error_result("MCP resource listing failed: " + "; ".join(failures))
             return self._success_result("No MCP resources are currently available.")
 
-        return self._success_result("Available MCP Resources:\n" + "\n".join(all_resources))
+        content = "Available MCP Resources:\n" + "\n".join(all_resources)
+        if failures:
+            return ToolResult(
+                content=content + "\nUnavailable servers: " + "; ".join(failures),
+                status="partial",
+            )
+        return self._success_result(content)
 
 
 class ReadMcpResourceTool(_McpBridgeTool):
@@ -166,7 +171,7 @@ class ReadMcpResourceTool(_McpBridgeTool):
             return self._error_result("Missing required argument: uri")
         server_name = str(args.get("server") or "").strip()
 
-        found_content = None
+        found_content: str | None = None
         failures: list[str] = []
         clients = self._mcp_manager.iter_connected_clients()
         if server_name:
@@ -180,19 +185,21 @@ class ReadMcpResourceTool(_McpBridgeTool):
 
         for _name, client in clients:
             try:
-                # Ignore invalid URI exceptions that typical MCP servers might throw
                 content = await client.read_resource(uri)
-                if content:
+                if content is not None:
                     found_content = content
                     break
             except Exception as exc:
                 failures.append(f"{_name}: {type(exc).__name__}: {exc}")
 
-        if not found_content:
+        if found_content is None:
             detail = f"Could not find or read MCP resource for URI: {uri}"
             if failures:
                 detail = f"{detail}. Server failures: {'; '.join(failures)}"
             return self._error_result(detail)
+
+        if found_content == "":
+            return self._success_result(f"Resource {uri} is empty.")
 
         if self._artifact_store and len(found_content) > 2000:
             artifact_id = self._artifact_store.save(
@@ -247,6 +254,7 @@ class ListMcpResourceTemplatesTool(_McpBridgeTool):
             return self._error_result("MCP Manager is not initialized or connected.")
 
         lines: list[str] = []
+        failures: list[str] = []
         for server_name, client in self._mcp_manager.iter_connected_clients():
             try:
                 for template in await client.list_resource_templates():
@@ -256,11 +264,19 @@ class ListMcpResourceTemplatesTool(_McpBridgeTool):
                         f"Name: {template.name} | MimeType: {template.mime_type}{description}"
                     )
             except Exception as exc:
-                logger.warning("Error fetching MCP resource templates from %s: %s", server_name, exc)
+                failures.append(f"{server_name}: {type(exc).__name__}: {exc}")
 
         if not lines:
+            if failures:
+                return self._error_result("MCP resource template listing failed: " + "; ".join(failures))
             return self._success_result("No MCP resource templates are currently available.")
-        return self._success_result("Available MCP Resource Templates:\n" + "\n".join(lines))
+        content = "Available MCP Resource Templates:\n" + "\n".join(lines)
+        if failures:
+            return ToolResult(
+                content=content + "\nUnavailable servers: " + "; ".join(failures),
+                status="partial",
+            )
+        return self._success_result(content)
 
 
 class SubscribeMcpResourceTool(_McpBridgeTool):
@@ -401,22 +417,32 @@ class ListMcpResourceNotificationsTool(_McpBridgeTool):
             return self._error_result("MCP Manager is not initialized or connected.")
 
         lines: list[str] = []
+        failures: list[str] = []
         for server_name, client in self._mcp_manager.iter_connected_clients():
             subscriptions = getattr(client, "list_resource_subscriptions", lambda: [])()
             for uri in subscriptions:
                 lines.append(f"- Server: {server_name} | Subscribed: {uri}")
             try:
                 notifications = client.consume_resource_notifications()
-            except Exception:
-                notifications = []
+            except Exception as exc:
+                failures.append(f"{server_name}: {type(exc).__name__}: {exc}")
+                continue
             for item in notifications:
                 method = str(item.get("method") or "")
                 uri = str(item.get("uri") or "")
                 lines.append(f"- Server: {server_name} | Notification: {method} | URI: {uri}")
 
         if not lines:
+            if failures:
+                return self._error_result("MCP notification listing failed: " + "; ".join(failures))
             return self._success_result("No MCP resource subscriptions or notifications are currently pending.")
-        return self._success_result("MCP Resource Subscription State:\n" + "\n".join(lines))
+        content = "MCP Resource Subscription State:\n" + "\n".join(lines)
+        if failures:
+            return ToolResult(
+                content=content + "\nUnavailable servers: " + "; ".join(failures),
+                status="partial",
+            )
+        return self._success_result(content)
 
 
 class ListMcpPromptsTool(_McpBridgeTool):
@@ -456,6 +482,7 @@ class ListMcpPromptsTool(_McpBridgeTool):
             return self._error_result("MCP Manager is not initialized or connected.")
 
         lines: list[str] = []
+        failures: list[str] = []
         for server_name, client in self._mcp_manager.iter_connected_clients():
             try:
                 for prompt in await client.list_prompts():
@@ -470,11 +497,19 @@ class ListMcpPromptsTool(_McpBridgeTool):
                         f"- Server: {server_name} | Prompt: {prompt.name}{description} | Args: {args_text}"
                     )
             except Exception as exc:
-                logger.warning("Error fetching MCP prompts from %s: %s", server_name, exc)
+                failures.append(f"{server_name}: {type(exc).__name__}: {exc}")
 
         if not lines:
+            if failures:
+                return self._error_result("MCP prompt listing failed: " + "; ".join(failures))
             return self._success_result("No MCP prompts are currently available.")
-        return self._success_result("Available MCP Prompts:\n" + "\n".join(lines))
+        content = "Available MCP Prompts:\n" + "\n".join(lines)
+        if failures:
+            return ToolResult(
+                content=content + "\nUnavailable servers: " + "; ".join(failures),
+                status="partial",
+            )
+        return self._success_result(content)
 
 
 class GetMcpPromptTool(_McpBridgeTool):

@@ -13,6 +13,9 @@ import json
 import re
 from typing import Any
 
+from jsonschema.exceptions import SchemaError
+from jsonschema.validators import validator_for
+
 from backend.artifact.store import ArtifactStore
 from backend.mcp.client import MCPCallResult, MCPClient, MCPToolDef
 from backend.tools.base import (
@@ -89,9 +92,11 @@ class MCPToolProxy(BaseTool):
         # Map MCP annotations/_meta to local capability hints (Phase 3.2).
         ann = getattr(tool_def, "annotations", {}) or {}
         meta = getattr(tool_def, "meta", {}) or {}
-        self.read_only = bool(ann.get("readOnlyHint", False))
         self.destructive = bool(ann.get("destructiveHint", False))
         self.open_world = bool(ann.get("openWorldHint", False))
+        self.read_only = bool(ann.get("readOnlyHint", False)) and not (
+            self.destructive or self.open_world
+        )
         # MCP _meta vendor extensions are namespaced; "anthropic/alwaysLoad" is
         # the only key with a cross-harness convention (cc Tool.ts).
         self.always_load = bool(meta.get("anthropic/alwaysLoad"))
@@ -112,9 +117,7 @@ class MCPToolProxy(BaseTool):
         ) or "auto"
         self._approval_mode = approval_mode
 
-        auto_requires_approval = not (
-            self.read_only and not (self.destructive or self.open_world)
-        )
+        auto_requires_approval = not self.read_only
         if approval_mode == "approve":
             requires_approval = False
         elif approval_mode == "prompt":
@@ -137,7 +140,7 @@ class MCPToolProxy(BaseTool):
     def is_read_only(self, args: dict[str, Any] | None = None) -> bool:
         # Open-world MCP calls remain externally observable even when a server
         # advertises readOnlyHint, so they are not safe read-only subagent work.
-        return self.read_only and not self.destructive and not self.open_world
+        return self.read_only
 
     def get_side_effect_kind(self, args: dict[str, Any] | None = None) -> str:
         # Remote tools that are not positively identified as reads are external
@@ -416,6 +419,15 @@ class MCPToolRegistry:
                 artifact_store=self._artifact_store,
                 manager=self._mcp_manager,
             )
+            schema = proxy.get_schema().parameters
+            if schema.get("type", "object") != "object":
+                logger.warning("[MCPRegistry] Skipped %s: input schema must describe an object", proxy.name)
+                continue
+            try:
+                validator_for(schema).check_schema(schema)
+            except SchemaError as exc:
+                logger.warning("[MCPRegistry] Skipped %s: invalid input schema: %s", proxy.name, exc.message)
+                continue
             existing_owner = self._wire_name_owner.get(proxy.name)
             if existing_owner is not None:
                 # Manual/user MCP config outranks plugin config. For equal

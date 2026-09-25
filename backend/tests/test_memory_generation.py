@@ -12,6 +12,8 @@ from typing import Any
 import pytest
 
 from backend.conversations.repository import ConversationRepository
+from backend.agent.context import ContextBuilder
+from backend.agent.state import AgentState
 from backend.memory.file_memory import FileMemory
 from backend.memory.generation import (
     MEMORY_DB_NAME,
@@ -23,6 +25,22 @@ from backend.memory.job_store import MemoryJobStore, PHASE2_JOB_KIND
 
 def _iso(timestamp: int) -> str:
     return datetime.fromtimestamp(timestamp, UTC).isoformat()
+
+
+def test_memory_read_failure_prevents_an_incomplete_prompt(tmp_path: Path) -> None:
+    memory = FileMemory(tmp_path / "memories")
+    (memory.memory_dir / "memory_summary.md").write_bytes(b"v1\n\xff")
+
+    class _Memory:
+        def load_context(self) -> str:
+            return memory.get_context()
+
+    context = ContextBuilder(memory_manager=_Memory(), workspace_root=tmp_path)
+    state = AgentState(user_message="Continue", workspace_root=tmp_path)
+
+    with pytest.raises(UnicodeDecodeError):
+        asyncio.run(context.start_turn("Continue", state))
+    assert context.history_length == 0
 
 
 def test_stage1_claim_uses_revisions_retry_backoff_and_source_advance(tmp_path: Path) -> None:

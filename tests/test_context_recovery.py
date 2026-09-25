@@ -21,7 +21,10 @@ from backend.llm.base import (
     StreamEventType,
     UsageInfo,
 )
-from backend.ws.compaction_coordinator import compact_conversation
+from backend.ws.compaction_coordinator import (
+    CompactionCommittedProjectionError,
+    compact_conversation,
+)
 from backend.ws.conversation_runtime import ConversationRuntime
 
 
@@ -201,6 +204,54 @@ def test_compaction_does_not_publish_into_builder_after_conversation_switch(
         "second conversation"
     ]
     assert compacted_first["compaction_count"] == 1
+
+
+def test_post_commit_live_projection_failure_rehydrates_before_next_query(monkeypatch, tmp_path: Path) -> None:
+    async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
+        repository = ConversationRepository(tmp_path / "conversations")
+        builder = ContextBuilder(
+            llm=_GateSummaryLLM("post-commit recovery"),
+            agent_settings=AgentSettings(compaction_keep_recent_tokens=80),
+        )
+        snapshot = {"history": _long_history(), "history_frozen_count": 32}
+        record = repository.create_conversation(
+            conversation_id="conv_post_commit_projection",
+            context_snapshot=snapshot,
+        )
+        session = _Session(repository, builder)
+        session.conversation_runtime.active_conversation_id = record.id
+        builder.load_snapshot(snapshot)
+
+        async def on_hydration_complete(_conversation_id: str) -> None:
+            return None
+
+        session._on_conversation_hydration_complete = on_hydration_complete
+        original_load = ContextBuilder.load_snapshot
+
+        def fail_only_live(self: ContextBuilder, value: dict[str, Any] | None) -> None:
+            if self is builder:
+                self.clear()
+                raise RuntimeError("live load failed after clearing history")
+            original_load(self, value)
+
+        monkeypatch.setattr(ContextBuilder, "load_snapshot", fail_only_live)
+        with pytest.raises(CompactionCommittedProjectionError) as caught:
+            await compact_conversation(session, conversation_id=record.id, context_builder=builder)
+
+        committed = caught.value.committed.after_snapshot
+        saved = repository.get_conversation(record.id)
+        assert saved is not None
+        assert saved.context_snapshot == committed
+        assert builder.export_snapshot()["history"] == []
+        assert session.conversation_runtime._pending_hydration is not None
+
+        # AgentRunner waits here before building a prompt. This must replace
+        # the cleared/partial builder from the committed repository snapshot.
+        await session.conversation_runtime.wait_for_hydration(record.id)
+        return committed, builder.export_snapshot()
+
+    committed, rehydrated = asyncio.run(scenario())
+    assert rehydrated["history"] == committed["history"]
 
 
 def test_hydration_revision_fence_reloads_latest_snapshot_and_clears_token_floor(

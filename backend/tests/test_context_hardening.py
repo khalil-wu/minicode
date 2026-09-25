@@ -145,7 +145,7 @@ def test_post_compaction_restore_bounds_oversized_single_line(tmp_path) -> None:
     source.write_bytes(b"x" * (256 * 1024 + 1))
     builder = ContextBuilder()
     state = AgentState(user_message="continue")
-    state.workspace_context = SimpleNamespace(root_path=tmp_path)
+    state.workspace_root = tmp_path
     state.record_tool_call("read_file", {"file_path": "large.txt"}, "ok")
 
     builder._restore_recent_files_after_compaction(state)

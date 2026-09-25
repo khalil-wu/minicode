@@ -74,6 +74,18 @@ def test_write_inside_workspace_allowed(arena):
     assert (ws / "made.txt").exists()
 
 
+def test_launcher_uses_its_own_module_outside_the_backend_checkout(arena, monkeypatch):
+    ws, outside = arena
+    package = ws / "backend"
+    package.mkdir()
+    (package / "__init__.py").write_text("raise RuntimeError('workspace backend imported')")
+    (outside / "win32security.py").write_text("raise RuntimeError('foreign win32security imported')")
+    monkeypatch.setenv("PYTHONPATH", str(outside))
+    result = _run(ws, _py("print('trusted-launch')"))
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout.strip() == "trusted-launch"
+
+
 def test_write_outside_workspace_denied(arena):
     ws, outside = arena
     result = _run(ws, _py(f"open(r'{outside}\\evil.txt','w').write('x')"))

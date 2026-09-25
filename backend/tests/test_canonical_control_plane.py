@@ -10,6 +10,7 @@ import pytest
 
 from backend.agent.conversation_query_guard import conversation_query_guards
 from backend.agent.runtime import AgentRuntime
+from backend.conversations.repository import ConversationRepository
 from backend.memory import consolidation_agent
 from backend.services.checkpoint_service import RunCheckpointResumeResult
 from backend.terminal.task_persistence import PersistedTaskState
@@ -124,6 +125,101 @@ def test_manual_compaction_rejects_an_active_conversation_turn() -> None:
     event = session.send_event.await_args.args[0]
     assert event.type == "error"
     assert event.data["error_type"] == "conversation_busy"
+
+
+@pytest.mark.parametrize(
+    ("fail_on_call", "expected_error_code", "expected_commits"),
+    [
+        (1, "context.compact_failed", 0),
+        (2, "context.budget_refresh_failed", 1),
+    ],
+)
+def test_manual_compaction_reports_budget_failure_at_the_correct_commit_boundary(
+    monkeypatch,
+    fail_on_call: int,
+    expected_error_code: str,
+    expected_commits: int,
+) -> None:
+    from backend.services import context_budget
+
+    calls = 0
+
+    def budget_snapshot(_session, _builder):
+        nonlocal calls
+        calls += 1
+        if calls == fail_on_call:
+            raise RuntimeError("token estimate unavailable")
+        return {"used": 100, "total": 1000, "breakdown": {}}
+
+    compact = AsyncMock(return_value=SimpleNamespace(summary="Saved summary"))
+    monkeypatch.setattr(context_budget, "build_context_budget_snapshot", budget_snapshot)
+    monkeypatch.setattr("backend.ws.compaction_coordinator.compact_conversation", compact)
+    monkeypatch.setattr("backend.ws.handlers.conversation._conversation_has_active_run", lambda *_args: False)
+    session = SimpleNamespace(
+        active_conversation_id="conversation-budget-failure",
+        context_builder=SimpleNamespace(context_ledger=lambda: {"estimated_tokens": 100, "entries": []}),
+        conversation_repo=SimpleNamespace(get_conversation=lambda _id: object()),
+        send_event=AsyncMock(),
+        last_agent_state=None,
+    )
+
+    assert asyncio.run(handle_context_compact(session, {})) is True
+    assert compact.await_count == expected_commits
+    events = [call.args[0] for call in session.send_event.await_args_list]
+    assert [event.type for event in events] == (
+        ["conversation.compaction.updated", "error"] if expected_commits else ["error"]
+    )
+    assert events[-1].data["error_code"] == expected_error_code
+    if expected_commits:
+        assert events[0].data["summary"] == "Saved summary"
+        assert "compacted and saved" in events[-1].data["message"]
+
+
+def test_manual_compaction_keeps_committed_result_when_event_delivery_fails(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("backend.ws.handlers.conversation._conversation_has_active_run", lambda *_args: False)
+    repo = ConversationRepository(tmp_path / "conversations")
+    conversation = repo.create_conversation(conversation_id="conversation-committed-before-send")
+
+    class Builder:
+        compacted = False
+
+        def context_ledger(self):
+            return {"estimated_tokens": 100, "actual_tokens": 100, "entries": []}
+
+        def get_budget_snapshot(self, *, state, tool_schemas):
+            return {"used": 100, "total": 1000, "breakdown": {"history": 100}}
+
+        async def compact(self, *, focus, restore_state):
+            self.compacted = True
+            return "Saved summary"
+
+        def export_snapshot(self):
+            return {"history": [], "compaction_count": 1}
+
+    send_event = AsyncMock(side_effect=OSError("socket send failed"))
+    session = SimpleNamespace(
+        active_conversation_id=conversation.id,
+        context_builder=Builder(),
+        last_agent_state=None,
+        tool_registry=SimpleNamespace(get_schemas=lambda **_kwargs: []),
+        permission_checker=object(),
+        permission_context=object(),
+        conversation_repo=repo,
+        conversation_runtime=None,
+        _conversation_projection_lock=lambda _id: asyncio.Lock(),
+        send_event=send_event,
+    )
+
+    with pytest.raises(OSError, match="socket send failed"):
+        asyncio.run(handle_context_compact(session, {}))
+
+    saved = repo.get_conversation(conversation.id)
+    assert saved is not None
+    assert saved.compaction_state == "compacted"
+    assert saved.compaction_summary == "Saved summary"
+    assert saved.context_snapshot["compaction_count"] == 1
+    assert send_event.await_count == 1
+    assert send_event.await_args.args[0].type == "conversation.compaction.updated"
 
 
 def test_memory_consolidation_uses_query_engine_lifecycle(monkeypatch, tmp_path) -> None:

@@ -135,6 +135,24 @@ backend/tests 与 tests 两半全绿（`tests/test_llm_diagnostics_api.py::…wi
 
 ## 6. 未做 / 观察
 
+### 2026-09-22 修复：默认预留跟随窗口
+
+`TokenBudget.response_reserve=None` 表示自动，实际预留由
+`reserved_response_tokens` 统一计算为 `min(16384, total // 10)`。36K 窗口默认
+预留 3600、压缩边界 32400、history_budget 17400；大窗口默认仍至多预留 16384。
+配置加载、直接 SDK/eval 构造、主会话及子 agent 的模型切换都保留自动语义。
+从小模型切回大模型会重新计算，不会继承先前小窗口的数值。显式配置（包括 0）
+仍按用户指定值生效；显式 36K/16K 仍可能退化。
+
+压缩触发、预算预警、history_budget、附件和压缩后文件恢复都使用同一个有效值。
+这修复了缺省配置占掉小窗口近一半空间的原因，没有增加重试、熔断或隐藏错误。
+它是本地输入预算策略，不是供应商最大输出能力的声明；过小到连系统提示和工具
+schema 都容不下的窗口，也不会因此变得可用。
+
+`backend/tests/test_adaptive_response_reserve.py` 覆盖 28K/32K/36K 下的 20K
+压缩后输入不再连续压缩、精确边界仍触发、模型双向切换、配置加载与显式值保留。
+下述「缺省 16384」是修复前的观察。
+
 - `response_reserve` 缺省 16 384 对小窗口模型偏大（36K 窗口只剩 4.6K history_budget，
   keep_recent 只有 2.3K）；cc 是 `min(model max_output, 20000)`，codex 用窗口的 90%。
   自定义供应商没有 max_output 元数据时我们没法自动缩，本轮没改，留待模型元数据补齐后处理。

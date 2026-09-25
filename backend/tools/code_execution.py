@@ -61,9 +61,12 @@ class ToolExecTool(BaseTool):
     def get_schema(self) -> ToolSchema:
         return ToolSchema(self.name, self.description, {
             "type": "object", "additionalProperties": False,
-            "properties": {"code": {"type": "string", "minLength": 1, "maxLength": 128000},
-                "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 10000},
-                "max_chars": {"type": "integer", "minimum": 256, "maximum": 50000}},
+            "properties": {"code": {"type": "string", "minLength": 1, "maxLength": 128000,
+                                      "description": "JavaScript with awaited tools.name(args) calls; use text/image/audio to return output."},
+                "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 10000,
+                                  "description": "Milliseconds to wait before yielding a running cell_id; default 1000."},
+                "max_chars": {"type": "integer", "minimum": 256, "maximum": 50000,
+                              "description": "Maximum characters of returned text; default 8000."}},
             "required": ["code"],
         }, freeform={"input_field": "code", "description": self.description, "format": {"type": "text"}})
 
@@ -93,8 +96,12 @@ class ToolWaitTool(BaseTool):
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(self.name, self.description, {"type": "object", "additionalProperties": False,
-            "properties": {"cell_id": {"type": "string"}, "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 10000},
-                "terminate": {"type": "boolean"}, "max_chars": {"type": "integer", "minimum": 256, "maximum": 50000}},
+            "properties": {"cell_id": {"type": "string", "description": "Exact running cell_id returned by tool_exec or tool_wait."},
+                "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 10000,
+                                  "description": "Milliseconds to wait for new output; default 1000."},
+                "terminate": {"type": "boolean", "description": "Stop this cell and its pending tool calls; default false."},
+                "max_chars": {"type": "integer", "minimum": 256, "maximum": 50000,
+                              "description": "Maximum characters of returned text; default 8000."}},
             "required": ["cell_id"]})
 
     async def execute(self, args, context: ToolExecutionContext | None = None) -> ToolResult:

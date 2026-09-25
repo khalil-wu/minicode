@@ -10,7 +10,7 @@ import { normalizeWorkspaceRoot } from "../lib/workspace-path";
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-type FieldKind = "array" | "boolean" | "number" | "record" | "string";
+type FieldKind = "array" | "boolean" | "number" | "record" | "string" | "nullable-string";
 
 const REQUIRED_ROUTING_FIELDS: Partial<
   Record<ServerEventType, Readonly<Record<string, FieldKind>>>
@@ -170,7 +170,7 @@ const REQUIRED_ROUTING_FIELDS: Partial<
     thread_id: "string",
     conversation_id: "string",
     turn_id: "string",
-    diff: "string",
+    diff: "nullable-string",
   },
   "conversation.hydration.updated": {
     conversation_id: "string",
@@ -362,6 +362,7 @@ const WORKSPACE_OWNED_EVENT_TYPES = new Set<ServerEventType>([
 ]);
 
 const hasKind = (value: unknown, kind: FieldKind): boolean => {
+  if (kind === "nullable-string") return value === null || typeof value === "string";
   if (kind === "array") return Array.isArray(value);
   if (kind === "record") return isRecord(value);
   if (kind === "number") return typeof value === "number" && Number.isFinite(value);
