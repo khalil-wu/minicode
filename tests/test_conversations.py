@@ -13,6 +13,7 @@ from backend.agent.state import AgentState
 from backend.llm.base import LLMAdapter
 from backend.main import app
 from backend.memory.file_memory import FileMemory
+from backend.memory.manager import MemoryManager
 
 
 class _ConversationNoopLLM(LLMAdapter):
@@ -2297,7 +2298,7 @@ def test_context_builder_injects_profile_memory_without_visible_transcript(tmp_p
         encoding="utf-8",
     )
 
-    builder = ContextBuilder(memory_manager=memory)
+    builder = ContextBuilder(memory_manager=MemoryManager(memory))
     builder.load_snapshot(
         {
             "history": [],
