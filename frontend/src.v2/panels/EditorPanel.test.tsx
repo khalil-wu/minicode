@@ -319,6 +319,27 @@ describe("EditorPanel", () => {
     expect(screen.queryByTestId("monaco-editor")).toBeNull();
   });
 
+  it("explains missing files without displaying the raw IPC failure and closes the stale tab", () => {
+    useAppStore.setState({
+      editorTabs: [{
+        id: "editor-missing-instructions",
+        path: ".minicode/INSTRUCTIONS.md",
+        content: "",
+        original: "",
+        loading: false,
+        error: "Error invoking remote method 'minicode:fs:readFile': Error: ENOENT: no such file or directory",
+        largeFile: false,
+      }],
+      activeTabPath: ".minicode/INSTRUCTIONS.md",
+    });
+
+    const { container } = render(<EditorPanel />);
+    expect(screen.getByText("文件不存在或已移动")).toBeTruthy();
+    expect((container.querySelector("details") as HTMLDetailsElement).open).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "关闭标签" }));
+    expect(useAppStore.getState().editorTabs).toHaveLength(0);
+  });
+
   it("reads desktop workspace files with an absolute path even when tabs store relative paths", async () => {
     vi.mocked(isDesktop).mockReturnValue(true);
     vi.mocked(fsReadFileInfo).mockResolvedValue({

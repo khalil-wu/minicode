@@ -1120,7 +1120,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
               正在加载文件...
             </div>
           ) : activeTab.error ? (
-            <FileLoadErrorNotice path={activeTab.path} error={activeTab.error} onRetry={() => {
+            <FileLoadErrorNotice path={activeTab.path} error={activeTab.error} onClose={() => closeEditorTab(activeTab.path)} onRetry={() => {
               useAppStore.setState((state) => ({
                 editorTabs: state.editorTabs.map((tab) => editorPathsEqual(tab.path, activeTab.path, state.workingDirectory)
                   ? { ...tab, loading: true, error: null }
@@ -1396,21 +1396,29 @@ const LargeFileNotice = ({ tab }: { tab: { path: string; loadWarning?: string | 
   </div>
 );
 
-const FileLoadErrorNotice = ({ path, error, onRetry }: { path: string; error: string; onRetry: () => void }) => (
-  <div className="h-full flex flex-col items-center justify-center gap-[9px] p-6 text-center" style={{ color: "var(--text-muted)", background: "var(--surface-base)" }}>
-    <FileWarning size={28} style={{ color: "var(--state-danger)" }} />
-    <div className="font-bold" style={{ color: "var(--text-primary)" }}>无法加载文件</div>
-    <div className="max-w-[560px] leading-[1.5]" style={{ color: "var(--state-danger)", fontSize: "var(--text-sm)" }}>
-      {error}
+const FileLoadErrorNotice = ({ path, error, onRetry, onClose }: { path: string; error: string; onRetry: () => void; onClose: () => void }) => {
+  const missing = /ENOENT|no such file or directory|not found/i.test(error);
+  return (
+    <div className="h-full flex flex-col items-center justify-center gap-[9px] p-6 text-center" style={{ color: "var(--text-muted)", background: "var(--surface-base)" }}>
+      <FileWarning size={28} style={{ color: "var(--state-warning)" }} />
+      <div className="font-bold" style={{ color: "var(--text-primary)" }}>{missing ? "文件不存在或已移动" : "无法加载文件"}</div>
+      <div className="max-w-[560px] leading-[1.5]" style={{ color: "var(--text-secondary)", fontSize: "var(--text-sm)" }}>
+        {missing ? "当前路径没有这个文件。请检查文件位置，或关闭这个标签。" : "读取失败。请重试，或查看技术详情。"}
+      </div>
+      <div className="max-w-[560px] overflow-hidden text-ellipsis whitespace-nowrap" style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}>
+        {path}
+      </div>
+      <div className="flex gap-2">
+        <button type="button" onClick={onRetry} className="inline-flex items-center h-[30px] px-2.5 border rounded-[4px] cursor-pointer font-semibold" style={{ borderColor: "var(--border-subtle)", background: "var(--surface-raised)", color: "var(--text-primary)", fontSize: "var(--text-xs)" }}>重试</button>
+        <button type="button" onClick={onClose} className="inline-flex items-center h-[30px] px-2.5 border rounded-[4px] cursor-pointer" style={{ borderColor: "var(--border-subtle)", background: "transparent", color: "var(--text-secondary)", fontSize: "var(--text-xs)" }}>关闭标签</button>
+      </div>
+      <details className="max-w-[560px] text-left" style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>
+        <summary className="cursor-pointer">技术详情</summary>
+        <div className="mt-2 break-all" style={{ fontFamily: "var(--font-mono)" }}>{error}</div>
+      </details>
     </div>
-    <div className="max-w-[560px] overflow-hidden text-ellipsis whitespace-nowrap" style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}>
-      {path}
-    </div>
-    <button type="button" onClick={onRetry} className="inline-flex items-center gap-1.5 h-[30px] px-2.5 border rounded-[4px] cursor-pointer font-semibold" style={{ borderColor: "var(--border-subtle)", background: "var(--surface-raised)", color: "var(--text-primary)", fontFamily: "var(--font-ui)", fontSize: "var(--text-xs)" }}>
-      重试
-    </button>
-  </div>
-);
+  );
+};
 
 const MarkdownPreviewLimitNotice = ({ imageCount, onEdit }: { imageCount: number; onEdit: () => void }) => (
   <div className="h-full flex flex-col items-center justify-center gap-[9px] p-6 text-center" style={{ color: "var(--text-muted)", background: "var(--surface-base)" }}>

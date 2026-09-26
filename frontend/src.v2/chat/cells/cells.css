@@ -2319,14 +2319,15 @@ button.diff-cell-file-path:hover {
 }
 
 .md-prose a {
-  color: var(--accent-primary);
+  color: var(--text-secondary);
   text-decoration: none;
   transition: color var(--transition-fast);
 }
 
 .md-prose a:hover {
-  color: var(--accent-hover);
+  color: var(--text-primary);
   text-decoration: underline;
+  text-decoration-color: var(--border-strong);
 }
 
 .md-prose img {

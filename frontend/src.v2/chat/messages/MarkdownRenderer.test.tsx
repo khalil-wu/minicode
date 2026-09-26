@@ -81,7 +81,8 @@ describe("MarkdownRenderer", () => {
     const { rerender } = render(<MarkdownRenderer content={"依据 `src/Backup.ts:12`。"} workspaceRoot="E:/记得日记" knownFilePaths={["E:\\记得日记\\remember-diary\\src\\backup.ts"]} />);
     expect(screen.getByRole("button", { name: "src/Backup.ts:12" }).title).toContain("remember-diary/src/backup.ts");
     rerender(<MarkdownRenderer content={"依据 `Backup.ts`。"} workspaceRoot="/project" knownFilePaths={["/project/sub/backup.ts"]} />);
-    expect(screen.getByRole("button", { name: "Backup.ts" }).title).toContain("/project/Backup.ts");
+    expect(screen.queryByRole("button", { name: "Backup.ts" })).toBeNull();
+    expect(screen.getByText("Backup.ts", { selector: "code" })).toBeTruthy();
   });
 
   it("uses the plain streaming code path when a fence has no preceding paragraph", () => {
@@ -330,7 +331,7 @@ describe("MarkdownRenderer", () => {
     useAppStore.setState({ openEditorFile });
 
     try {
-      render(<MarkdownRenderer content={"Check frontend/src.v2/model/transformer.ts:42:7 before training."} />);
+      render(<MarkdownRenderer content={"Check frontend/src.v2/model/transformer.ts:42:7 before training."} knownFilePaths={["frontend/src.v2/model/transformer.ts"]} />);
 
       fireEvent.click(screen.getByRole("button", { name: "frontend/src.v2/model/transformer.ts:42:7" }));
 
@@ -343,6 +344,15 @@ describe("MarkdownRenderer", () => {
     } finally {
       useAppStore.setState({ openEditorFile: originalOpenEditorFile });
     }
+  });
+
+  it("keeps unverified file names as prose instead of opening a missing editor tab", () => {
+    const content = "项目内未找到 .minicode/INSTRUCTIONS.md；请查看 `missing.md`。";
+    const { container } = render(<MarkdownRenderer content={content} knownFilePaths={["项目内容概览.md"]} />);
+    expect(container.textContent).toContain(".minicode/INSTRUCTIONS.md");
+    expect(screen.queryByRole("button", { name: ".minicode/INSTRUCTIONS.md" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "missing.md" })).toBeNull();
+    expect(screen.getByText("missing.md", { selector: "code" })).toBeTruthy();
   });
 
   it.each(["[file](calculator.py)", "[file](C:/side-project/calculator.py)"])(
@@ -382,7 +392,7 @@ describe("MarkdownRenderer", () => {
       const openEditorFile = vi.fn();
       useAppStore.setState({ openEditorFile });
       try {
-        const { container } = render(<MarkdownRenderer content={`任务完成${separator}资料/calculator.py:2 已修复。`} />);
+        const { container } = render(<MarkdownRenderer content={`任务完成${separator}资料/calculator.py:2 已修复。`} knownFilePaths={["资料/calculator.py"]} />);
         fireEvent.click(screen.getByRole("button", { name: "资料/calculator.py:2" }));
         expect(openEditorFile).toHaveBeenCalledWith("资料/calculator.py", undefined, { line: 2, column: undefined });
         expect(container.textContent).toContain(`任务完成${separator}`);
@@ -397,7 +407,7 @@ describe("MarkdownRenderer", () => {
     const openEditorFile = vi.fn();
     useAppStore.setState({ openEditorFile });
     try {
-      render(<MarkdownRenderer content={"读取 `任务完成。calculator.py:2`。"} />);
+      render(<MarkdownRenderer content={"读取 `任务完成。calculator.py:2`。"} knownFilePaths={["任务完成。calculator.py"]} />);
       fireEvent.click(screen.getByRole("button", { name: "任务完成。calculator.py:2" }));
       expect(openEditorFile).toHaveBeenCalledWith("任务完成。calculator.py", undefined, { line: 2, column: undefined });
     } finally {
@@ -419,6 +429,7 @@ describe("MarkdownRenderer", () => {
             "- backend/agent/loop.py：主循环。",
             "- backend/agent/loop_process_events.py：事件整理。",
           ].join("\n")}
+          knownFilePaths={["backend/agent/loop.py", "backend/agent/loop_process_events.py"]}
         />,
       );
 
@@ -445,7 +456,7 @@ describe("MarkdownRenderer", () => {
     useAppStore.setState({ openEditorFile });
 
     try {
-      render(<MarkdownRenderer content={"- `backend/main.py`, `backend/bootstrap/app.py`：启动入口。"} />);
+      render(<MarkdownRenderer content={"- `backend/main.py`, `backend/bootstrap/app.py`：启动入口。"} knownFilePaths={["backend/main.py", "backend/bootstrap/app.py"]} />);
 
       const chip = screen.getByRole("button", { name: "backend/main.py" });
       expect(chip.className).toContain("md-file-chip");
@@ -464,7 +475,7 @@ describe("MarkdownRenderer", () => {
   });
 
   it("renders editor chips with compact file-type badges", () => {
-    render(<MarkdownRenderer content={"Open `frontend/src.v2/chat/noticeEvents.ts` and `README.md`."} />);
+    render(<MarkdownRenderer content={"Open `frontend/src.v2/chat/noticeEvents.ts` and `README.md`."} knownFilePaths={["frontend/src.v2/chat/noticeEvents.ts", "README.md"]} />);
 
     const tsChip = screen.getByRole("button", { name: "frontend/src.v2/chat/noticeEvents.ts" });
     const mdChip = screen.getByRole("button", { name: "README.md" });
@@ -671,7 +682,7 @@ describe("MarkdownRenderer", () => {
 
   it("turns an inline-code external document path into an openable file chip", () => {
     useAppStore.setState({ workingDirectory: "C:/Desktop/MiniCode" });
-    render(<MarkdownRenderer content={"文档位于 `C:\\Desktop\\test.docx`。"} />);
+    render(<MarkdownRenderer content={"文档位于 `C:\\Desktop\\test.docx`。"} knownFilePaths={["C:/Desktop/test.docx"]} />);
 
     const chip = screen.getByRole("button", { name: "C:\\Desktop\\test.docx" });
     fireEvent.click(chip);

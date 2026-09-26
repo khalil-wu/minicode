@@ -111,7 +111,7 @@ describe("repaired transcript and resource contracts", () => {
 
   it("retains the line on a linkified absolute Windows file reference", () => {
     useAppStore.setState({ workingDirectory: "C:/repo" });
-    render(<MarkdownRenderer content="C:/repo/main.ts:12" workspaceRoot="C:/repo" />);
+    render(<MarkdownRenderer content="C:/repo/main.ts:12" workspaceRoot="C:/repo" knownFilePaths={["C:/repo/main.ts"]} />);
     fireEvent.click(screen.getByRole("button", { name: "C:/repo/main.ts:12" }));
     expect(useAppStore.getState().editorOpenRequests.at(-1)).toMatchObject({ path: "main.ts", line: 12 });
   });

@@ -324,7 +324,7 @@ const parseEditorPathTarget = (value: string): { path: string; line?: number; co
   };
 };
 
-const splitBareFileRefs = (value: string): MarkdownNode[] | null => {
+const splitBareFileRefs = (value: string, scope: MessageResourceScope): MarkdownNode[] | null => {
   bareFileRefPattern.lastIndex = 0;
   const parts: MarkdownNode[] = [];
   let lastIndex = 0;
@@ -338,12 +338,14 @@ const splitBareFileRefs = (value: string): MarkdownNode[] | null => {
     const fullRef = line ? `${path}:${line}${column ? `:${column}` : ""}` : path;
     const refStart = match.index + prefix.length;
     if (!isWorkspaceRelativeEditorPath(path) && !/^[A-Za-z]:[/\\]/.test(path)) continue;
+    const knownTarget = knownFileTarget({ path }, scope, true);
+    if (!knownTarget) continue;
     if (refStart > lastIndex) {
       parts.push({ type: "text", value: value.slice(lastIndex, refStart) });
     }
     parts.push({
       type: "link",
-      url: line ? editorLinkUrl(path, line, column) : path,
+      url: line ? editorLinkUrl(knownTarget.path, line, column) : knownTarget.path,
       children: [{ type: "text", value: fullRef }],
     });
     lastIndex = refStart + fullRef.length;
@@ -354,7 +356,7 @@ const splitBareFileRefs = (value: string): MarkdownNode[] | null => {
   return parts;
 };
 
-const linkifyBareFileReferences = () => (tree: MarkdownNode) => {
+const linkifyBareFileReferences = (scope: MessageResourceScope) => (tree: MarkdownNode) => {
   const visit = (node: MarkdownNode): void => {
     const children = node.children;
     if (!children || node.type === "link" || node.type === "code" || node.type === "inlineCode") return;
@@ -362,7 +364,7 @@ const linkifyBareFileReferences = () => (tree: MarkdownNode) => {
     const nextChildren: MarkdownNode[] = [];
     for (const child of children) {
       if (child.type === "text" && child.value) {
-        const split = splitBareFileRefs(child.value);
+        const split = splitBareFileRefs(child.value, scope);
         if (split) {
           nextChildren.push(...split);
           continue;
@@ -1072,24 +1074,26 @@ const absoluteEditorTitlePath = (path: string, workingDirectory: string): string
 
 type MessageResourceScope = { workspaceRoot?: string; conversationId?: string; knownFilePaths?: string[] };
 
-// Only auto-linked prose uses suffix resolution. Explicit Markdown targets
-// retain their exact meaning; ambiguous short names remain ordinary text.
-function knownFileTarget<T extends FileTarget>(target: T | null, scope: MessageResourceScope): T | null {
-  if (!target || !isWorkspaceRelativeEditorPath(target.path) || !scope.knownFilePaths?.length) return target;
+// Implicit file references need successful tool evidence. Explicit Markdown
+// targets retain their exact meaning; ambiguous short names remain ordinary text.
+function knownFileTarget<T extends FileTarget>(target: T | null, scope: MessageResourceScope, requireKnown = false): T | null {
+  if (!target) return null;
+  if (!scope.knownFilePaths?.length) return requireKnown ? null : target;
   const root = scope.workspaceRoot ?? useAppStore.getState().workingDirectory;
   const referenceKey = workspaceFilePathComparisonKey(target.path, root);
   const suffix = normalizeWorkspacePath(target.path);
   const suffixKey = isWindowsLikeWorkspacePath(root) ? suffix.toLowerCase() : suffix;
+  const canMatchSuffix = isWorkspaceRelativeEditorPath(target.path);
   const matches = new Map<string, string>();
   for (const path of scope.knownFilePaths) {
-    const candidate = workspacePathFromHref(path, { workspaceRoot: root });
+    const candidate = workspacePathFromHref(path, { workspaceRoot: root, allowExternalDeliverable: true });
     if (!candidate) continue;
     const key = workspaceFilePathComparisonKey(candidate, root);
     if (key === referenceKey) return { ...target, path: candidate };
-    if (key.endsWith(`/${suffixKey}`)) matches.set(key, candidate);
+    if (canMatchSuffix && key.endsWith(`/${suffixKey}`)) matches.set(key, candidate);
   }
   if (matches.size > 1) return null;
-  return matches.size === 1 ? { ...target, path: [...matches.values()][0] } : target;
+  return matches.size === 1 ? { ...target, path: [...matches.values()][0] } : requireKnown ? null : target;
 }
 
 const FileReferenceChip = ({ target, children, workspaceRoot, conversationId }: { target: EditorTarget; children: React.ReactNode } & MessageResourceScope) => {
@@ -1400,11 +1404,11 @@ const mdComponents = (
         </div>
       );
     }
-    const inlineEditorTarget = knownFileTarget(workspaceFileTargetFromHref(text, resourceScope.workspaceRoot), resourceScope);
+    const inlineEditorTarget = knownFileTarget(workspaceFileTargetFromHref(text, resourceScope.workspaceRoot), resourceScope, true);
     if (inlineEditorTarget) {
       return <FileReferenceChip target={inlineEditorTarget} {...resourceScope}>{children}</FileReferenceChip>;
     }
-    const inlineFileTarget = knownFileTarget(workspaceGenericFileTargetFromHref(text, resourceScope.workspaceRoot), resourceScope);
+    const inlineFileTarget = knownFileTarget(workspaceGenericFileTargetFromHref(text, resourceScope.workspaceRoot), resourceScope, true);
     if (inlineFileTarget) {
       return <GenericFileReferenceChip target={inlineFileTarget} {...resourceScope}>{children}</GenericFileReferenceChip>;
     }
@@ -1430,7 +1434,7 @@ const mdComponents = (
         <a
           {...props}
           href={`#${targetId}`}
-          className="text-[var(--accent-primary)] underline"
+          className="md-text-link"
           onClick={(event) => {
             event.preventDefault();
             const slug = markdownHeadingSlug(decodeMarkdownFragment(href.slice(1)));
@@ -1484,7 +1488,7 @@ const mdComponents = (
         {...props}
         target={opensInApp ? undefined : "_blank"}
         rel="noreferrer"
-        className={opensInApp ? "md-web-link" : "text-[var(--accent-primary)] underline"}
+        className={opensInApp ? "md-web-link" : "md-text-link"}
         onClick={(event) => {
           props.onClick?.(event);
           if (event.defaultPrevented) return;
@@ -1545,7 +1549,6 @@ const remarkPlugins: MarkdownRemarkPlugins = [
   [remarkGfm, { singleTilde: false }],
   remarkMath,
   normalizeFallbackStrongMarkers,
-  linkifyBareFileReferences,
 ];
 
 const rehypePlugins: MarkdownRehypePlugins = [
@@ -1743,7 +1746,10 @@ function StreamingMarkdownView({ content, isStreaming, citations, workspaceRoot,
   const pathsKey = JSON.stringify(knownFilePaths);
   const resources = useMemo(() => ({ workspaceRoot, conversationId, knownFilePaths: pathsKey ? JSON.parse(pathsKey) : undefined }), [workspaceRoot, conversationId, pathsKey]);
   const hasCitations = Boolean(citations?.length);
-  const plugins = useMemo<MarkdownRemarkPlugins>(() => hasCitations ? [...remarkPlugins, removeCitationMarkers] : remarkPlugins, [hasCitations]);
+  const plugins = useMemo<MarkdownRemarkPlugins>(() => {
+    const fileRefs: MarkdownRemarkPlugins[number] = [linkifyBareFileReferences, resources];
+    return hasCitations ? [...remarkPlugins, fileRefs, removeCitationMarkers] : [...remarkPlugins, fileRefs];
+  }, [hasCitations, resources]);
   const shared = { scopeId, resources, resolved, plugins };
   return <MarkdownResourceContext.Provider value={resources}><div id={scopeId} className="md-body">
     {!view.wholeDocument && <CommittedMarkdown parts={view.parts} count={view.parts.length} {...shared} />}

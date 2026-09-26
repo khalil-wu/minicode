@@ -178,15 +178,29 @@
   min-width: 0;
   align-items: baseline;
   gap: 0.3em;
-  color: var(--accent-primary);
+  color: var(--text-secondary);
   font-weight: var(--fw-medium);
   text-decoration: none;
   overflow-wrap: anywhere;
 }
 
 .md-prose .md-web-link:hover {
+  color: var(--text-primary);
   text-decoration: underline;
+  text-decoration-color: var(--border-strong);
   text-underline-offset: 2px;
+}
+
+.md-body a.md-text-link {
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+
+.md-body a.md-text-link:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
 }
 
 .md-prose .md-web-link:focus-visible {
@@ -265,7 +279,7 @@ html[data-theme="dark"] .md-prose .md-web-link-icon > img {
   border: 0;
   border-radius: 3px;
   background: transparent;
-  color: var(--accent-primary);
+  color: var(--text-secondary);
   font: inherit;
   line-height: inherit;
   white-space: nowrap;
@@ -276,8 +290,8 @@ html[data-theme="dark"] .md-prose .md-web-link-icon > img {
 }
 
 .md-prose .md-file-chip:hover {
-  background: var(--accent-soft);
-  color: var(--accent-hover);
+  background: var(--surface-soft);
+  color: var(--text-primary);
 }
 
 .md-prose .md-file-chip:focus-visible {
@@ -347,7 +361,7 @@ html[data-theme="dark"] .md-prose .md-web-link-icon > img {
 
 .md-prose .md-folder-chip-icon {
   flex: none;
-  color: var(--md-file-chip-name);
+  color: var(--text-muted);
 }
 
 .md-prose .md-official-file-icon {
