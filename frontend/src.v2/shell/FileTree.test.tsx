@@ -255,6 +255,44 @@ describe("FileTree directory request ownership", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("does not show or persist a missing folder requested by a message link", async () => {
+    const root = "C:/Desktop/harness测试";
+    mocks.isDesktop.mockReturnValue(true);
+    useAppStore.setState({ workingDirectory: root });
+    mocks.fsListTree.mockImplementation(async (path: string) => {
+      if (path === root) return [{ name: "src", path: `${root}/src`, isDirectory: true }];
+      throw new Error(`Directory not found: ${path}`);
+    });
+    render(<FileTree />);
+    await screen.findByRole("treeitem", { name: "src" });
+
+    act(() => useAppStore.getState().requestFileTreeReveal("下载/打开《项目内容概览.md》", "folder"));
+    await waitFor(() => expect(mocks.fsListTree).toHaveBeenCalledWith(`${root}/下载`));
+    await waitFor(() => expect(useAppStore.getState().fileTreeRevealRequests).toHaveLength(0));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(readExpandedPaths(root)).toEqual(new Set());
+  });
+
+  it("loads a nested folder once and consumes its reveal request", async () => {
+    const root = "C:/workspace-a";
+    mocks.isDesktop.mockReturnValue(true);
+    useAppStore.setState({ workingDirectory: root });
+    mocks.fsListTree.mockImplementation(async (path: string) => {
+      if (path === root) return [{ name: "src", path: `${root}/src`, isDirectory: true }];
+      if (path === `${root}/src`) return [{ name: "nested", path: `${root}/src/nested`, isDirectory: true }];
+      if (path === `${root}/src/nested`) return [{ name: "leaf.ts", path: `${root}/src/nested/leaf.ts`, isDirectory: false }];
+      throw new Error(`Directory not found: ${path}`);
+    });
+    render(<FileTree />);
+    await screen.findByRole("treeitem", { name: "src" });
+
+    act(() => useAppStore.getState().requestFileTreeReveal("src/nested", "folder"));
+    await waitFor(() => expect(useAppStore.getState().fileTreeRevealRequests).toHaveLength(0));
+    expect(readExpandedPaths(root)).toEqual(new Set([`${root}/src`, `${root}/src/nested`]));
+    expect(mocks.fsListTree.mock.calls.filter(([path]) => path === `${root}/src/nested`)).toHaveLength(1);
+    expect(await screen.findByText("leaf.ts")).toBeTruthy();
+  });
+
   it("does not apply stale desktop expansion cleanup to the new workspace", async () => {
     const rootA = "C:/workspace-a";
     const rootB = "C:/workspace-b";

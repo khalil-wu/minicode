@@ -580,6 +580,37 @@ describe("MarkdownRenderer", () => {
     }
   });
 
+  it("opens action-style Markdown file links instead of revealing a made-up folder", () => {
+    const root = "C:/Desktop/harness测试";
+    const original = useAppStore.getState();
+    const openEditorFile = vi.fn();
+    const requestFileTreeReveal = vi.fn();
+    useAppStore.setState({ workingDirectory: root, openEditorFile, requestFileTreeReveal });
+
+    try {
+      render(
+        <MarkdownRenderer
+          content="[打开《项目内容概览.md》](下载/打开《项目内容概览.md》)"
+          knownFilePaths={[`${root}/项目内容概览.md`]}
+        />,
+      );
+      const chip = screen.getByRole("button", { name: "打开《项目内容概览.md》" });
+      expect(chip.className).toContain("md-file-chip");
+      expect(chip.className).not.toContain("md-folder-chip");
+      fireEvent.click(chip);
+      expect(openEditorFile).toHaveBeenCalledWith(
+        `${root}/项目内容概览.md`, undefined, { line: undefined, column: undefined },
+      );
+      expect(requestFileTreeReveal).not.toHaveBeenCalled();
+    } finally {
+      useAppStore.setState({
+        workingDirectory: original.workingDirectory,
+        openEditorFile: original.openEditorFile,
+        requestFileTreeReveal: original.requestFileTreeReveal,
+      });
+    }
+  });
+
   it("renders generated PDF links as files instead of folders", () => {
     const originalWorkingDirectory = useAppStore.getState().workingDirectory;
     useAppStore.setState({ workingDirectory: "C:/Desktop/MiniCode" });

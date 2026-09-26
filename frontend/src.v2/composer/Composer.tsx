@@ -660,16 +660,6 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
           width: minimal ? "100%" : wideMode ? "var(--chat-wide-axis-width)" : "var(--chat-composer-axis-width)",
           marginBottom: codeLayout ? "14px" : 0,
           padding: codeLayout ? "0" : "8px 10px 10px",
-          background: commandModeActive ? commandComposerBackground : "transparent",
-          border: dragOver
-            ? "2px dashed var(--command-accent, var(--state-info))"
-            : commandModeActive
-              ? "1px solid var(--command-border, var(--state-info))"
-              : "1px solid var(--border-subtle)",
-          borderRadius: "var(--radius-lg, 16px)",
-          boxShadow: commandModeActive
-            ? "0 0 0 1px color-mix(in oklch, var(--command-accent, var(--state-info)) 10%, transparent)"
-            : "none",
         }}
       >
       {activeGoal && <GoalBar />}
@@ -783,9 +773,6 @@ const GoalBar = () => {
     </div>
   );
 };
-
-const commandComposerBackground =
-  "color-mix(in oklch, var(--command-accent, var(--state-info)) 7%, var(--surface-page))";
 
 const formatQuotedMessageForBackend = (quote: ComposerQuote): string => {
   const speaker = quote.role === "user" ? "User" : quote.role === "assistant" ? "Assistant" : "System";

@@ -455,6 +455,8 @@ svg.lucide {
 
 .message-list-scroll {
   padding-inline: var(--mc-content-gutter) !important;
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
 }
 
 .assistant-cell-content,
@@ -559,13 +561,13 @@ svg.lucide {
   width: min(var(--mc-chat-width), calc(100% - 48px)) !important;
   max-width: min(var(--mc-chat-width), calc(100% - 48px)) !important;
   margin-inline: auto !important;
-  margin-top: 18px !important;
+  margin-top: 0 !important;
   margin-bottom: 20px !important;
   padding: 12px 10px 8px !important;
   border: 1px solid var(--border-subtle) !important;
   border-radius: var(--radius-xl) !important;
-  background: var(--surface-raised) !important;
-  box-shadow: var(--shadow-refined) !important;
+  background: transparent !important;
+  box-shadow: 0 2px 10px color-mix(in oklch, black 4%, transparent) !important;
 }
 
 /* Command mode is an intentional transient surface; ordinary composing
@@ -573,8 +575,15 @@ svg.lucide {
    floating card. */
 #root .composer-container[data-command-mode="true"] {
   border: 1px solid var(--border-soft) !important;
+  border-radius: var(--radius-xl) !important;
   background: var(--surface-base) !important;
   box-shadow: var(--shadow-refined) !important;
+}
+
+#root .composer-container[data-drag-over="true"] {
+  border: 2px dashed var(--command-accent, var(--state-info)) !important;
+  border-radius: var(--radius-xl) !important;
+  background: var(--surface-soft) !important;
 }
 
 #root .composer-capability-summary {
@@ -591,12 +600,6 @@ svg.lucide {
 #root .composer-container::before {
   content: none !important;
   display: none !important;
-}
-
-#root .chat-pane .composer-container:focus-within,
-#root .workbench-home-composer .composer-container:focus-within {
-  border-color: var(--border-soft) !important;
-  box-shadow: var(--shadow-refined) !important;
 }
 
 #root .composer-container[data-command-mode="true"]:focus-within {

@@ -55,7 +55,7 @@
   z-index: var(--z-composer);
   display: flex;
   flex-direction: column;
-  background: var(--surface-base);
+  background: transparent;
 }
 
 .chat-turn-change-summary {

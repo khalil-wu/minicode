@@ -610,14 +610,6 @@ html[data-theme="dark"] .md-prose .md-folder-chip {
 }
 
 /* ════════════════════════════════════════════════════════
-   Composer focus enhancement (Phase 2 UI optimization)
-   ════════════════════════════════════════════════════════ */
-.composer-container:focus-within {
-  border-color: var(--accent-primary) !important;
-  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent-primary) 10%, transparent), var(--shadow-soft) !important;
-}
-
-/* ════════════════════════════════════════════════════════
    Button interaction feedback (Phase 3 UI optimization)
    ════════════════════════════════════════════════════════ */
 .btn-primary,

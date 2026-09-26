@@ -818,7 +818,11 @@ const workspacePathFromHref = (
     candidate = trimmed.replace(/^\/([A-Za-z]:[\/\\])/, "$1");
     fromLocalFrontend = true;
   } else {
-    candidate = trimmed;
+    try {
+      candidate = decodeURI(trimmed);
+    } catch {
+      return null;
+    }
   }
 
   candidate = normalizeSlashes(stripFileRefDecorations(candidate).replace(/%5[cC]/g, "/")).replace(/^\.\/+/, "");
@@ -877,9 +881,15 @@ const workspaceGenericFileTargetFromHref = (href: string, workspaceRoot?: string
   return { path: candidate };
 };
 
+const actionFilePathFromHref = (href: string, workspaceRoot?: string): string | null => {
+  const candidate = workspacePathFromHref(href, { workspaceRoot });
+  const match = candidate && /^(?:下载[\\/])?打开《([^《》]+)》$/u.exec(candidate);
+  return match && anyFilePathPattern.test(match[1]) ? match[1] : null;
+};
+
 const workspaceFolderTargetFromHref = (href: string, workspaceRoot?: string): FolderTarget | null => {
   const candidate = workspacePathFromHref(href, { workspaceRoot });
-  if (!candidate || anyFilePathPattern.test(candidate)) return null;
+  if (!candidate || anyFilePathPattern.test(candidate) || /\.[A-Za-z0-9]+》$/.test(candidate)) return null;
   return { path: candidate.replace(/[\\/]+$/, "") };
 };
 
@@ -1437,15 +1447,20 @@ const mdComponents = (
         </a>
       );
     }
-    const parsedEditorTarget = editorTargetFromHref(href, resourceScope.workspaceRoot) ?? editorTargetFromLinkText(href, childrenText, resourceScope.workspaceRoot);
-    const editorTarget = href.startsWith("minicode-file-ref:")
+    const actionFilePath = actionFilePathFromHref(href, resourceScope.workspaceRoot);
+    const parsedEditorTarget = actionFilePath
+      ? workspaceFileTargetFromHref(actionFilePath, resourceScope.workspaceRoot)
+      : editorTargetFromHref(href, resourceScope.workspaceRoot) ?? editorTargetFromLinkText(href, childrenText, resourceScope.workspaceRoot);
+    const editorTarget = href.startsWith("minicode-file-ref:") || actionFilePath
       ? knownFileTarget(parsedEditorTarget, resourceScope)
       : parsedEditorTarget;
     const fileTarget = editorTarget
       ? null
-      : workspaceGenericFileTargetFromHref(href, resourceScope.workspaceRoot) ?? (
-          canUseLinkTextAsEditorTarget(href) ? workspaceGenericFileTargetFromHref(childrenText, resourceScope.workspaceRoot) : null
-        );
+      : actionFilePath
+        ? knownFileTarget(workspaceGenericFileTargetFromHref(actionFilePath, resourceScope.workspaceRoot), resourceScope)
+        : workspaceGenericFileTargetFromHref(href, resourceScope.workspaceRoot) ?? (
+            canUseLinkTextAsEditorTarget(href) ? workspaceGenericFileTargetFromHref(childrenText, resourceScope.workspaceRoot) : null
+          );
     const folderTarget = editorTarget || fileTarget
       ? null
       : workspaceFolderTargetFromHref(href, resourceScope.workspaceRoot) ?? (

@@ -237,13 +237,13 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     return () => window.clearTimeout(id);
   }, [loading]);
 
-  const loadDirectory = useCallback(async (path: string) => {
+  const loadDirectory = useCallback(async (path: string): Promise<boolean> => {
     const directory = workingDirectory;
     const epoch = refreshEpochRef.current;
     const isCurrent = () =>
       epoch === refreshEpochRef.current
       && workspaceRootsEqual(directory, useAppStore.getState().workingDirectory);
-    if (!directory || !isCurrent()) return;
+    if (!directory || !isCurrent()) return false;
     setLoadingPaths((current) => new Set(current).add(path));
     try {
       const children = isDesktop()
@@ -254,8 +254,10 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
           ? replaceNodeChildren(current, path, sortNodes(children))
           : current
       ));
+      return isCurrent();
     } catch (err) {
-      if (isCurrent()) setError(err instanceof Error ? err.message : "无法加载文件列表");
+      if (isCurrent() && !isMissingWorkspaceError(err)) setError(err instanceof Error ? err.message : "无法加载文件列表");
+      return false;
     } finally {
       setLoadingPaths((current) => {
         if (!isCurrent()) return current;
@@ -373,25 +375,30 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     setQuery("");
     const chain = folderRevealChain(target);
     const foldersToExpand = chain.length ? chain : [target];
-    setExpandedPaths((current) => {
-      const next = new Set(current);
-      for (const folder of foldersToExpand) next.add(folder);
-      writeExpandedPaths(workingDirectory || ".", next);
-      return next;
-    });
+    const loadedFolders: string[] = [];
     for (const folder of foldersToExpand) {
       if (!isSameTreePath(folder, workingDirectory, workingDirectory)) {
-        await loadDirectory(folder);
+        if (!await loadDirectory(folder)) break;
+        loadedFolders.push(folder);
       }
+    }
+    if (loadedFolders.length > 0) {
+      setExpandedPaths((current) => {
+        const next = new Set(current);
+        for (const folder of loadedFolders) next.add(folder);
+        writeExpandedPaths(workingDirectory || ".", next);
+        return next;
+      });
     }
     window.setTimeout(() => scrollToTreePath(target), 80);
     return true;
   }, [folderRevealChain, loadDirectory, normalizeRevealFolderPath, scrollToTreePath, workingDirectory]);
 
   const pendingChangesRef = useRef<{ path: string; event: string; timestamp: number }[]>([]);
+  const treeReady = Boolean(tree);
 
   useEffect(() => {
-    if (!tree || loading || fileTreeRevealRequests.length === 0) return;
+    if (!treeReady || loading || fileTreeRevealRequests.length === 0) return;
     let cancelled = false;
     const run = async () => {
       for (const request of fileTreeRevealRequests) {
@@ -406,7 +413,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     fileTreeRevealRequests,
     loading,
     revealFolderRequest,
-    tree,
+    treeReady,
   ]);
 
   useEffect(() => {
