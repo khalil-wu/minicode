@@ -22,7 +22,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from backend.agent.prompting import split_sys_prompt_prefix
+from backend.agent.prompting import CONDITIONAL_RULES_BOUNDARY, split_sys_prompt_prefix
 from backend.agent.lifecycle_errors import LifecycleStaleError as ExtensionStaleError
 from backend.llm.base import (
     emit_provider_lifecycle_request,
@@ -1584,14 +1584,12 @@ class AnthropicAdapter(LLMAdapter):
     ) -> list[dict[str, Any]]:
         """Split system prompt into cache-stable and dynamic blocks.
 
-        The stable prefix gets a ``cache_control`` breakpoint. Dynamic
-        workspace, skill, and memory context stays unmarked so changes there
-        do not create repeated cache writes.
-        Claude Code marks the stable system prefix only. Workspace, skill,
-        memory, and other request-scoped context remain an unmarked suffix so a
-        change there does not create a repeated cache write. Tool definitions
-        and the conversation checkpoint are marked separately by
-        ``_add_cache_breakpoints``.
+        The stable prefix gets a ``cache_control`` breakpoint. When path-matched
+        rules are present, the preceding workspace/skill/memory context gets a
+        second breakpoint so a rule change does not invalidate that prefix.
+        Without conditional rules, request-scoped context remains unmarked.
+        Tool definitions and the conversation checkpoint are marked separately
+        by ``_add_cache_breakpoints``.
         """
         split = split_sys_prompt_prefix(system_text)
         cache_control = _cache_control(ttl_1h)
@@ -1604,13 +1602,16 @@ class AnthropicAdapter(LLMAdapter):
                     "cache_control": dict(cache_control),
                 }
             )
-        if split.dynamic_suffix.strip():
-            blocks.append(
-                {
-                    "type": "text",
-                    "text": split.dynamic_suffix,
-                }
-            )
+        if CONDITIONAL_RULES_BOUNDARY in split.dynamic_suffix:
+            context, rules = split.dynamic_suffix.split(CONDITIONAL_RULES_BOUNDARY, 1)
+            context = context.rstrip("\n")
+            rules = rules.lstrip("\n")
+            if context.strip():
+                blocks.append({"type": "text", "text": context, "cache_control": dict(cache_control)})
+            if rules.strip():
+                blocks.append({"type": "text", "text": rules})
+        elif split.dynamic_suffix.strip():
+            blocks.append({"type": "text", "text": split.dynamic_suffix})
         if not blocks:
             blocks.append(
                 {
@@ -1661,11 +1662,9 @@ class AnthropicAdapter(LLMAdapter):
         2. One cache_control marker on the last tool definition.
         3. tool_result blocks strictly before the last cache_control marker get
            ``cache_reference: tool_use_id`` to improve cache-hit tracking.
-        Combined with the two system-block breakpoints from
-        ``_build_system_blocks``, this gives Anthropic four cache segments:
-          1. Stable system prefix (identity, rules, contracts)
-          2. Tool definitions (stable across turns)
-          3. Conversation history prefix (grows turn-by-turn)
+        With path-matched rules, ``_build_system_blocks`` adds a second system
+        breakpoint. The four segments are the stable system prefix, shared
+        workspace context, tool definitions, and growing conversation history.
         """
         cache_control = _cache_control(ttl_1h)
 

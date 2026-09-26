@@ -121,11 +121,14 @@ def derive_turn_tool_schema_state(
     permission_checker: PermissionChecker | None = None,
     permission_context: PermissionContext | None = None,
     toolset_policy: Any | None = None,
+    mcp_registry_version: int = 0,
     previous: TurnToolSchemaDerivation | None = None,
 ) -> TurnToolSchemaDerivation:
     permission_key = permission_context_cache_key(permission_context)
     derivation_key = (
-        id(tool_registry), tool_registry.version if tool_registry is not None else None,
+        tool_registry.schema_source if tool_registry is not None else None,
+        tool_registry.version if tool_registry is not None else None,
+        mcp_registry_version,
         toolset_policy.cache_key() if toolset_policy is not None else "",
         id(permission_checker), tuple(sorted(mcp_instructions.items())),
     )

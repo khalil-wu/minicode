@@ -675,18 +675,13 @@ class ContextBuilder:
     def skill_manager(self) -> Any | None:
         return self._skill_manager
 
-    def bind_skill_manager(self, manager: SkillManager, workspace_root: Path | str | None) -> None:
-        # Discovery scans the skill directories on disk, so re-snapshotting the
-        # same source manager for the same workspace is wasted filesystem work
-        # on the event loop. A fresh builder is created per turn and still
-        # discovers once here (installed/edited/removed skills are picked up);
-        # only the redundant second bind within a turn is skipped.
-        # Dedupe only against what we actually snapshotted this builder. __init__
-        # pre-assigns self._skill_manager to the raw (un-snapshotted) manager, so
-        # a `manager is self._skill_manager` check would wrongly skip the first
-        # bind and leave the global executor in place (owned-snapshot guard).
+    def bind_skill_manager(
+        self, manager: SkillManager, workspace_root: Path | str | None, *, refresh: bool = False,
+    ) -> None:
+        # The builder can be reused across user turns. The query boundary asks
+        # for a fresh snapshot; repeated binds within that turn use this one.
         source = (id(manager), os.path.normcase(os.path.normpath(str(workspace_root or ""))))
-        if self._skill_snapshot_source is not None and source == self._skill_snapshot_source:
+        if not refresh and source == self._skill_snapshot_source:
             return
         self._skill_manager = manager.snapshot(workspace_root)
         self._skill_snapshot_source = source
@@ -1469,6 +1464,7 @@ class ContextBuilder:
         workspace_root: Path | None,
     ) -> PromptParts:
         project_guidelines = self._get_project_guidelines(workspace_root)
+        matched_rules = ""
         if workspace_root is not None:
             from backend.agent.instruction_discovery import load_matching_project_rules
 
@@ -1480,15 +1476,12 @@ class ContextBuilder:
                 project_doc_fallback_filenames=self._project_doc_fallback_filenames,
                 hook_manager=self._hook_manager,
             )
-            if matched_rules:
-                project_guidelines = "\n\n".join(
-                    part for part in (project_guidelines, matched_rules) if part.strip()
-                )
         builder = PromptBuilderV2()
         sections = builder.build_sections(
             state=state,
             workspace_root=workspace_root,
             project_guidelines=project_guidelines,
+            conditional_rules=matched_rules,
             skill_context=self._build_skill_catalog(),
             memory_context=self._build_memory_context(),
             persistent_context=self._build_persistent_context(),
@@ -2607,7 +2600,7 @@ class ContextBuilder:
             chars = max(0, int(row.get("chars") or 0))
             if name == "stable_system" or name in {"current_time", "task_status"}:
                 category = "system_runtime"
-            elif name in {"workspace_summary", "project_guidelines"}:
+            elif name in {"workspace_summary", "project_guidelines", "conditional_rules"}:
                 category = "guidelines"
             elif name == "skill_context":
                 category = "skills"

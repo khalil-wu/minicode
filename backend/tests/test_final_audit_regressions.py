@@ -82,6 +82,44 @@ def test_next_turn_refreshes_skill_changes_without_rewriting_active_snapshot(tmp
     assert manager.snapshot(tmp_path).load_skill_payload("review") is None
 
 
+def test_reused_context_refreshes_skills_each_turn(tmp_path, monkeypatch):
+    _skill(tmp_path, "review", "review", "Version one")
+    loader = SkillLoader(tmp_path)
+    root_lookups = []
+    roots = [("workspace", tmp_path)]
+
+    def search_dirs():
+        root_lookups.append(1)
+        return list(roots)
+
+    monkeypatch.setattr(loader, "_search_dirs", search_dirs)
+    manager = SkillManager(loader)
+    manager.discover()
+    context = ContextBuilder()
+    context.bind_skill_manager(manager, tmp_path, refresh=True)
+    first_turn = context.skill_manager
+    assert "Version one" in first_turn.load_skill_payload("review")["content"]
+    context.bind_skill_manager(manager, tmp_path)
+    assert context.skill_manager is first_turn
+    assert len(root_lookups) == 2
+
+    _skill(tmp_path, "review", "review", "Version two")
+    _skill(tmp_path, "new", "new", "New installation")
+    other_root = tmp_path / "new-search-root"
+    _skill(other_root, "external", "external", "New search root")
+    roots.append(("plugin", other_root))
+    context.bind_skill_manager(manager, tmp_path, refresh=True)
+    assert context.skill_manager is not first_turn
+    assert "Version two" in context.skill_manager.load_skill_payload("review")["content"]
+    assert context.skill_manager.load_skill_payload("new")
+    assert context.skill_manager.load_skill_payload("external")
+    assert "Version one" in first_turn.load_skill_payload("review")["content"]
+    assert len(root_lookups) == 3
+
+    manager.discover()
+    assert len(root_lookups) == 4
+
+
 def test_case_insensitive_skill_collision_requires_exact_path(tmp_path, monkeypatch):
     first = _skill(tmp_path, "a", "Review", "First")
     second = _skill(tmp_path, "b", "review", "Second")

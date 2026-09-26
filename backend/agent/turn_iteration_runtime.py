@@ -73,6 +73,9 @@ class TurnIterationRuntime:
         self.run_record = run_record
         self.skill_manager = skill_manager
         self.agent_session = agent_session
+        self._base_schema_key: tuple[Any, ...] | None = None
+        self._base_schema_permission: Any = None
+        self._base_schemas: list[dict[str, Any]] = []
 
     def sync_active_session_model(self) -> Any:
         """Capture the selection before context preparation and provider I/O."""
@@ -160,12 +163,24 @@ class TurnIterationRuntime:
         # a valid tool_search result render in the next schema while a direct
         # model tool call is still rejected by the runtime guard.
         self.tool_context.metadata[ACTIVE_TOOLSET_POLICY_METADATA_KEY] = active_policy
-        base_schemas = self.tool_registry.get_schemas(
-            permission_checker=self.permission_checker,
-            permission_context=self.tool_context.permission,
-            toolset_policy=active_policy,
-            mcp_registry_version=mcp_version,
+        schema_key = (
+            self.tool_registry.schema_source,
+            self.tool_registry.version,
+            mcp_version,
+            active_policy.cache_key(),
+            id(self.permission_checker),
         )
+        if (schema_key != self._base_schema_key
+                or self.tool_context.permission is not self._base_schema_permission):
+            self._base_schemas = self.tool_registry.get_schemas(
+                permission_checker=self.permission_checker,
+                permission_context=self.tool_context.permission,
+                toolset_policy=active_policy,
+                mcp_registry_version=mcp_version,
+            )
+            self._base_schema_key = schema_key
+            self._base_schema_permission = self.tool_context.permission
+        base_schemas = self._base_schemas
         schema_state = derive_turn_tool_schema_state(
             base_tool_schemas=base_schemas,
             mcp_instructions=mcp_instructions,
@@ -173,6 +188,7 @@ class TurnIterationRuntime:
             permission_checker=self.permission_checker,
             permission_context=self.tool_context.permission,
             toolset_policy=active_policy,
+            mcp_registry_version=mcp_version,
             previous=previous_tool_schema_state,
         )
         active_capabilities = capabilities_for_adapter(self.llm)

@@ -4380,7 +4380,6 @@ class SessionAgentRunnerMixin:
             skill_executor=getattr(self, "skill_executor", None),
             memory_manager=run_memory_manager,
             llm=run_llm,
-            skill_manager=self.skill_manager,
             conversation_id=conversation.id,
             workspace_root=run_workspace_root,
         )

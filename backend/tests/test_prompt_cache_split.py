@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from backend.agent.prompting import (
     PromptBuilderV2,
+    PromptParts,
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
     clear_system_prompt_sections,
     split_sys_prompt_prefix,
@@ -242,6 +243,52 @@ def test_prompt_builder_keeps_dynamic_turn_context_out_of_stable_prefix(tmp_path
     assert "DYNAMIC SKILL CONTEXT" in parts.context
     assert "DYNAMIC TOOL GUIDANCE" not in parts.context
     assert "DYNAMIC_DEFERRED_TOOL" not in parts.context
+
+
+def test_conditional_rules_are_last_in_the_cacheable_system_context(tmp_path: Path) -> None:
+    state = SimpleNamespace(workspace_context=None, prompt_context={})
+    builder = PromptBuilderV2()
+    common = dict(
+        state=state,
+        workspace_root=tmp_path,
+        project_guidelines="PROJECT GUIDE",
+        skill_context="SKILL CATALOG",
+        memory_context="MEMORY",
+        persistent_context="PERSISTENT FACT",
+        git_status_context="GIT SNAPSHOT",
+    )
+    first = builder.build_sections(**common, conditional_rules="RULE A")
+    second = builder.build_sections(**common, conditional_rules="RULE B")
+    assert first[-1].name == "conditional_rules"
+    assert second[-1].name == "conditional_rules"
+    assert [section.content for section in first[:-1]] == [section.content for section in second[:-1]]
+    assert "GIT SNAPSHOT" in first[-2].content
+    assert first[-1].content == "RULE A"
+    assert second[-1].content == "RULE B"
+    first_system = PromptParts.from_sections(first).render_system()
+    second_system = PromptParts.from_sections(second).render_system()
+    first_blocks = AnthropicAdapter._build_system_blocks(first_system)
+    second_blocks = AnthropicAdapter._build_system_blocks(second_system)
+    assert first_blocks[:-1] == second_blocks[:-1]
+    assert "cache_control" in first_blocks[-2]
+    assert first_blocks[-1]["text"] == "RULE A"
+    assert second_blocks[-1]["text"] == "RULE B"
+    rules_only = PromptParts(stable="STABLE", conditional_rules="RULE A")
+    assert AnthropicAdapter._build_system_blocks(rules_only.render_system())[-1]["text"] == "RULE A"
+
+
+def test_context_builder_keeps_matched_rules_after_other_system_context(tmp_path: Path, monkeypatch) -> None:
+    from backend.agent import instruction_discovery
+
+    monkeypatch.setattr(instruction_discovery, "load_matching_project_rules", lambda *args, **kwargs: "MATCHED RULE")
+    context = ContextBuilder()
+    monkeypatch.setattr(context, "_get_project_guidelines", lambda root: "PROJECT GUIDE")
+    state = AgentState(user_message="continue", workspace_root=tmp_path)
+    parts = context._build_prompt_parts(state, tmp_path)
+    assert parts.conditional_rules == "MATCHED RULE"
+    assert "PROJECT GUIDE" in parts.context
+    assert parts.render_system().index("PROJECT GUIDE") < parts.render_system().index("MATCHED RULE")
+    assert [section["name"] for section in state.prompt_context["prompt_section_summary"]["sections"]][-1] == "conditional_rules"
 
 
 def test_read_only_subagent_keeps_project_instructions_without_parent_memory(tmp_path: Path) -> None:

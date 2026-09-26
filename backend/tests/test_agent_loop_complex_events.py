@@ -162,9 +162,18 @@ class _ComplexEventLLM(LLMAdapter):
         return ""
 
 
-def test_complex_agent_loop_event_sequence_preserves_visibility_and_terminal_invariants() -> (
+def test_complex_agent_loop_event_sequence_preserves_visibility_and_terminal_invariants(monkeypatch) -> (
     None
 ):
+    schema_calls: list[ToolRegistry] = []
+    original_get_schemas = ToolRegistry.get_schemas
+
+    def counted_get_schemas(self, *args, **kwargs):
+        schema_calls.append(self)
+        return original_get_schemas(self, *args, **kwargs)
+
+    monkeypatch.setattr(ToolRegistry, "get_schemas", counted_get_schemas)
+
     async def run():
         td = tempfile.mkdtemp()
         registry = ToolRegistry()
@@ -191,9 +200,12 @@ def test_complex_agent_loop_event_sequence_preserves_visibility_and_terminal_inv
             state=state,
         ):
             events.append(event)
-        return events, context, state
+        return events, context, state, registry
 
-    events, context, state = asyncio.run(run())
+    events, context, state, registry = asyncio.run(run())
+    # Three model iterations share one direct tool schema projection. The
+    # session registry has a separate bootstrap schema read.
+    assert sum(candidate is not registry for candidate in schema_calls) == 1
     serialized_events = json.dumps(
         [{"type": event.type, "data": event.data} for event in events],
         ensure_ascii=False,

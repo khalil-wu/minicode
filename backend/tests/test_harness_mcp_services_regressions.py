@@ -169,6 +169,17 @@ def test_unchanged_tool_contract_reuses_derivation_and_changes_invalidate(monkey
     same = derive_turn_tool_schema_state(base_tool_schemas=deepcopy(schemas), mcp_instructions={}, tool_registry=registry, previous=first)
     assert same is first
     assert build.call_count == 1
+    fork = registry.fork()
+    same_after_fork = derive_turn_tool_schema_state(
+        base_tool_schemas=fork.get_schemas(), mcp_instructions={}, tool_registry=fork, previous=first,
+    )
+    assert same_after_fork is first
+    assert build.call_count == 1
+    mcp_changed = derive_turn_tool_schema_state(
+        base_tool_schemas=fork.get_schemas(), mcp_instructions={}, tool_registry=fork,
+        mcp_registry_version=1, previous=first,
+    )
+    assert mcp_changed is not first
     changed = deepcopy(schemas)
     changed[0]["function"]["description"] += " updated contract"
     updated = derive_turn_tool_schema_state(base_tool_schemas=changed, mcp_instructions={}, tool_registry=registry, previous=first)

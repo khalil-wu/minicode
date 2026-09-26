@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 PromptLayer = Literal["stable", "context"]
 SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__"
+CONDITIONAL_RULES_BOUNDARY = "__SYSTEM_PROMPT_CONDITIONAL_RULES_BOUNDARY__"
 _PROMPT_SECTION_CACHE: dict[str, str] = {}
 
 
@@ -191,21 +192,28 @@ class PromptParts:
 
     stable: str
     context: str = ""
+    conditional_rules: str = ""
 
     def render_system(self) -> str:
         parts = [self.stable, SYSTEM_PROMPT_DYNAMIC_BOUNDARY, self.context]
+        if self.conditional_rules:
+            parts.extend((CONDITIONAL_RULES_BOUNDARY, self.conditional_rules))
         return "\n\n".join(part for part in parts if part.strip())
 
     @classmethod
     def from_sections(cls, sections: list[PromptSection]) -> "PromptParts":
         def joined(layer: PromptLayer) -> str:
             return "\n\n".join(
-                s.content for s in sections if s.layer == layer and s.content.strip()
+                s.content for s in sections
+                if s.layer == layer and s.name != "conditional_rules" and s.content.strip()
             )
 
         return cls(
             stable=joined("stable"),
             context=joined("context"),
+            conditional_rules="\n\n".join(
+                s.content for s in sections if s.name == "conditional_rules" and s.content.strip()
+            ),
         )
 
 
@@ -764,6 +772,7 @@ class PromptBuilderV2:
         state: Any,
         workspace_root: Path | None = None,
         project_guidelines: str = "",
+        conditional_rules: str = "",
         skill_context: str = "",
         memory_context: str = "",
         persistent_context: str = "",
@@ -774,6 +783,7 @@ class PromptBuilderV2:
                 state=state,
                 workspace_root=workspace_root,
                 project_guidelines=project_guidelines,
+                conditional_rules=conditional_rules,
                 skill_context=skill_context,
                 memory_context=memory_context,
                 persistent_context=persistent_context,
@@ -787,6 +797,7 @@ class PromptBuilderV2:
         state: Any,
         workspace_root: Path | None = None,
         project_guidelines: str = "",
+        conditional_rules: str = "",
         skill_context: str = "",
         memory_context: str = "",
         persistent_context: str = "",
@@ -846,6 +857,9 @@ class PromptBuilderV2:
             git_status = git_status_context
             if git_status:
                 context_candidates.append(("git_status", git_status))
+        # Path-matched rules can change as tools touch files during a turn.
+        # Put them last so the preceding system/context prefix remains reusable.
+        context_candidates.append(("conditional_rules", conditional_rules.strip()))
         for name, content in context_candidates:
             if content:
                 sections.append(

@@ -35,6 +35,7 @@ class CapabilityRegistry:
         self._schema_cache: dict[str, list[dict[str, Any]]] = {}
         self._validated_policies: set[tuple[str, int]] = set()
         self._version = 0
+        self._schema_source = object()
         self.mcp_tool_registry: Any | None = None
 
     def register(
@@ -130,6 +131,7 @@ class CapabilityRegistry:
         clone._schema_cache = deepcopy(self._schema_cache)
         clone._validated_policies = set(self._validated_policies)
         clone._version = self._version
+        clone._schema_source = self._schema_source
         if self.mcp_tool_registry is not None:
             self.mcp_tool_registry.fork(clone)
         return clone
@@ -706,6 +708,10 @@ class CapabilityRegistry:
     @property
     def version(self) -> int:
         return self._version
+
+    @property
+    def schema_source(self) -> object:
+        return self._schema_source
 
     def _build_named_metadata(self, name: str, metadata: Any) -> dict[str, Any]:
         if isinstance(metadata, dict):

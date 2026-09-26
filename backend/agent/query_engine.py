@@ -748,7 +748,7 @@ class QueryEngine:
 
         skill_manager = skill_manager or ctx.skill_manager
         if isinstance(skill_manager, SkillManager):
-            ctx.bind_skill_manager(skill_manager, sc.workspace_root)
+            ctx.bind_skill_manager(skill_manager, sc.workspace_root, refresh=True)
             skill_manager = ctx.skill_manager
 
         # Clear per-turn ephemeral state in the lifecycle owner. Only touch
