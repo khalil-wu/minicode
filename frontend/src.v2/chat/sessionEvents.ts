@@ -38,8 +38,10 @@ import { fromBackendPermissionMode } from "../protocol/permissions";
 import { mergeCapabilities } from "../protocol/capabilities";
 import {
   conversationResetPayload,
+  isInFlightProjection,
   LS,
   removeConversationOwnedPrompts,
+  resumedFromInFlightProjection,
   visibleDiffReviewForConversation,
   writeLS,
 } from "../stores/shared-helpers";
@@ -804,14 +806,17 @@ const applyActiveStreamSnapshot = (session: RuntimeSessionSnapshot) => {
         liveIndex = index;
         break;
       }
-      if (fallbackIndex < 0 && !message.terminalStatus && message.completedAt == null) fallbackIndex = index;
+      if (
+        fallbackIndex < 0
+        && ((!message.terminalStatus && message.completedAt == null) || isInFlightProjection(message))
+      ) fallbackIndex = index;
     }
     const activeIndex = liveIndex >= 0 ? liveIndex : fallbackIndex;
     return messages.map((message, index) => {
       const ownsActiveStream = message.role === "assistant"
         && message.queueState !== "queued"
         && ((targets?.has(message.id) ?? false) || (!targets?.size && index === activeIndex));
-      if (ownsActiveStream) return { ...message, isStreaming: true };
+      if (ownsActiveStream) return { ...resumedFromInFlightProjection(message), isStreaming: true };
       return message.isStreaming || message.isThinkingStreaming
         ? { ...message, isStreaming: false, isThinkingStreaming: false }
         : message;

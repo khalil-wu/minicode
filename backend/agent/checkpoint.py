@@ -138,20 +138,23 @@ class _CheckpointByteBudget:
 
 
 _CHECKPOINT_OMITTED = object()
+# Identity and control fields are small and are what makes a checkpoint
+# findable and resumable, so they claim the byte budget before the bulky
+# history and tool records.
 _CHECKPOINT_DYNAMIC_FIELDS = (
     "session_id",
+    "run_id",
+    "conversation_id",
+    "stopped_reason",
+    "resume_payload",
+    "active_skills",
+    "disabled_tools",
+    "loaded_deferred_tools",
     "user_message",
     "reply",
     "context_snapshot",
     "messages",
     "tool_calls",
-    "resume_payload",
-    "active_skills",
-    "disabled_tools",
-    "loaded_deferred_tools",
-    "stopped_reason",
-    "run_id",
-    "conversation_id",
 )
 
 
@@ -217,20 +220,23 @@ def _bounded_checkpoint_value(
         bounded_reversed.reverse()
         return bounded_reversed
     if isinstance(value, dict):
+        # A record is kept whole or not at all: a dict missing some of its keys
+        # (a tool call without its name) cannot be restored.
+        before_dict = budget.remaining
         if not budget.reserve_bytes(2):
             return _CHECKPOINT_OMITTED
         bounded_reversed: list[tuple[str, Any]] = []
         for key, item in islice(reversed(value.items()), MAX_CHECKPOINT_COLLECTION_ITEMS):
-            before_item = budget.remaining
             key_text = str(key)
             key_size = len(json.dumps(key_text, ensure_ascii=False).encode("utf-8")) + 1
             separator_size = 1 if bounded_reversed else 0
             if not budget.reserve_bytes(key_size + separator_size):
-                break
+                budget.remaining = before_dict
+                return _CHECKPOINT_OMITTED
             bounded = _bounded_checkpoint_value(item, depth=depth + 1, budget=budget)
             if bounded is _CHECKPOINT_OMITTED:
-                budget.remaining = before_item
-                break
+                budget.remaining = before_dict
+                return _CHECKPOINT_OMITTED
             bounded_reversed.append((key_text, bounded))
         bounded_reversed.reverse()
         return dict(bounded_reversed)

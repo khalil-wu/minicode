@@ -70,6 +70,7 @@ def test_scheduler_tick_does_not_fire_expired_or_invalid_persisted_tasks(tmp_pat
     )
     if case == "expired":
         task.created_at = (now - timedelta(days=8)).isoformat()
+        task.auto_expire = True
     else:
         task.recurring = False
         if case == "bad_timezone":
@@ -97,6 +98,26 @@ def test_scheduler_tick_does_not_fire_expired_or_invalid_persisted_tasks(tmp_pat
             else:
                 assert task.id in scheduler._unusable_schedule_ids
                 assert scheduler._tasks[task.id].deleted_at is None
+        finally:
+            await scheduler.stop()
+
+    asyncio.run(run())
+
+
+def test_user_created_recurring_task_outlives_the_agent_expiry(tmp_path, monkeypatch):
+    path = tmp_path / "tasks.json"
+    monkeypatch.setattr(scheduler_module, "SCHEDULE_FILE", path)
+    now = datetime.now(UTC)
+    task = ScheduledTask(id="weekday-standup", prompt="standup", schedule="0 9 * * 1-5")
+    task.created_at = (now - timedelta(days=30)).isoformat()
+    path.write_text(json.dumps({"tasks": [task.to_dict()], "runs": []}), encoding="utf-8")
+
+    async def run():
+        scheduler = TaskScheduler(on_fire=None)
+        try:
+            listed = scheduler.list_tasks()
+            assert [row["id"] for row in listed] == ["weekday-standup"]
+            assert scheduler._tasks["weekday-standup"].deleted_at is None
         finally:
             await scheduler.stop()
 

@@ -25,7 +25,9 @@ class ScheduleCronTool(BaseTool):
     description = (
         "Schedule a recurring background task on a cron expression. The task fires the given prompt "
         "at the schedule (min hour day-of-month month day-of-week, e.g. '0 9 * * 1-5' = 9am weekdays). "
-        "Use for periodic checks/devops. Returns a job ID you can pass to schedule_cron_delete."
+        "Use for periodic checks/devops. Returns a job ID you can pass to schedule_cron_delete. "
+        "Tasks scheduled here expire after 7 days; tell the user so they can recreate it from "
+        "the scheduler if it should keep running."
     )
 
     def get_schema(self) -> ToolSchema:
@@ -68,6 +70,7 @@ class ScheduleCronTool(BaseTool):
                 permission_mode=permission_mode,
                 workspace_root=workspace_root,
                 conversation_id=str(getattr(context, "conversation_id", "") or ""),
+                auto_expire=True,
             )
         except Exception as exc:
             return self._error_result(f"Failed to schedule task: {exc}")
@@ -75,7 +78,8 @@ class ScheduleCronTool(BaseTool):
         return self._success_result(
             content=(
                 f"Scheduled '{name}' on cron '{cron}' (mode={permission_mode}).\n"
-                f"Job ID: {task.id}"
+                f"Job ID: {task.id}\n"
+                "This task expires automatically after 7 days."
             ),
             display_summary=f"Scheduled {name}",
         )

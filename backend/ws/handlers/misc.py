@@ -894,7 +894,7 @@ async def handle_subagent_plan_review(session: "WebSocketSession", data: dict[st
             continue
         if not isinstance(payload, dict) or payload.get("type") != "plan_approval_request":
             continue
-        if str(payload.get("requestId") or "").strip() != request_id:
+        if str(payload.get("request_id") or "").strip() != request_id:
             continue
         if str(getattr(message, "sender_id", "") or "").strip() != subagent_id:
             continue
@@ -948,10 +948,10 @@ async def handle_subagent_plan_review(session: "WebSocketSession", data: dict[st
     granted_mode = "confirm" if approved else ""
     response = {
         "type": "plan_approval_response",
-        "requestId": request_id,
+        "request_id": request_id,
         "approved": approved,
         "timestamp": datetime.now(UTC).isoformat(),
-        **({"permissionMode": granted_mode} if approved else {}),
+        **({"permission_mode": granted_mode} if approved else {}),
     }
     try:
         runtime.send_swarm_message(

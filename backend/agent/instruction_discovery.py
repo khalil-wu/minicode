@@ -550,6 +550,22 @@ def _expand_guideline_imports(
     return expanded
 
 
+def _unreadable_block(
+    path: Path, source_kind: str, label: str, priority: int, scope: str, error: OSError,
+) -> GuidelineBlock:
+    """Keep an existing but unreadable instruction file visible instead of absent."""
+    logger.warning("Instruction file %s could not be read: %s", path, error)
+    reason = error.strerror or type(error).__name__
+    return GuidelineBlock(
+        path=path,
+        scope=scope,
+        source_kind=source_kind,
+        label=label,
+        priority=priority,
+        content=f"[This instruction file exists but could not be read ({reason}); its guidance is not included.]",
+    )
+
+
 def _read_blocks(
     specs: list[tuple[Path, str, str, int, str]],
     *,
@@ -569,6 +585,9 @@ def _read_blocks(
                 raw_content = path.read_bytes()
             except FileNotFoundError:
                 continue
+            except OSError as exc:
+                blocks.append(_unreadable_block(path, source_kind, label, priority, scope, exc))
+                continue
             truncated = raw_content[:remaining]
             content = truncated.decode("utf-8", errors="replace")
             if not content.strip():
@@ -584,6 +603,9 @@ def _read_blocks(
             try:
                 content = path.read_text(encoding="utf-8", errors="ignore").strip()
             except FileNotFoundError:
+                continue
+            except OSError as exc:
+                blocks.append(_unreadable_block(path, source_kind, label, priority, scope, exc))
                 continue
         if source_kind.endswith("_rule"):
             content, conditional_paths = _parse_rule_content(content)

@@ -16,7 +16,7 @@ export const WorkspaceContextMenu = ({ path, position, onClose }: {
       }, "workspace.recent.remove");
       if (!commandResultSucceeded(result)) throw new Error(result.message || "无法移除工作区。");
       if (result.data?.closed_active) useAppStore.getState().setAppMode("cowork");
-      pushToast("工作区已移除，历史会话保留在项目的 .minicode 中。重新打开项目即可继续。", "success", 5000);
+      pushToast("工作区已从列表移除，历史会话仍然保留，重新打开项目即可继续。", "success", 5000);
     } catch (error) {
       pushToast(error instanceof Error ? error.message : "无法移除工作区。", "error", 5000);
     }

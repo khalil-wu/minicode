@@ -47,6 +47,7 @@ import {
   editorStateForWorkspace,
   conversationResetPayload,
   visibleDiffReviewForConversation,
+  resumedFromInFlightProjection,
   LS,
   writeLS,
 } from "./shared-helpers";
@@ -1434,7 +1435,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       let nextMessages: typeof sourceMessages;
       if (targetMessage) {
         nextMessages = sourceMessages.slice();
-        const baseMessage = stripLegacyContentFields(targetMessage);
+        const baseMessage = resumedFromInFlightProjection(stripLegacyContentFields(targetMessage));
         const blocks = resumedBlocks(getContentBlocks(targetMessage));
         nextMessages[targetIndex] = {
           ...baseMessage,

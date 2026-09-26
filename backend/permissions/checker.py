@@ -539,7 +539,7 @@ def literal_command_parses(command: str) -> list[Any]:
     if posix is not None:
         parses.append(posix)
     if sys.platform == "win32" or _looks_like_powershell(command):
-        windows = powershell_ast.parse_literal_commands(command)
+        windows = powershell_ast.parse_literal_commands(powershell_ast.powershell_equivalent(command))
         if windows is not None:
             parses.append(windows)
     return parses
@@ -556,7 +556,57 @@ def _looks_like_powershell(command: str) -> bool:
 
 def check_catastrophic_command(command: str) -> tuple[bool, str]:
     """Public wrapper for the static catastrophic shell-command blocklist."""
-    return _check_catastrophic_command(command)
+    from backend.permissions.powershell_ast import command_readings
+
+    for reading in command_readings(command):
+        allowed, reason = _check_catastrophic_command(reading)
+        if not allowed:
+            return allowed, reason
+    return True, ""
+
+
+# PowerShell cmdlets (and their aliases) that create, overwrite, move or delete
+# the item named by their path arguments.
+_POWERSHELL_WRITE_COMMANDS = frozenset({
+    "set-content", "add-content", "clear-content", "out-file", "tee-object",
+    "copy-item", "move-item", "new-item", "rename-item", "set-item", "remove-item",
+    "sc", "ac", "clc", "tee", "cp", "cpi", "copy", "mv", "mi", "move", "ni",
+    "ren", "rni", "si", "rm", "ri", "del", "erase", "rd", "rmdir",
+})
+# Parameters whose value is data, not a filesystem target.
+_POWERSHELL_NON_PATH_PARAMETERS = frozenset({
+    "-value", "-inputobject", "-encoding", "-itemtype", "-stream", "-filter",
+    "-include", "-exclude", "-credential", "-delimiter", "-width",
+})
+
+
+def _powershell_protected_write_reason(command: str) -> str:
+    from backend.permissions import powershell_ast
+    from backend.permissions.shell_ast import DYNAMIC_WORD
+
+    if sys.platform != "win32" and not _looks_like_powershell(command):
+        return ""
+    parsed = powershell_ast.parse_literal_commands(powershell_ast.powershell_equivalent(command))
+    if parsed is None:
+        return ""
+    for argv in parsed.commands:
+        if not argv or argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower() not in _POWERSHELL_WRITE_COMMANDS:
+            continue
+        skip_value = False
+        for token in argv[1:]:
+            if skip_value:
+                skip_value = False
+                continue
+            if token == DYNAMIC_WORD:
+                continue
+            name, separator, bound = token.partition(":") if token.startswith("-") else ("", "", token)
+            if name.lower() in _POWERSHELL_NON_PATH_PARAMETERS:
+                skip_value = not separator
+                continue
+            # ``-Path:.env`` binds the value in the same token.
+            if bound and _path_is_protected_write(bound):
+                return "shell write to a protected path (PowerShell cmdlet)"
+    return ""
 
 
 def protected_write_command_reason(command: str, *, _depth: int = 0) -> str:
@@ -567,7 +617,13 @@ def protected_write_command_reason(command: str, *, _depth: int = 0) -> str:
     write was detected.
     """
     stripped = command.strip()
-    reason = _protected_write_reason(stripped)
+    from backend.permissions.powershell_ast import command_readings
+
+    for reading in command_readings(stripped):
+        reason = _protected_write_reason(reading)
+        if reason:
+            return reason
+    reason = _powershell_protected_write_reason(stripped)
     if reason:
         return reason
     if _depth >= 4:

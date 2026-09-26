@@ -29,9 +29,9 @@ def _request_message(request_id: str) -> Any:
                 "type": "plan_approval_request",
                 "from": "tester",
                 "timestamp": "2026-01-01T00:00:00+00:00",
-                "planFilePath": "/ws/.minicode/plans/t1.md",
-                "planContent": "# Plan",
-                "requestId": request_id,
+                "plan_file_path": "/ws/.minicode/plans/t1.md",
+                "plan_content": "# Plan",
+                "request_id": request_id,
             }
         )
     )
@@ -142,7 +142,12 @@ def test_plan_review_approve_sends_user_decision(
         assert fake_runtime.committed == 1
         payload = json.loads(fake_runtime.sent[0]["content"])
         assert payload["approved"] is True
-        assert payload["permissionMode"] == "confirm"
+        assert payload["permission_mode"] == "confirm"
+        # The teammate's mailbox reader must accept exactly what was sent.
+        from backend.agent.mailbox_delivery import _plan_approval_response
+
+        parsed = _plan_approval_response(type("Message", (), {"content": fake_runtime.sent[0]["content"]})())
+        assert parsed is not None and parsed["request_id"] == "plan_approval:t1:abc"
         command, level, data = session.results[-1]
         assert (command, level) == ("subagent.plan_review", "info")
         assert data["approved"] is True and data["granted_permission_mode"] == "confirm"
@@ -166,7 +171,7 @@ def test_plan_review_reject_keeps_mode_absent(
         )
         payload = json.loads(fake_runtime.sent[0]["content"])
         assert payload["approved"] is False
-        assert "permissionMode" not in payload
+        assert "permission_mode" not in payload
 
     asyncio.run(run())
 

@@ -444,7 +444,9 @@ def _command_side_effect_kind(args: dict[str, Any] | None) -> str:
         literal_command_parses,
         protected_write_command_reason,
     )
+    from backend.permissions.powershell_ast import command_readings
 
+    readings = command_readings(command)
     allowed, _reason = check_catastrophic_command(command)
     # A shell write to a protected path (.minicode/**, .git/**, settings.json, …)
     # is classified destructive so it always requires confirmation, never a
@@ -453,7 +455,7 @@ def _command_side_effect_kind(args: dict[str, Any] | None) -> str:
     if (
         not allowed
         or protected_write_command_reason(command)
-        or any(pattern.search(command) for pattern in _DESTRUCTIVE_COMMAND_PATTERNS)
+        or any(pattern.search(reading) for reading in readings for pattern in _DESTRUCTIVE_COMMAND_PATTERNS)
     ):
         return TOOL_SIDE_EFFECT_DESTRUCTIVE
     # The string patterns above only see top-level text. Resolve the literal
@@ -466,7 +468,7 @@ def _command_side_effect_kind(args: dict[str, Any] | None) -> str:
         return TOOL_SIDE_EFFECT_DESTRUCTIVE
     if _as_bool(payload.get("with_escalated_permissions", False)):
         return TOOL_SIDE_EFFECT_EXTERNAL
-    if any(pattern.search(command) for pattern in _EXTERNAL_COMMAND_PATTERNS):
+    if any(pattern.search(reading) for reading in readings for pattern in _EXTERNAL_COMMAND_PATTERNS):
         return TOOL_SIDE_EFFECT_EXTERNAL
     if any(argv_rules.is_external(argv) for argv in literal_commands):
         return TOOL_SIDE_EFFECT_EXTERNAL

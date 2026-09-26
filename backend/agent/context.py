@@ -598,6 +598,7 @@ class ContextBuilder:
         self._compaction_count = 0
         self._skill_executor = skill_executor
         self._skill_manager = skill_manager
+        self._skill_snapshot_source: tuple[int, str] | None = None
         if isinstance(skill_manager, SkillManager):
             self.bind_skill_manager(skill_manager, workspace_root)
         self._memory_manager = memory_manager
@@ -675,7 +676,20 @@ class ContextBuilder:
         return self._skill_manager
 
     def bind_skill_manager(self, manager: SkillManager, workspace_root: Path | str | None) -> None:
+        # Discovery scans the skill directories on disk, so re-snapshotting the
+        # same source manager for the same workspace is wasted filesystem work
+        # on the event loop. A fresh builder is created per turn and still
+        # discovers once here (installed/edited/removed skills are picked up);
+        # only the redundant second bind within a turn is skipped.
+        # Dedupe only against what we actually snapshotted this builder. __init__
+        # pre-assigns self._skill_manager to the raw (un-snapshotted) manager, so
+        # a `manager is self._skill_manager` check would wrongly skip the first
+        # bind and leave the global executor in place (owned-snapshot guard).
+        source = (id(manager), os.path.normcase(os.path.normpath(str(workspace_root or ""))))
+        if self._skill_snapshot_source is not None and source == self._skill_snapshot_source:
+            return
         self._skill_manager = manager.snapshot(workspace_root)
+        self._skill_snapshot_source = source
         self._skill_executor = SkillExecutor(self._skill_manager)
 
     def bind_budget(self, token_budget: TokenBudget) -> None:
@@ -834,11 +848,16 @@ class ContextBuilder:
         ]
         if not missing:
             return
-        insert_at = 1 if (
-            self._history
-            and self._history[0].role == "user"
-            and not self._history[0].is_user_input
-            and _extract_compaction_summary(str(self._history[0].content or ""))
+        # Compacted history keeps admitted user inputs ahead of the summary.
+        # Skills go right after the summary, where the next compaction's
+        # _split_previous_compaction_summary expects nothing else in between.
+        head = 0
+        while head < len(self._history) and self._history[head].is_user_input:
+            head += 1
+        insert_at = head + 1 if (
+            head < len(self._history)
+            and self._history[head].role == "user"
+            and _extract_compaction_summary(str(self._history[head].content or ""))
             is not None
         ) else 0
         if insert_at < self._history_frozen_count:

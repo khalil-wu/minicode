@@ -8,6 +8,7 @@ import type {
 } from "../protocol/events";
 import { isReplayedEvent as isReplayedChatEvent } from "../protocol/events";
 import { sendClientCommand } from "../protocol/ws-outbox";
+import { isInFlightProjection } from "../stores/shared-helpers";
 import { applyUserMessageQueueUpdate } from "./sessionEvents";
 import type { StreamBuffer } from "../lib/stream-buffer";
 import { getToolCallsFromMessage, messageIndices, toolCallLocations } from "../lib/content-blocks";
@@ -316,7 +317,8 @@ const hasTerminalAssistantForConversation = (conversationId?: string, messageId?
     message.role === "assistant" &&
     !message.isStreaming &&
     !message.isThinkingStreaming &&
-    Boolean(message.terminalStatus),
+    Boolean(message.terminalStatus) &&
+    !isInFlightProjection(message),
   );
 
 const clearStreamingFlagIfNoLiveAssistant = (conversationId?: string) => {
@@ -468,7 +470,11 @@ const streamResumeRejectionReason = (
   const target = messagesForConversation(owner, targetMessageId).find((message) =>
     message.role === "assistant",
   );
-  if (target?.terminalStatus || (target && !target.isStreaming && target.completedAt)) {
+  if (
+    target
+    && !isInFlightProjection(target)
+    && (target.terminalStatus || (!target.isStreaming && target.completedAt))
+  ) {
     return "target_already_terminal";
   }
   const incomingTurnId = String(event.turn_id || "").trim();

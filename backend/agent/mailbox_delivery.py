@@ -19,6 +19,33 @@ from backend.permissions.checker import normalize_permission_mode_token
 logger = logging.getLogger(__name__)
 
 
+def _run_is_conversation_leader(
+    runtime: AgentRuntime,
+    run_id: Any,
+    conversation_id: str,
+    *,
+    spawn_parent_run_id: str = "",
+) -> bool:
+    """Whether ``run_id`` is the leader lineage of ``conversation_id``.
+
+    The leader's run id is query-run scoped, so it differs on every leader
+    turn; a teammate is spawned under one of them. Every such turn is a root
+    run of the same conversation, so recognizing the leader by its conversation
+    (not by a captured run id) keeps shutdown and plan coordination working
+    across turns. A sibling teammate resolves to a subagent, never a root run.
+    """
+    candidate = str(run_id or "").strip()
+    if not candidate:
+        return False
+    if spawn_parent_run_id and candidate == str(spawn_parent_run_id).strip():
+        return True
+    record = runtime.get_run(candidate)
+    return (
+        record is not None
+        and str(getattr(record, "conversation_id", "") or "") == str(conversation_id or "")
+    )
+
+
 def _plan_approval_request(message: Any) -> dict[str, Any] | None:
     try:
         payload = json.loads(str(getattr(message, "content", "") or ""))
@@ -80,7 +107,10 @@ async def _handle_teammate_plan_approval_responses(
         response = _plan_approval_response(message)
         if response is None or response.get("request_id") != active_request_id:
             continue
-        if str(getattr(message, "sender_id", "") or "") != parent_run_id:
+        if not _run_is_conversation_leader(
+            runtime, getattr(message, "sender_id", ""), conversation_id,
+            spawn_parent_run_id=parent_run_id,
+        ):
             continue
         if str(getattr(message, "team_name", "") or "") != team_name:
             continue
@@ -218,7 +248,12 @@ async def _handle_parent_plan_approval_requests(
         sender = runtime.get_subagent(sender_id)
         if sender is None or str(sender.status or "") != "running":
             continue
-        if str(getattr(sender, "parent_run_id", "") or "") != parent_run_id:
+        # The teammate was spawned under some leader turn of this conversation;
+        # the current leader turn has a different run id. Confirm ownership by
+        # the conversation lineage, not by the captured spawn-turn run id.
+        if not _run_is_conversation_leader(
+            runtime, getattr(sender, "parent_run_id", ""), conversation_id,
+        ):
             continue
         parent_run = runtime.get_run(parent_run_id)
         if (

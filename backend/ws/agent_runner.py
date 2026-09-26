@@ -1265,7 +1265,14 @@ async def _replay_pending_conversation_projections(
                     if payload.get("summary") is not None
                     else None
                 ),
-                expected_revision=int(payload.get("expected_revision") or 0),
+                # Rebase this staged terminal fact onto the current head, exactly
+                # as the unprojected-terminal loop below does. Its captured
+                # revision was only valid when staged; a non-input write since
+                # (UI-state flush, plan snapshot, reconcile) advanced the
+                # generation, and re-committing under the stale revision raised a
+                # write conflict that this replay never caught — wedging every
+                # later turn. The id-based message replace and context delta make
+                # the rebase idempotent and touch only this turn's own message.
             )
             if recovered is None:
                 raise RuntimeError("conversation no longer exists")

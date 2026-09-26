@@ -3088,7 +3088,6 @@ async def handle_conversation_permission_mode_set(session: "WebSocketSession", d
             await owner_session.auto_approve_pending_tool_approvals(
                 reason=plan.auto_approve_reason,
                 conversation_id=plan.conversation_id,
-                only_auto_allowed=plan.only_auto_allowed,
             )
         await owner_session.session_lifecycle.send_task_runtime_update()
 

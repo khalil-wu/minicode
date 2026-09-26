@@ -484,6 +484,20 @@ export const isStructurallyEmptyAssistantMessage = (message: ChatMessage) =>
   && !hasVisibleContentBlocks(message)
   && message.artifacts.length === 0;
 
+/**
+ * The backend persists a running turn periodically as "partial" with reason
+ * "run_in_progress". That snapshot is not a terminal state: while the backend
+ * stream slot owns the turn, the message is still streaming.
+ */
+export const isInFlightProjection = (message: Pick<ChatMessage, "terminationReason">): boolean =>
+  message.terminationReason === "run_in_progress";
+
+/** Hand an in-flight projection back to its live stream. */
+export const resumedFromInFlightProjection = <T extends ChatMessage>(message: T): T =>
+  isInFlightProjection(message)
+    ? { ...message, terminalStatus: undefined, terminationReason: undefined }
+    : message;
+
 export const cacheMessagesForConversation = (
   state: AppStore,
   id: string | null,

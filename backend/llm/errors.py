@@ -162,6 +162,50 @@ class LLMErrorClassification:
         )
 
 
+
+# Context-overflow wordings across providers, OpenAI-compatible gateways and
+# local servers (llama.cpp, LM Studio, Ollama) that report it only in text.
+_CONTEXT_OVERFLOW_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"prompt is too long",
+        r"prompt too long",
+        r"request_too_large",
+        r"input is too long for requested model",
+        r"exceeds the context window",
+        r"exceeds (?:the )?(?:model'?s )?maximum context length",
+        r"maximum context length is \d+",
+        r"context[_ ]length[_ ]exceeded",
+        r"input token count.*exceeds the maximum",
+        r"maximum prompt length is \d+",
+        r"reduce the length of the messages",
+        r"exceeds (?:the )?maximum allowed input length",
+        r"is longer than the model'?s context length",
+        r"exceeds the limit of \d+",
+        r"exceeds the available context size",
+        r"greater than the context length",
+        r"context window exceeds limit",
+        r"exceeded model token limit",
+        r"too large for model with \d+ maximum context length",
+        r"but the configured context size is",
+        r"model_context_window_exceeded",
+        r"exceeded (?:max )?context length",
+        r"range of input length should be",
+        r"too many tokens",
+        r"token limit exceeded",
+    )
+)
+# Throttling can mention tokens too ("too many tokens, please wait").
+_NOT_CONTEXT_OVERFLOW = ("rate limit", "rate_limit", "too many requests", "throttl")
+
+
+def is_context_overflow_text(message: str | BaseException | None) -> bool:
+    """Whether provider error text reports a prompt larger than the context window."""
+    text = _normalize_error_text(message)
+    if not text or _contains_any(text, _NOT_CONTEXT_OVERFLOW):
+        return False
+    return any(pattern.search(text) for pattern in _CONTEXT_OVERFLOW_PATTERNS)
+
 def classify_llm_error(message: str | BaseException | None) -> LLMErrorClassification:
     text = _normalize_error_text(message)
     status_codes = _extract_status_codes(message)
@@ -313,7 +357,7 @@ def classify_llm_error(message: str | BaseException | None) -> LLMErrorClassific
             "payload too large",
             "content too large",
         ),
-    ):
+    ) or is_context_overflow_text(message):
         return LLMErrorClassification(
             fatal=False,
             retryable=True,
@@ -772,6 +816,10 @@ def sanitize_llm_error_message(
         return "\u5f53\u524d\u6a21\u578b\u4e0d\u652f\u6301\u56fe\u7247\u8f93\u5165\uff0c\u8bf7\u5207\u6362\u5230\u652f\u6301\u89c6\u89c9\u8f93\u5165\u7684\u6a21\u578b\u3002" + suffix
     if kind == "protocol":
         return "\u6240\u9009 API \u683c\u5f0f\u65e0\u6cd5\u88ab\u5f53\u524d\u670d\u52a1\u5546\u6216\u7f51\u5173\u5904\u7406\uff0c\u8bf7\u68c0\u67e5 API \u683c\u5f0f\u4e0e Base URL\u3002MiniCode \u672a\u5207\u6362\u5230\u5176\u4ed6\u534f\u8bae\u3002" + suffix
+    if kind == "prompt_too_long":
+        return "\u8bf7\u6c42\u8d85\u51fa\u4e86\u6a21\u578b\u7684\u4e0a\u4e0b\u6587\u7a97\u53e3\u3002\u8bf7\u4f7f\u7528 /compact \u538b\u7f29\u5bf9\u8bdd\uff0c\u6216\u5728\u6a21\u578b\u8bbe\u7f6e\u4e2d\u628a\u4e0a\u4e0b\u6587\u7a97\u53e3\u8bbe\u4e3a\u8be5\u6a21\u578b\u7684\u771f\u5b9e\u5927\u5c0f\u3002" + suffix
+    if kind == "media_size":
+        return "\u56fe\u7247\u6216 PDF \u8d85\u51fa\u4e86\u6a21\u578b\u7684\u5927\u5c0f\u9650\u5236\uff0c\u8bf7\u7f29\u5c0f\u6216\u79fb\u9664\u9644\u4ef6\u540e\u91cd\u8bd5\u3002" + suffix
     if kind == "network":
         return "\u6a21\u578b\u670d\u52a1\u7f51\u7edc\u8bf7\u6c42\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002" + suffix
     return "\u6a21\u578b\u8c03\u7528\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u6216\u5207\u6362\u6a21\u578b\u3002" + suffix

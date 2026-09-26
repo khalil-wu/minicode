@@ -50,6 +50,31 @@ _CMD_SEPARATORS = re.compile(r"\s*(?:&&|\|\||&|\|)\s*")
 _parser_lock = threading.Lock()
 _parser: Any = None
 
+# PowerShell's tokenizer treats typographic quotes as the ASCII quote
+# characters, the en/em dash and horizontal bar as the parameter dash, and a
+# lone carriage return as a newline. Classifying the ASCII spelling therefore
+# judges exactly the script PowerShell will run.
+_POWERSHELL_EQUIVALENTS = str.maketrans({
+    **dict.fromkeys(map(chr, (0x2018, 0x2019, 0x201A, 0x201B)), "'"),
+    **dict.fromkeys(map(chr, (0x201C, 0x201D, 0x201E)), '"'),
+    **dict.fromkeys(map(chr, (0x2013, 0x2014, 0x2015)), "-"),
+})
+
+
+def powershell_equivalent(script: str) -> str:
+    """Spell *script* the way PowerShell's tokenizer reads it."""
+    return script.replace("\r\n", "\n").replace("\r", "\n").translate(_POWERSHELL_EQUIVALENTS)
+
+
+def command_readings(command: str) -> tuple[str, ...]:
+    """Every spelling of *command* a host shell may act on.
+
+    POSIX shells keep typographic quotes, dashes and a lone CR literal while
+    PowerShell reads them as syntax, so a rule must hold for both readings.
+    """
+    equivalent = powershell_equivalent(command)
+    return (command,) if equivalent == command else (command, equivalent)
+
 
 def is_available() -> bool:
     return _AVAILABLE

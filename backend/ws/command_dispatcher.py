@@ -1137,10 +1137,40 @@ class SessionCommandDispatcher:
                         # regenerate request itself, so close it here too.
                         await emit_conversation_not_found(self._session, target_conversation_id)
                         return
-                    prepared = self._session._prepare_retry_from_message(
-                        conversation=current,
-                        retry_from_message_id=retry_from_message_id,
+                    from backend.ws.handlers.conversation import (
+                        _release_conversation_mutation,
+                        _try_claim_conversation_mutation,
                     )
+
+                    # Regeneration rewrites the transcript. Fence that rewrite
+                    # against a scheduled task, REST run, or another window that
+                    # owns this conversation, exactly as truncate/delete do. This
+                    # window's own run was already drained above, so a claim held
+                    # here can only belong to a foreign owner; rewinding under it
+                    # would drop that run's turn on its next projection commit.
+                    mutation_claim = _try_claim_conversation_mutation(
+                        self._session,
+                        target_conversation_id,
+                        operation="regenerate",
+                    )
+                    if mutation_claim is None:
+                        error_event = AgentEvent.error(
+                            "Another run is active on this conversation; stop it before regenerating.",
+                            # No run starts and no `done` follows, so this must be
+                            # terminal evidence or the client stays "running".
+                            recoverable=False,
+                            error_type="conversation_busy",
+                        )
+                        error_event.data["conversation_id"] = target_conversation_id
+                        await self._session.send_event(error_event)
+                        return
+                    try:
+                        prepared = self._session._prepare_retry_from_message(
+                            conversation=current,
+                            retry_from_message_id=retry_from_message_id,
+                        )
+                    finally:
+                        _release_conversation_mutation(mutation_claim)
                     if prepared is None:
                         error_event = AgentEvent.error(
                             f"Cannot regenerate from message '{retry_from_message_id}'",

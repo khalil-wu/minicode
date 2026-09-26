@@ -300,8 +300,13 @@ class SessionApprovalRuntimeMixin:
         *,
         reason: str,
         conversation_id: str | None = None,
-        only_auto_allowed: bool = False,
     ) -> list[str]:
+        """Approve pending tool calls that the current policy now allows.
+
+        A mode switch approves exactly what the new mode would have run without
+        asking; anything it still gates (bypass keeps destructive commands behind
+        confirmation) stays pending for the user.
+        """
         pending_payloads = self.turn_wait_state.pending_approval_payloads
         target_conversation_id = str(conversation_id or "").strip()
         approved_ids: list[str] = []
@@ -323,7 +328,7 @@ class SessionApprovalRuntimeMixin:
             tool_name = str(request.get("tool_name") or "").strip()
             if tool_name == "exit_plan_mode":
                 continue
-            if only_auto_allowed and not self._pending_tool_payload_is_auto_allowed(payload):
+            if not self._pending_tool_payload_is_auto_allowed(payload):
                 continue
 
             resolved = self._resolve_pending_approval(

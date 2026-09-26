@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from typing import Any
 
+from backend.permissions.powershell_ast import command_readings
+
 _LEGACY_TOOL_NAMES = frozenset({"bash", "edit", "read", "write", "shell"})
 _PROTOCOL_COMMAND_NAMES = frozenset({"terminal.exec", "terminal_exec"})
 
@@ -160,7 +162,9 @@ def _content_pattern_matches(pattern: str, value: str, *, is_command: bool) -> b
     """
     if not value:
         return False
-    if is_command and _contains_unquoted_shell_control(value.strip()):
+    if is_command and any(
+        _contains_unquoted_shell_control(reading.strip()) for reading in command_readings(value)
+    ):
         return False
     if is_command and pattern.endswith(":*"):
         prefix = pattern[:-2].strip()
@@ -348,7 +352,8 @@ def rule_matches_call(
     if effect in {"deny", "ask"}:
         return any(
             _content_pattern_matches(rule.content, candidate, is_command=True)
-            for subcommand in _split_unquoted_subcommands(value)
+            for reading in command_readings(value)
+            for subcommand in _split_unquoted_subcommands(reading)
             for candidate in _deny_match_candidates(subcommand)
         )
     # Strip only the SAFE wrapper list for allow rules. Bare env prefixes stay

@@ -71,6 +71,10 @@ class ScheduledTask:
     isolation: str = "worktree"
     # cc recurring flag: false = fire once at the next match, then auto-delete.
     recurring: bool = True
+    # Recurring schedules created by the agent expire after
+    # SCHEDULED_TASK_MAX_AGE_SECONDS so a model cannot leave work firing
+    # indefinitely. Schedules the user creates persist until deleted.
+    auto_expire: bool = False
     deleted_at: str | None = None
     # Scheduled work is deliberately bound to one workspace.  Keeping the
     # binding on the task makes the process-wide scheduler safe when a user
@@ -501,11 +505,11 @@ class TaskScheduler:
             logger.debug("Failed to notify scheduled task observers", exc_info=True)
 
     def _sweep_expired(self, now: datetime | None = None) -> None:
-        """MiniCode auto-expires recurring schedules after 7 days."""
+        """Expire agent-created recurring schedules after 7 days."""
         timestamp = now.timestamp() if now is not None else time.time()
         changed = False
         for task in list(self._tasks.values()):
-            if task.deleted_at is not None or not task.recurring:
+            if task.deleted_at is not None or not task.recurring or not task.auto_expire:
                 continue
             try:
                 created = datetime.fromisoformat(task.created_at).timestamp()
@@ -570,6 +574,7 @@ class TaskScheduler:
         timezone: str = "",
         isolation: str = "worktree",
         recurring: bool = True,
+        auto_expire: bool = False,
     ) -> ScheduledTask:
         existing = self.list_tasks()
         if len([t for t in existing if t.get("status") != "deleted"]) >= MAX_SCHEDULED_JOBS:
@@ -591,6 +596,7 @@ class TaskScheduler:
             timezone=str(timezone or "").strip(),
             isolation="workspace" if isolation == "workspace" else "worktree",
             recurring=bool(recurring),
+            auto_expire=bool(auto_expire),
         )
         next_run = next_run_after(task.schedule, datetime.now(UTC), timezone=task.timezone)
         task.next_run_at = next_run.isoformat() if next_run else None

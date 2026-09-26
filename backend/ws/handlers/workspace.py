@@ -63,21 +63,20 @@ async def handle_workspace_recent_remove(session: "WebSocketSession", data: dict
     if not path:
         await emit_command_error(session, "workspace.recent.remove", "Path is required")
         return True
-    history_path = ""
     closed_active = False
     if data.get("preserve_history") is True:
-        from backend.services.workspace_history import preserve_workspace_history, workspace_conversation_ids
+        from backend.services.workspace_history import workspace_conversation_ids
         from backend.ws.handlers.conversation import _conversation_has_active_run, handle_conversation_create
         from backend.workspace.state import set_active_workspace_root
 
+        # Removing the recent-workspace entry only edits the navigation list.
+        # The conversations stay in the app's own store keyed by workspace, so
+        # reopening the project restores them; nothing is copied into the
+        # project directory (that dump was never read and would leak tool
+        # output, which can contain secrets, into a git-tracked path).
         ids = await asyncio.to_thread(workspace_conversation_ids, session.conversation_repo, path)
         if any(_conversation_has_active_run(session, conversation_id) for conversation_id in ids):
             await emit_command_error(session, "workspace.recent.remove", "此工作区还有运行中的任务，请先停止任务再移除。")
-            return True
-        try:
-            history_path = await asyncio.to_thread(preserve_workspace_history, session.conversation_repo, path, ids)
-        except OSError as exc:
-            await emit_command_error(session, "workspace.recent.remove", str(exc))
             return True
         if session.active_conversation_id in ids:
             await handle_conversation_create(session, {"workspace_root": "", "title": "New chat", "conversation_type": "main"})
@@ -99,7 +98,7 @@ async def handle_workspace_recent_remove(session: "WebSocketSession", data: dict
         "workspace.recent.remove",
         "Recent workspace entry removed." if removed else "Recent workspace entry was already absent.",
         level="success",
-        data={"path": path, "removed": removed, **({"history_path": history_path, "closed_active": closed_active} if history_path else {})},
+        data={"path": path, "removed": removed, **({"closed_active": closed_active} if closed_active else {})},
     )
     return True
 

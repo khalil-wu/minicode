@@ -343,6 +343,13 @@ class SendMessageTool(_AgentCoordinationTool):
             else None
         )
         try:
+            # A teammate's lifecycle gate matches on the message's team. When
+            # the caller addressed a named teammate (``name@team``) and did not
+            # pass team_name, take it from the resolved teammate so a shutdown
+            # or plan message reaches the mailbox that filters on it.
+            team_name = str(args.get("team_name") or "").strip()
+            if not team_name and recipient_record is not None:
+                team_name = str(getattr(recipient_record, "team_name", "") or "").strip()
             record = await _runtime_call(
                 runtime,
                 "send_swarm_message",
@@ -350,7 +357,7 @@ class SendMessageTool(_AgentCoordinationTool):
                 recipient_id=recipient,
                 content=message,
                 conversation_id=conversation_id,
-                team_name=str(args.get("team_name") or "").strip(),
+                team_name=team_name,
                 task_id=str(args.get("task_id") or "").strip(),
                 summary=summary,
                 sender_mailbox_epoch=_actor_mailbox_epoch(context),

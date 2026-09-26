@@ -48,6 +48,8 @@ _HTTP_413_RE = re.compile(
 
 def is_context_overflow_error(error: Any) -> bool:
     """True when the error text reports a context/prompt-size overflow."""
+    from backend.llm.errors import is_context_overflow_text
+
     text = str(error or "").lower()
     status_code = getattr(error, "status_code", None)
     if status_code is None:
@@ -56,6 +58,7 @@ def is_context_overflow_error(error: Any) -> bool:
         status_code == 413
         or any(marker in text for marker in _CONTEXT_OVERFLOW_MARKERS)
         or _HTTP_413_RE.search(text) is not None
+        or is_context_overflow_text(error)
     )
 
 

@@ -3347,6 +3347,27 @@ class TaskTool(BaseTool):
 
                         selected_claim = None
                         selected_message = None
+
+                        def _is_leader_sender(sender_id: Any) -> bool:
+                            # The leader's run id is query-run scoped, so it
+                            # changes every leader turn; the teammate was spawned
+                            # under one of them. Recognize any later turn by the
+                            # invariant that holds across all of them: it is a
+                            # root run of this same conversation. A sibling
+                            # teammate resolves to a subagent, never a root run,
+                            # so it cannot impersonate the leader.
+                            sender = str(sender_id or "").strip()
+                            if not sender:
+                                return False
+                            if sender == parent_run_id:
+                                return True
+                            record = runtime.get_run(sender)
+                            return (
+                                record is not None
+                                and str(getattr(record, "conversation_id", "") or "")
+                                == conversation_id
+                            )
+
                         while not subagent_cancel_event.is_set():
                             claims = runtime.claim_swarm_messages(
                                 participant_id=subagent_id,
@@ -3388,8 +3409,7 @@ class TaskTool(BaseTool):
                                     and payload.get("type") == "plan_approval_response"
                                     and str(payload.get("request_id") or "")
                                     == active_request_id
-                                    and str(claim.message.sender_id or "")
-                                    == parent_run_id
+                                    and _is_leader_sender(claim.message.sender_id)
                                     and str(claim.message.team_name or "") == team_name
                                     and int(
                                         claim.message.recipient_mailbox_epoch or 0
@@ -3465,16 +3485,17 @@ class TaskTool(BaseTool):
                                     for claim, payload in parsed
                                     if payload is not None
                                     and payload.get("type") == "shutdown_request"
-                                    and str(claim.message.sender_id or "")
-                                    == parent_run_id
+                                    and _is_leader_sender(claim.message.sender_id)
                                     and str(claim.message.team_name or "") == team_name
                                     and int(
                                         claim.message.recipient_mailbox_epoch or 0
                                     )
                                     == int(subagent_fence.get("mailbox_epoch") or 0)
                                     and str(payload.get("request_id") or "").strip()
-                                    and str(payload.get("from") or "").strip()
-                                    in {parent_run_id, "team-lead"}
+                                    and (
+                                        str(payload.get("from") or "").strip() == "team-lead"
+                                        or _is_leader_sender(payload.get("from"))
+                                    )
                                 ),
                                 None,
                             )
@@ -3527,8 +3548,7 @@ class TaskTool(BaseTool):
                                 (
                                     (claim, payload)
                                     for claim, payload in parsed
-                                    if str(claim.message.sender_id or "")
-                                    == parent_run_id
+                                    if _is_leader_sender(claim.message.sender_id)
                                 ),
                                 None,
                             )
@@ -3541,8 +3561,7 @@ class TaskTool(BaseTool):
                             current_prompt = _format_teammate_message(
                                 (
                                     "team-lead"
-                                    if str(selected_message.sender_id or "")
-                                    == parent_run_id
+                                    if _is_leader_sender(selected_message.sender_id)
                                     else str(selected_message.sender_id or "unknown")
                                 ),
                                 str(selected_message.content or ""),

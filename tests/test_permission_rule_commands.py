@@ -198,14 +198,13 @@ def test_permission_mode_bypass_auto_approves_pending_tool_requests() -> None:
         {
             "reason": "permission_mode_bypass",
             "conversation_id": "conv-1",
-            "only_auto_allowed": False,
         }
     ]
     assert runtime_updates == [True]
     assert conversation_lists == [True]
 
 
-def test_permission_mode_auto_approves_only_auto_allowed_pending_tool_requests() -> None:
+def test_permission_mode_auto_rechecks_pending_tool_requests() -> None:
     (
         session,
         _command_results,
@@ -235,7 +234,6 @@ def test_permission_mode_auto_approves_only_auto_allowed_pending_tool_requests()
         {
             "reason": "permission_mode_auto",
             "conversation_id": "conv-1",
-            "only_auto_allowed": True,
         }
     ]
     assert runtime_updates == [True]
@@ -321,6 +319,9 @@ def test_auto_approve_pending_tool_approvals_skips_user_questions() -> None:
     session = WebSocketSession.__new__(WebSocketSession)
     session.turn_wait_state = TurnWaitState()
     session.approval_diff_cache = {}
+    # Policy re-evaluation is covered elsewhere; here every tool call is allowed
+    # so the assertion isolates which prompt kinds are eligible at all.
+    session._pending_tool_payload_is_auto_allowed = lambda _payload: True
     session.turn_wait_state.pending_approval_payloads = {
         "tool-1": {
             "type": "control_request",
@@ -436,7 +437,6 @@ def test_auto_approve_pending_tool_approvals_filters_auto_mode_permissions() -> 
         approved = await session.auto_approve_pending_tool_approvals(
             reason="permission_mode_auto",
             conversation_id="conv-1",
-            only_auto_allowed=True,
         )
 
         assert approved == ["read-1"]

@@ -169,6 +169,36 @@ async def test_later_success_supersedes_a_failed_partial_projection(tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_pending_terminal_projection_replays_after_a_non_input_write(tmp_path):
+    # A terminal projection was staged but its commit never received a receipt
+    # (transient write failure). A later non-input full-generation write (a UI
+    # agent-state flush) advances the revision before the next run starts.
+    repository = ConversationRepository(tmp_path / "conversations")
+    journal = ExecutionJournal("wedge-fixture", base_dir=tmp_path / "journal")
+    record = repository.create_conversation(
+        transcript=[{"id": "u1", "role": "user", "content": "hi"}],
+        context_snapshot={"history": [{"role": "user", "content": "hi"}]},
+    )
+    staged_revision = repository.get_projection_context(record.id)[0]
+    journal.append_lifecycle("conversation_projection_pending", {
+        "conversation_id": record.id,
+        "assistant_message": {"id": "a1", "role": "assistant", "content": "done", "terminal_status": "completed"},
+        "context_delta": {"set": {"history": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "done"}]}, "removed": []},
+        "summary": None,
+        "expected_revision": staged_revision,
+    })
+    repository.patch_context_snapshot(record.id, {"ui_agent_state": {"progress": []}}, revision=1, revision_key="_ui_rev")
+
+    # Every run start must recover the durable answer, not wedge on the stale revision.
+    for _ in range(3):
+        await _replay_pending_conversation_projections(repository, journal, conversation_id=record.id)
+    transcript = repository.get_conversation(record.id).transcript
+    assert [message["id"] for message in transcript] == ["u1", "a1"]
+    assert transcript[-1]["content"] == "done"
+    assert journal.pending_conversation_projections() == []
+
+
+@pytest.mark.asyncio
 async def test_extension_reload_keeps_project_configuration(tmp_path, monkeypatch):
     import backend.ws.agent_runner as module
     class StopProbe(BaseException):

@@ -429,7 +429,9 @@ def test_write_and_edit_file_refuse_protected_control_paths(tmp_path) -> None:
     assert settings.read_text(encoding="utf-8") == '{"permissions": {}}\n'
 
 
-def test_edit_file_requires_expected_hash_for_existing_file(tmp_path) -> None:
+def test_edit_file_applies_without_expected_hash_for_existing_file(tmp_path) -> None:
+    # edit_file no longer requires a read-time hash: a unique old_string match
+    # is sufficient, so a missing expected_hash applies instead of failing.
     target = tmp_path / "app.py"
     target.write_text("value = 1\n", encoding="utf-8")
 
@@ -440,6 +442,11 @@ def test_edit_file_requires_expected_hash_for_existing_file(tmp_path) -> None:
             "new_string": "2",
         }, context=_workspace_context(tmp_path))
     )
+    assert missing_hash.is_error is False
+    assert target.read_text(encoding="utf-8") == "value = 2\n"
+
+    # A provided, matching hash still applies.
+    target.write_text("value = 1\n", encoding="utf-8")
     fresh_hash = content_hash("value = 1\n")
     edited = asyncio.run(
         EditFileTool().execute({
@@ -449,9 +456,6 @@ def test_edit_file_requires_expected_hash_for_existing_file(tmp_path) -> None:
             "expected_hash": fresh_hash,
         }, context=_workspace_context(tmp_path))
     )
-
-    assert missing_hash.is_error is True
-    assert "expected_hash is required" in missing_hash.content
     assert edited.is_error is False
     assert target.read_text(encoding="utf-8") == "value = 2\n"
 

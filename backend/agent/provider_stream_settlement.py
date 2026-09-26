@@ -122,6 +122,10 @@ async def settle_provider_stream(
         action = "terminate"
 
     if action == "proceed":
+        # The provider accepted this prompt, so a later overflow in the same
+        # user turn is a new condition that deserves its own compaction. A
+        # retry that overflows again before any accepted response still stops.
+        state.reactive_compaction_attempted = False
         if pending_tool_calls and not provider_raw_done:
             finish_reason = finish_reason or "tool_calls_no_done"
             stream_state.finish_reason = finish_reason

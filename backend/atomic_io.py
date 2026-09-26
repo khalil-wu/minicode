@@ -70,16 +70,18 @@ def canonical_path_mapping_key(mapping: dict[str, Any], path: Path | str) -> str
     Older persisted sessions keyed read hashes with ``str(Path.resolve())``.
     On Windows that spelling can differ only by case from the canonical key;
     migration keeps those sessions editable after the identity fix.
+
+    The legacy spelling is exactly the canonical one before ``normcase``/
+    ``normpath``, so recovering it needs only those pure string operations. It
+    must never re-``resolve()`` every stored key: that turned each miss into one
+    filesystem syscall per entry and made a long session's reads quadratic on
+    the event loop.
     """
     key = canonical_file_path_key(path)
     if key in mapping:
         return key
     for stored_key in list(mapping):
-        try:
-            matches = canonical_file_path_key(stored_key) == key
-        except (OSError, RuntimeError, ValueError):
-            matches = False
-        if matches:
+        if os.path.normcase(os.path.normpath(stored_key)) == key:
             mapping[key] = mapping.pop(stored_key)
             break
     return key

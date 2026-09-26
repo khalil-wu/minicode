@@ -573,6 +573,9 @@ class _ApprovalRuntime(SessionApprovalRuntimeMixin):
             "approval-b",
         }
 
+    def _pending_tool_payload_is_auto_allowed(self, _payload) -> bool:
+        return True
+
 
 def test_global_auto_approval_emits_one_cancellation_per_conversation() -> None:
     runtime = _ApprovalRuntime()

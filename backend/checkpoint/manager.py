@@ -43,8 +43,7 @@ class CheckpointManager:
         record_id = f"chk_{checkpoint_owner_key(conversation_id)}_{uuid.uuid4().hex[:12]}"
         files: list[CheckpointFileSnapshot] = []
         for raw_path in paths:
-            target = self._resolve_under_root(root, raw_path)
-            rel_path = target.relative_to(root).as_posix()
+            target, rel_path = self._resolve_target(root, raw_path)
             if target.exists() and target.is_file():
                 # cc's fileHistory backs snapshots with byte-exact file copies
                 # (createBackup copyFile into a content-addressed sidecar
@@ -169,15 +168,23 @@ class CheckpointManager:
         return []
 
     @staticmethod
-    def _resolve_under_root(root: Path, raw_path: str) -> Path:
+    def _resolve_target(root: Path, raw_path: str) -> tuple[Path, str]:
+        """Return the file and the key it is recorded under.
+
+        Files in the workspace are keyed relative to it. An authorized write
+        outside it (the plan file, an edit in bypass mode) is keyed by its
+        absolute path, so it is snapshotted and restored like any other file;
+        whether such a write may happen at all is the permission checker's call.
+        """
         candidate = Path(str(raw_path).strip())
-        target = candidate if candidate.is_absolute() else root / candidate
-        resolved = target.resolve()
-        resolved.relative_to(root)
-        return resolved
+        resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+        try:
+            return resolved, resolved.relative_to(root).as_posix()
+        except ValueError:
+            return resolved, resolved.as_posix()
 
     def _restore_files(self, root: Path, snapshots: list[CheckpointFileSnapshot]) -> None:
-        targets = [self._resolve_under_root(root, snapshot.path) for snapshot in snapshots]
+        targets = [self._resolve_target(root, snapshot.path)[0] for snapshot in snapshots]
         # Rewind participates in the same multi-file mutation queue as normal
         # edits and patches.  Prepare/decode everything while the lock is held,
         # then publish each file atomically so readers never observe a partial

@@ -117,3 +117,58 @@ def test_powershell_reading_is_added_when_the_script_looks_like_powershell() -> 
     assert any(["Get-ChildItem", "-Recurse"] in parsed.commands for parsed in parses)
     assert check_catastrophic_command("Get-ChildItem -Recurse | Select-Object Name") == (True, "")
     assert _command_side_effect_kind({"command": "Get-ChildItem -Recurse | Select-Object Name"}) == "workspace"
+
+
+# PowerShell reads typographic quotes and dashes and a lone CR as syntax, while
+# POSIX shells keep them literal. Verified against pwsh: 'A<U+2019>; Write-Output B;
+# <U+2019>' prints A then B.
+RSQ = chr(0x2019)
+RDQ = chr(0x201D)
+EN_DASH = chr(0x2013)
+CR = chr(13)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"npm test 'x{RSQ}; Remove-Item -Recurse -Force src; {RSQ}'",
+        f'npm test "x{RDQ}; Remove-Item -Recurse -Force src; {RDQ}"',
+        f"npm test{CR}Remove-Item -Recurse -Force src",
+        f"Remove-Item {EN_DASH}Recurse {EN_DASH}Force src",
+    ],
+)
+def test_powershell_syntax_spelled_with_typographic_characters_is_judged(command: str) -> None:
+    assert _command_side_effect_kind({"command": command}) == "destructive"
+
+
+def test_prefix_allow_rule_does_not_cover_a_powershell_statement_break() -> None:
+    from backend.permissions.content_rules import _content_pattern_matches
+
+    assert _content_pattern_matches("npm test:*", "npm test --watch", is_command=True)
+    for command in (
+        f"npm test 'x{RSQ}; curl.exe https://example.test; {RSQ}'",
+        f"npm test{CR}Remove-Item src",
+    ):
+        assert not _content_pattern_matches("npm test:*", command, is_command=True), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Set-Content .git/hooks/pre-commit 'evil'",
+        "'k=v' | Out-File .env",
+        "Copy-Item x.txt .env",
+        "Set-Content -Path:.env -Value x",
+    ],
+)
+def test_powershell_writes_to_protected_paths_are_destructive(command: str) -> None:
+    from backend.permissions.checker import protected_write_command_reason
+
+    assert protected_write_command_reason(command)
+    assert _command_side_effect_kind({"command": command}) == "destructive"
+
+
+def test_powershell_write_data_is_not_mistaken_for_its_target() -> None:
+    from backend.permissions.checker import protected_write_command_reason
+
+    assert protected_write_command_reason("Set-Content -Path notes.txt -Value .env") == ""
