@@ -264,7 +264,7 @@
   inset: 0 auto 0 -16px;
   width: calc(var(--effort-progress) + 16px);
   background: var(--accent-primary);
-  transition: width 240ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: width var(--transition-slow);
 }
 
 .composer-effort-dot,
@@ -293,7 +293,7 @@
   border: 1px solid var(--border-subtle);
   background: var(--text-on-accent);
   box-shadow: var(--shadow-soft);
-  transition: left 240ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: left var(--transition-slow);
 }
 
 .composer-effort-input {
