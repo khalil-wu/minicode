@@ -194,6 +194,51 @@ def _closest_edit_excerpt(content: str, old_string: str) -> str:
     )
 
 
+def _whitespace_tolerant_matches(content: str, old_string: str) -> list[tuple[int, int]]:
+    """Line-based fallback that mirrors Codex apply_patch seek_sequence.
+
+    Only used when exact and quote-normalized matching both fail. Compares the
+    old_string block against file line windows with decreasing strictness:
+    ignore trailing whitespace, then ignore leading and trailing whitespace.
+    Returns (start, length) spans over the whole matched lines so the caller
+    can still enforce uniqueness before replacing. Partial in-line matches are
+    left to the exact path; this fallback is deliberately line-oriented.
+    """
+    if not old_string:
+        return []
+    file_lines = content.split("\n")
+    offsets: list[int] = []
+    pos = 0
+    for line in file_lines:
+        offsets.append(pos)
+        pos += len(line) + 1
+
+    pattern = old_string.split("\n")
+    include_trailing_newline = len(pattern) > 1 and pattern[-1] == ""
+    if include_trailing_newline:
+        pattern = pattern[:-1]
+    if not pattern:
+        return []
+
+    n, m = len(file_lines), len(pattern)
+    if m > n:
+        return []
+
+    for tol in (str.rstrip, str.strip):
+        spans: list[tuple[int, int]] = []
+        for i in range(0, n - m + 1):
+            if all(tol(file_lines[i + j]) == tol(pattern[j]) for j in range(m)):
+                start = offsets[i]
+                last = i + m - 1
+                end = offsets[last] + len(file_lines[last])
+                if include_trailing_newline and last + 1 < n:
+                    end += 1
+                spans.append((start, end - start))
+        if spans:
+            return spans
+    return []
+
+
 def prepare_edit_content(
     content: str,
     old_string: str,
@@ -214,9 +259,14 @@ def prepare_edit_content(
 
     count = match_content.count(old_string)
     normalized_matches: list[tuple[int, int]] = []
+    whitespace_matches: list[tuple[int, int]] = []
     if count == 0:
         normalized_matches = _normalized_quote_matches(match_content, old_string)
         if not normalized_matches:
+            # Last-resort, Codex seek_sequence-style leniency: match whole lines
+            # while ignoring trailing / surrounding whitespace differences.
+            whitespace_matches = _whitespace_tolerant_matches(match_content, old_string)
+        if not normalized_matches and not whitespace_matches:
             excerpt = _closest_edit_excerpt(match_content, old_string)
             diagnostic = f"\n{excerpt}" if excerpt else ""
             raise ValueError(
@@ -226,21 +276,26 @@ def prepare_edit_content(
                 f"Current content_hash: {content_hash(content)}."
                 f"{diagnostic}"
             )
-        count = len(normalized_matches)
+        count = len(normalized_matches) or len(whitespace_matches)
     if not replace_all and count > 1:
         raise ValueError(
             f"old_string matched {count} places in {file_path}. "
             "Provide more surrounding context so it matches exactly once, or use replace_all=true."
         )
 
-    if normalized_matches:
-        replacement_spans = normalized_matches if replace_all else normalized_matches[:1]
+    spans = normalized_matches or whitespace_matches
+    if spans:
+        preserve_quotes = bool(normalized_matches)
+        replacement_spans = spans if replace_all else spans[:1]
         chunks: list[str] = []
         cursor = 0
         for start, length in replacement_spans:
             chunks.append(match_content[cursor:start])
-            actual_old_string = match_content[start : start + length]
-            chunks.append(_preserve_quote_style(old_string, actual_old_string, new_string))
+            if preserve_quotes:
+                actual_old_string = match_content[start : start + length]
+                chunks.append(_preserve_quote_style(old_string, actual_old_string, new_string))
+            else:
+                chunks.append(new_string)
             cursor = start + length
         chunks.append(match_content[cursor:])
         new_content = bom + "".join(chunks)
@@ -270,8 +325,13 @@ class EditFileTool(BaseTool):
     activity_kind = "fileChange"
     display_label = "Edit"
     description = (
-        "Make targeted string replacements in an existing file. Read the file first so the harness can inject its read-time guard, and make old_string match exactly without line-number prefixes. "
-        "old_string must be unique unless replace_all is true; use write_file for mostly new content."
+        "Make targeted string replacements in an existing file. Copy old_string verbatim from the file, "
+        "with no line-number prefixes. Include enough surrounding lines so old_string is unique; when a "
+        "line repeats, add a few lines of context above and below rather than a bare fragment. "
+        "old_string must match exactly once unless replace_all is true. Whitespace and smart/curly quotes "
+        "are tolerated as a fallback, so a near-exact copy still applies. new_string is the full replacement "
+        "for that block; an empty new_string deletes it. Use write_file for mostly new content, and do not "
+        "re-read the file just to obtain a hash before editing."
     )
     permission = PermissionLevel.DIFF_REVIEW
     workspace_path_fields = ("file_path",)
@@ -297,7 +357,11 @@ class EditFileTool(BaseTool):
 
     def model_description(self) -> str:
         return (
-            "Make targeted string replacements in an existing file with exact old_string matching."
+            "Make targeted string replacements in an existing file. Copy old_string verbatim and include "
+            "enough surrounding context to match exactly once (add a few lines above/below when a line "
+            "repeats); use replace_all for every occurrence. Whitespace and smart-quote differences are "
+            "tolerated as a fallback. An empty new_string deletes the matched block. No need to re-read the "
+            "file for a hash before editing."
         )
 
     def model_schema(self) -> ToolSchema:
@@ -308,7 +372,7 @@ class EditFileTool(BaseTool):
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "Absolute or workspace-relative path to the file already read."},
-                    "old_string": {"type": "string", "description": "Exact existing text to replace, including whitespace; unique unless replace_all is true."},
+                    "old_string": {"type": "string", "description": "Existing text copied verbatim from the file (no line-number prefixes), with enough surrounding context to match exactly once; unique unless replace_all is true."},
                     "new_string": {"type": "string", "description": "Replacement text; an empty string deletes the matched text."},
                     # Without this the model must issue one call per occurrence
                     # for a rename. expected_hash stays out of the model-facing
@@ -433,8 +497,10 @@ class EditFileTool(BaseTool):
         if not old_string:
             return self._error_result("Missing old_string argument")
         if old_string == new_string:
-            return self._error_result(
-                "No changes to make: old_string and new_string are exactly the same."
+            # A no-op edit is not an error: report success so the model does not
+            # burn a turn re-issuing an already-applied change.
+            return self._success_result(
+                f"No change needed for {file_path}: old_string already equals new_string."
             )
 
         bypass_mode = _is_bypass_mode(context)
@@ -467,7 +533,7 @@ class EditFileTool(BaseTool):
             # Read, prepare, and publish the reviewed edit in the same-file queue.
             def commit_edit():
                 with file_mutation_locks([path]):
-                    ok, message = _validate_expected_hash(path, args.get("expected_hash"))
+                    ok, message = _validate_expected_hash(path, args.get("expected_hash"), require_hash=False)
                     if not ok:
                         raise ValueError(message)
                     previous = path.read_bytes().decode("utf-8")

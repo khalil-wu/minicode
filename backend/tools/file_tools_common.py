@@ -362,7 +362,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
     atomic_write_text(path, content)
 
 
-def _validate_expected_hash(path: Path, expected_hash: Any) -> tuple[bool, str]:
+def _validate_expected_hash(path: Path, expected_hash: Any, *, require_hash: bool = True) -> tuple[bool, str]:
     if not path.exists():
         if str(expected_hash or "").strip():
             return False, "expected_hash must be empty when creating a new file"
@@ -370,6 +370,13 @@ def _validate_expected_hash(path: Path, expected_hash: Any) -> tuple[bool, str]:
 
     normalized = str(expected_hash or "").strip().lower()
     if not normalized:
+        # A missing hash is tolerated when the caller opts out of the
+        # read-before-write guard (edit_file). Correctness still relies on the
+        # exact, unique old_string match enforced by prepare_edit_content, so a
+        # stale mental model fails cleanly as "old_string not found" rather than
+        # corrupting the file. write_file/notebook keep require_hash=True.
+        if not require_hash:
+            return True, ""
         return (
             False,
             "expected_hash is required for existing files. Re-read the file with read_file and retry with its content_hash.",

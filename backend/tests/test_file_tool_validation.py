@@ -182,7 +182,7 @@ def test_edit_file_mismatch_returns_current_excerpt_and_hash():
     asyncio.run(_go())
 
 
-def test_edit_file_rejects_noop_replacements_without_touching_the_file():
+def test_edit_file_treats_noop_replacement_as_success_without_touching_the_file():
     async def _go():
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -204,8 +204,8 @@ def test_edit_file_rejects_noop_replacements_without_touching_the_file():
                 ),
             )
 
-            assert result.is_error
-            assert "No changes to make" in result.content
+            assert not result.is_error
+            assert "No change needed" in result.content
             assert output.read_bytes() == before_bytes
 
     asyncio.run(_go())
@@ -449,3 +449,33 @@ def test_list_files_hides_denylisted_entries_like_its_search_siblings():
             ).content
 
     asyncio.run(_go())
+
+
+def test_edit_file_matches_with_trailing_whitespace_tolerance():
+    from backend.tools.edit_file import prepare_edit_content
+
+    content = "def f():\n    return 1   \n\nx = 2\n"
+    updated, count = prepare_edit_content(
+        content, "    return 1", "    return 42", file_path="a.py"
+    )
+    assert count == 1
+    assert "    return 42" in updated
+
+
+def test_edit_file_matches_with_leading_indent_tolerance():
+    from backend.tools.edit_file import prepare_edit_content
+
+    content = "class A:\n        def m(self):\n            pass\n"
+    updated, _ = prepare_edit_content(
+        content, "def m(self):", "def m(self, x):", file_path="b.py"
+    )
+    assert "def m(self, x):" in updated
+
+
+def test_edit_file_whitespace_fallback_still_requires_unique_match():
+    import pytest
+    from backend.tools.edit_file import prepare_edit_content
+
+    content = "a = 1\n\na = 1\n"
+    with pytest.raises(ValueError, match="matched"):
+        prepare_edit_content(content, "a = 1 ", "a = 9", file_path="c.py")

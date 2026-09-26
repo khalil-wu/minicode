@@ -248,7 +248,10 @@ def test_apply_patch_direct_execute_without_review_still_guards(tmp_path: Path) 
     )
 
 
-def test_edit_file_rejects_without_expected_hash_on_existing(tmp_path: Path) -> None:
+def test_edit_file_allows_missing_expected_hash_on_existing(tmp_path: Path) -> None:
+    # edit_file opts out of the read-before-write hash guard: a unique
+    # old_string match is sufficient, so a missing hash applies instead of
+    # failing (mirrors Codex apply_patch, which needs no content hash).
     target = tmp_path / "e.py"
     target.write_text("x\n", encoding="utf-8")
     ctx = _ctx(tmp_path)
@@ -258,8 +261,8 @@ def test_edit_file_rejects_without_expected_hash_on_existing(tmp_path: Path) -> 
             ctx,
         )
     )
-    assert result.is_error
-    assert "expected_hash" in result.content.lower()
+    assert not result.is_error
+    assert target.read_text(encoding="utf-8") == "y\n"
 
 
 def test_read_file_hashes_round_trip_and_clear() -> None:
