@@ -116,6 +116,7 @@ export {
   TimerOff,
   Trash2,
   TriangleAlert,
+  Undo2,
   Upload,
   Wrench,
   X,

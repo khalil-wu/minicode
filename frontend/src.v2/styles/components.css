@@ -1270,3 +1270,111 @@ body:has(.settings-workspace.settings-center) .toast-container {
 .mc-empty-state-action button:hover {
   background: color-mix(in oklch, var(--accent-primary) 20%, transparent);
 }
+
+/* ── Inline agent-edit review ─────────────────────────────────────────────
+   Line/glyph decorations painted by useAgentEditReview + the floating review
+   bar (AgentEditReviewBar). Colors reuse the diff token family; motion uses
+   the transition registry so the ui-debt gate stays green. */
+.agent-edit-editor-host {
+  position: relative;
+}
+
+.agent-edit-line-add {
+  background: var(--diff-add-bg);
+}
+.agent-edit-line-delete {
+  background: var(--diff-del-bg);
+}
+.agent-edit-line-replace {
+  background: color-mix(in oklch, var(--accent-primary) 12%, transparent);
+}
+
+.agent-edit-glyph-add::before,
+.agent-edit-glyph-delete::before,
+.agent-edit-glyph-replace::before {
+  content: "";
+  display: block;
+  width: 3px;
+  height: 100%;
+  margin-left: 4px;
+  border-radius: var(--radius-full);
+}
+.agent-edit-glyph-add::before {
+  background: var(--diff-add-text);
+}
+.agent-edit-glyph-delete::before {
+  background: var(--diff-del-text);
+}
+.agent-edit-glyph-replace::before {
+  background: var(--accent-primary);
+}
+
+.agent-edit-review-bar {
+  position: absolute;
+  right: 18px;
+  bottom: 16px;
+  z-index: var(--z-content);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-overlay);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  animation: agent-edit-review-in var(--transition-fast) both;
+}
+
+@keyframes agent-edit-review-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.agent-edit-review-count {
+  padding: 0 4px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.agent-edit-review-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.agent-edit-review-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+.agent-edit-review-btn:hover {
+  background: var(--surface-hover);
+}
+.agent-edit-review-btn:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: var(--shadow-refined-focus);
+}
+.agent-edit-review-undo:hover {
+  background: var(--diff-del-bg);
+  color: var(--diff-del-text);
+}
+.agent-edit-review-keep:hover {
+  background: var(--diff-add-bg);
+  color: var(--diff-add-text);
+}
+.agent-edit-review-keepall {
+  color: var(--text-muted);
+}

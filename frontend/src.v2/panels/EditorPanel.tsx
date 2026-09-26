@@ -32,6 +32,8 @@ import {
   decodeMarkdownFragment,
   markdownHeadingSlug,
 } from "../lib/markdown";
+import { useAgentEditReview } from "./useAgentEditReview";
+import { AgentEditReviewBar } from "../components/AgentEditReviewBar";
 
 const configureMonacoWorkers = () => {
   const scope = globalThis as typeof globalThis & {
@@ -66,7 +68,13 @@ const LazyPdfPreview = lazy(() => import("./PdfAttachmentPreview").then((module)
 
 type MonacoEditorInstance = {
   getSelection: () => unknown;
-  getModel?: () => { getValueInRange: (range: unknown) => string } | null;
+  getModel?: () => {
+    getValueInRange: (range: unknown) => string;
+    getLineCount: () => number;
+    getLineMaxColumn: (lineNumber: number) => number;
+    getEOL?: () => string;
+  } | null;
+  createDecorationsCollection?: (decorations: unknown[]) => { set: (d: unknown[]) => void; clear: () => void };
   addAction?: (descriptor: {
     id: string;
     label: string;
@@ -470,6 +478,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const editorOpenRequests = useAppStore((s) => s.editorOpenRequests);
   const fileChanges = useAppStore((s) => s.fileChanges);
   const gitChanges = useAppStore((s) => s.gitChanges);
+  const conversationId = useAppStore((s) => s.conversationId);
+  const turnDiff = useAppStore((s) => (conversationId ? s.turnDiffs[conversationId] : undefined));
   const setDiffReviewState = useAppStore((s) => s.setDiffReviewState);
   const setRightStackTab = useAppStore((s) => s.setRightStackTab);
   const consumeEditorOpenRequest = useAppStore((s) => s.consumeEditorOpenRequest);
@@ -496,6 +506,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const [monacoUnavailable, setMonacoUnavailable] = useState(false);
   const editorRef = useRef<MonacoEditorInstance | null>(null);
   const monacoMountedRef = useRef(false);
+  const [editorEpoch, setEditorEpoch] = useState(0);
   const pendingRevealRef = useRef<EditorTarget | null>(null);
   const loadEpochRef = useRef(new Map<string, number>());
   const loadingTabsRef = useRef(new WeakSet<EditorTab>());
@@ -536,6 +547,16 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     ];
     return files.find((file) => pathsMatch(file.path, activeTabPath) && file.patch) ?? null;
   }, [activeTabPath, gitChanges.workingTree, gitChanges.staged]);
+
+  const agentEditReview = useAgentEditReview({
+    editorRef,
+    path: activeTab?.path,
+    content: activeTab?.content,
+    readOnly: activeTab?.readOnly,
+    turnDiff,
+    workingDirectory,
+    editorEpoch,
+  });
 
   useEffect(() => {
     setMdPreview(false);
@@ -1131,6 +1152,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
               readOnly={activeTab.readOnly}
             />
           ) : (
+            <div className="agent-edit-editor-host relative flex-1 min-h-0 flex flex-col">
             <Suspense fallback={<EditorLoading />}>
               <LazyMonacoEditor
                 key={normalizeWorkspaceRoot(workingDirectory)}
@@ -1144,6 +1166,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                 onMount={(editor) => {
                   monacoMountedRef.current = true;
                   editorRef.current = editor as MonacoEditorInstance;
+                  setEditorEpoch((epoch) => epoch + 1);
                   editor.onDidDispose(() => {
                     if (editorRef.current === editor) editorRef.current = null;
                   });
@@ -1167,6 +1190,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                   });
                   editor.onDidChangeCursorPosition((event) => {
                     setCursor({ line: event.position.lineNumber, column: event.position.column });
+                    agentEditReview.onCursorLine(event.position.lineNumber);
                   });
                   window.setTimeout(() => revealEditorTarget(), 0);
                 }}
@@ -1190,7 +1214,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                   lineDecorationsWidth: 12,
                   renderFinalNewline: "dimmed",
                   folding: true,
-                  glyphMargin: false,
+                  glyphMargin: agentEditReview.total > 0,
                   bracketPairColorization: { enabled: true },
                   guides: { indentation: true, bracketPairs: true },
                   smoothScrolling: !reducedMotion,
@@ -1206,6 +1230,16 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                 }}
               />
             </Suspense>
+            <AgentEditReviewBar
+              total={agentEditReview.total}
+              currentIndex={agentEditReview.currentIndex}
+              onPrev={agentEditReview.prev}
+              onNext={agentEditReview.next}
+              onKeep={agentEditReview.keep}
+              onUndo={agentEditReview.undo}
+              onKeepAll={agentEditReview.keepAll}
+            />
+            </div>
           )
         ) : (
           <div className="h-full flex flex-col items-center justify-center gap-2.5 text-sm" style={{ color: "var(--text-muted)", background: "var(--surface-base)" }}>
