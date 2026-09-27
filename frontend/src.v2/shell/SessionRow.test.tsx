@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionRow } from "./SessionRow";
 
@@ -102,6 +102,29 @@ describe("SessionRow hydration status", () => {
     expect(screen.queryByLabelText("任务运行中")).toBeNull();
     expect((screen.getByRole("button", { name: "Delete me" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "会话操作" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("switches the active conversation on normal and modified clicks", () => {
+    render(
+      <SessionRow
+        conversation={{ id: "conv-b", title: "Task B", updatedAt: "2026-08-15T00:00:00Z" }}
+        sessionStatus="idle"
+        isHydrating={false}
+        active={false}
+        menuOpen={false}
+        renaming={false}
+        renameValue=""
+        waitingLabel={null}
+        {...callbacks}
+      />,
+    );
+
+    const row = screen.getByRole("button", { name: "Task B" });
+    fireEvent.click(row);
+    fireEvent.click(row, { ctrlKey: true });
+    fireEvent.click(row, { metaKey: true });
+    expect(callbacks.onSwitch).toHaveBeenCalledTimes(3);
+    expect(callbacks.onSwitch).toHaveBeenCalledWith("conv-b");
   });
 
   it("does not re-render an unchanged row when another row menu changes", () => {

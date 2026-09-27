@@ -10,6 +10,7 @@ import {
   __resetOpenWebInBrowserForTests,
   subscribeBrowserRequests,
 } from "../openWebInBrowser";
+import { workspaceRawResourceUrlWithToken } from "../../protocol/api";
 import mermaid from "mermaid";
 
 const { sendMock, openPathMock, revealPathMock } = vi.hoisted(() => {
@@ -505,7 +506,7 @@ describe("MarkdownRenderer", () => {
 
     try {
       render(
-        <MarkdownRenderer content={"- [backend/agent/loop.py](http://127.0.0.1:5173/C:/Desktop/MiniCode/backend/agent/loop.py)：主循环。"} />,
+        <MarkdownRenderer content={`- [backend/agent/loop.py](${window.location.origin}/C:/Desktop/MiniCode/backend/agent/loop.py)：主循环。`} />,
       );
 
       const chip = screen.getByRole("button", { name: "backend/agent/loop.py" });
@@ -539,7 +540,7 @@ describe("MarkdownRenderer", () => {
 
     try {
       render(
-        <MarkdownRenderer content={"[backend/agent/loop.py](http://127.0.0.1:5173/backend/agent/loop.py), 继续。"} />,
+        <MarkdownRenderer content={`[backend/agent/loop.py](${window.location.origin}/backend/agent/loop.py), 继续。`} />,
       );
 
       const chip = screen.getByRole("button", { name: "backend/agent/loop.py" });
@@ -572,7 +573,7 @@ describe("MarkdownRenderer", () => {
 
     try {
       render(
-        <MarkdownRenderer content={"- [backend](http://127.0.0.1:5173/C:/Desktop/MiniCode/backend)：后端。"} />,
+        <MarkdownRenderer content={`- [backend](${window.location.origin}/C:/Desktop/MiniCode/backend)：后端。`} />,
       );
 
       const chip = screen.getByRole("button", { name: "backend" });
@@ -589,6 +590,33 @@ describe("MarkdownRenderer", () => {
         workingDirectory: originalWorkingDirectory,
       });
     }
+  });
+
+  it("opens another localhost port as a web page even when its path resembles a workspace folder or file", () => {
+    useAppStore.setState({ conversationId: "conv-local-web", workingDirectory: "C:/Desktop/MiniCode" });
+    const requests: string[] = [];
+    const unsubscribe = subscribeBrowserRequests((request) => requests.push(request.url));
+    const origin = "http://localhost:53821";
+    render(<MarkdownRenderer content={`[Dashboard](${origin}/dashboard) and [Report](${origin}/report.pdf)`} />);
+
+    expect(screen.queryByRole("button", { name: "Dashboard" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Report" })).toBeNull();
+    fireEvent.click(screen.getByRole("link", { name: "Dashboard" }));
+    fireEvent.click(screen.getByRole("link", { name: "Report" }));
+
+    expect(requests).toEqual([`${origin}/dashboard`, `${origin}/report.pdf`]);
+    unsubscribe();
+  });
+
+  it("uses the configured API origin for workspace raw links", () => {
+    const workspaceRoot = "C:/Desktop/MiniCode";
+    useAppStore.setState({ conversationId: "conv-raw-link", workingDirectory: workspaceRoot });
+    const raw = workspaceRawResourceUrlWithToken("docs/report.pdf", workspaceRoot);
+    const other = "http://localhost:53821/api/workspace/raw?path=docs%2Freport.pdf";
+    render(<MarkdownRenderer content={`[Local report](${raw}) and [Other service](${other})`} />);
+
+    expect(screen.getByRole("button", { name: "Local report" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Other service" })).toBeTruthy();
   });
 
   it("opens action-style Markdown file links instead of revealing a made-up folder", () => {

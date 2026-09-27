@@ -52,7 +52,12 @@ def test_pdf_frame_csp_allows_only_local_backend_frames() -> None:
 
 def test_release_workflow_requires_signed_update_bundle() -> None:
     workflow = Path(".github/workflows/release-windows.yml").read_text(encoding="utf-8")
+    ci_workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
 
+    assert "workflow_call:" in ci_workflow
+    assert "uses: ./.github/workflows/ci.yml" in workflow
+    assert "needs: validation" in workflow
+    assert "npm run test:packaged" in workflow
     assert "Get-AuthenticodeSignature" in workflow
     assert "latest.yml" in workflow
     assert "*.blockmap" in workflow

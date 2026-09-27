@@ -2132,7 +2132,7 @@ describe("handleSessionEvent", () => {
     expect(state.lastUsage).toBeNull();
   });
 
-  it("treats a canonical list as authoritative over obsolete optimistic state", () => {
+  it("clears obsolete optimistic state while requesting the canonical fallback", () => {
     const textStreamBuffer = makeBuffer();
     const thinkingStreamBuffer = makeBuffer();
     useAppStore.setState({
@@ -2167,10 +2167,14 @@ describe("handleSessionEvent", () => {
     } as unknown as ServerEvent, { textStreamBuffer, thinkingStreamBuffer })).toBe(true);
 
     const state = useAppStore.getState();
-    expect(state.conversationId).toBe("conv-history");
+    expect(state.conversationId).toBeNull();
     expect(state.messages).toEqual([]);
     expect(state.conversations.map((conversation) => conversation.id)).toEqual(["conv-history"]);
     expect(state.conversationMessages["conv_local_new"]).toBeUndefined();
+    expect(sendClientCommand).toHaveBeenCalledWith({
+      type: "conversation.switch",
+      conversation_id: "conv-history",
+    });
   });
 
   it("conversation switched restores cached messages and goal when transcript is absent", () => {
@@ -2592,7 +2596,7 @@ describe("handleSessionEvent", () => {
     expect(state.messages[0].isStreaming).toBeFalsy();
   });
 
-  it("conversation list falls back to a visible session instead of blanking the UI", () => {
+  it("conversation list waits for a confirmed fallback switch before showing that session", () => {
     const textStreamBuffer = makeBuffer();
     const thinkingStreamBuffer = makeBuffer();
     useAppStore.setState({
@@ -2625,13 +2629,26 @@ describe("handleSessionEvent", () => {
     } as unknown as ServerEvent, { textStreamBuffer, thinkingStreamBuffer })).toBe(true);
 
     const state = useAppStore.getState();
-    expect(state.conversationId).toBe("conv-next");
-    expect(state.messages.map((message) => message.id)).toEqual(["m-next"]);
+    expect(state.conversationId).toBeNull();
+    expect(state.messages).toEqual([]);
     expect(state.conversationMessages["conv-deleted"]).toBeUndefined();
     expect(sendClientCommand).toHaveBeenCalledWith({
       type: "conversation.switch",
       conversation_id: "conv-next",
     });
+
+    handleSessionEvent({
+      type: "conversation.switched",
+      conversation_id: "conv-next",
+      conversation: {
+        id: "conv-next",
+        title: "Next",
+        workspace_root: "C:/repo-next",
+        transcript: [{ id: "m-next", role: "assistant", content: "next cached" }],
+      },
+    } as unknown as ServerEvent, { textStreamBuffer, thinkingStreamBuffer });
+    expect(useAppStore.getState().conversationId).toBe("conv-next");
+    expect(useAppStore.getState().messages.map((message) => message.id)).toEqual(["m-next"]);
   });
 
   it("does not switch the backend back to the old task while a newly created task activation is in flight", () => {

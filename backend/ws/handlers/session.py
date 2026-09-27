@@ -177,6 +177,7 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
             session.active_conversation_id = target.id
             workspace_activated = await session.switch_workspace_for_conversation(target, announce=False)
             if not workspace_activated:
+                session.session_lifecycle.clear_workspace_runtime()
                 result["error"] = result.get("error") or (
                     "The conversation was restored, but its workspace could not be activated. "
                     "Reopen or trust the workspace before using workspace tools."

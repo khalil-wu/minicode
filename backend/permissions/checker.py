@@ -546,7 +546,7 @@ def literal_command_parses(command: str) -> list[Any]:
 
 
 _POWERSHELL_HINT = re.compile(
-    r"(?:^|[\s;|&(])(?:[A-Z][a-z]+-[A-Z][A-Za-z]+|pwsh|powershell)\b|\$env:|\$_|-Recurse\b",
+    r"(?:^|[\s;|&(])(?:[A-Z][a-z]+-[A-Z][A-Za-z]+|(?i:pwsh|powershell|remove-item|ri|rd|rmdir|del|erase|spps|iex))\b|\$env:|\$_|-Recurse\b|[A-Za-z]:[\\/]",
 )
 
 

@@ -15,7 +15,7 @@ import { openWebTarget } from "../openWebTarget";
 import { openLocalFilePreview, openWorkspaceFilePreview } from "../openAttachmentPreview";
 import { removeCitationMarkers } from "./citationText";
 import { BrandIcon } from "../../components/BrandIcon";
-import { workspaceRawResourceUrlWithToken } from "../../protocol/api";
+import { apiBase, workspaceRawResourceUrlWithToken } from "../../protocol/api";
 import { isDesktop, openPath, revealPath } from "../../desktop/runtime";
 import { useContextMenu } from "../../components/useContextMenu";
 import {
@@ -678,10 +678,16 @@ const parsePositiveInt = (value: string | null | undefined): number | undefined 
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 };
 
-const isLocalFrontendUrl = (url: URL): boolean =>
+const isLoopbackHttpUrl = (url: URL): boolean =>
   url.protocol === "http:" || url.protocol === "https:"
     ? /^(?:127\.0\.0\.1|localhost|\[::1\])$/i.test(url.hostname)
     : false;
+
+const isLocalFrontendUrl = (url: URL): boolean =>
+  isLoopbackHttpUrl(url)
+  && /^(?:127\.0\.0\.1|localhost|\[::1\])$/i.test(window.location.hostname)
+  && url.protocol === window.location.protocol
+  && url.port === window.location.port;
 
 const textFromReactNode = (children: React.ReactNode): string => {
   const pieces: string[] = [];
@@ -757,7 +763,7 @@ const workspaceRelativePath = (path: string, workspaceRoot: string): string | nu
 const isWorkspaceRawResourceUrl = (url: string): boolean => {
   try {
     const parsed = new URL(url, window.location.href);
-    return isLocalFrontendUrl(parsed)
+    return parsed.origin === new URL(apiBase()).origin
       && parsed.pathname === "/api/workspace/raw"
       && parsed.searchParams.has("path");
   } catch {
@@ -774,7 +780,9 @@ const workspacePathFromHref = (
   const workingDirectory = options.workspaceRoot ?? String(useAppStore.getState().workingDirectory || "");
   let candidate = "";
   let fromLocalFrontend = false;
-  if (trimmed.startsWith("minicode-local-file:")) {
+  if (isWorkspaceRawResourceUrl(trimmed)) {
+    candidate = new URL(trimmed).searchParams.get("path") || "";
+  } else if (trimmed.startsWith("minicode-local-file:")) {
     try {
       candidate = decodeURIComponent(trimmed.slice("minicode-local-file:".length));
     } catch {

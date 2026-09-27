@@ -114,7 +114,7 @@ def test_workspace_activation_failure_rolls_back_context_root_and_watcher(monkey
 
 @pytest.mark.parametrize("wait_for_initialize", [False, True], ids=["conversation-switch", "explicit-activation"])
 @pytest.mark.parametrize("workspace_state", ["untrusted", "missing"])
-def test_failed_workspace_admission_keeps_only_the_correct_runtime_owner(
+def test_failed_workspace_admission_preserves_previous_runtime_until_owner_changes(
     monkeypatch, tmp_path: Path, wait_for_initialize: bool, workspace_state: str,
 ) -> None:
     previous_root = tmp_path / "previous"
@@ -138,11 +138,11 @@ def test_failed_workspace_admission_keeps_only_the_correct_runtime_owner(
     ))
 
     assert result is False
-    assert lifecycle.workspace_context is (previous_context if wait_for_initialize else None)
-    assert lifecycle.workspace_root == (previous_root if wait_for_initialize else None)
-    assert session.mcp_manager is (previous_mcp if wait_for_initialize else None)
-    assert lifecycle.file_watcher is (watcher if wait_for_initialize else None)
-    assert bool(stopped) is not wait_for_initialize
+    assert lifecycle.workspace_context is previous_context
+    assert lifecycle.workspace_root == previous_root
+    assert session.mcp_manager is previous_mcp
+    assert lifecycle.file_watcher is watcher
+    assert not stopped
     assert session.events[-1].data["error_code"] == f"workspace_{workspace_state}"
 
 

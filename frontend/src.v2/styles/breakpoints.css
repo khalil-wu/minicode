@@ -78,8 +78,8 @@
   }
 
   /* Improve touch targets */
-  button,
-  a,
+  button:not(.md-file-chip),
+  a:not(.md-web-link):not(.md-text-link),
   .clickable {
     min-height: 44px;
     min-width: 44px;

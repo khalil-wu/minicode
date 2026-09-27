@@ -16,8 +16,15 @@ permissions:
   contents: write
 
 jobs:
+  validation:
+    name: Full release validation
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   windows:
     name: Signed Windows installer
+    needs: validation
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -74,6 +81,9 @@ jobs:
           CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           MINICODE_UPDATE_FEED_URL: ${{ vars.MINICODE_UPDATE_FEED_URL }}
         run: npm run dist:win
+      - name: Smoke test packaged app
+        working-directory: desktop
+        run: npm run test:packaged
       - name: Verify installer signature and update metadata
         shell: pwsh
         run: |

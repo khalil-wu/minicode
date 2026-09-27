@@ -25,6 +25,9 @@ export const ChatPane = () => {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() === "f" && (e.ctrlKey || e.metaKey)) {
+        if (e.target instanceof Node && e.target !== document && e.target !== document.body && !containerRef.current?.contains(e.target)) return;
+        const state = useAppStore.getState();
+        if (state.appMode === "code" && state.panelSlots.find((slot) => slot.focused)?.kind === "editor") return;
         e.preventDefault();
         e.stopPropagation();
         setShowSearch((current) => !current);

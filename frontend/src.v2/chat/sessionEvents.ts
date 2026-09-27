@@ -1379,20 +1379,19 @@ export const handleSessionEvent = (
         // conversation.list is an inventory snapshot, not an activation
         // command. Keep an existing visible active conversation authoritative;
         // switching is committed by conversation.switched/session restore.
-        // The list may choose a backend/fallback owner only for cold start or
-        // after the current owner was actually removed/archived.
+        // A backend owner can hydrate on cold start. A local fallback must
+        // wait for conversation.switched before becoming active.
         const fallbackActiveConversationId = fallbackVisibleConversationId(
           storeState.conversationId ?? undefined,
           conversationMetas,
         );
-        const effectiveActiveConversationId = currentEffectiveActiveConversationId
-          ?? requestedEffectiveActiveConversationId
-          ?? fallbackActiveConversationId;
         const activationNeedsBackendSync = Boolean(
-          effectiveActiveConversationId
+          fallbackActiveConversationId
           && !currentEffectiveActiveConversationId
           && !requestedEffectiveActiveConversationId,
         );
+        const effectiveActiveConversationId = currentEffectiveActiveConversationId
+          ?? requestedEffectiveActiveConversationId;
         const nextConversationMetas = conversationMetas;
         const knownConversationIds = new Set(nextConversationMetas.map((conversation) => conversation.id));
         const removedConversationIds = storeState.conversations
@@ -1491,11 +1490,11 @@ export const handleSessionEvent = (
           } else {
             hydrateActiveConversation(activeConversation, effectiveActiveConversationId, undefined, { upsertMeta: false });
           }
-          if (activationNeedsBackendSync) {
-            sendClientCommand({ type: "conversation.switch", conversation_id: effectiveActiveConversationId });
-          }
         } else {
           clearActiveConversationView();
+          if (activationNeedsBackendSync && fallbackActiveConversationId) {
+            sendClientCommand({ type: "conversation.switch", conversation_id: fallbackActiveConversationId });
+          }
         }
         applyRuntimeSessionSnapshot(ev.session);
       }

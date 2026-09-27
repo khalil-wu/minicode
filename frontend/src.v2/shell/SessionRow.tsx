@@ -1,6 +1,5 @@
 import { memo, useRef } from "react";
 import { Circle, Clock3, GitBranch, LoaderCircle, MoreHorizontal } from "lucide-react";
-import { useAppStore } from "../stores";
 import { isDesktop } from "../desktop/runtime";
 import type { ConversationMeta } from "../stores/types";
 import { IconAction, ConversationMenu } from "./sidebarComponents";
@@ -110,17 +109,7 @@ const SessionRowComponent = ({
           type="button"
           aria-current={active ? "page" : undefined}
           disabled={c.archived || deleting}
-          onClick={(e) => {
-            if (e.ctrlKey || e.metaKey) {
-              const id = `chat-${c.id}`;
-              const state = useAppStore.getState();
-              if (!state.panelSlots.some((p: { id: string }) => p.id === id)) {
-                state.addPanel({ id, kind: "chat" });
-              }
-            } else {
-              onSwitch(c.id);
-            }
-          }}
+          onClick={() => onSwitch(c.id)}
           style={sessionMainButtonStyle}
         >
           <div style={{ flex: 1, minWidth: 0 }}>

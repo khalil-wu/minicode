@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.permissions import argv_rules, powershell_ast
+from backend.permissions import argv_rules, checker, powershell_ast
 from backend.permissions.checker import check_catastrophic_command, literal_command_parses
 from backend.tools.command_support import _command_side_effect_kind
 
@@ -57,6 +57,7 @@ def test_compound_flag_covers_semicolons_and_chains() -> None:
         ["Remove-Item", "-LiteralPath", "C:" + BS, "-Recurse"],
         ["Remove-Item", "C:" + BS + "Users" + BS + "bob", "-Recurse"],
         ["ri", "-r", "-fo", "C:" + BS],
+        ["rm", "-r", "C:" + BS],
         ["del", "/s", "/q", "C:" + BS],
         ["rd", "/s", "/q", "C:" + BS],
         ["Stop-Process", "-Name", "python", "-Force"],
@@ -89,6 +90,7 @@ def test_windows_rules_ignore_ordinary_work(argv: list[str]) -> None:
         "Remove-Item -Recurse -Force C:" + BS,
         "Remove-Item 'C:" + BS + "Users" + BS + "bob' -Recurse",
         "ri -r -fo C:" + BS,
+        "rm -r C:" + BS,
         "Get-ChildItem; Remove-Item -Recurse build",
         'powershell -Command "Remove-Item -Recurse C:' + BS + '"',
         'cmd /c "rd /s /q C:' + BS + '"',
@@ -98,6 +100,24 @@ def test_windows_rules_ignore_ordinary_work(argv: list[str]) -> None:
 def test_composed_powershell_commands_are_not_allowed(command: str) -> None:
     allowed, reason = check_catastrophic_command(command)
     assert allowed is False and reason, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ri -r -fo C:" + BS,
+        "RI -R -FO C:" + BS,
+        "ri -r ~",
+        "rm -r C:" + BS,
+    ],
+)
+def test_powershell_delete_aliases_are_blocked_on_posix_hosts(
+    monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    monkeypatch.setattr(checker.sys, "platform", "linux")
+    allowed, reason = check_catastrophic_command(command)
+    assert allowed is False and reason, command
+    assert _command_side_effect_kind({"command": command}) == "destructive"
 
 
 @pytest.mark.parametrize(

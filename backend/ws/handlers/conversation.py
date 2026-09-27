@@ -731,6 +731,8 @@ async def handle_conversation_create(
 
 async def handle_conversation_clone(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     """Clone a persisted session without sharing mutable state or worktree ownership."""
+    from backend.services.conversation_payload_service import build_conversation_switched_payload
+
     source_id = str(data.get("conversation_id") or session.active_conversation_id or "").strip()
     source = session.conversation_repo.get_conversation(source_id) if source_id else None
     if source is None:
@@ -777,25 +779,45 @@ async def handle_conversation_clone(session: "WebSocketSession", data: dict[str,
             data={"conversation_id": source.id, "reason": "attachment_clone_failed"},
         )
         return True
-    if bool(data.get("activate")):
+    activation_requested = bool(data.get("activate"))
+    activated = False
+    if activation_requested:
+        previous_active_id = session.active_conversation_id
         session.active_conversation_id = clone.id
-        await session.switch_workspace_for_conversation(clone, announce=False)
-        session.load_active_conversation_snapshot(clone.id, clone.context_snapshot)
-        session.sync_permission_mode_with_active_conversation(source="conversation.clone")
+        if await session.switch_workspace_for_conversation(clone, announce=False):
+            is_hydrating = session.load_active_conversation_snapshot(
+                clone.id, clone.context_snapshot, notify=True, defer_start=True,
+            )
+            session.sync_permission_mode_with_active_conversation(source="conversation.clone")
+            await session.send_payload(
+                build_conversation_switched_payload(
+                    clone,
+                    is_hydrating=is_hydrating,
+                    runtime_snapshot=session.runtime_snapshot(),
+                ),
+                log_context="conversation.switched",
+            )
+            if is_hydrating:
+                session.start_active_conversation_hydration(clone.id)
+            activated = True
+        else:
+            session.active_conversation_id = previous_active_id
     projection_errors = await _broadcast_conversation_lists(session)
     await session.emit_command_result(
         "conversation.clone",
         (
-            f"Cloned conversation as {clone.title}, but one or more windows need to resynchronize."
+            f"Cloned conversation as {clone.title}, but its workspace could not be activated."
+            if activation_requested and not activated
+            else f"Cloned conversation as {clone.title}, but one or more windows need to resynchronize."
             if projection_errors
             else f"Cloned conversation as {clone.title}."
         ),
-        level="warning" if projection_errors else "success",
+        level="warning" if projection_errors or (activation_requested and not activated) else "success",
         data={
             "conversation_id": clone.id,
             "source_conversation_id": source.id,
             "branch_kind": clone.branch_kind,
-            "activated": bool(data.get("activate")),
+            "activated": activated,
             "projection_errors": projection_errors,
         },
     )
@@ -1003,8 +1025,11 @@ async def handle_conversation_switch(session: "WebSocketSession", data: dict[str
         target.id,
         conversation=target,
     ) or target
+    previous_active_id = session.active_conversation_id
     session.active_conversation_id = target.id
-    await session.switch_workspace_for_conversation(target, announce=True)
+    if not await session.switch_workspace_for_conversation(target, announce=True):
+        session.active_conversation_id = previous_active_id
+        return True
     is_hydrating = session.load_active_conversation_snapshot(
         target.id,
         target.context_snapshot,
@@ -1071,11 +1096,20 @@ async def _activate_conversation_or_blank(
     *,
     reconcile_agent_state: bool = True,
 ) -> None:
-    from backend.services.conversation_payload_service import choose_conversation_activation_target
+    from backend.services.conversation_payload_service import (
+        build_conversation_switched_payload,
+        choose_conversation_activation_target,
+    )
 
+    previous_active_id = session.active_conversation_id
+    previous_active = (
+        choose_conversation_activation_target(session.conversation_repo, previous_active_id)
+        if previous_active_id else None
+    )
     target = choose_conversation_activation_target(session.conversation_repo, preferred_id)
     if target is None:
-        _clear_active_conversation_runtime(session)
+        if not preferred_id or previous_active is None:
+            _clear_active_conversation_runtime(session)
         return
 
     if reconcile_agent_state:
@@ -1084,9 +1118,27 @@ async def _activate_conversation_or_blank(
             conversation=target,
         ) or target
     session.active_conversation_id = target.id
-    await session.switch_workspace_for_conversation(target, announce=True)
-    session.load_active_conversation_snapshot(target.id, target.context_snapshot)
+    if not await session.switch_workspace_for_conversation(target, announce=True):
+        if previous_active is not None:
+            session.active_conversation_id = previous_active_id
+            return
+        # The previous owner is gone. Keep the fallback transcript available,
+        # with no workspace tools until its directory can be opened or trusted.
+        session.session_lifecycle.clear_workspace_runtime()
+    is_hydrating = session.load_active_conversation_snapshot(
+        target.id, target.context_snapshot, notify=True, defer_start=True,
+    )
     session.sync_permission_mode_with_active_conversation(source="conversation.activate")
+    await session.send_payload(
+        build_conversation_switched_payload(
+            target,
+            is_hydrating=is_hydrating,
+            runtime_snapshot=session.runtime_snapshot(),
+        ),
+        log_context="conversation.switched",
+    )
+    if is_hydrating:
+        session.start_active_conversation_hydration(target.id)
 
 
 async def handle_conversation_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:

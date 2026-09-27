@@ -170,7 +170,7 @@ def _powershell_flag_set(args: list[str]) -> set[str]:
 
 def _powershell_reason(name: str, args: list[str]) -> str:
     """Rules for cmdlets and their aliases as PowerShell would resolve them."""
-    if name == "remove-item" or name == "ri" or (name in {"rm", "rd", "rmdir", "del", "erase"} and any(a.startswith("-") and a.lower() not in {"-rf", "-r", "-f", "-fr"} for a in args)):
+    if name in {"remove-item", "ri", "rm"} or (name in {"rd", "rmdir", "del", "erase"} and any(a.startswith("-") and a.lower() not in {"-rf", "-r", "-f", "-fr"} for a in args)):
         flags = _powershell_flag_set(args)
         recursive = bool(flags & {"-recurse", "-r"}) or any(a.lower() == "-recurse:$true" for a in args)
         for target in _operands(args):

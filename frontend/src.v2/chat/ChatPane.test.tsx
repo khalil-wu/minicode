@@ -14,6 +14,8 @@ describe("ChatPane search shortcuts", () => {
     useAppStore.setState({
       conversationId: "conv-chat-pane",
       conversationHydration: {},
+      appMode: "cowork",
+      panelSlots: [{ id: "main-chat", kind: "chat", focused: true }],
     });
   });
 
@@ -49,6 +51,34 @@ describe("ChatPane search shortcuts", () => {
     expect(screen.getByPlaceholderText("在对话中搜索…")).toBeTruthy();
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByPlaceholderText("在对话中搜索…")).toBeNull();
+  });
+
+  it("lets a focused Monaco editor handle Ctrl+F instead of opening chat search", () => {
+    useAppStore.setState({
+      appMode: "code",
+      panelSlots: [
+        { id: "main-chat", kind: "chat", focused: true },
+        { id: "main-editor", kind: "editor", focused: false },
+      ],
+    });
+    render(<><div role="textbox" aria-label="Monaco editor" tabIndex={0} /><ChatPane /></>);
+    const editor = screen.getByRole("textbox", { name: "Monaco editor" });
+    editor.focus();
+    for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
+      const findEvent = new KeyboardEvent("keydown", { key: "f", ...modifier, bubbles: true, cancelable: true });
+      editor.dispatchEvent(findEvent);
+      expect(findEvent.defaultPrevented).toBe(false);
+    }
+    expect(screen.queryByPlaceholderText("在对话中搜索…")).toBeNull();
+
+    useAppStore.getState().focusPanel("main-editor");
+    const focusedEditorEvent = new KeyboardEvent("keydown", { key: "f", ctrlKey: true, bubbles: true, cancelable: true });
+    editor.dispatchEvent(focusedEditorEvent);
+    expect(focusedEditorEvent.defaultPrevented).toBe(false);
+
+    useAppStore.getState().focusPanel("main-chat");
+    fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+    expect(screen.getByPlaceholderText("在对话中搜索…")).toBeTruthy();
   });
 
   it("shows an informative hydration status while backend context is being restored", () => {
