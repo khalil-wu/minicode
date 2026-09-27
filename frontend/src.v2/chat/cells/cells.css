@@ -1939,8 +1939,7 @@
 }
 
 .diff-file-section-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -1950,11 +1949,21 @@
   background: transparent;
 }
 
+.diff-file-section-header > .diff-cell-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
 .diff-file-section:last-child .diff-file-section-header {
   border-bottom: 0;
 }
 
 .diff-cell-file-path {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   color: var(--text-secondary);
   font-family: var(--font-ui);
