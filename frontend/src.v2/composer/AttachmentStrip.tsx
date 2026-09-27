@@ -1,5 +1,5 @@
 import { LoaderCircle, RotateCcw, TriangleAlert, X } from "lucide-react";
-import { fileIcon } from "../shell/fileTreeHelpers";
+import { fileIcon } from "../lib/file-icons";
 import { useAppStore } from "../stores";
 import type { ComposerAttachment } from "../stores/types";
 import { cancelComposerUpload, retryComposerAttachment } from "./uploads";
@@ -226,7 +226,7 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
       ) : problem ? (
         <TriangleAlert size={14} className="shrink-0" aria-hidden="true" style={{ color: problemColor }} />
       ) : (
-        fileIcon(a.name, { size: 14, className: "composer-attachment-file-icon" })
+        fileIcon(a.name, { size: 16, className: "composer-attachment-file-icon" })
       )}
       <span className="truncate" style={{ minWidth: 0 }}>{truncateFilename(a.name)}</span>
       {a.status === "uploading" ? (

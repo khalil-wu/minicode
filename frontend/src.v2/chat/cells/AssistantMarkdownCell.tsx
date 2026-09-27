@@ -1,4 +1,5 @@
 import { AlertTriangle, ChevronDown, ChevronUp, Copy, Download, FileText, GitBranch, Image as ImageIcon, Maximize2, Quote, RotateCw, X } from "lucide-react";
+import { fileIcon } from "../../lib/file-icons";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type React from "react";
 import { createPortal } from "react-dom";
@@ -658,7 +659,7 @@ function GeneratedArtifactCard({
       onClick={openPreview}
       aria-label={`打开${artifact.summary || "生成文件"}`}
     >
-      <FileText size={18} aria-hidden="true" />
+      {fileIcon(artifact.summary || "file", { size: 18, className: "assistant-cell-artifact-file-icon" })}
       <span>
         <strong>{artifact.summary || "生成文件"}</strong>
         <small>{[mediaType, artifact.bytes != null ? formatFileSize(artifact.bytes) : ""].filter(Boolean).join(" · ")}</small>
@@ -726,7 +727,7 @@ function GeneratedFileLink({
           onClick={openAttachment}
         >
           <span className="assistant-cell-output-file-icon" aria-hidden="true">
-            {attachment.isImage ? <ImageIcon size={16} /> : <FileText size={16} />}
+            {fileIcon(attachment.path, { size: 16, className: "assistant-cell-output-file-icon-svg" })}
           </span>
           <span className="assistant-cell-output-file-name">{fileName}</span>
           <span className="assistant-cell-output-file-size">{sizeLabel}</span>

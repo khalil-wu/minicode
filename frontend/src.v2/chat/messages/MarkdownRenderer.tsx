@@ -4,25 +4,8 @@ import { StreamingMarkdownPartition, type MarkdownPart } from "./streamingMarkdo
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import { Folder } from "lucide-react";
-import { Icon } from "@iconify/react";
-import type { IconifyIcon } from "@iconify/types";
-import defaultFileIcon from "@iconify-icons/vscode-icons/default-file";
-import cssIcon from "@iconify-icons/vscode-icons/file-type-css";
-import excelIcon from "@iconify-icons/vscode-icons/file-type-excel";
-import htmlIcon from "@iconify-icons/vscode-icons/file-type-html";
-import imageIcon from "@iconify-icons/vscode-icons/file-type-image";
-import jsIcon from "@iconify-icons/vscode-icons/file-type-js-official";
-import jsonIcon from "@iconify-icons/vscode-icons/file-type-json-official";
-import markdownIcon from "@iconify-icons/vscode-icons/file-type-markdown";
-import pdfIcon from "@iconify-icons/vscode-icons/file-type-pdf2";
-import powerpointIcon from "@iconify-icons/vscode-icons/file-type-powerpoint";
-import powershellIcon from "@iconify-icons/vscode-icons/file-type-powershell";
-import pythonIcon from "@iconify-icons/vscode-icons/file-type-python";
-import reactIcon from "@iconify-icons/vscode-icons/file-type-reactjs";
-import tsIcon from "@iconify-icons/vscode-icons/file-type-typescript-official";
-import wordIcon from "@iconify-icons/vscode-icons/file-type-word";
 import "katex/dist/katex.min.css";
+import { fileIcon, folderIcon } from "../../lib/file-icons";
 import { useAppStore } from "../../stores";
 import type { Citation } from "../../stores/types";
 import { pushToast } from "../../overlays/ToastContainer";
@@ -974,42 +957,6 @@ const InlineOptionList = ({ text }: { text: string }) => {
 
 const fileChipClassName = "md-file-chip";
 
-const fileTypeLabels: Record<string, string> = {
-  bash: "SH",
-  c: "C",
-  cc: "C++",
-  cpp: "C++",
-  cs: "C#",
-  css: "CSS",
-  go: "GO",
-  h: "H",
-  hpp: "H++",
-  html: "HTML",
-  java: "JAVA",
-  js: "JS",
-  jsx: "JSX",
-  json: "JSON",
-  kt: "KT",
-  md: "MD",
-  mdx: "MDX",
-  php: "PHP",
-  ps1: "PS",
-  py: "PY",
-  rb: "RB",
-  rs: "RS",
-  scss: "SCSS",
-  sh: "SH",
-  sql: "SQL",
-  svelte: "SV",
-  toml: "TOML",
-  ts: "TS",
-  tsx: "TSX",
-  vue: "VUE",
-  xml: "XML",
-  yaml: "YAML",
-  yml: "YAML",
-};
-
 const fileExtensionFromPath = (value: string): string => {
   const clean = stripFileRefDecorations(value).replace(/[\\/]+$/, "");
   const base = clean.split(/[\\/]/).pop() ?? "";
@@ -1017,32 +964,9 @@ const fileExtensionFromPath = (value: string): string => {
   return match?.[1]?.toLowerCase() ?? "";
 };
 
-const fileTypeLabel = (extension: string): string => {
-  if (!extension) return "FILE";
-  return fileTypeLabels[extension] ?? extension.slice(0, 4).toUpperCase();
-};
-
-const fileIconForExtension = (extension: string): IconifyIcon => {
-  if (extension === "pdf") return pdfIcon;
-  if (extension === "doc" || extension === "docx") return wordIcon;
-  if (extension === "xls" || extension === "xlsx" || extension === "csv") return excelIcon;
-  if (extension === "ppt" || extension === "pptx") return powerpointIcon;
-  if (extension === "py") return pythonIcon;
-  if (extension === "ts") return tsIcon;
-  if (extension === "tsx" || extension === "jsx") return reactIcon;
-  if (extension === "js") return jsIcon;
-  if (extension === "json") return jsonIcon;
-  if (extension === "md" || extension === "mdx") return markdownIcon;
-  if (extension === "html") return htmlIcon;
-  if (extension === "css" || extension === "scss") return cssIcon;
-  if (extension === "ps1") return powershellIcon;
-  if (["avif", "bmp", "gif", "ico", "jpeg", "jpg", "png", "svg", "tif", "tiff", "webp"].includes(extension)) return imageIcon;
-  return defaultFileIcon;
-};
-
-const FileTypeIcon = ({ extension }: { extension: string }) => (
+const FileTypeIcon = ({ path, extension }: { path: string; extension: string }) => (
   <span className="md-official-file-icon" data-document-type={extension || "file"} aria-hidden="true">
-    <Icon icon={fileIconForExtension(extension)} width="18" height="18" />
+    {fileIcon(path, { size: 18, className: "md-official-file-icon-svg" })}
   </span>
 );
 
@@ -1137,7 +1061,7 @@ const FileReferenceChip = ({ target, children, workspaceRoot, conversationId }: 
         className={fileChipClassName}
         data-ext={extension || "file"}
       >
-        <FileTypeIcon extension={extension} />
+        <FileTypeIcon path={target.path} extension={extension} />
         <span className="md-file-chip-label">
           {directory ? <span className="md-file-chip-directory">{directory}</span> : null}
           <span className="md-file-chip-name">{fileName}</span>
@@ -1187,7 +1111,7 @@ const GenericFileReferenceChip = ({ target, children, workspaceRoot, conversatio
         className={fileChipClassName}
         data-ext={extension || "file"}
       >
-        <FileTypeIcon extension={extension} />
+        <FileTypeIcon path={target.path} extension={extension} />
         <span className="md-file-chip-label">
           {directory ? <span className="md-file-chip-directory">{directory}</span> : null}
           <span className="md-file-chip-name">{name}</span>
@@ -1213,7 +1137,7 @@ const FolderReferenceChip = ({ target, children, workspaceRoot }: { target: Fold
       className={`${fileChipClassName} md-folder-chip`}
       data-kind="folder"
     >
-      <Folder aria-hidden="true" size={14} strokeWidth={1.8} className="md-folder-chip-icon" />
+      <span className="md-folder-chip-icon" aria-hidden="true">{folderIcon(false, 16, target.path)}</span>
       <span className="md-file-chip-label">
         <span className="md-file-chip-name">{name}</span>
       </span>

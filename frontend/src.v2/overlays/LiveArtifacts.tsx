@@ -1,5 +1,6 @@
-import { Braces, Code2, FileText, FileType, GitCompare, Image as ImageIcon, Layers, Paperclip, RotateCcw, X } from "lucide-react";
+import { GitCompare, Image as ImageIcon, Layers, Paperclip, RotateCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { fileIcon } from "../lib/file-icons";
 import { useAppStore } from "../stores";
 import type { ArtifactPreview, ChatMessage } from "../stores/types";
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
@@ -18,16 +19,6 @@ import {
   artifactImageResourceUrl,
   withPreviewCacheBust,
 } from "../lib/artifact-resource";
-
-const KIND_ICON = {
-  file: FileText,
-  diff: GitCompare,
-  image: ImageIcon,
-  json: Braces,
-  code: Code2,
-  text: FileText,
-  pdf: FileType,
-} as const;
 
 const KIND_LABEL: Record<string, string> = {
   file: "文件",
@@ -111,7 +102,7 @@ export const LiveArtifacts = () => {
           ) : (
             <div style={gridStyle}>
               {artifacts.map((artifact) => {
-                const Icon = KIND_ICON[artifact.kind] ?? Paperclip;
+                const Icon = artifact.kind === "diff" ? GitCompare : Paperclip;
                 const sizeLabel = artifact.bytes
                   ? artifact.bytes > 1024
                     ? `${(artifact.bytes / 1024).toFixed(1)} KB`
@@ -258,6 +249,9 @@ function LiveArtifactCard({
     setFailed(false);
     setReloadNonce((value) => value + 1);
   };
+  const fileName = artifact.kind === "json" ? "file.json"
+      : artifact.kind === "text" ? "file.txt"
+        : artifact.summary || "file";
   const media = !imageUrl || failed ? (
     <span
       style={thumbnailFallbackStyle}
@@ -295,7 +289,11 @@ function LiveArtifactCard({
         aria-label={`打开制品：${artifact.summary || "未命名"}`}
       >
         {artifact.kind === "image" ? media : (
-          <span style={iconWrapStyle}><Icon size={18} /></span>
+          <span style={iconWrapStyle}>
+            {["file", "json", "code", "text"].includes(artifact.kind)
+              ? fileIcon(fileName, { size: 18, className: "live-artifact-file-icon" })
+              : <Icon size={18} />}
+          </span>
         )}
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={summaryStyle} title={artifact.summary}>{artifact.summary || "（未命名）"}</div>

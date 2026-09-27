@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FileText } from "../lib/icons";
+import { fileIcon } from "../lib/file-icons";
 import { X } from "lucide-react";
 import { useAppStore } from "../stores";
 import { isDesktop, fsSearchFiles } from "../desktop/runtime";
@@ -225,9 +225,9 @@ export const QuickOpen = () => {
                 gap: 10,
               }}
             >
-              <FileText size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} aria-hidden="true" />
+              {fileIcon(file.path, { size: 18, className: "quick-open-file-icon" })}
               <span title={file.path} style={{ flex: 1, minWidth: 0 }}>
-                <span style={{ display: "block", color: "var(--accent-primary)", fontWeight: "var(--fw-medium)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.name}</span>
+                <span style={{ display: "block", color: "var(--text-primary)", fontWeight: "var(--fw-medium)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.name}</span>
                 <span style={{ display: "block", color: "var(--text-muted)", fontSize: "var(--text-xs)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {file.path}
                 </span>

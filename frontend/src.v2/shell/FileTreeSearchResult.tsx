@@ -72,7 +72,7 @@ export const SearchResultRow = ({
       }}
     >
       <span style={{ ...treeIconStyle, color: isDir ? "var(--mc-icon-folder, var(--text-secondary))" : iconColor({ name: result.name, path: result.path, is_dir: false }) }} aria-hidden="true">
-        {isDir ? folderIcon(false) : fileIcon(result.name)}
+        {isDir ? folderIcon(false, 18, result.name) : fileIcon(result.name)}
       </span>
       <span style={{ minWidth: 0, flex: 1 }}>
         <span style={searchResultNameStyle}>{result.name}</span>

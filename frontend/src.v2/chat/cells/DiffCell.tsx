@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { ChevronDown, ChevronUp, FileDiff, RotateCcw } from "lucide-react";
+import { fileIcon } from "../../lib/file-icons";
 import type { DiffCellState, DiffFileChange } from "./cellTypes";
 import { diffCellTitle, diffFileChangeType } from "./diffCellLabels";
 import { useAppStore } from "../../stores";
@@ -151,6 +152,7 @@ function DiffFileSection({ file, onOpen }: { file: DiffFileChange; onOpen?: () =
     : file.path;
   return <section className="diff-file-section">
     <div className="diff-file-section-header">
+      {fileIcon(file.path, { size: 16, className: "diff-cell-file-icon" })}
       {onOpen
         ? <button type="button" className="diff-cell-file-path" title={file.path} onClick={onOpen}>{displayPath}</button>
         : <span className="diff-cell-file-path" title={file.path}>{displayPath}</span>}

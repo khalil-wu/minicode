@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { lazy, Suspense } from "react";
 import { Circle, Edit3, Eye, FileCode2, FileWarning, GitCompare, Image, LockKeyhole, RefreshCw, X } from "lucide-react";
-import { fileGlyphColor, fileIcon } from "../shell/fileTreeHelpers";
+import { fileGlyphColor, fileIcon } from "../lib/file-icons";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
@@ -1020,7 +1020,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                   <Circle size={14} fill="currentColor" className="shrink-0" style={{ color: "var(--state-warning)" }} />
                 ) : (
                   <span className="editor-tab-file-icon shrink-0" style={{ color: fileGlyphColor(tab.path) }} aria-hidden="true">
-                    {fileIcon(tab.path, { size: 14, className: "editor-tab-file-icon-svg" })}
+                    {fileIcon(tab.path, { size: 16, className: "editor-tab-file-icon-svg" })}
                   </span>
                 )}
                 <span className="overflow-hidden text-ellipsis whitespace-nowrap text-xs">

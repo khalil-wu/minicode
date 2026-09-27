@@ -173,6 +173,11 @@
   font-weight: var(--fw-semibold);
 }
 
+.mc-file-icon {
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+
 .md-prose .md-web-link {
   display: inline-flex;
   min-width: 0;

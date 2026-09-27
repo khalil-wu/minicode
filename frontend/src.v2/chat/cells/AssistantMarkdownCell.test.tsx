@@ -422,8 +422,8 @@ describe("AssistantMarkdownCell generated files", () => {
     );
 
     expect(screen.getByLabelText("生成文件")).toBeTruthy();
-    expect(screen.getByRole("button", { name: /shot\.png/ }).querySelector("svg.lucide-image")).toBeTruthy();
-    expect(screen.getByRole("button", { name: /build\.log/ }).querySelector("svg.lucide-file-text")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /shot\.png/ }).querySelector('svg.assistant-cell-output-file-icon-svg[data-file-kind="image"]')).toBeTruthy();
+    expect(screen.getByRole("button", { name: /build\.log/ }).querySelector('svg.assistant-cell-output-file-icon-svg[data-file-kind="document"]')).toBeTruthy();
     expect(screen.getByText("shot.png")).toBeTruthy();
     expect(screen.getByText("build.log")).toBeTruthy();
     // Sizes formatted human-readably.

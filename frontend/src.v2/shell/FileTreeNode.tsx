@@ -135,8 +135,8 @@ export const TreeNode = memo(({
         <span style={{ ...treeIconStyle, color: iconColor(node) }} aria-hidden="true">
           {node.is_dir
             ? expanded
-              ? folderIcon(true)
-              : folderIcon(false)
+              ? folderIcon(true, 18, node.name)
+              : folderIcon(false, 18, node.name)
             : fileIcon(node.name)}
         </span>
         <span style={{

@@ -7,6 +7,7 @@ import {
   sendPromptResponseCommand,
 } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
+import { fileIcon } from "../lib/file-icons";
 import { buildApprovalResponseCommand } from "../protocol/prompt-responses";
 import { getToolCallsFromMessage } from "../lib/content-blocks";
 import { useColorizedLines, extractFilePathFromDiff, guessLanguageFromPath } from "../lib/monaco-colorize";
@@ -751,7 +752,10 @@ const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState
                       fontSize: "var(--text-xs)",
                     }}
                   >
-                    <div className="overflow-hidden text-ellipsis whitespace-nowrap" style={{ fontFamily: "var(--font-mono)" }}>{file.path}</div>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      {fileIcon(file.path, { size: 15, className: "diff-file-icon" })}
+                      <span className="overflow-hidden text-ellipsis whitespace-nowrap" style={{ fontFamily: "var(--font-mono)" }}>{file.path}</span>
+                    </div>
                     <div className="flex gap-2 mt-0.5" style={{ color: "var(--text-muted)" }}>
                       {file.additions != null && <span style={{ color: "var(--state-success)" }}>+{file.additions}</span>}
                       {file.deletions != null && <span style={{ color: "var(--state-danger)" }}>-{file.deletions}</span>}
@@ -1137,7 +1141,10 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
                     fontSize: "var(--text-xs)",
                   }}
                 >
-                  <div className="overflow-hidden text-ellipsis whitespace-nowrap" style={{ fontFamily: "var(--font-mono)" }}>{f.path}</div>
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    {fileIcon(f.path, { size: 15, className: "diff-file-icon" })}
+                    <span className="overflow-hidden text-ellipsis whitespace-nowrap" style={{ fontFamily: "var(--font-mono)" }}>{f.path}</span>
+                  </div>
                   <div className="flex gap-1.5 mt-px">
                     <span style={{ color: "var(--state-success)", fontSize: "var(--text-3xs)" }}>+{f.additions}</span>
                     <span style={{ color: "var(--state-danger)", fontSize: "var(--text-3xs)" }}>-{f.deletions}</span>
@@ -1171,7 +1178,10 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
                     fontSize: "var(--text-xs)",
                   }}
                 >
-                  <div className="overflow-hidden text-ellipsis whitespace-nowrap" style={{ fontFamily: "var(--font-mono)" }}>{f.path}</div>
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    {fileIcon(f.path, { size: 15, className: "diff-file-icon" })}
+                    <span className="overflow-hidden text-ellipsis whitespace-nowrap" style={{ fontFamily: "var(--font-mono)" }}>{f.path}</span>
+                  </div>
                   <div className="flex gap-1.5 mt-px">
                     <span style={{ color: "var(--state-success)", fontSize: "var(--text-3xs)" }}>+{f.additions}</span>
                     <span style={{ color: "var(--state-danger)", fontSize: "var(--text-3xs)" }}>-{f.deletions}</span>
@@ -1206,7 +1216,10 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
                     fontSize: "var(--text-xs)",
                   }}
                 >
-                  <div className="overflow-hidden text-ellipsis whitespace-nowrap" style={{ fontFamily: "var(--font-mono)" }}>{path}</div>
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    {fileIcon(path, { size: 15, className: "diff-file-icon" })}
+                    <span className="overflow-hidden text-ellipsis whitespace-nowrap" style={{ fontFamily: "var(--font-mono)" }}>{path}</span>
+                  </div>
                 </button>
                 <button type="button" disabled={pendingActions.size > 0} onClick={() => handleStage(path)} title="暂存" aria-label={`暂存 ${path}`} style={{ ...fileDecisionBtnStyle, color: "var(--state-success)" }}>
                   <Plus size={14} />

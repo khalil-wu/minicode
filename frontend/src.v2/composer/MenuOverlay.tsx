@@ -1,6 +1,6 @@
 import { AtSign, Blocks, Command, Folder, RefreshCw } from "lucide-react";
 import { BrandIcon } from "../components/BrandIcon";
-import { fileIcon } from "../shell/fileTreeHelpers";
+import { fileIcon } from "../lib/file-icons";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isDesktop, fsListTree, fsSearchFiles } from "../desktop/runtime";
 import { useAppStore } from "../stores";
@@ -625,7 +625,7 @@ const activeBadgeStyle: React.CSSProperties = {
 
 function renderMenuIcon(item: MenuItem) {
   if (item.type === "folder") return <Folder size={14} />;
-  if (item.type === "file") return fileIcon(item.name || item.path || "file", { size: 14, className: "composer-context-icon-svg" });
+  if (item.type === "file") return fileIcon(item.name || item.path || "file", { size: 16, className: "composer-context-icon-svg" });
   if (item.type === "skill") return <BrandIcon value={item.displayName || item.name} iconUrl={item.icon} inferBrand={false} fallback="skill" size={14} />;
   if (item.type === "plugin") return <Blocks size={14} />;
   if (item.type === "argument") return <AtSign size={14} />;

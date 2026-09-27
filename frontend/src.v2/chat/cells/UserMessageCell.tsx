@@ -1,5 +1,5 @@
 import { Clock3, Copy, CornerDownLeft, RotateCcw, X } from "lucide-react";
-import { fileIcon } from "../../shell/fileTreeHelpers";
+import { fileIcon } from "../../lib/file-icons";
 import { useCallback, useEffect, useState } from "react";
 import type React from "react";
 import type { UserMessageCellState } from "./cellTypes";
@@ -184,12 +184,12 @@ export function UserMessageCell({
                     onClick={() => openFilePreview(attachment, index)}
                     title={`预览 ${attachment.name}`}
                   >
-                    {fileIcon(attachment.name, { size: 13, className: "user-cell-attachment-file-icon" })}
+                    {fileIcon(attachment.name, { size: 15, className: "user-cell-attachment-file-icon" })}
                     <span>{attachment.name}</span>
                   </button>
                 ) : (
                   <span key={attachmentKey(attachment, index)} className="user-cell-attachment-chip">
-                    {fileIcon(attachment.name, { size: 13, className: "user-cell-attachment-file-icon" })}
+                    {fileIcon(attachment.name, { size: 15, className: "user-cell-attachment-file-icon" })}
                     <span>{attachment.name}</span>
                   </span>
                 );

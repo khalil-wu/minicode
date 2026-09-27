@@ -344,7 +344,11 @@
 }
 
 .file-tree-file-icon,
-.file-tree-folder-icon,
+.file-tree-folder-icon {
+  width: 18px;
+  height: 18px;
+}
+
 .editor-tab-file-icon-svg,
 .editor-media-file-icon-svg,
 .editor-empty-file-icon-svg {
@@ -362,8 +366,8 @@
 }
 
 .editor-tab-file-icon-svg {
-  width: var(--mc-icon-sm);
-  height: var(--mc-icon-sm);
+  width: 16px;
+  height: 16px;
 }
 
 .editor-empty-file-icon {
@@ -427,8 +431,8 @@
 .composer-context-icon-svg,
 .user-cell-attachment-file-icon,
 .diff-cell-file-icon {
-  width: var(--mc-icon-sm);
-  height: var(--mc-icon-sm);
+  width: 16px;
+  height: 16px;
 }
 
 .file-tree-file-icon[data-file-kind="document"],

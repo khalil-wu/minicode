@@ -3,7 +3,6 @@ import {
   FileDiff,
   FileImage,
   FileText,
-  Folder,
   GitBranch,
   ListChecks,
   Monitor,
@@ -22,6 +21,7 @@ import {
   type EmbeddedBrowserState,
 } from "../desktop/runtime";
 import { projectAgentViews } from "../lib/agent-view-model";
+import { fileIcon, folderIcon } from "../lib/file-icons";
 import { getToolCallsFromMessage } from "../lib/content-blocks";
 import { mediaTypeForPath } from "../lib/media-types";
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
@@ -567,7 +567,7 @@ export const ChatContextCard = () => {
           </button>}
           {hasWorkspace && <>
             <div className="mc-chat-context-environment-row"><Monitor size={17} aria-hidden="true" /><span>{workspaceGit?.isWorktree ? "独立工作树" : "本地工作区"}</span></div>
-            <div className="mc-chat-context-environment-row" title={workingDirectory}><Folder size={17} aria-hidden="true" /><span>{shortPath(workingDirectory)}</span></div>
+            <div className="mc-chat-context-environment-row" title={workingDirectory}>{folderIcon(false, 17, workingDirectory)}<span>{shortPath(workingDirectory)}</span></div>
             {workspaceGit?.branch && <button type="button" className="mc-chat-context-environment-row" onClick={() => openPanel("diff")} title={workspaceGit.branch}>
               <GitBranch size={17} aria-hidden="true" /><span>{workspaceGit.branch}</span><ChevronRight size={14} aria-hidden="true" />
             </button>}
@@ -607,7 +607,6 @@ export const ChatContextCard = () => {
               <small>{items.length}</small>
             </button>
             {items.slice(0, 3).map((attachment) => {
-              const Icon = attachment.kind === "image" ? FileImage : FileText;
               return (
                 <button
                   key={attachment.id}
@@ -620,7 +619,7 @@ export const ChatContextCard = () => {
                   <span>
                     {attachment.kind === "image" && attachment.source !== "workspace"
                       ? <ContextAttachmentThumbnail attachment={attachment} />
-                      : <Icon size={15} />}
+                      : fileIcon(attachment.label, { size: 16, className: "mc-chat-context-file-icon" })}
                   </span>
                   <span className="mc-chat-context-source-content">
                     <span>{attachment.label}</span>

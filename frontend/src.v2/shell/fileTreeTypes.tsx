@@ -178,7 +178,7 @@ export const treeChevronStyle: React.CSSProperties = {
 };
 
 export const treeIconStyle: React.CSSProperties = {
-  width: 17,
+  width: 20,
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",

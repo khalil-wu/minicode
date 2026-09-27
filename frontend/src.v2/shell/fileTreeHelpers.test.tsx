@@ -1,9 +1,16 @@
 import { isValidElement } from "react";
+import reactIcon from "@iconify-icons/material-icon-theme/react";
+import cssIcon from "@iconify-icons/material-icon-theme/css";
+import viteIcon from "@iconify-icons/material-icon-theme/vite";
+import tableIcon from "@iconify-icons/material-icon-theme/table";
+import settingsIcon from "@iconify-icons/material-icon-theme/settings";
+import consoleIcon from "@iconify-icons/material-icon-theme/console";
 import { describe, expect, it } from "vitest";
 
 import {
   fileGlyphKind,
   fileIcon,
+  folderIcon,
   hasLoadedDirectoryNode,
   isMissingWorkspaceError,
   isPathInsideTreeRoot,
@@ -26,7 +33,7 @@ describe("fileIcon", () => {
     const icon = fileIcon("noticeEvents.ts");
 
     expect(isValidElement(icon)).toBe(true);
-    expect(isValidElement<{ className?: string; "data-file-kind"?: string }>(icon) ? icon.props.className : "").toBe("file-tree-file-icon");
+    expect(isValidElement<{ className?: string; "data-file-kind"?: string }>(icon) ? icon.props.className : "").toContain("file-tree-file-icon");
     expect(isValidElement<{ className?: string; "data-file-kind"?: string }>(icon) ? icon.props["data-file-kind"] : "").toBe("code");
   });
 
@@ -48,8 +55,30 @@ describe("fileIcon", () => {
   it("honors custom size and className options", () => {
     const icon = fileIcon("styles.css", { size: 12, className: "custom-file-icon" });
     expect(isValidElement<{ width?: number; className?: string; "data-file-kind"?: string }>(icon) ? icon.props.width : undefined).toBe(12);
-    expect(isValidElement<{ size?: number; className?: string; "data-file-kind"?: string }>(icon) ? icon.props.className : undefined).toBe("custom-file-icon");
+    expect(isValidElement<{ size?: number; className?: string; "data-file-kind"?: string }>(icon) ? icon.props.className : undefined).toContain("custom-file-icon");
     expect(isValidElement<{ size?: number; className?: string; "data-file-kind"?: string }>(icon) ? icon.props["data-file-kind"] : undefined).toBe("style");
+  });
+
+  it("uses the same official React, CSS and Vite glyphs for paths in every surface", () => {
+    const iconData = (path: string) => {
+      const icon = fileIcon(path);
+      return isValidElement<{ icon?: unknown }>(icon) ? icon.props.icon : undefined;
+    };
+    expect(iconData("src/App.tsx")).toBe(reactIcon);
+    expect(iconData("src/styles.css")).toBe(cssIcon);
+    expect(iconData("vite.config.ts")).toBe(viteIcon);
+    expect(iconData("data.csv")).toBe(tableIcon);
+    expect(iconData(".env.local")).toBe(settingsIcon);
+    expect(iconData("run.sh")).toBe(consoleIcon);
+    const closed = folderIcon(false);
+    const open = folderIcon(true);
+    const closedSrc = isValidElement<{ src?: string }>(closed) ? closed.props.src : "";
+    const openSrc = isValidElement<{ src?: string }>(open) ? open.props.src : "";
+    expect(closedSrc).toContain("data:image/svg+xml");
+    expect(openSrc).toContain("data:image/svg+xml");
+    expect(openSrc).not.toBe(closedSrc);
+    const cssFolder = folderIcon(false, 18, "styles/css");
+    expect(isValidElement<{ src?: string }>(cssFolder) ? cssFolder.props.src : "").not.toBe(closedSrc);
   });
 });
 

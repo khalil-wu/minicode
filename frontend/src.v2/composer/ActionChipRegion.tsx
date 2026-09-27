@@ -1,5 +1,5 @@
 import { Blocks, Folder, MessageSquareText, X } from "lucide-react";
-import { fileIcon } from "../shell/fileTreeHelpers";
+import { fileIcon } from "../lib/file-icons";
 import { useAppStore } from "../stores";
 
 export const ContextChipRegion = () => {
