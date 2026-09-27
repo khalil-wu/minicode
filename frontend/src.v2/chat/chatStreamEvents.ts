@@ -1333,6 +1333,7 @@ export const handleChatStreamEvent = (
         Number.isFinite(durationMs) ? durationMs : undefined,
         String((e as unknown as { reason?: unknown }).reason || "").trim() || undefined,
       );
+      if (!replayed) resetSendDeduplication();
       if (metadataOnly) return true;
       // approval.cancelled is authoritative, but DONE is the terminal fence
       // for the turn. Clear prompts owned by this conversation as a fallback
@@ -1385,7 +1386,6 @@ export const handleChatStreamEvent = (
       // not the budget breakdown). silent: indicator-only, no chat notice.
       if (!replayed) {
         sendClientCommand({ type: "session.usage.inspect", silent: true });
-        resetSendDeduplication();
       }
       return true;
     }

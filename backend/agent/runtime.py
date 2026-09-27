@@ -1045,6 +1045,10 @@ class AgentRuntime:
             return None
         self._subagents[subagent_id] = candidate
         self._registry.seal(subagent_id, kind="subagent")
+        # The durable terminal record has freed a worker slot. Wake queued
+        # foreground/background work now, before result projection and task
+        # cleanup finish on the old worker.
+        self._notify_subagent_capacity()
         self.write_metric("subagent_completed", candidate.to_dict())
         self._record_agent_activity(
             "completed",

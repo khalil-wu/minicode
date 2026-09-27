@@ -15,7 +15,7 @@ vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 import { useAppStore } from "../stores";
 import { buildUpdateActivitySnapshot } from "../desktop/updateActivityMirror";
-import { sendChatMessage } from "../chat/sendChatMessage";
+import { resetSendDeduplication, sendChatMessage } from "../chat/sendChatMessage";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import type { ClientCommand } from "../protocol/events";
 import { resetPendingClientCommandAcksForTests, resetRecentInboundEventIdsForTests, useWebSocketConnection } from "./useWebSocket";
@@ -42,6 +42,8 @@ const Harness = () => { useWebSocketConnection(); return null; };
 
 beforeEach(() => {
   vi.useFakeTimers(); WireSocket.instances = []; vi.stubGlobal("WebSocket", WireSocket); localStorage.clear();
+  vi.setSystemTime(new Date("2026-09-27T00:00:00Z"));
+  resetSendDeduplication();
   resetPendingClientCommandAcksForTests(); resetRecentInboundEventIdsForTests();
   useAppStore.setState({ isConnected: false, conversationId: null, conversations: [], messages: [], conversationMessages: {}, conversationStreaming: {}, isStreaming: false, connectionPhase: "connecting", reconnectAttempt: 0, reconnectMaxAttempts: null, connectionError: null, permissionMode: "bypass", runtimeSession: null, runtimeCapabilities: null });
 });
@@ -101,4 +103,8 @@ it.each(["connected", "reconnect"])("replays the real backend tool stress sessio
   expect(socket.close).not.toHaveBeenCalled();
   expect(useAppStore.getState().isStreaming).toBe(false);
   expect(buildUpdateActivitySnapshot(useAppStore.getState()).activeTurns).toEqual([]);
+  if (mode === "connected") {
+    const userCommand = fixture.connections[0].commands.find((entry: Wire) => entry.command.type === "user_message").command;
+    expect(sendChatMessage({ displayContent: userCommand.content, conversationId: userCommand.conversation_id, skipLocalAppend: true })).toBe(true);
+  }
 });

@@ -1987,12 +1987,42 @@ def test_single_foreground_subagent_waits_for_global_worker_slot(monkeypatch, tm
         assert len(started_prompts) == 4
 
         release.set()
-        foreground_result = await asyncio.wait_for(foreground_task, timeout=2)
+        # The capacity transition is checked directly below. This deadline
+        # only bounds the full child setup, journal, and terminal projection.
+        foreground_result = await asyncio.wait_for(foreground_task, timeout=10)
 
         assert foreground_result.status == "completed"
         assert foreground_started.is_set()
         assert len(started_prompts) == 5
         assert peak_active == 4
+
+    asyncio.run(run())
+
+
+def test_terminal_subagent_commit_wakes_global_worker_slot_waiter(tmp_path):
+    async def run() -> None:
+        runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl")
+        runtime.start_run(conversation_id="capacity-test", run_id="parent-run")
+        worker_ids = [f"subagent-capacity-{index}" for index in range(4)]
+        for subagent_id in worker_ids:
+            runtime.start_subagent(
+                subagent_id=subagent_id,
+                parent_run_id="parent-run",
+                agent_type="explore",
+                background=True,
+            )
+
+        waiting = asyncio.create_task(runtime.acquire_subagent_slot("subagent-fifth"))
+        await asyncio.sleep(0)
+        assert not waiting.done()
+        assert runtime._subagent_capacity_waiters
+
+        completed = runtime.complete_subagent(
+            worker_ids[0], "completed", **_subagent_fence(runtime, worker_ids[0])
+        )
+        assert completed is not None
+        assert await asyncio.wait_for(waiting, timeout=1)
+        runtime.release_subagent_slot("subagent-fifth")
 
     asyncio.run(run())
 
