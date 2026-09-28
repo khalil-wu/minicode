@@ -477,8 +477,7 @@ def test_websocket_session_switch_hydrates_large_snapshot_in_background(monkeypa
         await session.command_dispatcher._handle_command(
             UserCommand(type="conversation.switch", data={"conversation_id": target.id})
         )
-        await asyncio.sleep(0.05)
-        await asyncio.sleep(0.05)
+        await session.conversation_runtime.wait_for_hydration(target.id)
         return session.ws.sent, session
 
     sent, session = asyncio.run(scenario())
@@ -490,7 +489,7 @@ def test_websocket_session_switch_hydrates_large_snapshot_in_background(monkeypa
     )
     completed = next(
         index for index, payload in enumerate(sent)
-        if payload.get("type") == "conversation.hydration.updated"
+        if payload.get("type") == "conversation.switched"
         and payload.get("is_hydrating") is False
     )
     assert started < completed
