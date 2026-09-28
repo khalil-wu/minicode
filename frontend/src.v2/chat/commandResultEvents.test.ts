@@ -19,6 +19,7 @@ describe("handleCommandResultEvent", () => {
     vi.clearAllMocks();
     useAppStore.setState({
       conversationId: "conv-command",
+      pendingConversationSwitchId: null,
       messages: [],
       conversationMessages: {},
       conversationStreaming: {},
@@ -36,6 +37,20 @@ describe("handleCommandResultEvent", () => {
       pluginCommandPanelPayload: null,
       subagents: [],
     });
+  });
+
+  it("restores the previous chat view when a requested switch is refused", () => {
+    useAppStore.setState({ pendingConversationSwitchId: "conv-archived" });
+    expect(handleCommandResultEvent({
+      type: "command.result",
+      command: "conversation.switch",
+      level: "warning",
+      message: "Restore this conversation from the archive before switching to it.",
+      data: { conversation_id: "conv-archived", reason: "archived" },
+    } as ServerEvent)).toBe(true);
+
+    expect(useAppStore.getState().pendingConversationSwitchId).toBeNull();
+    expect(useAppStore.getState().conversationId).toBe("conv-command");
   });
 
   it("surfaces inspect-type results as an ephemeral toast, never as a persistent transcript message", () => {

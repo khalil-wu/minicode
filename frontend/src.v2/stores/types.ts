@@ -1249,6 +1249,7 @@ export interface ConversationHistoryPage {
 
 export interface ChatSlice {
   conversationId: string | null;
+  pendingConversationSwitchId: string | null;
   conversations: ConversationMeta[];
   conversationInventoryInstanceId: string | null;
   conversationInventoryRevision: number;

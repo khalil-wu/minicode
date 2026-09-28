@@ -27,6 +27,7 @@ describe("handleSessionEvent", () => {
     vi.mocked(pushToast).mockClear();
     useAppStore.setState({
       conversationId: "conv-active",
+      pendingConversationSwitchId: null,
       conversations: [],
       conversationInventoryInstanceId: null,
       conversationInventoryRevision: 0,
@@ -280,6 +281,7 @@ describe("handleSessionEvent", () => {
 
   it("records the backend hydration phase from conversation switched events", () => {
     const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+    useAppStore.setState({ pendingConversationSwitchId: "conv-hydrating" });
 
     expect(handleSessionEvent({
       type: "conversation.switched",
@@ -297,6 +299,7 @@ describe("handleSessionEvent", () => {
       isHydrating: true,
       updatedAt: expect.any(Number),
     });
+    expect(useAppStore.getState().pendingConversationSwitchId).toBeNull();
     expect(sendClientCommand).toHaveBeenCalledOnce();
     expect(sendClientCommand).toHaveBeenCalledWith({ type: "commands.list" });
   });

@@ -157,6 +157,7 @@ def test_manual_compaction_reports_budget_failure_at_the_correct_commit_boundary
     monkeypatch.setattr("backend.ws.handlers.conversation._conversation_has_active_run", lambda *_args: False)
     session = SimpleNamespace(
         active_conversation_id="conversation-budget-failure",
+        conversation_runtime=SimpleNamespace(wait_for_hydration=AsyncMock()),
         context_builder=SimpleNamespace(context_ledger=lambda: {"estimated_tokens": 100, "entries": []}),
         conversation_repo=SimpleNamespace(get_conversation=lambda _id: object()),
         send_event=AsyncMock(),
@@ -205,7 +206,7 @@ def test_manual_compaction_keeps_committed_result_when_event_delivery_fails(monk
         permission_checker=object(),
         permission_context=object(),
         conversation_repo=repo,
-        conversation_runtime=None,
+        conversation_runtime=SimpleNamespace(wait_for_hydration=AsyncMock()),
         _conversation_projection_lock=lambda _id: asyncio.Lock(),
         send_event=send_event,
     )

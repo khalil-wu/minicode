@@ -171,6 +171,7 @@ export const ConversationsTab = ({
   const isStreaming = useAppStore((s) => s.isStreaming);
   const conversationStreaming = useAppStore((s) => s.conversationStreaming);
   const conversationHydration = useAppStore((s) => s.conversationHydration);
+  const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId);
   const requestConversationSwitch = useAppStore((s) => s.requestConversationSwitch);
   const pendingApproval = useAppStore((s) => s.pendingApproval);
   const approvalQueue = useAppStore((s) => s.approvalQueue);
@@ -312,7 +313,7 @@ export const ConversationsTab = ({
   const onSetConfirmDialogRef = useRef(onSetConfirmDialog);
   const onNavigateRef = useRef(onNavigate);
   conversationsRef.current = conversations;
-  conversationIdRef.current = conversationId;
+  conversationIdRef.current = pendingConversationSwitchId || conversationId;
   renameStateRef.current = { renaming, renameValue };
   onSetConfirmDialogRef.current = onSetConfirmDialog;
   onNavigateRef.current = onNavigate;

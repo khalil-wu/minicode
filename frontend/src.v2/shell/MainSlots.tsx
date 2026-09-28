@@ -29,7 +29,8 @@ export const MainSlots = ({ mode = "split", forceChat = false }: MainSlotsProps)
   const resizePanel = useAppStore((s) => s.resizePanel);
   const setAppMode = useAppStore((s) => s.setAppMode);
   const hasOpenEditor = useAppStore((s) => s.editorTabs.length > 0);
-  const conversationTitle = useAppStore((s) => s.conversations.find((item) => item.id === s.conversationId)?.title);
+  const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId);
+  const conversationTitle = useAppStore((s) => s.conversations.find((item) => item.id === (s.pendingConversationSwitchId || s.conversationId))?.title);
   const [compact, setCompact] = useState(isCompactViewport);
 
   const chatSlot = panelSlots.find((slot) => slot.kind === "chat") ?? { id: "main-chat", kind: "chat" as const, label: "对话" };
@@ -85,7 +86,7 @@ export const MainSlots = ({ mode = "split", forceChat = false }: MainSlotsProps)
         {(conversationTitle || (showSwitcher && (tabbed || compact || effectiveMaximizedSlot))) && (
           <div className="mc-workbench-toolbar">
             {conversationTitle && <span className="mc-workbench-title" title={conversationTitle}>{conversationTitle}</span>}
-            {conversationTitle && activeSlot.kind === "chat" && (
+            {conversationTitle && !pendingConversationSwitchId && activeSlot.kind === "chat" && (
               <button
                 type="button"
                 className="btn-ghost mc-icon-button"

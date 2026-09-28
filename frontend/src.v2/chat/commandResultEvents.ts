@@ -256,6 +256,14 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     };
   };
 
+  if (
+    ev.command === "conversation.switch"
+    && ev.level !== "success"
+    && ev.data?.conversation_id === useAppStore.getState().pendingConversationSwitchId
+  ) {
+    useAppStore.setState({ pendingConversationSwitchId: null });
+  }
+
   // Resolve the owning operation before doing any generic presentation. A
   // settings page waiting on this result owns its inline state/toast; surfacing
   // the same MCP/plugin/scheduler result as agent progress mixes control-plane

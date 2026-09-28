@@ -5,7 +5,7 @@ import { handleSessionEvent } from "../chat/sessionEvents";
 
 vi.mock("../protocol/ws-outbox", () => ({
   createClientCommandId: vi.fn(() => "test-client-command-id"),
-  sendClientCommand: vi.fn(),
+  sendClientCommand: vi.fn(() => true),
   sendClientCommandAwaitResult: vi.fn(),
   commandResultSucceeded: (event: { level?: string }) => !["error", "failed"].includes(String(event.level || "")),
   sendConversationDeleteCommand: vi.fn().mockResolvedValue(true),
@@ -30,6 +30,7 @@ const applyConversationList = (
 const resetChatState = () => {
   useAppStore.setState({
     conversationId: null,
+    pendingConversationSwitchId: null,
     conversations: [],
     messages: [],
     conversationMessages: {},
@@ -286,10 +287,27 @@ describe("conversation deletion store behavior", () => {
     const state = useAppStore.getState();
     expect(sendClientCommand).toHaveBeenCalledWith({ type: "conversation.switch", conversation_id: "conv-next" });
     expect(state.conversationId).toBe("conv-active");
+    expect(state.pendingConversationSwitchId).toBe("conv-next");
     expect(state.messages).toEqual([activeMessage]);
 
     useAppStore.getState().applyConversationSwitched({ conversationId: "conv-next" });
     expect(useAppStore.getState().messages).toEqual([nextMessage]);
+    expect(useAppStore.getState().pendingConversationSwitchId).toBeNull();
+  });
+
+  it("keeps the latest visible switch pending across an earlier switch response", () => {
+    useAppStore.setState({
+      conversationId: "conv-a",
+      conversations: ["conv-a", "conv-b", "conv-c"].map((id) => ({ id, title: id, updatedAt: "2026-05-24T00:00:00.000Z" })),
+    });
+
+    useAppStore.getState().requestConversationSwitch("conv-b");
+    useAppStore.getState().requestConversationSwitch("conv-c");
+    useAppStore.getState().applyConversationSwitched({ conversationId: "conv-b" });
+    expect(useAppStore.getState().pendingConversationSwitchId).toBe("conv-c");
+
+    useAppStore.getState().applyConversationSwitched({ conversationId: "conv-c" });
+    expect(useAppStore.getState().pendingConversationSwitchId).toBeNull();
   });
 
   it("applies backend-confirmed conversation switches from cached messages", () => {

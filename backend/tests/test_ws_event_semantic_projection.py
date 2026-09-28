@@ -718,6 +718,7 @@ def test_manual_context_compact_emits_owned_lifecycle_then_authoritative_usage()
     projection_lock = asyncio.Lock()
     session = SimpleNamespace(
         active_conversation_id="conversation-1",
+        conversation_runtime=SimpleNamespace(wait_for_hydration=AsyncMock()),
         context_builder=builder,
         last_agent_state=agent_state,
         tool_registry=SimpleNamespace(get_schemas=lambda **_kwargs: []),

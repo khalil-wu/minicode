@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatPane } from "./ChatPane";
 import { useAppStore } from "../stores";
@@ -13,6 +13,7 @@ describe("ChatPane search shortcuts", () => {
   beforeEach(() => {
     useAppStore.setState({
       conversationId: "conv-chat-pane",
+      pendingConversationSwitchId: null,
       conversationHydration: {},
       appMode: "cowork",
       panelSlots: [{ id: "main-chat", kind: "chat", focused: true }],
@@ -79,6 +80,20 @@ describe("ChatPane search shortcuts", () => {
     useAppStore.getState().focusPanel("main-chat");
     fireEvent.keyDown(window, { key: "f", ctrlKey: true });
     expect(screen.getByPlaceholderText("在对话中搜索…")).toBeTruthy();
+  });
+
+  it("immediately blanks the old chat while a switch waits for its public page", () => {
+    const { container } = render(<ChatPane />);
+    expect(screen.getByText("messages")).toBeTruthy();
+
+    act(() => useAppStore.setState({ pendingConversationSwitchId: "conv-next" }));
+    expect(container.querySelector(".chat-pane")?.getAttribute("data-switching")).toBe("true");
+    expect(screen.queryByText("messages")).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "composer" })).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain("正在打开会话");
+
+    act(() => useAppStore.setState({ pendingConversationSwitchId: null }));
+    expect(screen.getByText("messages")).toBeTruthy();
   });
 
   it("shows an informative hydration status while backend context is being restored", () => {

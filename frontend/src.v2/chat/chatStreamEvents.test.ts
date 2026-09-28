@@ -24,6 +24,7 @@ const immediateBuffer = (
 const seedStreamingAssistant = () => {
   useAppStore.setState({
     conversationId: "conv-stream",
+    pendingConversationSwitchId: null,
     messages: [{
       id: "assistant-stream",
       role: "assistant",
@@ -1128,6 +1129,22 @@ describe("handleChatStreamEvent typed lifecycle", () => {
       workspaceRoot: "",
       worktreePath: "",
     });
+  });
+
+  it("restores the prior view when workspace admission rejects a pending switch", () => {
+    useAppStore.setState({ conversationId: "conv-stream", pendingConversationSwitchId: "conv-target" });
+
+    expect(handleChatStreamEvent({
+      type: "error",
+      conversation_id: "conv-target",
+      message: "Workspace is not trusted",
+      error_type: "workspace",
+      error_code: "workspace_untrusted",
+      recoverable: true,
+    } as unknown as ServerEvent, "conv-target", handlers)).toBe(true);
+
+    expect(useAppStore.getState().pendingConversationSwitchId).toBeNull();
+    expect(useAppStore.getState().conversationId).toBe("conv-stream");
   });
 
   it("does not delete a conversation when conversation.not_found is replayed", () => {

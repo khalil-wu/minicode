@@ -81,6 +81,7 @@ const originalRequestGitChanges = useAppStore.getState().requestGitChanges;
 
 describe("FileTree directory request ownership", () => {
   beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
     localStorage.clear();
     mocks.listWorkspaceTree.mockReset();
     mocks.requestGitChanges.mockReset();

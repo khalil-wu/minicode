@@ -1234,6 +1234,7 @@ export const handleSessionEvent = (
       );
       const switchEventWillHydrate = ev.type === "session.restored" && ev.conversation_switched_follows === true;
       if (ev.type === "session.restored") {
+        useAppStore.setState({ pendingConversationSwitchId: null });
         pendingAuthoritativeConversationResets.clear();
         if (switchEventWillHydrate && activeConversationId) {
           // session.restore is followed immediately by a canonical

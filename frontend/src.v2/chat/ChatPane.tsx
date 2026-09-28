@@ -13,6 +13,7 @@ export const ChatPane = () => {
   const [showSearch, setShowSearch] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const conversationId = useAppStore((state) => state.conversationId);
+  const pendingConversationSwitchId = useAppStore((state) => state.pendingConversationSwitchId);
   const isHydrating = useAppStore((state) => Boolean(
     conversationId && state.conversationHydration[conversationId]?.isHydrating,
   ));
@@ -21,6 +22,10 @@ export const ChatPane = () => {
     setShowSearch(false);
     window.getSelection()?.removeAllRanges();
   }, []);
+
+  useEffect(() => {
+    if (pendingConversationSwitchId) setShowSearch(false);
+  }, [pendingConversationSwitchId]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -55,6 +60,7 @@ export const ChatPane = () => {
     <div
       ref={containerRef}
       className="chat-pane flex-1 min-h-0 overflow-hidden w-full"
+      data-switching={pendingConversationSwitchId ? "true" : "false"}
       style={{
         position: "relative",
         display: "grid",
@@ -67,7 +73,10 @@ export const ChatPane = () => {
         background: "var(--surface-base)",
       }}
     >
-      <div className="chat-pane-layout">
+      {pendingConversationSwitchId ? (
+        <span role="status" className="sr-only">正在打开会话…</span>
+      ) : (
+        <div className="chat-pane-layout">
         <div className="chat-pane-main">
           {showSearch && (
             <ChatSearch onClose={handleCloseSearch} containerRef={containerRef} />
@@ -106,7 +115,8 @@ export const ChatPane = () => {
           </div>
         </div>
         <ChatContextCard />
-      </div>
+        </div>
+      )}
     </div>
   );
 };

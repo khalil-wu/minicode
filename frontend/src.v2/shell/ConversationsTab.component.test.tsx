@@ -30,6 +30,7 @@ describe('ConversationsTab project navigation', () => {
     useAppStore.setState({
       appMode: 'cowork',
       conversationId: 'conv-represented',
+      pendingConversationSwitchId: null,
       conversations: [{
         id: 'conv-represented', title: 'Existing workspace task',
         updatedAt: '2026-08-15T00:00:00.000Z', workspaceRoot: 'C:\\Represented',
@@ -47,6 +48,21 @@ describe('ConversationsTab project navigation', () => {
   })
 
   afterEach(() => { cleanup(); vi.useRealTimers() })
+
+  it('highlights the requested conversation before the backend confirms the switch', () => {
+    useAppStore.setState({ conversations: [
+      ...useAppStore.getState().conversations,
+      { id: 'conv-next', title: 'Next task', updatedAt: '2026-08-15T00:00:01.000Z', workspaceRoot: 'C:\\Represented' },
+    ] })
+    render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
+    const previous = screen.getByText('Existing workspace task').closest('button')
+    const next = screen.getByText('Next task').closest('button')
+    expect(previous?.getAttribute('aria-current')).toBe('page')
+
+    act(() => useAppStore.setState({ pendingConversationSwitchId: 'conv-next' }))
+    expect(previous?.hasAttribute('aria-current')).toBe(false)
+    expect(next?.getAttribute('aria-current')).toBe('page')
+  })
 
   it('removes a workspace through its context menu while retaining conversations across reopen', async () => {
     const { unmount } = render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)

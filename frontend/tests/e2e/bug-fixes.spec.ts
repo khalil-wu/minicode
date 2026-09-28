@@ -1517,6 +1517,49 @@ test.describe("Conversation session cache", () => {
     await expect(page.getByText("Conversation B is separate")).toHaveCount(0);
   });
 
+  test("clicking a task immediately blanks the old chat until its page arrives", async ({ page }) => {
+    await page.evaluate(() => {
+      const store = (window as any).__zustandStore;
+      const oldMessage = { id: "old-answer", role: "assistant", content: "Old task content", artifacts: [], timestamp: Date.now() };
+      store.setState({
+        appMode: "cowork",
+        conversationId: "conv-a",
+        pendingConversationSwitchId: null,
+        conversations: [
+          { id: "conv-a", title: "Task A", updatedAt: new Date().toISOString() },
+          { id: "conv-b", title: "Task B", updatedAt: new Date().toISOString() },
+        ],
+        messages: [oldMessage],
+        conversationMessages: { "conv-a": [oldMessage], "conv-b": [] },
+        conversationStreaming: { "conv-a": false, "conv-b": false },
+        isStreaming: false,
+        isConnected: true,
+      });
+    });
+    await expect(page.getByText("Old task content")).toBeVisible();
+
+    const targetTask = page.getByTestId("conversation-list").getByText("Task B", { exact: true });
+    await targetTask.click();
+    await expect(page.locator(".chat-pane")).toHaveAttribute("data-switching", "true");
+    await expect(page.getByText("Old task content")).toHaveCount(0);
+    await expect(targetTask.locator("xpath=ancestor::button[1]")).toHaveAttribute("aria-current", "page");
+    await page.screenshot({ path: "../output/playwright/session-switch-pending-20260928.png", fullPage: true });
+
+    await page.evaluate(() => (window as any).__mockWs._receive({
+      type: "conversation.switched",
+      conversation_id: "conv-b",
+      is_hydrating: true,
+      conversation: {
+        id: "conv-b",
+        title: "Task B",
+        messages: [{ id: "new-answer", role: "assistant", content: "New task content", timestamp: Date.now() }],
+      },
+    }));
+    await expect(page.locator(".chat-pane")).toHaveAttribute("data-switching", "false");
+    await expect(page.getByText("New task content")).toBeVisible();
+    await page.screenshot({ path: "../output/playwright/session-switch-ready-20260928.png", fullPage: true });
+  });
+
   test("switching conversations follows the conversation workspace immediately", async ({ page }) => {
     await page.route("**/api/workspace/git/worktree?**", (route) => route.fulfill({
       json: {

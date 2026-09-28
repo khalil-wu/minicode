@@ -302,6 +302,7 @@ function findStreamingIndexForMessage(messages: AppStore["messages"], messageId?
 
 export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, get) => ({
   conversationId: null,
+  pendingConversationSwitchId: null,
   conversations: [],
   conversationInventoryInstanceId: null,
   conversationInventoryRevision: 0,
@@ -598,13 +599,18 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   requestConversationSwitch: (id) => {
     const targetId = id.trim();
     if (!targetId) return;
+    if (targetId === get().conversationId && !get().pendingConversationSwitchId) return;
     // `conversation.switched` is the causal event and the only authority on
     // which conversation is active — the backend refuses a stale or archived
     // target rather than switching to it. Applying the switch locally first
     // left the renderer showing a conversation the backend never activated, and
     // every later command then carried a conversation_id its scope check
-    // rejects. Wait for applyConversationSwitched.
-    sendClientCommand({ type: "conversation.switch", conversation_id: targetId });
+    // rejects. Keep the authority unchanged while presenting the requested
+    // conversation as an empty view until its public page arrives.
+    set({ pendingConversationSwitchId: targetId });
+    if (!sendClientCommand({ type: "conversation.switch", conversation_id: targetId })) {
+      set({ pendingConversationSwitchId: null });
+    }
   },
   applyConversationSwitched: ({ conversationId }) => {
     const id = conversationId.trim();
@@ -640,6 +646,9 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           };
       return {
         ...conversationResetPayload(),
+        pendingConversationSwitchId: s.pendingConversationSwitchId === id
+          ? null
+          : s.pendingConversationSwitchId,
         ...(sameConversation
           ? {
               contextUsage: s.contextUsage,
@@ -1510,6 +1519,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   setConnectionState: (phase, details) => set((s) => ({
     isConnected: phase === "connected",
     connectionPhase: phase,
+    pendingConversationSwitchId: phase === "connected" ? s.pendingConversationSwitchId : null,
     runtimeSession: phase === "connected" ? s.runtimeSession : null,
     reconnectAttempt: details?.attempt ?? (phase === "connected" ? 0 : s.reconnectAttempt),
     reconnectMaxAttempts: details?.maxAttempts === undefined

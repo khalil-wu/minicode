@@ -162,8 +162,9 @@ def test_repository_hydration_waits_for_full_context_without_cancelling_on_waite
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("message_count", [40, 160])
 @pytest.mark.parametrize("fail_read", [False, True])
-def test_large_conversation_switch_publishes_page_before_private_context_load(tmp_path, monkeypatch, fail_read):
+def test_conversation_switch_publishes_page_before_private_context_load(tmp_path, monkeypatch, fail_read, message_count):
     from backend.tests.test_ws_cold_connection import _connection, _release_session
     from backend.ws.manager import WebSocketManager
     from backend.ws.handlers.conversation import handle_conversation_switch
@@ -173,7 +174,9 @@ def test_large_conversation_switch_publishes_page_before_private_context_load(tm
         session, _ = await manager.connect(**connection)
         monkeypatch.setattr(session, "refresh_llm_selection", lambda **_: None)
         repo = session.conversation_repo
-        record = repo.create_conversation(transcript=history(160), context_snapshot={"history": history(160)})
+        record = repo.create_conversation(
+            transcript=history(message_count), context_snapshot={"history": history(message_count)},
+        )
         repo._record_cache.clear()
         entered, release = threading.Event(), threading.Event()
         preview = asyncio.Event()
@@ -205,7 +208,7 @@ def test_large_conversation_switch_publishes_page_before_private_context_load(tm
                 assert any(event.get("type") == "error" and "unreadable" in event.get("message", "") for event in connection["websocket"].sent)
             else:
                 await session.conversation_runtime.wait_for_hydration(record.id)
-                assert session.context_builder.history_length == 160
+                assert session.context_builder.history_length == message_count
                 switches = [event for event in connection["websocket"].sent if event.get("type") == "conversation.switched"]
                 assert switches[0]["is_hydrating"] and not switches[-1]["is_hydrating"]
         finally:

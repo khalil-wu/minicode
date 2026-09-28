@@ -959,52 +959,15 @@ async def handle_conversation_export(session: "WebSocketSession", data: dict[str
 
 
 async def handle_conversation_switch(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.services.conversation_payload_service import build_conversation_switched_payload
+    from backend.conversations.models import ConversationRecord
+    from datetime import UTC, datetime
 
     conversation_id = str(data.get("conversation_id", ""))
     view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, conversation_id)
-    if view is not None and view["message_count"] > 80 and not view.get("archived") and view.get("conversation_type", "main") == "main":
-        from backend.conversations.models import ConversationRecord
-        from datetime import UTC, datetime
-        target = ConversationRecord.from_dict(view)
-        if not await session.switch_workspace_for_conversation(target, announce=False):
-            return True
-        session.active_conversation_id = target.id
-        session.permission_context = session.permission_context_for_conversation(target, source="conversation.switch")
-        session.refresh_llm_selection()
-
-        async def restored(owner: str) -> None:
-            if owner != session.active_conversation_id:
-                return
-            error = session.conversation_runtime.hydration_error
-            if error is not None:
-                await session._on_conversation_hydration_complete(owner)
-                return
-            generation = session.conversation_runtime._hydration_generation
-            await session.reconcile_persisted_ui_agent_state(owner)
-            session.refresh_llm_selection()
-            current_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner)
-            if owner != session.active_conversation_id or generation != session.conversation_runtime._hydration_generation:
-                return
-            await session.send_payload({"type": "conversation.switched", "conversation_id": owner,
-                                        "conversation": current_view, "is_hydrating": False,
-                                        "session": session.runtime_snapshot(),
-                                        "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")}, log_context="conversation.switched")
-            if data.get("_reemit_pending", True):
-                await session.reemit_pending_state(conversation_id=owner)
-
-        session.conversation_runtime.defer_repository_hydration(target.id, on_hydration_complete=restored)
-        await session.send_payload({"type": "conversation.switched", "conversation_id": target.id,
-                                    "conversation": view, "is_hydrating": True, "context_pending": True,
-                                    "session": session.runtime_snapshot(),
-                                    "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")}, log_context="conversation.switched")
-        session.start_active_conversation_hydration(target.id)
-        return True
-    target = await asyncio.to_thread(session.conversation_repo.get_conversation, conversation_id)
-    if target is None:
+    if view is None:
         await emit_conversation_not_found(session, conversation_id)
         return True
-    if getattr(target, "conversation_type", "main") != "main":
+    if view.get("conversation_type", "main") != "main":
         await session.emit_command_result(
             "conversation.switch",
             "Side chats cannot become the active main conversation.",
@@ -1012,7 +975,7 @@ async def handle_conversation_switch(session: "WebSocketSession", data: dict[str
             data={"conversation_id": conversation_id, "reason": "side_chat"},
         )
         return True
-    if getattr(target, "archived", False):
+    if view.get("archived"):
         await session.send_conversation_list()
         await session.emit_command_result(
             "conversation.switch",
@@ -1021,40 +984,39 @@ async def handle_conversation_switch(session: "WebSocketSession", data: dict[str
             data={"conversation_id": conversation_id, "reason": "archived"},
         )
         return True
-    target = await session.reconcile_persisted_ui_agent_state(
-        target.id,
-        conversation=target,
-    ) or target
-    previous_active_id = session.active_conversation_id
-    session.active_conversation_id = target.id
+    target = ConversationRecord.from_dict(view)
     if not await session.switch_workspace_for_conversation(target, announce=True):
-        session.active_conversation_id = previous_active_id
         return True
-    is_hydrating = session.load_active_conversation_snapshot(
-        target.id,
-        target.context_snapshot,
-        notify=True,
-        defer_start=True,
-    )
-    session.sync_permission_mode_with_active_conversation(source="conversation.switch")
-    logger.info(
-        "[handle_conversation_switch] Switch to conv: %s, transcript len: %d, snapshot keys: %s",
-        target.id,
-        len(target.transcript) if target.transcript else 0,
-        list(target.context_snapshot.keys()) if target.context_snapshot else [],
-    )
-    await session.send_payload(
-        build_conversation_switched_payload(
-            target,
-            is_hydrating=is_hydrating,
-            runtime_snapshot=session.runtime_snapshot(),
-        ),
-        log_context="conversation.switched",
-    )
-    if is_hydrating:
-        session.start_active_conversation_hydration(target.id)
-    if data.get("_reemit_pending", True):
-        await session.reemit_pending_state(conversation_id=target.id)
+    session.active_conversation_id = target.id
+    session.permission_context = session.permission_context_for_conversation(target, source="conversation.switch")
+    session.refresh_llm_selection()
+
+    async def restored(owner: str) -> None:
+        if owner != session.active_conversation_id:
+            return
+        error = session.conversation_runtime.hydration_error
+        if error is not None:
+            await session._on_conversation_hydration_complete(owner)
+            return
+        generation = session.conversation_runtime._hydration_generation
+        await session.reconcile_persisted_ui_agent_state(owner)
+        session.refresh_llm_selection()
+        current_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner)
+        if owner != session.active_conversation_id or generation != session.conversation_runtime._hydration_generation:
+            return
+        await session.send_payload({"type": "conversation.switched", "conversation_id": owner,
+                                    "conversation": current_view, "is_hydrating": False,
+                                    "session": session.runtime_snapshot(),
+                                    "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")}, log_context="conversation.switched")
+        if data.get("_reemit_pending", True):
+            await session.reemit_pending_state(conversation_id=owner)
+
+    session.conversation_runtime.defer_repository_hydration(target.id, on_hydration_complete=restored)
+    await session.send_payload({"type": "conversation.switched", "conversation_id": target.id,
+                                "conversation": view, "is_hydrating": True, "context_pending": True,
+                                "session": session.runtime_snapshot(),
+                                "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")}, log_context="conversation.switched")
+    session.start_active_conversation_hydration(target.id)
     return True
 
 
@@ -3531,6 +3493,9 @@ async def handle_context_compact(session: "WebSocketSession", data: dict[str, An
 
     projection_error: CompactionCommittedProjectionError | None = None
     try:
+        await session.conversation_runtime.wait_for_hydration(conversation_id)
+        if session.active_conversation_id != conversation_id:
+            raise RuntimeError("The active conversation changed while its context was loading")
         before_ledger = context_ledger_snapshot(ctx)
         before_budget = build_context_budget_snapshot(session, ctx)
         committed = await compact_conversation(
@@ -3855,8 +3820,11 @@ async def handle_context_fork(session: "WebSocketSession", data: dict[str, Any])
         )
         return True
 
-    ctx = session.context_builder
     try:
+        await session.conversation_runtime.wait_for_hydration(source_conversation_id)
+        if session.active_conversation_id != source_conversation_id:
+            raise RuntimeError("The active conversation changed while its context was loading")
+        ctx = session.context_builder
         context_history_index = _resolve_context_history_index(
             ctx,
             source_transcript,
@@ -4074,8 +4042,11 @@ async def handle_context_side_query(session: "WebSocketSession", data: dict[str,
             recoverable=True,
         )
         return True
-    ctx = session.context_builder
     try:
+        await session.conversation_runtime.wait_for_hydration(conversation_id)
+        if session.active_conversation_id != conversation_id:
+            raise RuntimeError("The active conversation changed while its context was loading")
+        ctx = session.context_builder
         result = await ctx.side_query(
             query,
             focus=focus,
@@ -4113,8 +4084,11 @@ async def handle_context_ledger(session: "WebSocketSession", data: dict[str, Any
             recoverable=True,
         )
         return True
-    ctx = session.context_builder
     try:
+        await session.conversation_runtime.wait_for_hydration(conversation_id)
+        if session.active_conversation_id != conversation_id:
+            raise RuntimeError("The active conversation changed while its context was loading")
+        ctx = session.context_builder
         ledger = ctx.context_ledger()
         await session.send_event(
             AgentEvent(

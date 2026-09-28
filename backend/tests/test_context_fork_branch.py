@@ -17,6 +17,17 @@ from backend.ws.handlers.conversation import (
 )
 
 
+async def _loaded_context(_conversation_id: str) -> None:
+    return None
+
+
+def _ready_session(**values):
+    return SimpleNamespace(
+        conversation_runtime=SimpleNamespace(wait_for_hydration=_loaded_context),
+        **values,
+    )
+
+
 def _resource_stores(tmp_path: Path) -> dict[str, object]:
     return {
         "attachment_store": AttachmentStore(tmp_path / "attachments"),
@@ -54,7 +65,7 @@ def test_context_fork_materializes_independent_branch(tmp_path: Path) -> None:
 
         async def send_event(event: AgentEvent) -> None:
             events.append(event)
-        session = SimpleNamespace(
+        session = _ready_session(
             context_builder=ctx,
             conversation_repo=repo,
             active_conversation_id=parent.id,
@@ -100,7 +111,7 @@ def test_context_fork_resolves_message_id_before_ui_index(tmp_path: Path) -> Non
         async def send_event(event: AgentEvent) -> None:
             events.append(event)
 
-        session = SimpleNamespace(
+        session = _ready_session(
             context_builder=ctx,
             conversation_repo=repo,
             active_conversation_id=parent.id,
@@ -148,7 +159,7 @@ def test_context_fork_rejects_unknown_message_id_without_creating_branch(tmp_pat
         async def send_event(event: AgentEvent) -> None:
             events.append(event)
 
-        session = SimpleNamespace(
+        session = _ready_session(
             context_builder=ctx,
             conversation_repo=repo,
             active_conversation_id=parent.id,
@@ -191,7 +202,7 @@ def test_context_fork_maps_recent_message_after_context_prefix_compaction(tmp_pa
         async def send_event(event: AgentEvent) -> None:
             events.append(event)
 
-        session = SimpleNamespace(
+        session = _ready_session(
             context_builder=ctx,
             conversation_repo=repo,
             active_conversation_id=parent.id,
@@ -298,7 +309,7 @@ def test_context_fork_owner_tracks_whether_the_new_branch_was_activated(tmp_path
         async def send_conversation_list() -> None:
             return None
 
-        session = SimpleNamespace(
+        session = _ready_session(
             context_builder=ctx,
             conversation_repo=repo,
             active_conversation_id=parent.id,
@@ -354,7 +365,7 @@ def test_context_fork_legacy_index_maps_to_compacted_model_history(tmp_path: Pat
         async def send_event(event: AgentEvent) -> None:
             events.append(event)
 
-        session = SimpleNamespace(
+        session = _ready_session(
             context_builder=ctx,
             conversation_repo=repo,
             active_conversation_id=parent.id,
@@ -395,7 +406,7 @@ def test_context_fork_rejects_invalid_unstable_indices_and_empty_transcript(tmp_
         async def send_event(event: AgentEvent) -> None:
             events.append(event)
 
-        session = SimpleNamespace(
+        session = _ready_session(
             context_builder=ctx,
             conversation_repo=repo,
             active_conversation_id=parent.id,
@@ -430,7 +441,7 @@ def test_context_side_query_keeps_owner_captured_before_async_wait() -> None:
         started = asyncio.Event()
         release = asyncio.Event()
         events: list[AgentEvent] = []
-        session = SimpleNamespace(active_conversation_id="conv-source", agent_state=None)
+        session = _ready_session(active_conversation_id="conv-source", agent_state=None)
 
         class Context:
             async def side_query(self, query: str, *, focus: str, state: object) -> str:
@@ -469,7 +480,7 @@ def test_context_side_query_keeps_owner_captured_before_async_wait() -> None:
 
 def test_context_ledger_keeps_original_owner_when_builder_mutates_session() -> None:
     events: list[AgentEvent] = []
-    session = SimpleNamespace(active_conversation_id="conv-source")
+    session = _ready_session(active_conversation_id="conv-source")
     ledger = {
         "schema_version": 1,
         "estimated_tokens": 100,

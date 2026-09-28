@@ -1393,6 +1393,14 @@ export const handleChatStreamEvent = (
       const messageId = eventMessageId(e);
       const turnId = eventTurnId(e);
       const replayed = isReplayedChatEvent(e);
+      const switchErrorCode = (e as { error_code?: string }).error_code;
+      if (
+        !replayed && !messageId && !turnId
+        && conversationId === useAppStore.getState().pendingConversationSwitchId
+        && ["conversation.not_found", "workspace_missing", "workspace_untrusted"].includes(switchErrorCode || "")
+      ) {
+        useAppStore.setState({ pendingConversationSwitchId: null });
+      }
       if (!conversationId) {
         const globalError = e as unknown as {
           message?: string;
