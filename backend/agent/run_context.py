@@ -48,6 +48,7 @@ class RunContext:
     model_owner_task: asyncio.Task | None = None
     execution_journal: ExecutionJournal | None = None
     mcp_manager: MCPServerManager | None = None
+    skill_manager: Any | None = None
     mcp_owner_session_id: str = ""
     # Selection for the next provider step. Existing calls retain their own
     # ModelExecutionSnapshot when a host publishes a replacement here.

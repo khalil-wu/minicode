@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from backend.agent.prompting import build_tool_runtime_guidance
@@ -14,6 +14,7 @@ from backend.tools.registry import ToolRegistry
 from backend.tools.catalog import canonicalize_tool_schemas
 from backend.tools.tool_search import build_deferred_tools_prompt_block
 from backend.tools.toolsets import ToolsetPolicy
+from backend.llm.provider_contracts import normalize_tool_mode
 
 
 WORKSPACE_REQUIRED_TOOL_PATTERNS = (
@@ -73,6 +74,26 @@ def workspace_bound_tool_names(tool_registry: ToolRegistry) -> set[str]:
     return names
 
 
+def requested_tool_mode(*, default_code_mode_only: bool, model_execution: Any | None, llm: Any) -> str:
+    model_info = getattr(model_execution, "model_info", None)
+    if model_info is not None:
+        declared = str(
+            getattr(model_info, "tool_mode", "")
+            or getattr(model_execution.config.llm, "tool_mode", "")
+            or llm.configured_tool_mode()
+            or ""
+        )
+    elif model_execution is not None:
+        declared = str(
+            getattr(model_execution.config.llm, "tool_mode", "")
+            or llm.configured_tool_mode()
+            or ""
+        )
+    else:
+        declared = str(llm.configured_tool_mode() or "")
+    return normalize_tool_mode(declared) or ("code_mode_only" if default_code_mode_only else "code_mode")
+
+
 def effective_toolset_policy(
     *,
     base_policy: ToolsetPolicy | None,
@@ -81,6 +102,7 @@ def effective_toolset_policy(
     requires_explicit_workspace: bool,
     workspace_root: Any | None,
     permission_mode: str,
+    tool_mode: str = "code_mode",
 ) -> ToolsetPolicy:
     """Build the one policy used by schema, discovery, and execution."""
 
@@ -91,7 +113,13 @@ def effective_toolset_policy(
         and permission_mode != "bypass"
     ):
         denied.update(workspace_bound_tool_names(tool_registry))
-    return (base_policy or ToolsetPolicy.default()).with_disabled_tools(denied)
+    policy = (base_policy or ToolsetPolicy.default()).with_disabled_tools(denied)
+    mode = tool_mode if tool_registry.get_tool("tool_exec") is not None else "direct"
+    return replace(
+        policy,
+        code_mode_only=mode == "code_mode_only",
+        code_mode_enabled=mode != "direct",
+    )
 
 
 def tool_schema_names(schemas: list[dict[str, Any]]) -> set[str]:

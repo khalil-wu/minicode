@@ -12,6 +12,7 @@ from backend.agent.tool_schema_derivation import (
     TurnToolSchemaDerivation,
     derive_turn_tool_schema_state,
     effective_toolset_policy,
+    requested_tool_mode,
 )
 from backend.llm.capabilities import (
     capabilities_for_adapter,
@@ -56,6 +57,7 @@ class TurnIterationRuntime:
         run_record: Any,
         skill_manager: Any | None = None,
         agent_session: Any | None = None,
+        code_mode_only: bool = False,
     ) -> None:
         self.context = context
         self.state = state
@@ -73,6 +75,7 @@ class TurnIterationRuntime:
         self.run_record = run_record
         self.skill_manager = skill_manager
         self.agent_session = agent_session
+        self.code_mode_only = code_mode_only
         self._base_schema_key: tuple[Any, ...] | None = None
         self._base_schema_permission: Any = None
         self._base_schemas: list[dict[str, Any]] = []
@@ -137,6 +140,15 @@ class TurnIterationRuntime:
             ),
             workspace_root=self.workspace_root,
             permission_mode=str(self.tool_context.permission.mode or ""),
+            tool_mode=(
+                "code_mode"
+                if getattr(self.agent_session, "active_tool_names", None) is not None
+                else requested_tool_mode(
+                    default_code_mode_only=self.code_mode_only,
+                    model_execution=run_context.model_execution,
+                    llm=self.llm,
+                )
+            ),
         )
         loaded_deferred_tools = frozenset(
             str(name).strip()
@@ -238,6 +250,9 @@ class TurnIterationRuntime:
                         self.skill_manager,
                         boundary_input.content,
                         self.state,
+                        self.tool_context.run_context.mcp_manager if self.tool_context.run_context else None,
+                        self.tool_context.approval_handler,
+                        self.tool_context.run_context.publish_nested_event if self.tool_context.run_context else None,
                     ):
                         events.append(skill_event)
                 original_attachments = self.state.attachments

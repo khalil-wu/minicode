@@ -561,6 +561,8 @@ async def _run(prompt: str) -> int:
 
         asyncio.create_task(capture_active_tasks(), name="eval-request-diagnostics")
     agent_values = dict(profile.get("agent", {}))
+    if "MINICODE_EVAL_CODE_MODE_ONLY" in os.environ:
+        agent_values["code_mode_only"] = _env_bool("MINICODE_EVAL_CODE_MODE_ONLY")
     for env_name, field in (
         ("MINICODE_EVAL_MAX_ITERATIONS", "max_iterations"),
         ("MINICODE_EVAL_MAX_TOOL_CALLS", "max_tool_calls"),

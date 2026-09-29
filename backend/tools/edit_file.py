@@ -496,12 +496,6 @@ class EditFileTool(BaseTool):
             return self._error_result("Missing file_path argument")
         if not old_string:
             return self._error_result("Missing old_string argument")
-        if old_string == new_string:
-            # A no-op edit is not an error: report success so the model does not
-            # burn a turn re-issuing an already-applied change.
-            return self._success_result(
-                f"No change needed for {file_path}: old_string already equals new_string."
-            )
 
         bypass_mode = _is_bypass_mode(context)
         try:
@@ -528,6 +522,38 @@ class EditFileTool(BaseTool):
 
             if is_current_plan_file(path, context):
                 return self._error_result(f"Refusing to edit a plan-file symlink: {file_path}")
+
+        if old_string == new_string:
+            def verify_noop() -> None:
+                with file_mutation_locks([path]):
+                    ok, message = _validate_expected_hash(path, args.get("expected_hash"), require_hash=False)
+                    if not ok:
+                        raise ValueError(message)
+                    current = normalize_text_newlines(path.read_bytes().decode("utf-8"))
+                    target = normalize_text_newlines(old_string)
+                    count = current.lstrip("\ufeff").count(target)
+                    if count == 0:
+                        raise ValueError(f"old_string was not found in {file_path}.")
+                    replace_all = args.get("replace_all", False)
+                    if isinstance(replace_all, str):
+                        replace_all = replace_all.strip().lower() in {"true", "1", "yes", "y", "on"}
+                    if count > 1 and not replace_all:
+                        raise ValueError(
+                            f"old_string matched {count} places in {file_path}. "
+                            "Provide more surrounding context or use replace_all=true."
+                        )
+
+            try:
+                await run_blocking_io(verify_noop)
+            except UnicodeDecodeError:
+                return self._error_result(f"Cannot read binary or non-UTF-8 file: {file_path}")
+            except ValueError as exc:
+                return self._error_result(str(exc))
+            except OSError as exc:
+                return self._error_result(f"Failed to read file: {exc}")
+            return self._success_result(
+                f"No change needed for {file_path}: old_string already equals new_string."
+            )
 
         try:
             # Read, prepare, and publish the reviewed edit in the same-file queue.

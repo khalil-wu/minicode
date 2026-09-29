@@ -211,6 +211,23 @@ def test_edit_file_treats_noop_replacement_as_success_without_touching_the_file(
     asyncio.run(_go())
 
 
+def test_edit_file_noop_rejects_missing_file_and_missing_target(tmp_path):
+    tool = EditFileTool()
+    context = ToolExecutionContext(
+        permission=PermissionContext(mode="auto"),
+        workspace_root=tmp_path,
+    )
+    args = {"file_path": "missing.txt", "old_string": "already done", "new_string": "already done"}
+    missing_file = asyncio.run(tool.execute(args, context))
+    (tmp_path / "present.txt").write_text("different text\n", encoding="utf-8")
+    missing_target = asyncio.run(tool.execute({**args, "file_path": "present.txt"}, context))
+
+    assert missing_file.is_error
+    assert "File does not exist" in missing_file.content
+    assert missing_target.is_error
+    assert "old_string was not found" in missing_target.content
+
+
 def test_edit_file_quote_fallback_preserves_curly_quote_style_for_replace_all():
     async def _go():
         with tempfile.TemporaryDirectory() as td:

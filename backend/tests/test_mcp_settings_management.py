@@ -29,6 +29,9 @@ class _Manager:
     async def reload_config(self) -> None:
         self.reloaded += 1
 
+    def allows_user_server_install(self, _config: Any) -> bool:
+        return True
+
     async def register_config(self, config: Any) -> None:
         self.registered.append(config.name)
 
@@ -56,6 +59,36 @@ def _install_memory_config(monkeypatch, data: dict[str, Any]) -> dict[str, Any]:
 
 async def _noop_hook(**_kwargs: Any) -> None:
     return None
+
+
+def test_skill_mcp_install_writes_one_approved_batch_without_overwriting_existing(monkeypatch) -> None:
+    memory = _install_memory_config(monkeypatch, {"servers": {"existing": {"transport": "stdio", "command": "python"}}})
+    manager = _Manager()
+    candidates = [
+        {"name": "docs", "transport": "http", "url": "https://docs.example.test/mcp", "auto_start": True},
+        {"name": "local", "transport": "stdio", "command": "python", "args": [], "auto_start": True},
+    ]
+
+    installed = asyncio.run(mcp_service.install_skill_mcp_servers(
+        manager, candidates, config_change_hook=_noop_hook,
+    ))
+
+    assert installed == ["docs", "local"]
+    assert manager.reloaded == 1
+    assert set(memory["data"]["servers"]) == {"existing", "docs", "local"}
+    assert memory["data"]["servers"]["docs"]["url"] == "https://docs.example.test/mcp"
+    with pytest.raises(mcp_service.MCPServiceError, match="already configured"):
+        asyncio.run(mcp_service.install_skill_mcp_servers(
+            manager, [candidates[0]], config_change_hook=_noop_hook,
+        ))
+    assert manager.reloaded == 1
+    manager.allows_user_server_install = lambda _config: False
+    with pytest.raises(mcp_service.MCPServiceError, match="blocked by managed policy"):
+        asyncio.run(mcp_service.install_skill_mcp_servers(
+            manager, [{"name": "blocked", "transport": "stdio", "command": "python"}],
+            config_change_hook=_noop_hook,
+        ))
+    assert "blocked" not in memory["data"]["servers"]
 
 
 def test_mcp_status_includes_editable_config_without_resolving_pass_through(monkeypatch) -> None:

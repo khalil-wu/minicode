@@ -33,6 +33,7 @@ from backend.agent.tool_schema_derivation import (
     TurnToolSchemaDerivation,
     derive_turn_tool_schema_state,
     effective_toolset_policy,
+    requested_tool_mode,
 )
 from backend.agent.turn_budget import TurnBudgetController
 from backend.agent.turn_budget_runtime import TurnBudgetRuntime
@@ -105,8 +106,9 @@ def build_agent_loop_components(
             metadata[ACTIVE_TOOLSET_POLICY_METADATA_KEY],
             label="legacy active toolset policy",
         )
-    if configured_session_policy is not None:
-        metadata[SESSION_TOOLSET_POLICY_METADATA_KEY] = configured_session_policy
+    if configured_session_policy is None:
+        configured_session_policy = ToolsetPolicy.default()
+    metadata[SESSION_TOOLSET_POLICY_METADATA_KEY] = configured_session_policy
     bootstrap.run_context.session_toolset_policy = configured_session_policy
 
     def current_session_toolset_policy() -> ToolsetPolicy | None:
@@ -149,6 +151,15 @@ def build_agent_loop_components(
         requires_explicit_workspace=bootstrap.run_context.requires_explicit_workspace,
         workspace_root=bootstrap.workspace_root,
         permission_mode=str(tool_context.permission.mode or ""),
+        tool_mode=(
+            "code_mode"
+            if getattr(bootstrap.agent_session, "active_tool_names", None) is not None
+            else requested_tool_mode(
+                default_code_mode_only=settings.code_mode_only,
+                model_execution=bootstrap.run_context.model_execution,
+                llm=tool_context.llm,
+            )
+        ),
     )
     tool_context.metadata[ACTIVE_TOOLSET_POLICY_METADATA_KEY] = active_toolset_policy
     bootstrap.run_context.toolset_policy = active_toolset_policy
@@ -204,6 +215,7 @@ def build_agent_loop_components(
         run_record=run_record,
         skill_manager=skill_manager,
         agent_session=bootstrap.agent_session,
+        code_mode_only=settings.code_mode_only,
     )
 
     turn_start_tool_call_count = len(state.tool_calls)

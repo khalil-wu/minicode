@@ -325,6 +325,9 @@ class AgentSettings:
     # MiniCode waits indefinitely for approvals and applies no timeout; a
     # numeric value here is an explicit opt-in for deployments that want one.
     approval_timeout_seconds: float | None = None
+    # Expose only the code orchestration entry points to the model while
+    # retaining ordinary tools for nested tool_exec calls.
+    code_mode_only: bool = True
 
 @dataclass(frozen=True)
 class UISettings:
@@ -748,6 +751,10 @@ def load_config(*, cwd: Path | None = None) -> AppConfig:
             ),
         ),
         agent_mode=_normalize_agent_mode(agent_data.get("agent_mode", "react")),
+        code_mode_only=coerce_feature_bool(
+            agent_data.get("code_mode_only", AgentSettings.code_mode_only),
+            AgentSettings.code_mode_only,
+        ),
         live_text_streaming=coerce_feature_bool(agent_data.get("live_text_streaming", True), True),
         stream_timeout_seconds=_coerce_nonnegative_float(
             agent_data.get("stream_timeout_seconds"), AgentSettings.stream_timeout_seconds

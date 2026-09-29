@@ -1394,6 +1394,19 @@ export const ProviderTab = ({
           <SelectMenu ariaLabel="默认模型" value={modelName} onValueChange={selectModel} disabled={busy}>
             {configuredModelList.map((id) => <option key={id} value={id}>{id}</option>)}
           </SelectMenu>
+          <label style={{ display: "grid", gap: 6, marginBottom: 12 }}>
+            <span>工具调用模式</span>
+            <SelectMenu ariaLabel="工具调用模式" disabled={busy}
+              value={modelMetadata[modelName]?.tool_mode ?? "default"}
+              onValueChange={(value) => setModelMetadata((previous) => ({ ...previous, [modelName]: {
+                ...previous[modelName], tool_mode: value === "default" ? undefined : value as ProviderModelMetadata["tool_mode"],
+              } }))}>
+              <option value="default">跟随 MiniCode 默认</option>
+              <option value="direct">直接工具</option>
+              <option value="code_mode">直接工具与代码编排</option>
+              <option value="code_mode_only">仅代码编排</option>
+            </SelectMenu>
+          </label>
           {effectiveWireApi === "responses" && (
             <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
               <input

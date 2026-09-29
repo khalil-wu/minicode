@@ -20,7 +20,7 @@ _PROMPT_SECTION_CACHE: dict[str, str] = {}
 
 @dataclass(frozen=True)
 class PromptSection:
-    """One named, layered piece of the system prompt.
+    """One named, layered piece of the request instructions.
 
     Named so tests can assert ordering and so cache behavior is auditable:
     stable sections must never depend on workspace or task state.
@@ -192,25 +192,36 @@ class PromptParts:
 
     stable: str
     context: str = ""
+    project_guidelines: str = ""
     conditional_rules: str = ""
 
     def render_system(self) -> str:
         parts = [self.stable, SYSTEM_PROMPT_DYNAMIC_BOUNDARY, self.context]
-        if self.conditional_rules:
-            parts.extend((CONDITIONAL_RULES_BOUNDARY, self.conditional_rules))
         return "\n\n".join(part for part in parts if part.strip())
+
+    def render_user_instructions(self) -> str:
+        instructions = "\n\n".join(
+            part for part in (self.project_guidelines, self.conditional_rules)
+            if part.strip()
+        )
+        return f"# Project instructions\n<INSTRUCTIONS>\n{instructions}\n</INSTRUCTIONS>" if instructions else ""
 
     @classmethod
     def from_sections(cls, sections: list[PromptSection]) -> "PromptParts":
         def joined(layer: PromptLayer) -> str:
             return "\n\n".join(
                 s.content for s in sections
-                if s.layer == layer and s.name != "conditional_rules" and s.content.strip()
+                if s.layer == layer
+                and s.name not in {"project_guidelines", "conditional_rules"}
+                and s.content.strip()
             )
 
         return cls(
             stable=joined("stable"),
             context=joined("context"),
+            project_guidelines="\n\n".join(
+                s.content for s in sections if s.name == "project_guidelines" and s.content.strip()
+            ),
             conditional_rules="\n\n".join(
                 s.content for s in sections if s.name == "conditional_rules" and s.content.strip()
             ),
@@ -314,7 +325,7 @@ def _build_tool_runtime_guidance_uncached(
             "Await tools.name(args); results have content, status, is_error, images, and MCP structured_content. "
             "Check failures before using results. Promise.all/allSettled is appropriate for independent reads; "
             "use await in order for dependent operations. text(value) and image(result.images[0]) choose what reaches the model. "
-            "ALL_TOOLS lists names, descriptions and JSON parameter schemas. Deferred tools still require tool_search first. "
+            "ALL_TOOLS lists names, descriptions and JSON parameter schemas. Deferred tools still require tool_search first, then call them through tool_exec in code_mode_only. "
             "When a cell is running, use tool_wait with its exact cell_id before claiming the work finished. "
             "Unawaited tool calls and timers are discarded when the script finishes; no Node, filesystem or network APIs exist in the isolate. "
             "Use store/load for JSON values in this live session; fresh exec calls have fresh JavaScript globals."
@@ -858,7 +869,7 @@ class PromptBuilderV2:
             if git_status:
                 context_candidates.append(("git_status", git_status))
         # Path-matched rules can change as tools touch files during a turn.
-        # Put them last so the preceding system/context prefix remains reusable.
+        # Keep them last in the user-level project instruction fragment.
         context_candidates.append(("conditional_rules", conditional_rules.strip()))
         for name, content in context_candidates:
             if content:

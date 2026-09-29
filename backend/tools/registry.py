@@ -7,6 +7,7 @@ import json
 import logging
 from collections import Counter
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -537,7 +538,7 @@ class CapabilityRegistry:
         )
         if view is None or not bool(getattr(view, "schema_available", False)):
             return None
-        if require_deferred and (view.exposure != "deferred" or bool(view.direct)):
+        if require_deferred and (view.exposure not in {"deferred", "deferred_model_only"} or bool(view.direct)):
             return None
         schema_for_policy = getattr(tool, "model_schema_for_policy", None)
         tool_schema = (
@@ -616,6 +617,34 @@ class CapabilityRegistry:
             postprocess_tool_schema(dict(v.schema), visible_tool_names=visible_names)
             for v in direct_views
         ]
+        if active_policy.code_mode_only and not active_policy.nested_surface and "tool_exec" in visible_names:
+            from backend.tools.toolsets import CODE_MODE_DIRECT_TOOLS
+
+            nested_schemas = self.get_schemas(
+                permission_checker=permission_checker,
+                permission_context=permission_context,
+                toolset_policy=replace(active_policy, code_mode_only=False, nested_surface=True),
+            )
+            catalog = []
+            for nested in nested_schemas:
+                function = nested.get("function") or {}
+                name = function.get("name")
+                if not name or name in CODE_MODE_DIRECT_TOOLS:
+                    continue
+                parameters = function.get("parameters") or {}
+                required = parameters.get("required") or []
+                optional = [key for key in (parameters.get("properties") or {}) if key not in required]
+                args = ", ".join([*required, *(f"[{key}]" for key in optional[:4])])
+                description = str(function.get("description") or "").partition("\n")[0][:120]
+                catalog.append(f"- {name}({args}): {description}")
+            directory = "\n\nNested tools available through tools.name(args):\n" + "\n".join(catalog)
+            directory += "\nUse ALL_TOOLS to inspect complete schemas before calling unfamiliar tools."
+            for schema in schemas:
+                if schema["function"]["name"] == "tool_exec":
+                    schema["function"]["description"] += directory
+                    if freeform := schema.get("_minicode_freeform"):
+                        freeform["description"] += directory
+                    break
         schemas = canonicalize_tool_schemas(schemas, tool_registry=self)
 
         self._schema_cache[cache_key] = schemas

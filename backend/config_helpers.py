@@ -13,6 +13,7 @@ from backend.atomic_io import (
 from backend.feature_flags import coerce_feature_bool
 from backend.llm.model_catalog import MODEL_CONTEXT_WINDOW_DEFAULT, responses_model_catalog_entry
 from backend.llm.proxy_policy import normalize_provider_proxy_mode
+from backend.llm.provider_contracts import normalize_tool_mode
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import wraps
@@ -127,6 +128,7 @@ class LLMSettings:
     image_size: str = "1024x1024"
     image_quality: str = ""
     thinking_budget: int = 0
+    tool_mode: str = ""
 
 
 @dataclass(frozen=True)
@@ -628,6 +630,8 @@ def _coerce_model_metadata(value: Any) -> dict[str, dict[str, Any]]:
             metadata["model_instructions"] = raw_metadata["model_instructions"].strip()
         if isinstance(raw_metadata.get("parallel_tool_calls"), bool):
             metadata["parallel_tool_calls"] = raw_metadata["parallel_tool_calls"]
+        if tool_mode := normalize_tool_mode(raw_metadata.get("tool_mode")):
+            metadata["tool_mode"] = tool_mode
         if metadata:
             metadata["source"] = "provider"
             result[model_id] = metadata
@@ -716,6 +720,7 @@ def get_provider_model_metadata(
         "native_compaction": declared.get("native_compaction"),
         "model_instructions": declared.get("model_instructions", ""),
         "parallel_tool_calls": declared.get("parallel_tool_calls"),
+        "tool_mode": declared.get("tool_mode", ""),
         "context_window": resolution.tokens,
         "context_window_source": resolution.source,
         "context_window_verified": resolution.verified,
@@ -1854,6 +1859,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
             native_compaction=model_metadata["native_compaction"],
             model_instructions=model_metadata["model_instructions"],
             parallel_tool_calls=model_metadata["parallel_tool_calls"],
+            tool_mode=model_metadata["tool_mode"],
             default_headers=tuple(anthropic["default_headers"]),
             auth_header=bool(anthropic["auth_header"]),
         )
@@ -1904,6 +1910,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
             native_compaction=model_metadata["native_compaction"],
             model_instructions=model_metadata["model_instructions"],
             parallel_tool_calls=model_metadata["parallel_tool_calls"],
+            tool_mode=model_metadata["tool_mode"],
             default_headers=tuple(custom["default_headers"]),
             auth_header=bool(custom["auth_header"]),
             image_model=str(image_config["model"] if image_config else ""),
@@ -1955,6 +1962,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
         native_compaction=model_metadata["native_compaction"],
         model_instructions=model_metadata["model_instructions"],
         parallel_tool_calls=model_metadata["parallel_tool_calls"],
+        tool_mode=model_metadata["tool_mode"],
         default_headers=tuple(openai["default_headers"]),
         auth_header=bool(openai["auth_header"]),
         image_model=str(image_config["model"] if image_config else ""),

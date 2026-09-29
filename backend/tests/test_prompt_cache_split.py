@@ -241,11 +241,13 @@ def test_prompt_builder_keeps_dynamic_turn_context_out_of_stable_prefix(tmp_path
 
     assert "DYNAMIC WORKSPACE SUMMARY" in parts.context
     assert "DYNAMIC SKILL CONTEXT" in parts.context
+    assert "DYNAMIC PROJECT GUIDELINES" in parts.project_guidelines
+    assert "DYNAMIC PROJECT GUIDELINES" not in parts.render_system()
     assert "DYNAMIC TOOL GUIDANCE" not in parts.context
     assert "DYNAMIC_DEFERRED_TOOL" not in parts.context
 
 
-def test_conditional_rules_are_last_in_the_cacheable_system_context(tmp_path: Path) -> None:
+def test_conditional_rules_follow_project_guidelines_in_user_context(tmp_path: Path) -> None:
     state = SimpleNamespace(workspace_context=None, prompt_context={})
     builder = PromptBuilderV2()
     common = dict(
@@ -269,15 +271,20 @@ def test_conditional_rules_are_last_in_the_cacheable_system_context(tmp_path: Pa
     second_system = PromptParts.from_sections(second).render_system()
     first_blocks = AnthropicAdapter._build_system_blocks(first_system)
     second_blocks = AnthropicAdapter._build_system_blocks(second_system)
-    assert first_blocks[:-1] == second_blocks[:-1]
-    assert "cache_control" in first_blocks[-2]
-    assert first_blocks[-1]["text"] == "RULE A"
-    assert second_blocks[-1]["text"] == "RULE B"
+    assert first_blocks == second_blocks
+    assert "RULE A" not in first_system
+    assert "RULE B" not in second_system
+    assert "cache_control" in first_blocks[0]
+    first_user = PromptParts.from_sections(first).render_user_instructions()
+    second_user = PromptParts.from_sections(second).render_user_instructions()
+    assert first_user.index("PROJECT GUIDE") < first_user.index("RULE A")
+    assert second_user.endswith("RULE B\n</INSTRUCTIONS>")
     rules_only = PromptParts(stable="STABLE", conditional_rules="RULE A")
-    assert AnthropicAdapter._build_system_blocks(rules_only.render_system())[-1]["text"] == "RULE A"
+    assert "RULE A" not in rules_only.render_system()
+    assert "RULE A" in rules_only.render_user_instructions()
 
 
-def test_context_builder_keeps_matched_rules_after_other_system_context(tmp_path: Path, monkeypatch) -> None:
+def test_context_builder_sends_project_rules_as_user_instructions(tmp_path: Path, monkeypatch) -> None:
     from backend.agent import instruction_discovery
 
     monkeypatch.setattr(instruction_discovery, "load_matching_project_rules", lambda *args, **kwargs: "MATCHED RULE")
@@ -286,8 +293,16 @@ def test_context_builder_keeps_matched_rules_after_other_system_context(tmp_path
     state = AgentState(user_message="continue", workspace_root=tmp_path)
     parts = context._build_prompt_parts(state, tmp_path)
     assert parts.conditional_rules == "MATCHED RULE"
-    assert "PROJECT GUIDE" in parts.context
-    assert parts.render_system().index("PROJECT GUIDE") < parts.render_system().index("MATCHED RULE")
+    assert parts.project_guidelines == "PROJECT GUIDE"
+    asyncio.run(context.start_turn(state.user_message, state))
+    messages = asyncio.run(context.build(state))
+    assert "PROJECT GUIDE" not in messages[0].content
+    assert "MATCHED RULE" not in messages[0].content
+    instructions = next(message for message in messages if "PROJECT GUIDE" in message.content)
+    assert instructions.role == "user"
+    assert instructions.content.index("PROJECT GUIDE") < instructions.content.index("MATCHED RULE")
+    assert messages.index(instructions) < len(messages) - 1
+    assert messages[-1].content.endswith("continue")
     assert [section["name"] for section in state.prompt_context["prompt_section_summary"]["sections"]][-1] == "conditional_rules"
 
 
@@ -316,7 +331,7 @@ def test_read_only_subagent_keeps_project_instructions_without_parent_memory(tmp
 
     assert "SCOPED WORKSPACE SUMMARY" in parts.context
     assert "TASK SPECIFIC SKILL" in parts.context
-    assert "PARENT PROJECT GUIDELINES" in parts.context
+    assert "PARENT PROJECT GUIDELINES" in parts.project_guidelines
     assert "PARENT CONVERSATION MEMORY" not in parts.context
     assert "PARENT PERSISTENT FACTS" not in parts.context
 

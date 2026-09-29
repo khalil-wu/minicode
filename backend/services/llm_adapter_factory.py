@@ -54,6 +54,7 @@ def build_wire_adapter(
             api_key=settings.api_key,
             model=settings.model,
             model_instructions=settings.model_instructions,
+            tool_mode=settings.tool_mode,
             small_fast_model=settings.small_fast_model,
             base_url=settings.base_url or None,
             max_tokens=max(
@@ -168,6 +169,7 @@ def _openai_compatible_settings(
         native_compaction=metadata["native_compaction"],
         model_instructions=metadata["model_instructions"],
         parallel_tool_calls=metadata["parallel_tool_calls"],
+        tool_mode=metadata["tool_mode"],
         image_model=image_model,
         image_size=image_size,
         image_quality=image_quality,
@@ -309,6 +311,7 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapte
             api_key=spec.api_key,
             model=spec.model_id,
             model_instructions=spec.model_instructions,
+            tool_mode=spec.tool_mode,
             small_fast_model=spec.small_fast_model or spec.model_id,
             base_url=spec.base_url or None,
             max_tokens=max(
@@ -366,6 +369,7 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapte
             native_compaction=spec.native_compaction,
             model_instructions=spec.model_instructions,
             parallel_tool_calls=spec.parallel_tool_calls,
+            tool_mode=spec.tool_mode,
             default_headers=tuple(
                 (str(key), str(value)) for key, value in spec.headers.items()
             ),

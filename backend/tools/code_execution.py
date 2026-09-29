@@ -52,7 +52,7 @@ class ToolExecTool(BaseTool):
         "store/load retain JSON values for later cells in this session; cells have fresh globals. "
         "Use tool_wait when status is running. Await every tool promise; unawaited calls are discarded. "
         "Supports setTimeout, clearTimeout, notify, yield_control and exit. Limits: 10 seconds of JavaScript execution, 128 MiB heap, 8 MiB stored values. "
-        "An optional first line // @exec: {\"yield_time_ms\":1000,\"max_chars\":8000} sets polling/output options for raw-code calls."
+        "An optional first line // @exec: {\"yield_time_ms\":10000,\"max_chars\":8000} sets polling/output options for raw-code calls."
     )
 
     def is_concurrency_safe(self, args=None):
@@ -64,7 +64,7 @@ class ToolExecTool(BaseTool):
             "properties": {"code": {"type": "string", "minLength": 1, "maxLength": 128000,
                                       "description": "JavaScript with awaited tools.name(args) calls; use text/image/audio to return output."},
                 "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 10000,
-                                  "description": "Milliseconds to wait before yielding a running cell_id; default 1000."},
+                                  "description": "Milliseconds to wait before yielding a running cell_id; default 10000."},
                 "max_chars": {"type": "integer", "minimum": 256, "maximum": 50000,
                               "description": "Maximum characters of returned text; default 8000."}},
             "required": ["code"],
@@ -79,7 +79,7 @@ class ToolExecTool(BaseTool):
             args = {**args, **options, "code": args["code"]}
             error = validate_tool_input(self, args)
             if error: return ToolResult(error, is_error=True, status="failed")
-        result = await context.run_context.code_execution.execute(args["code"], context, yield_time_ms=args.get("yield_time_ms", 1000))
+        result = await context.run_context.code_execution.execute(args["code"], context, yield_time_ms=args.get("yield_time_ms", 10000))
         return await _present_result(result, context, args.get("max_chars", 8000))
 
 
@@ -98,7 +98,7 @@ class ToolWaitTool(BaseTool):
         return ToolSchema(self.name, self.description, {"type": "object", "additionalProperties": False,
             "properties": {"cell_id": {"type": "string", "description": "Exact running cell_id returned by tool_exec or tool_wait."},
                 "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 10000,
-                                  "description": "Milliseconds to wait for new output; default 1000."},
+                                  "description": "Milliseconds to wait for new output; default 10000."},
                 "terminate": {"type": "boolean", "description": "Stop this cell and its pending tool calls; default false."},
                 "max_chars": {"type": "integer", "minimum": 256, "maximum": 50000,
                               "description": "Maximum characters of returned text; default 8000."}},
@@ -107,5 +107,5 @@ class ToolWaitTool(BaseTool):
     async def execute(self, args, context: ToolExecutionContext | None = None) -> ToolResult:
         if context is None or context.run_context is None or context.run_context.code_execution is None:
             return ToolResult("tool_wait requires a QueryEngine-owned code runtime.", is_error=True, status="failed")
-        result = await context.run_context.code_execution.wait(args["cell_id"], yield_time_ms=args.get("yield_time_ms", 1000), terminate=args.get("terminate", False))
+        result = await context.run_context.code_execution.wait(args["cell_id"], yield_time_ms=args.get("yield_time_ms", 10000), terminate=args.get("terminate", False))
         return await _present_result(result, context, args.get("max_chars", 8000))

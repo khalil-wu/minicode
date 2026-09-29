@@ -58,7 +58,7 @@ class AskUserTool(BaseTool):
             name=self.name,
             capability="user.ask",
             toolset="core",
-            exposure="core",
+            exposure="direct_model_only",
             required_args=("question",),
         )
 

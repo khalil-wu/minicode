@@ -242,6 +242,29 @@ async def _finalize_tool_result(
     )
     if result.request_digest != request_digest:
         result = replace(result, request_digest=request_digest)
+    if tc.name in {"read_file", "run_command"} and not result.is_error and tool_ctx.run_context is not None:
+        skill_manager = tool_ctx.run_context.skill_manager
+        if skill_manager is not None:
+            from backend.agent.skill_activation import implicit_skill_for_tool
+
+            skill = implicit_skill_for_tool(skill_manager, tc.name, tc.arguments, tool_ctx.workspace_root)
+            if skill is not None and skill.name not in state.active_skills:
+                state.active_skills.append(skill.name)
+                mcp_manager = tool_ctx.run_context.mcp_manager
+                missing = [
+                    server for server in skill.mcp_dependencies
+                    if mcp_manager is None or mcp_manager.get_client(server) is None
+                ]
+                if missing:
+                    names = ", ".join(missing)
+                    result = replace(result, content=result.content + (
+                        f"\n\nMCP dependency unavailable for Skill '{skill.name}': {names}. "
+                        "Do not assume those tools or resources are available."
+                    ))
+                    yield AgentEvent(
+                        type="system_notice",
+                        data={"content": f"Skill '{skill.name}' requires MCP server(s) that are not connected: {names}."},
+                    )
     if not result.is_error:
         _track_created_file_edits(tc, diff, tool_ctx)
     removed_records = _reconcile_removed_created_file_edits(tool_ctx)

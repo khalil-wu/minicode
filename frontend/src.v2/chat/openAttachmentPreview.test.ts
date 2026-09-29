@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import {
   openAttachmentPreview,
+  openArtifactPreview,
   openLocalFilePreview,
 } from "./openAttachmentPreview";
 import { releasePreviewScope, resetPreviewRequestScopesForTests } from "./previewRequestScope";
@@ -19,6 +20,7 @@ vi.mock("../hooks/useWebSocket", () => ({
 }));
 
 vi.mock("../protocol/api", () => ({
+  artifactRawResourceUrlWithToken: () => "http://127.0.0.1:8100/api/artifacts/raw?artifact_id=art-mcp",
   attachmentRawResourceUrlWithToken: () => "",
   fetchAttachmentPreview: (...args: unknown[]) => mocks.fetchAttachmentPreview(...args),
   workspaceRawResourceUrlWithToken: () => "",
@@ -59,6 +61,13 @@ describe("attachment preview request generation", () => {
       panelSlots: [],
       rightPanelOpen: false,
     });
+  });
+
+  it("opens a binary MCP artifact through the native artifact URL", () => {
+    useAppStore.setState({ conversationId: "conv-mcp" });
+    expect(openArtifactPreview({ artifactId: "art-mcp", conversationId: "conv-mcp", kind: "binary", mediaType: "text/plain" })).toBe(true);
+    expect(useAppStore.getState().conversationWorkbenchStates["conv-mcp"]?.previewArtifact?.url)
+      .toContain("/api/artifacts/raw");
   });
 
   afterEach(() => {

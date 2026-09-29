@@ -938,6 +938,7 @@ def toolset_policy_guard_reason(
     try:
         from backend.tools.toolsets import (
             ACTIVE_TOOLSET_POLICY_METADATA_KEY,
+            CODE_MODE_DIRECT_TOOLS,
             ToolsetPolicy,
         )
         from backend.tools.tool_search import _toolset_policy_for_context
@@ -957,6 +958,14 @@ def toolset_policy_guard_reason(
         if policy.is_directly_visible(spec):
             return ""
         if policy.is_available(spec):
+            if policy.nested_surface and spec.exposure in {"direct_model_only", "deferred_model_only"}:
+                return f"Tool '{tc.name}' is available only as a direct model tool."
+            if spec.exposure == "deferred_model_only":
+                return f"Tool '{tc.name}' must be activated with tool_search before a direct model call."
+            if not policy.code_mode_enabled and spec.name == "tool_exec":
+                return "tool_exec is unavailable for a model using direct tool mode."
+            if policy.code_mode_only and spec.name not in CODE_MODE_DIRECT_TOOLS:
+                return f"Tool '{tc.name}' is not a direct model tool in code mode. Use tool_exec, and discover deferred tools with tool_search first."
             return (
                 f"Tool '{tc.name}' is deferred and has not been activated for this turn. "
                 "Use tool_search to activate it, then retry on the next iteration."
@@ -2206,6 +2215,19 @@ def store_result_events(
             artifact_id=result.artifact_id or first["artifact_id"],
             artifact_kind=result.artifact_kind or "file", artifact_media_type=result.artifact_media_type or first["media_type"],
             artifact_bytes=result.artifact_bytes if result.artifact_bytes is not None else first["bytes"])
+    resource_events: list[AgentEvent] = []
+    if tool_ctx is not None:
+        for resource in result.runtime_metadata.get("mcp_resource_artifacts", []):
+            media_type = resource["media_type"]
+            resource_events.append(AgentEvent("artifact.preview", {
+                "artifact_id": resource["artifact_id"],
+                "conversation_id": tool_ctx.conversation_id,
+                "message_id": str(tool_ctx.metadata.get("assistant_message_id") or ""),
+                "kind": "image" if media_type.startswith("image/") else "file",
+                "media_type": media_type,
+                "summary": resource["uri"],
+                "bytes": resource["bytes"],
+            }))
     event = store_result(
         tc,
         result,
@@ -2230,7 +2252,7 @@ def store_result_events(
                 image_events.append(AgentEvent.image_chunk(image_data, media_type))
     # Keep the terminal tool_result last because runtime-span settlement reads
     # the final emitted event as the authoritative tool completion record.
-    return [*audio_events, *image_events, event]
+    return [*audio_events, *resource_events, *image_events, event]
 
 
 def _resolve_workspace_path_for_diff(

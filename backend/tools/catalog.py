@@ -49,14 +49,13 @@ def _registered_tool_spec(tool_registry: ToolRegistry, tool_name: str) -> ToolSp
     # Keep this rule at the canonical registry boundary so a plain BaseTool
     # implementation cannot accidentally flood the provider schema.
     is_mcp = tool_name.startswith("mcp__")
+    declared_exposure = getattr(tool, "tool_exposure", None)
     return ToolSpec(
         name=tool_name,
         toolset="mcp" if is_mcp else "default",
-        exposure=(
-            "core"
-            if getattr(tool, "always_load", False)
-            else "deferred"
-            if is_mcp or getattr(tool, "should_defer", False)
+        exposure=declared_exposure or (
+            "core" if getattr(tool, "always_load", False)
+            else "deferred" if is_mcp or getattr(tool, "should_defer", False)
             else "core"
         ),
         required_args=required,
@@ -72,13 +71,13 @@ def tool_spec_for(tool_name: str, tool_registry: ToolRegistry) -> ToolSpec:
     updated = spec
     if (
         getattr(tool, "should_defer", False)
-        and updated.exposure == "core"
+        and updated.exposure in {"core", "direct_model_only"}
         and not updated.always_load
         and not getattr(tool, "always_load", False)
     ):
         updated = replace(
             updated,
-            exposure="deferred",
+            exposure="deferred_model_only" if updated.exposure == "direct_model_only" else "deferred",
             toolset=updated.toolset if updated.toolset != "core" else "default",
         )
     if getattr(tool, "always_load", False) and not updated.always_load:

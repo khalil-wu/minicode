@@ -168,6 +168,8 @@ class SkillManager:
             "path": str(meta.source_path),
             "source_level": meta.source_level,
             "description": meta.description,
+            "mcp_dependencies": list(meta.mcp_dependencies),
+            "mcp_dependency_specs": [dict(spec) for spec in meta.mcp_dependency_specs],
             "content": full.raw_content or full.content,
             "token_estimate": full.token_estimate,
         }
@@ -185,6 +187,11 @@ class SkillManager:
         if not self._discovered:
             self.discover()
         return self._loader.list_metas()
+
+    def get_meta_by_path(self, source_path: str | Path) -> SkillMeta | None:
+        if not self._discovered:
+            self.discover()
+        return self._loader.get_meta_by_path(source_path)
 
     def readable_roots(self) -> list[Path]:
         """Return the exact discovered Skill directories as read-only roots.

@@ -117,6 +117,9 @@ dependencies:
   tools:
     - type: mcp
       value: openaiDeveloperDocs
+      transport: streamable_http
+      url: https://docs.example.test/mcp
+      oauth_callback_port: 8765
 """,
     )
     (skill_path.parent / "icon.png").write_bytes(b"png")
@@ -131,6 +134,12 @@ dependencies:
     assert meta.short_description == "Official documentation workflow"
     assert meta.brand_color == "#10a37f"
     assert meta.mcp_dependencies == ["openaiDeveloperDocs"]
+    assert meta.mcp_dependency_specs == [{
+        "value": "openaiDeveloperDocs",
+        "transport": "streamable_http",
+        "url": "https://docs.example.test/mcp",
+        "oauth_callback_port": 8765,
+    }]
     assert meta.allow_implicit_invocation is False
     assert meta.default_prompt == "Check official docs."
     assert meta.icon == str(skill_path.parent / "icon.png")

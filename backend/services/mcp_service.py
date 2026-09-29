@@ -293,6 +293,35 @@ async def add_mcp_server(
     return get_mcp_status(manager)
 
 
+async def install_skill_mcp_servers(
+    manager: Any | None,
+    candidates: list[dict[str, Any]],
+    *,
+    config_change_hook: ConfigChangeHook = run_config_change_hook,
+) -> list[str]:
+    """Install approved skill dependencies through the normal global MCP config path."""
+    manager = require_mcp_manager(manager)
+    configs = [_manual_config_from_payload(candidate) for candidate in candidates]
+    for config in configs:
+        _validate_config_for_service(config)
+        try:
+            allowed = manager.allows_user_server_install(config)
+        except (ValueError, RuntimeError) as exc:
+            raise MCPServiceError(f"Could not check MCP policy for '{config.name}': {exc}") from exc
+        if not allowed:
+            raise MCPServiceError(f"MCP server '{config.name}' is blocked by managed policy")
+    async with _MCP_CONFIG_MUTATION_LOCK:
+        current_data = _read_current_config_data()
+        servers = current_data.setdefault("servers", {})
+        for config in configs:
+            if config.name in servers:
+                raise MCPServiceError(f"MCP server '{config.name}' is already configured")
+            servers[config.name] = _server_entry_from_config(config)
+        await _write_config_data(current_data, config_change_hook=config_change_hook)
+    await manager.reload_config()
+    return [config.name for config in configs]
+
+
 async def update_mcp_server(
     manager: Any | None,
     data: dict[str, Any],

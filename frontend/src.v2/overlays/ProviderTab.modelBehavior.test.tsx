@@ -37,19 +37,24 @@ it("edits each model independently and submits native tools and prompt settings 
   fireEvent.click(screen.getByLabelText(/WebSocket 增量传输/));
   fireEvent.click(screen.getByRole("button", { name: "上下文压缩方式，当前：自动选择" }));
   fireEvent.click(screen.getByRole("option", { name: "提供商原生压缩" }));
+  fireEvent.click(screen.getByRole("button", { name: "工具调用模式，当前：跟随 MiniCode 默认" }));
+  fireEvent.click(screen.getByRole("option", { name: "直接工具" }));
   fireEvent.click(screen.getByRole("button", { name: "默认模型，当前：alpha" }));
   fireEvent.click(screen.getByRole("option", { name: "beta" }));
   expect(instructions.value).toBe("Beta guidance");
+  fireEvent.click(screen.getByRole("button", { name: "工具调用模式，当前：跟随 MiniCode 默认" }));
+  fireEvent.click(screen.getByRole("option", { name: "仅代码编排" }));
   expect(screen.getByRole("button", { name: "上下文压缩方式，当前：自动选择" })).toBeTruthy();
   expect((screen.getByLabelText(/原生补丁输入/) as HTMLInputElement).checked).toBe(false);
   expect((screen.getByLabelText(/WebSocket 增量传输/) as HTMLInputElement).checked).toBe(false);
   fireEvent.click(screen.getByRole("button", { name: "默认模型，当前：beta" }));
   fireEvent.click(screen.getByRole("option", { name: "alpha" }));
   expect(instructions.value).toBe("Edited alpha guidance");
+  expect(screen.getByRole("button", { name: "工具调用模式，当前：直接工具" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "保存", exact: true }));
   await waitFor(() => expect(saved).toHaveBeenCalledOnce());
   expect(saved.mock.calls[0][0].openai.model_metadata).toEqual({
-    alpha: { context_window: 128000, model_instructions: "Edited alpha guidance", supports_custom_tools: true, responses_websocket: true, native_compaction: true },
-    beta: { model_instructions: "Beta guidance" },
+    alpha: { context_window: 128000, model_instructions: "Edited alpha guidance", supports_custom_tools: true, responses_websocket: true, native_compaction: true, tool_mode: "direct" },
+    beta: { model_instructions: "Beta guidance", tool_mode: "code_mode_only" },
   });
 });

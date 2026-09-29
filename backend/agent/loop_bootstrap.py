@@ -169,6 +169,7 @@ async def bootstrap_agent_loop(
     external_metadata = metadata if isinstance(metadata, dict) else None
     resolved_metadata = dict(metadata or {})
     run_context = run_context or RunContext()
+    run_context.skill_manager = skill_manager
     lifecycle_runtime = resolve_lifecycle_runtime(
         session_context=session_context,
         run_context=run_context,

@@ -19,6 +19,7 @@ export type ProviderModelMetadata = {
   responses_websocket?: boolean;
   native_compaction?: boolean | null;
   model_instructions?: string;
+  tool_mode?: "direct" | "code_mode" | "code_mode_only";
   source?: string;
 };
 

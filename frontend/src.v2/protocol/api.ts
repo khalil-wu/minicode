@@ -459,6 +459,21 @@ export const fetchAttachmentOriginal = async (
   return response.blob();
 };
 
+export const fetchArtifactOriginal = async (
+  sessionId: string,
+  conversationId: string,
+  artifactId: string,
+): Promise<Blob> => {
+  const url = artifactRawResourceUrlWithToken(artifactId, sessionId, conversationId);
+  const response = await fetchWithTimeout(url, { headers: authHeaders() }, {
+    timeoutMessage: "产物下载超时，请重试。",
+  });
+  if (!response.ok) {
+    throw new ApiError(response.status, errorMessageFromResponseText(await response.text(), response.statusText));
+  }
+  return response.blob();
+};
+
 export type AttachmentUploadPhase = "uploading" | "processing";
 
 export interface UploadAttachmentOptions {

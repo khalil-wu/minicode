@@ -299,7 +299,9 @@ class QueryEngine:
         runner_scope = AsyncExitStack()
         terminal_event: AgentEvent | None = None
         nested_events = None
-        if session.tool_registry.get_tool("tool_exec") is not None or turn_ctx.run_context.extension_actions is not None:
+        if (session.tool_registry.get_tool("tool_exec") is not None
+                or turn_ctx.run_context.extension_actions is not None
+                or turn_ctx.skill_manager is not None):
             from backend.agent.nested_tool_events import NestedToolEvents
             nested_events = NestedToolEvents(journal)
             turn_ctx.run_context.publish_nested_event = nested_events.publish

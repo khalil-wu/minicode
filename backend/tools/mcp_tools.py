@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 from backend.permissions.context import ToolExecutionContext
@@ -49,13 +50,14 @@ class ListMcpResourcesTool(_McpBridgeTool):
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "list_mcp_resources"
         self.description = (
-            "List all available resources from every connected MCP server. "
+            "List one page of resources from connected MCP servers. Pass server and cursor "
+            "to continue a server's listing. "
             "Use this FIRST when you need external context that MCP servers might provide — "
             "database schemas, API docs, live configuration, or any dynamic data source exposed "
             "via MCP. Returns a catalog of resource URIs with names and mime types. "
             "Do NOT use this when the needed information is already in the conversation, can be "
             "found via read_file in the workspace, or is general knowledge from training data. "
-            "After listing, use read_mcp_resource with a specific URI to fetch the actual content."
+            "After listing, use read_mcp_resource with the exact server and URI to fetch content."
         )
         self._mcp_manager = mcp_manager
 
@@ -63,7 +65,13 @@ class ListMcpResourcesTool(_McpBridgeTool):
         return ToolSchema(
             name=self.name,
             description=self.description,
-            parameters={"type": "object", "properties": {}},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Exact MCP server name; omit to list the first page from each connected server."},
+                    "cursor": {"type": "string", "description": "Next cursor returned for this server by a previous listing. Requires server."},
+                },
+            },
         )
 
     async def execute(
@@ -75,13 +83,25 @@ class ListMcpResourcesTool(_McpBridgeTool):
         if not self._mcp_manager:
             return self._error_result("MCP Manager is not initialized or connected.")
 
+        server_name = str(args.get("server") or "").strip()
+        cursor = str(args.get("cursor") or "").strip() or None
+        if cursor and not server_name:
+            return self._error_result("server is required when cursor is provided")
+        clients = self._mcp_manager.iter_connected_clients()
+        if server_name:
+            clients = [(name, client) for name, client in clients if name == server_name]
+            if not clients:
+                return self._error_result(f"MCP server is not connected: {server_name}")
+
         all_resources = []
         failures: list[str] = []
-        for name, client in self._mcp_manager.iter_connected_clients():
+        for name, client in clients:
             try:
-                resources = await client.list_resources()
+                resources, next_cursor = await client.list_resources_page(cursor)
                 for r in resources:
                     all_resources.append(f"- URI: {r.uri} | Name: {r.name} | MimeType: {r.mime_type} | Server: {name}")
+                if next_cursor:
+                    all_resources.append(f"- Next cursor: {next_cursor} | Server: {name}")
             except Exception as e:
                 failures.append(f"{name}: {type(e).__name__}: {e}")
 
@@ -116,15 +136,14 @@ class ReadMcpResourceTool(_McpBridgeTool):
     should_defer = True
     search_hint = "mcp resource read uri external context database schema api docs"
     mcp_capability = "mcp.read"
-    mcp_required_args = ("uri",)
+    mcp_required_args = ("server", "uri")
 
     def __init__(self, mcp_manager: Any | None, artifact_store: Any | None = None) -> None:
         self.name = "read_mcp_resource"
         self.description = (
-            "Read a specific resource from a connected MCP server by its exact URI. "
+            "Read a specific resource from a connected MCP server by its exact server and URI. "
             "Use AFTER list_mcp_resources has shown available resource URIs — do not guess URIs. "
-            "When list_mcp_resources includes a Server value for the resource, pass that exact "
-            "server name to avoid reading a same-URI resource from a different MCP server. "
+            "Pass the Server value returned by list_mcp_resources. "
             "The fetched content is injected into the conversation as contextual data for reasoning. "
             "Large resources are automatically stored as artifacts with a preview returned inline; "
             "use read_artifact if the full content is needed. "
@@ -147,13 +166,10 @@ class ReadMcpResourceTool(_McpBridgeTool):
                     },
                     "server": {
                         "type": "string",
-                        "description": (
-                            "Optional MCP server name from list_mcp_resources. "
-                            "Use this when the listing includes a Server value or when multiple servers may expose the same URI."
-                        )
+                        "description": "Exact MCP server name from list_mcp_resources."
                     }
                 },
-                "required": ["uri"]
+                "required": ["server", "uri"]
             },
         )
 
@@ -166,54 +182,71 @@ class ReadMcpResourceTool(_McpBridgeTool):
         if not self._mcp_manager:
             return self._error_result("MCP Manager is not initialized or connected.")
 
-        uri = args.get("uri")
+        server_name = str(args.get("server") or "").strip()
+        if not server_name:
+            return self._error_result("Missing required argument: server")
+        uri = str(args.get("uri") or "").strip()
         if not uri:
             return self._error_result("Missing required argument: uri")
-        server_name = str(args.get("server") or "").strip()
+        client = self._mcp_manager.get_client(server_name)
+        if client is None:
+            return self._error_result(f"MCP server is not connected: {server_name}")
+        try:
+            contents = await client.read_resource(uri)
+        except Exception as exc:
+            return self._error_result(f"MCP resource read failed on {server_name}: {type(exc).__name__}: {exc}")
 
-        found_content: str | None = None
-        failures: list[str] = []
-        clients = self._mcp_manager.iter_connected_clients()
-        if server_name:
-            clients = [
-                (name, client)
-                for name, client in clients
-                if name == server_name
-            ]
-            if not clients:
-                return self._error_result(f"MCP server is not connected: {server_name}")
+        text_parts: list[str] = []
+        resource_artifacts: list[dict[str, Any]] = []
+        for item in contents:
+            resource_uri = str(item.get("uri") or uri)
+            mime_type = str(item.get("mimeType") or "application/octet-stream")
+            if "text" in item:
+                text_parts.append(str(item.get("text") or ""))
+            elif "blob" in item:
+                if self._artifact_store is None:
+                    return self._error_result("MCP binary resource requires an artifact store")
+                blob = str(item["blob"])
+                body = base64.b64decode(blob, validate=True)
+                artifact_id = self._artifact_store.save(
+                    content=blob,
+                    source=f"mcp:{server_name}:{resource_uri}",
+                    type="mcp_resource",
+                    media_type=mime_type,
+                )
+                resource_artifacts.append({
+                    "artifact_id": artifact_id,
+                    "uri": resource_uri,
+                    "media_type": mime_type,
+                    "bytes": len(body),
+                })
 
-        for _name, client in clients:
-            try:
-                content = await client.read_resource(uri)
-                if content is not None:
-                    found_content = content
-                    break
-            except Exception as exc:
-                failures.append(f"{_name}: {type(exc).__name__}: {exc}")
-
-        if found_content is None:
-            detail = f"Could not find or read MCP resource for URI: {uri}"
-            if failures:
-                detail = f"{detail}. Server failures: {'; '.join(failures)}"
-            return self._error_result(detail)
-
-        if found_content == "":
-            return self._success_result(f"Resource {uri} is empty.")
+        found_content = "\n".join(text_parts)
+        if not found_content and not resource_artifacts:
+            return self._success_result(f"Resource {server_name}/{uri} is empty.")
 
         if self._artifact_store and len(found_content) > 2000:
             artifact_id = self._artifact_store.save(
                 content=found_content,
-                source=f"MCP Resource {uri}",
-                type="mcp_resource",
+                source=f"mcp:{server_name}:{uri}",
+                type="text",
             )
             preview = "\n".join(found_content.split("\n")[:10])
-            return self._success_result(
-                content=f"Resource {uri} read successfully.\nContent saved as Artifact ({len(found_content)} chars).\nPreview:\n{preview}...",
-                artifact_id=artifact_id,
-                artifact_preview=preview
+            found_content = f"Resource {server_name}/{uri} saved as Artifact {artifact_id} ({len(found_content)} chars).\nPreview:\n{preview}..."
+        if resource_artifacts:
+            references = "\n".join(
+                f"Binary resource {item['uri']} ({item['media_type']}) saved as Artifact {item['artifact_id']}."
+                for item in resource_artifacts
             )
-
+            first_artifact = resource_artifacts[0]
+            return ToolResult(content="\n".join(part for part in (found_content, references) if part),
+                              artifact_id=first_artifact["artifact_id"],
+                              artifact_kind=("image" if first_artifact["media_type"].startswith("image/")
+                                             else "file" if first_artifact["media_type"].startswith("audio/") or first_artifact["media_type"] == "application/pdf"
+                                             else "binary"),
+                              artifact_media_type=first_artifact["media_type"],
+                              artifact_bytes=first_artifact["bytes"], status="success",
+                              runtime_metadata={"mcp_resource_artifacts": resource_artifacts})
         return self._success_result(found_content)
 
 
@@ -230,7 +263,8 @@ class ListMcpResourceTemplatesTool(_McpBridgeTool):
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "list_mcp_resource_templates"
         self.description = (
-            "List parameterized MCP resource templates from connected servers. "
+            "List one page of parameterized MCP resource templates from connected servers. "
+            "Pass server and cursor to continue a server's listing. "
             "Use this when list_mcp_resources does not show a concrete URI but the server "
             "may expose URI templates such as docs://{package} or db://schema/{name}. "
             "After listing, fill the template variables and use read_mcp_resource with the concrete URI."
@@ -241,7 +275,13 @@ class ListMcpResourceTemplatesTool(_McpBridgeTool):
         return ToolSchema(
             name=self.name,
             description=self.description,
-            parameters={"type": "object", "properties": {}},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Exact MCP server name; omit to list the first page from each connected server."},
+                    "cursor": {"type": "string", "description": "Next cursor returned for this server by a previous listing. Requires server."},
+                },
+            },
         )
 
     async def execute(
@@ -253,16 +293,29 @@ class ListMcpResourceTemplatesTool(_McpBridgeTool):
         if not self._mcp_manager:
             return self._error_result("MCP Manager is not initialized or connected.")
 
+        server_name = str(args.get("server") or "").strip()
+        cursor = str(args.get("cursor") or "").strip() or None
+        if cursor and not server_name:
+            return self._error_result("server is required when cursor is provided")
+        clients = self._mcp_manager.iter_connected_clients()
+        if server_name:
+            clients = [(name, client) for name, client in clients if name == server_name]
+            if not clients:
+                return self._error_result(f"MCP server is not connected: {server_name}")
+
         lines: list[str] = []
         failures: list[str] = []
-        for server_name, client in self._mcp_manager.iter_connected_clients():
+        for server_name, client in clients:
             try:
-                for template in await client.list_resource_templates():
+                templates, next_cursor = await client.list_resource_templates_page(cursor)
+                for template in templates:
                     description = f" | {template.description}" if template.description else ""
                     lines.append(
                         f"- Server: {server_name} | Template: {template.uri_template} | "
                         f"Name: {template.name} | MimeType: {template.mime_type}{description}"
                     )
+                if next_cursor:
+                    lines.append(f"- Next cursor: {next_cursor} | Server: {server_name}")
             except Exception as exc:
                 failures.append(f"{server_name}: {type(exc).__name__}: {exc}")
 

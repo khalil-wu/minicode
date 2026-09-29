@@ -4,6 +4,7 @@ from backend.services.tool_registry_factory import build_tool_registry as _build
 from backend.artifact.store import ArtifactStore
 from backend.mcp.client import MCPAuthenticationError, MCPClient, MCPServerCapabilities
 from backend.mcp.manager import ServerStatus, classify_mcp_phase
+from backend.mcp.manager import MCP_DEFAULT_TOOL_TIMEOUT_SECONDS
 from backend.tools.mcp_tools import (
     ListMcpResourceNotificationsTool,
     ListMcpResourceTemplatesTool,
@@ -71,6 +72,58 @@ def test_mcp_client_lists_resource_templates_and_tracks_subscriptions() -> None:
         assert unsubscribed is True
         assert client.list_resource_subscriptions() == []
         assert ("resources/subscribe", {"uri": "docs://mini/latest"}) in client.calls
+
+    asyncio.run(run())
+
+
+def test_mcp_client_exposes_one_page_and_preserves_resource_blob() -> None:
+    class _PagedClient(_ResourceClient):
+        async def _request(self, method, params=None):
+            self.calls.append((method, params))
+            if method == "resources/list":
+                if params is None:
+                    return {"resources": [{"uri": "docs://one", "name": "One"}], "nextCursor": "page-2"}
+                return {"resources": [{"uri": "docs://two", "name": "Two"}]}
+            if method == "resources/read":
+                return {"contents": [{"uri": params["uri"], "blob": "AQID", "mimeType": "application/octet-stream"}]}
+            return await super()._request(method, params)
+
+    async def run() -> None:
+        client = _PagedClient()
+        first, cursor = await client.list_resources_page()
+        second, end = await client.list_resources_page(cursor)
+        contents = await client.read_resource("docs://two")
+
+        assert [item.uri for item in first] == ["docs://one"]
+        assert cursor == "page-2"
+        assert [item.uri for item in second] == ["docs://two"]
+        assert end is None
+        assert contents[0]["blob"] == "AQID"
+        assert ("resources/list", {"cursor": "page-2"}) in client.calls
+
+    asyncio.run(run())
+
+
+def test_mcp_client_template_page_and_default_tool_timeout() -> None:
+    class _PagedClient(_ResourceClient):
+        async def _request(self, method, params=None):
+            self.calls.append((method, params))
+            if method == "resources/templates/list":
+                if params is None:
+                    return {"resourceTemplates": [{"uriTemplate": "docs://{name}", "name": "Docs"}], "nextCursor": "more"}
+                return {"resourceTemplates": [{"uriTemplate": "db://{name}", "name": "Database"}]}
+            return await super()._request(method, params)
+
+    async def run() -> None:
+        client = _PagedClient()
+        first, cursor = await client.list_resource_templates_page()
+        second, end = await client.list_resource_templates_page(cursor)
+        assert [item.uri_template for item in first] == ["docs://{name}"]
+        assert cursor == "more"
+        assert [item.uri_template for item in second] == ["db://{name}"]
+        assert end is None
+        assert client._tool_timeout == MCP_DEFAULT_TOOL_TIMEOUT_SECONDS == 300.0
+        assert MCPClient(server_name="override", tool_timeout=45)._tool_timeout == 45
 
     asyncio.run(run())
 

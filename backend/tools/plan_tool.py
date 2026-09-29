@@ -30,6 +30,7 @@ class UpdatePlanTool(BaseTool):
     """Create, replace, or clear the turn's visible task checklist."""
 
     name = "update_plan"
+    tool_exposure = "direct_model_only"
     result_kind = "plan"
     activity_kind = "status"
     display_label = "Update plan"
@@ -151,6 +152,7 @@ class ExitPlanModeTool(BaseTool):
     """Submit a draft plan and wait for user approval before implementation."""
 
     name = "exit_plan_mode"
+    tool_exposure = "direct_model_only"
     result_kind = "plan"
     activity_kind = "status"
     display_label = "Submit plan"
@@ -373,6 +375,7 @@ class EnterPlanModeTool(BaseTool):
     """Request a read-only planning turn."""
 
     name = "enter_plan_mode"
+    tool_exposure = "direct_model_only"
     result_kind = "plan"
     activity_kind = "status"
     display_label = "Enter plan mode"

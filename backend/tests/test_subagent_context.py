@@ -810,6 +810,7 @@ def test_session_toolset_policy_round_trips_as_a_restriction() -> None:
         enabled_toolsets=(),
         enabled_tools=["read_file", "tool_search"],
         disabled_tools=["run_command"],
+        code_mode_only=True,
     )
     restored = ToolsetPolicy.from_mapping(policy.to_mapping())
 

@@ -8,10 +8,11 @@ vi.mock("../hooks/useWebSocket", () => ({
   getWebSocket: () => ({ sessionId: "session-preview-image" }),
 }));
 
-const downloadMocks = vi.hoisted(() => ({ original: vi.fn(), toast: vi.fn() }));
+const downloadMocks = vi.hoisted(() => ({ original: vi.fn(), artifact: vi.fn(), toast: vi.fn() }));
 vi.mock("../protocol/api", async (importOriginal) => ({
   ...await importOriginal<typeof import("../protocol/api")>(),
   fetchAttachmentOriginal: downloadMocks.original,
+  fetchArtifactOriginal: downloadMocks.artifact,
 }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: downloadMocks.toast }));
 
@@ -33,6 +34,7 @@ const resetPreviewState = () => {
     previewOwnerConversationId: null,
   });
   downloadMocks.original.mockReset();
+  downloadMocks.artifact.mockReset();
   downloadMocks.toast.mockReset();
 };
 
@@ -275,6 +277,31 @@ describe("PreviewPanel", () => {
     expect(clicks).toEqual(["report.docx"]);
     await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith("blob:original-document"));
     expect(button.disabled).toBe(false);
+  });
+
+  it("downloads an MCP binary artifact from the artifact endpoint", async () => {
+    const original = new Blob([new Uint8Array([1, 2, 3])], { type: "application/octet-stream" });
+    downloadMocks.artifact.mockResolvedValue(original);
+    vi.stubGlobal("URL", Object.assign(class extends URL {}, {
+      createObjectURL: vi.fn(() => "blob:mcp-resource"),
+      revokeObjectURL: vi.fn(),
+    }));
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    useAppStore.setState({
+      conversationId: "conv-mcp",
+      isConnected: true,
+      previewArtifact: {
+        artifactId: "art-mcp", name: "mcp-resource", content: "",
+        kind: "binary", mediaType: "application/octet-stream", source: "artifact",
+        url: "http://127.0.0.1:8100/api/artifacts/raw?artifact_id=art-mcp",
+      },
+    });
+    render(<PreviewPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "下载原文件" }));
+    await waitFor(() => expect(downloadMocks.artifact).toHaveBeenCalledWith(
+      "session-preview-image", "conv-mcp", "art-mcp",
+    ));
+    expect(screen.getByText("不支持应用内预览。此文件是二进制文件，无法提取可显示文本。")).toBeTruthy();
   });
 
   it("surfaces download errors and leaves the original available for retry", async () => {

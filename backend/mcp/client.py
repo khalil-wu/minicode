@@ -219,6 +219,10 @@ class MCPCallResult:
                     parts.append(f"[resource content: {label}]")
                 else:
                     parts.append("[resource content]")
+            elif block_type == "resource_link":
+                uri = str(item.get("uri") or "").strip()
+                if uri:
+                    parts.append(f"[resource link: {item.get('name') or uri}] {uri}")
             elif block_type:
                 parts.append(f"[{block_type} content]")
         return "\n".join(parts)
@@ -391,7 +395,7 @@ class MCPClient:
             "request_timeout",
         )
         self._tool_timeout = _positive_timeout(
-            tool_timeout if tool_timeout is not None else 100_000.0,
+            tool_timeout if tool_timeout is not None else 300.0,
             "tool_timeout",
         )
         self._token_store = token_store
@@ -769,37 +773,47 @@ class MCPClient:
             raise ValueError(f"Unsupported MCP facade operation: {method}")
         return _bounded_response(self.server_name, method, result)
 
+    async def _page(
+        self, method: str, result_key: str, cursor: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None, int]:
+        if cursor and len(cursor.encode("utf-8")) > _MAX_PAGINATION_CURSOR_BYTES:
+            raise ValueError(f"MCP pagination cursor exceeds {_MAX_PAGINATION_CURSOR_BYTES} bytes")
+        result = await self._request(method, {"cursor": cursor} if cursor else None)
+        items = [item for item in result.get(result_key, []) if isinstance(item, dict)]
+        if len(items) > _MAX_CATALOG_ITEMS:
+            raise ConnectionError(
+                f"MCP server '{self.server_name}' exceeded the catalog limit of "
+                f"{_MAX_CATALOG_ITEMS} items"
+            )
+        next_cursor = str(result.get("nextCursor") or "").strip() or None
+        if next_cursor and len(next_cursor.encode("utf-8")) > _MAX_PAGINATION_CURSOR_BYTES:
+            raise ConnectionError(
+                f"MCP server '{self.server_name}' returned a pagination cursor "
+                f"exceeding {_MAX_PAGINATION_CURSOR_BYTES} bytes"
+            )
+        return items, next_cursor, _payload_size_bytes(result)
+
     async def _paged(self, method: str, result_key: str) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         cursor: str | None = None
         seen: set[str] = set()
         total_bytes = 0
         for _ in range(_MAX_PAGES):
-            params = {"cursor": cursor} if cursor else None
-            result = await self._request(method, params)
-            total_bytes += _payload_size_bytes(result)
+            page_items, next_cursor, page_bytes = await self._page(method, result_key, cursor)
+            total_bytes += page_bytes
             if total_bytes > _MAX_MCP_RESPONSE_BYTES:
                 raise ConnectionError(
                     f"MCP server '{self.server_name}' returned a {method} catalog "
                     f"exceeding the {_MAX_MCP_RESPONSE_BYTES}-byte aggregate limit"
                 )
-            page_items = [
-                item for item in result.get(result_key, []) if isinstance(item, dict)
-            ]
             if len(items) + len(page_items) > _MAX_CATALOG_ITEMS:
                 raise ConnectionError(
                     f"MCP server '{self.server_name}' exceeded the catalog limit of "
                     f"{_MAX_CATALOG_ITEMS} items"
                 )
             items.extend(page_items)
-            next_cursor = str(result.get("nextCursor") or "").strip() or None
             if next_cursor is None:
                 return items
-            if len(next_cursor.encode("utf-8")) > _MAX_PAGINATION_CURSOR_BYTES:
-                raise ConnectionError(
-                    f"MCP server '{self.server_name}' returned a pagination cursor "
-                    f"exceeding {_MAX_PAGINATION_CURSOR_BYTES} bytes"
-                )
             if next_cursor in seen:
                 raise ConnectionError(f"MCP server '{self.server_name}' repeated pagination cursor")
             seen.add(next_cursor)
@@ -945,8 +959,21 @@ class MCPClient:
             raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
         if not self._server_capabilities.resources:
             return []
+        return self._parse_resources(await self._paged("resources/list", "resources"))
+
+    async def list_resources_page(
+        self, cursor: str | None = None,
+    ) -> tuple[list[MCPResourceDef], str | None]:
+        if not self._connected:
+            raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
+        if not self._server_capabilities.resources:
+            return [], None
+        items, next_cursor, _ = await self._page("resources/list", "resources", cursor)
+        return self._parse_resources(items), next_cursor
+
+    def _parse_resources(self, items: list[dict[str, Any]]) -> list[MCPResourceDef]:
         resources: list[MCPResourceDef] = []
-        for item in await self._paged("resources/list", "resources"):
+        for item in items:
             uri = str(item.get("uri") or "")
             if not unicode_identifier_is_safe(uri):
                 raise ConnectionError(
@@ -967,8 +994,23 @@ class MCPClient:
             raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
         if not self._server_capabilities.resources:
             return []
+        return self._parse_resource_templates(
+            await self._paged("resources/templates/list", "resourceTemplates")
+        )
+
+    async def list_resource_templates_page(
+        self, cursor: str | None = None,
+    ) -> tuple[list[MCPResourceTemplateDef], str | None]:
+        if not self._connected:
+            raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
+        if not self._server_capabilities.resources:
+            return [], None
+        items, next_cursor, _ = await self._page("resources/templates/list", "resourceTemplates", cursor)
+        return self._parse_resource_templates(items), next_cursor
+
+    def _parse_resource_templates(self, items: list[dict[str, Any]]) -> list[MCPResourceTemplateDef]:
         templates: list[MCPResourceTemplateDef] = []
-        for item in await self._paged("resources/templates/list", "resourceTemplates"):
+        for item in items:
             uri_template = str(item.get("uriTemplate") or item.get("uri_template") or "")
             if not unicode_identifier_is_safe(uri_template):
                 raise ConnectionError(
@@ -986,19 +1028,11 @@ class MCPClient:
             )
         return templates
 
-    async def read_resource(self, uri: str) -> str:
+    async def read_resource(self, uri: str) -> list[dict[str, Any]]:
         if not self._connected:
             raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
         result = await self._request("resources/read", {"uri": uri})
-        parts: list[str] = []
-        for content in result.get("contents", []):
-            if not isinstance(content, dict):
-                continue
-            if "text" in content:
-                parts.append(str(content.get("text") or ""))
-            elif "blob" in content:
-                parts.append(f"[binary resource: {content.get('mimeType') or 'application/octet-stream'}]")
-        return "\n".join(parts)
+        return [content for content in result.get("contents", []) if isinstance(content, dict)]
 
     async def subscribe_resource(self, uri: str) -> bool:
         if not self._connected or not self._server_capabilities.resources_subscribe:

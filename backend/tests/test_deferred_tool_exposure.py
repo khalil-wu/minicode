@@ -1,5 +1,6 @@
 import asyncio
 import json
+from dataclasses import replace
 
 from backend.agent.state import AgentState
 from backend.agent.tool_execution import run_tool
@@ -11,6 +12,7 @@ from backend.llm.base import ToolCallEvent
 from backend.services.tool_registry_factory import build_tool_registry
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.contracts import ToolSpec
+from backend.tools.code_execution import ToolExecTool, ToolWaitTool
 from backend.tools.registry import ToolRegistry
 from backend.tools.subagent_context import (
     build_agent_execution_profile,
@@ -22,7 +24,7 @@ from backend.tools.tool_search import (
     build_deferred_tools_prompt_block,
 )
 from backend.tools.toolsets import ToolAvailabilityFilter, ToolsetPolicy
-from backend.agent.tool_schema_derivation import effective_toolset_policy
+from backend.agent.tool_schema_derivation import effective_toolset_policy, requested_tool_mode
 
 
 def test_default_registry_defers_optional_tools_behind_bridge(tmp_path) -> None:
@@ -90,6 +92,96 @@ def test_default_schema_budget_never_hides_core_execution_entrypoints(tmp_path) 
         "send_message",
         "web_fetch",
     } <= names
+
+
+def test_code_mode_catalog_lists_nested_tools_without_disabled_capabilities(tmp_path) -> None:
+    registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    policy = ToolsetPolicy(code_mode_only=True, disabled_tools=frozenset({"run_command"}))
+    schemas = registry.get_schemas(toolset_policy=policy)
+    names = {schema["function"]["name"] for schema in schemas}
+    tool_exec = next(schema for schema in schemas if schema["function"]["name"] == "tool_exec")
+
+    assert "read_file" not in names
+    assert "- read_file(" in tool_exec["function"]["description"]
+    assert "- run_command(" not in tool_exec["function"]["description"]
+    assert "- read_file(" in tool_exec["_minicode_freeform"]["description"]
+
+
+def test_model_tool_modes_choose_distinct_direct_surfaces(tmp_path) -> None:
+    registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    observed = {}
+    for mode in ("direct", "code_mode", "code_mode_only"):
+        policy = effective_toolset_policy(
+            base_policy=ToolsetPolicy.default(), tool_registry=registry,
+            disabled_tools=set(), requires_explicit_workspace=False,
+            workspace_root=tmp_path, permission_mode="bypass", tool_mode=mode,
+        )
+        observed[mode] = {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=policy)}
+
+    assert "read_file" in observed["direct"] and "tool_exec" not in observed["direct"]
+    assert {"read_file", "tool_exec"} <= observed["code_mode"]
+    assert "read_file" not in observed["code_mode_only"] and "tool_exec" in observed["code_mode_only"]
+
+
+def test_empty_model_tool_mode_uses_explicit_adapter_setting() -> None:
+    from types import SimpleNamespace
+
+    llm = SimpleNamespace(configured_tool_mode=lambda: "direct")
+    snapshot = SimpleNamespace(
+        model_info=SimpleNamespace(tool_mode=""),
+        config=SimpleNamespace(llm=SimpleNamespace(tool_mode="direct")),
+    )
+    assert requested_tool_mode(default_code_mode_only=True, model_execution=snapshot, llm=llm) == "direct"
+    assert "in code_mode_only, call them through tool_exec" in ToolSearchTool().model_description()
+
+
+def test_per_tool_exposure_separates_direct_nested_and_deferred_surfaces() -> None:
+    class SurfaceTool(BaseTool):
+        read_only = True
+
+        def __init__(self, name, exposure):
+            self.name = name
+            self.exposure = exposure
+
+        def get_spec(self):
+            return ToolSpec(name=self.name, exposure=self.exposure)
+
+        def get_schema(self):
+            return ToolSchema(self.name, self.name, {"type": "object", "properties": {}})
+
+        async def execute(self, args, context=None):
+            return ToolResult(self.name)
+
+    registry = ToolRegistry()
+    for tool in (
+        ToolExecTool(), ToolWaitTool(), ToolSearchTool(registry),
+        SurfaceTool("model_only", "direct_model_only"),
+        SurfaceTool("nested_only", "code_mode_only"),
+        SurfaceTool("deferred_model", "deferred_model_only"),
+    ):
+        registry.register(tool)
+
+    model_policy = ToolsetPolicy(code_mode_only=True)
+    direct = {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=model_policy)}
+    assert "model_only" in direct
+    assert "nested_only" not in direct
+    assert "deferred_model" not in direct
+    nested_policy = replace(model_policy, nested_surface=True, code_mode_only=False)
+    nested = {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=nested_policy)}
+    assert "nested_only" in nested
+    assert "model_only" not in nested
+    assert "deferred_model" not in nested
+    assert "deferred_model" in {entry.name for entry in DeferredToolCatalog(registry, toolset_policy=model_policy).entries()}
+    state = AgentState(user_message="Find the deferred tool")
+    context = ToolExecutionContext(
+        permission=PermissionContext(mode="bypass"),
+        metadata={"_agent_state": state, "_toolset_policy": model_policy},
+        tool_registry=registry,
+    )
+    discovered = asyncio.run(ToolSearchTool(registry).execute({"query": "select:deferred_model"}, context=context))
+    assert json.loads(discovered.content)["activated"] == ["deferred_model"]
+    activated = replace(model_policy, enabled_tools=frozenset({"deferred_model"}))
+    assert "deferred_model" in {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=activated)}
 
 
 def test_schema_postprocess_preserves_common_task_words(tmp_path) -> None:

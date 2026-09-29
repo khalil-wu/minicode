@@ -326,6 +326,24 @@ def _isolated_model_runtime() -> ModelRuntime:
     return runtime
 
 
+def test_registered_model_exposes_its_tool_mode() -> None:
+    runtime = _isolated_model_runtime()
+    runtime.register_provider("tool-mode-provider", {
+        "api": "openai-completions",
+        "api_key": "fixture",
+        "models": [{
+            "id": "mode-model", "base_url": "https://example.invalid/v1",
+            "context_window": 128_000, "max_tokens": 8_192,
+            "tool_mode": "direct",
+        }],
+    })
+
+    model = runtime.get_model("tool-mode-provider", "mode-model")
+    assert model.tool_mode == "direct"
+    assert model.to_public_dict()["tool_mode"] == "direct"
+    assert runtime.resolve_adapter_spec("tool-mode-provider", "mode-model").tool_mode == "direct"
+
+
 def _oauth_runtime(oauth, *, provider_id: str = "modern-oauth") -> tuple[ModelRuntime, _FakeAuthStorage]:
     runtime = _isolated_model_runtime()
     storage = _FakeAuthStorage()

@@ -4,7 +4,10 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 
-ToolExposure = Literal["core", "deferred", "hidden"]
+ToolExposure = Literal[
+    "core", "deferred", "direct_model_only", "deferred_model_only",
+    "code_mode_only", "hidden",
+]
 
 
 @dataclass(frozen=True)

@@ -142,12 +142,14 @@ class AnthropicAdapter(LLMAdapter):
         max_context_window: int | float = 0,
         max_context_window_source: str = "",
         max_context_window_verified: bool = False,
+        tool_mode: str = "",
     ) -> None:
         self._api_key = api_key
         self._provider_id = str(provider_id or "anthropic").strip() or "anthropic"
         self._proxy_mode = normalize_provider_proxy_mode(proxy_mode)
         self._model = model
         self._model_instructions = model_instructions
+        self._tool_mode = tool_mode
         self._small_fast_model = str(small_fast_model or "").strip()
         self._base_url = base_url
         self._max_tokens = max(1, max_tokens or 8_000)
@@ -1584,10 +1586,10 @@ class AnthropicAdapter(LLMAdapter):
     ) -> list[dict[str, Any]]:
         """Split system prompt into cache-stable and dynamic blocks.
 
-        The stable prefix gets a ``cache_control`` breakpoint. When path-matched
-        rules are present, the preceding workspace/skill/memory context gets a
-        second breakpoint so a rule change does not invalidate that prefix.
-        Without conditional rules, request-scoped context remains unmarked.
+        The stable prefix gets a ``cache_control`` breakpoint. Project and
+        path-matched instructions are user-level context; legacy persisted
+        system prompts may still carry a conditional-rules boundary.
+        Request-scoped context remains unmarked by default.
         Tool definitions and the conversation checkpoint are marked separately
         by ``_add_cache_breakpoints``.
         """

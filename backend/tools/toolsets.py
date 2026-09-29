@@ -12,6 +12,9 @@ from backend.tools.contracts import ToolSpec
 # a group by omitting it; a sentinel keeps that meaning without forcing the
 # policy to enumerate groups that plugins may add at runtime.
 ALL_TOOLSETS = "*"
+CODE_MODE_DIRECT_TOOLS = frozenset({
+    "tool_exec", "tool_wait", "tool_search",
+})
 
 # Keep the immutable/session-owned selection separate from the per-iteration
 # effective policy.  The latter includes child-profile attenuation and loaded
@@ -112,6 +115,9 @@ class ToolsetPolicy:
     enabled_tools: frozenset[str] = field(default_factory=frozenset)
     disabled_tools: frozenset[str] = field(default_factory=frozenset)
     include_deferred_directly: bool = False
+    code_mode_only: bool = False
+    code_mode_enabled: bool = True
+    nested_surface: bool = False
     availability_filters: tuple[ToolAvailabilityFilter, ...] = ()
 
     @classmethod
@@ -127,6 +133,8 @@ class ToolsetPolicy:
             "enabled_tools": sorted(self.enabled_tools),
             "disabled_tools": sorted(self.disabled_tools),
             "include_deferred_directly": bool(self.include_deferred_directly),
+            "code_mode_only": bool(self.code_mode_only),
+            "code_mode_enabled": bool(self.code_mode_enabled),
             "availability_filters": [
                 clause.to_mapping() for clause in self.availability_filters
             ],
@@ -145,6 +153,8 @@ class ToolsetPolicy:
             "enabled_tools",
             "disabled_tools",
             "include_deferred_directly",
+            "code_mode_only",
+            "code_mode_enabled",
             "availability_filters",
         }
         unknown_keys = sorted(str(key) for key in raw if key not in allowed_keys)
@@ -196,6 +206,12 @@ class ToolsetPolicy:
                 if "include_deferred_directly" not in raw
                 else _bool(raw["include_deferred_directly"])
             ),
+            code_mode_only=(
+                False if "code_mode_only" not in raw else _bool(raw["code_mode_only"])
+            ),
+            code_mode_enabled=(
+                True if "code_mode_enabled" not in raw else _bool(raw["code_mode_enabled"])
+            ),
             availability_filters=filters,
         )
 
@@ -208,6 +224,9 @@ class ToolsetPolicy:
         enabled_tools: Iterable[str] | None = None,
         disabled_tools: Iterable[str] | None = None,
         include_deferred_directly: bool = False,
+        code_mode_only: bool = False,
+        code_mode_enabled: bool = True,
+        nested_surface: bool = False,
     ) -> "ToolsetPolicy":
         # ``None`` means "use the normal session selection: every group".  An
         # explicitly empty iterable is a real whitelist boundary used by Pi's
@@ -225,6 +244,9 @@ class ToolsetPolicy:
             enabled_tools=_clean_set(enabled_tools),
             disabled_tools=_clean_set(disabled_tools),
             include_deferred_directly=include_deferred_directly,
+            code_mode_only=code_mode_only,
+            code_mode_enabled=code_mode_enabled,
+            nested_surface=nested_surface,
         )
 
     def with_disabled_tools(self, values: Iterable[str]) -> "ToolsetPolicy":
@@ -316,6 +338,9 @@ class ToolsetPolicy:
                 ",".join(sorted(self.enabled_tools)),
                 ",".join(sorted(self.disabled_tools)),
                 "deferred=1" if self.include_deferred_directly else "deferred=0",
+                "code_mode_only=1" if self.code_mode_only else "code_mode_only=0",
+                "code_mode_enabled=1" if self.code_mode_enabled else "code_mode_enabled=0",
+                "nested_surface=1" if self.nested_surface else "nested_surface=0",
                 *(
                     f"availability[{index}]={clause.cache_key()}"
                     for index, clause in enumerate(self.availability_filters)
@@ -368,6 +393,16 @@ class ToolsetPolicy:
     def is_directly_visible(self, spec: ToolSpec) -> bool:
         if not self.is_available(spec):
             return False
+        if self.nested_surface:
+            if spec.exposure in {"direct_model_only", "deferred_model_only"}:
+                return False
+        else:
+            if spec.exposure == "code_mode_only":
+                return False
+            if not self.code_mode_enabled and spec.name == "tool_exec":
+                return False
+            if self.code_mode_only and spec.exposure not in {"direct_model_only", "deferred_model_only"} and spec.name not in CODE_MODE_DIRECT_TOOLS:
+                return False
         if spec.name in self.enabled_tools:
             return True
         if not self.enabled_toolsets:
@@ -376,9 +411,9 @@ class ToolsetPolicy:
         # its full schema must appear on turn 1 without a tool_search round-trip.
         if getattr(spec, "always_load", False):
             return True
-        if spec.exposure == "core":
+        if spec.exposure in {"core", "direct_model_only", "code_mode_only"}:
             return self._toolset_enabled(spec.toolset)
-        if spec.exposure == "deferred":
+        if spec.exposure in {"deferred", "deferred_model_only"}:
             return self.include_deferred_directly and self._toolset_enabled(spec.toolset)
         return False
 

@@ -19,7 +19,7 @@ from backend.agent.runtime import AgentRuntime
 from backend.agent.state import AgentState
 from backend.agent.turn_state import AgentTurnState
 from backend.artifact.store import ArtifactStore
-from backend.config import AgentSettings, PermissionSettings, TokenBudget
+from backend.config import AgentSettings, LLMSettings, PermissionSettings, TokenBudget
 from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
@@ -48,6 +48,8 @@ class ScriptModel(LLMAdapter):
         self.calls = 0
         self.reports = []
         self.inputs = []
+        self.visible_tool_names = []
+        self.visible_tool_descriptions = []
         self.after_first = after_first
         self.terminate = terminate
         self.parent_id = parent_id
@@ -59,6 +61,8 @@ class ScriptModel(LLMAdapter):
     async def stream_chat(self, messages, tools=None, metadata=None):
         self.calls += 1
         self.inputs.append(messages)
+        self.visible_tool_names.append({item["function"]["name"] for item in tools or []})
+        self.visible_tool_descriptions.append({item["function"]["name"]: item["function"]["description"] for item in tools or []})
         if self.calls == 1:
             call = self.first_call or ToolCallEvent(id=self.parent_id, name="tool_exec", arguments={"code": self.code, "yield_time_ms": self.yield_time_ms, "max_chars": self.max_chars})
         else:
@@ -115,13 +119,16 @@ class FixtureTool(BaseTool):
             self.finished.set()
 
 
-async def run_model(tmp_path, model, tools=(), *, mode="bypass", approval=None, limit=0, observe=None, cancel=None, context=None, session=None):
+async def run_model(tmp_path, model, tools=(), *, mode="bypass", approval=None, limit=0, observe=None, cancel=None, context=None, session=None, code_mode_only=False):
     registry = ToolRegistry()
     for tool in [ToolExecTool(), ToolWaitTool(), *tools]: registry.register(tool)
     registry.register(ToolSearchTool(registry))
     budget = TokenBudget(total=96000, response_reserve=4096)
     builder = context or ContextBuilder(llm=model, token_budget=budget, conversation_id="code-conv", workspace_root=tmp_path)
-    settings = AgentSettings(max_iterations=8, max_turn_seconds=20, max_tool_calls=limit, stream_max_attempts=0)
+    settings_args = dict(max_iterations=8, max_turn_seconds=20, max_tool_calls=limit, stream_max_attempts=0)
+    if code_mode_only is not None:
+        settings_args["code_mode_only"] = code_mode_only
+    settings = AgentSettings(**settings_args)
     session = session or AgentSession(llm=model, tool_registry=registry, artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
         permission_checker=PermissionChecker(PermissionSettings(require_confirm=[tool.name for tool in tools if not tool.read_only]), tmp_path),
         agent_settings=settings, token_budget=budget, context_builder=builder, approval_handler=approval)
@@ -169,7 +176,54 @@ def test_composition_filters_full_results_and_keeps_only_parent_calls_in_model_h
     asyncio.run(scenario())
 
 
-def test_independent_reads_overlap_and_deferred_tool_can_be_loaded_inside_one_script(tmp_path):
+def test_code_mode_only_hides_direct_tools_but_executes_them_inside_tool_exec(tmp_path):
+    async def scenario():
+        tool = FixtureTool(count=2)
+        model = ScriptModel('const result = await tools.rows({}); text(result.structured_content.rows.length);')
+        state, _, _, _, _ = await run_model(tmp_path, model, [tool], code_mode_only=None)
+
+        assert state.terminal_status == "completed"
+        assert tool.executions == 1
+        assert "rows" not in model.visible_tool_names[0]
+        assert {"tool_exec", "tool_wait"} <= model.visible_tool_names[0]
+        assert "rows(" in model.visible_tool_descriptions[0]["tool_exec"]
+        assert model.reports[-1]["output"] == ["2"]
+
+    asyncio.run(scenario())
+
+
+def test_code_mode_only_rejects_a_direct_nested_tool_call(tmp_path):
+    async def scenario():
+        direct_tool = FixtureTool(count=2)
+        direct_model = ScriptModel("text('unused');", first_call=ToolCallEvent(id="direct-rows", name="rows", arguments={}))
+        _, _, _, events, _ = await run_model(tmp_path, direct_model, [direct_tool], code_mode_only=True)
+        assert direct_tool.executions == 0
+        assert any(
+            event.type == "tool_result"
+            and event.data.get("id") == "direct-rows"
+            and event.data.get("status") == "blocked"
+            for event in events
+        )
+
+    asyncio.run(scenario())
+
+
+def test_model_tool_mode_overrides_the_agent_default(tmp_path):
+    async def scenario():
+        tool = FixtureTool(count=2)
+        model = ScriptModel("text('unused');", first_call=ToolCallEvent(id="direct-rows", name="rows", arguments={}))
+        model._settings = LLMSettings(api_key="fixture", model="direct-model", tool_mode="direct")
+        state, _, _, _, _ = await run_model(tmp_path, model, [tool], code_mode_only=True)
+        assert state.terminal_status == "completed"
+        assert tool.executions == 1
+        assert "rows" in model.visible_tool_names[0]
+        assert "tool_exec" not in model.visible_tool_names[0]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("code_mode_only", [False, True])
+def test_independent_reads_overlap_and_deferred_tool_can_be_loaded_inside_one_script(tmp_path, code_mode_only):
     async def scenario():
         class ConcurrentRead(FixtureTool):
             async def execute(self, args, context=None):
@@ -181,7 +235,7 @@ def test_independent_reads_overlap_and_deferred_tool_can_be_loaded_inside_one_sc
         left.peer, right.peer = right, left
         right.should_defer = True
         model = ScriptModel('await tools.tool_search({query:"select:right"}); const rows = await Promise.all([tools.left({}), tools.right({})]); text(rows.map(r => r.structured_content.rows.length));')
-        state, _, _, _, _ = await run_model(tmp_path, model, [left, right])
+        state, _, _, _, _ = await run_model(tmp_path, model, [left, right], code_mode_only=code_mode_only)
         assert model.reports[-1].get("output") == ["[2,2]"], model.reports
         assert state.terminal_status == "completed"
         assert left.executions == right.executions == 1
@@ -189,7 +243,8 @@ def test_independent_reads_overlap_and_deferred_tool_can_be_loaded_inside_one_sc
     asyncio.run(scenario())
 
 
-def test_nested_writes_require_the_same_approval_and_bind_to_the_leaf_request(tmp_path):
+@pytest.mark.parametrize("code_mode_only", [False, True])
+def test_nested_writes_require_the_same_approval_and_bind_to_the_leaf_request(tmp_path, code_mode_only):
     async def scenario():
         writer = FixtureTool("write_marker", effect=True)
         approvals = []
@@ -197,7 +252,7 @@ def test_nested_writes_require_the_same_approval_and_bind_to_the_leaf_request(tm
             approvals.append(call_id)
             return {"action": "approve"}
         model = ScriptModel('const r=await tools.write_marker({}); text({status:r.status,error:r.is_error});')
-        state, _, _, events, _ = await run_model(tmp_path, model, [writer], mode="confirm", approval=approve)
+        state, _, _, events, _ = await run_model(tmp_path, model, [writer], mode="confirm", approval=approve, code_mode_only=code_mode_only)
         assert state.terminal_status == "completed", model.reports
         assert writer.executions == 1, (model.reports, approvals)
         assert (tmp_path / "marker.txt").read_text() == "one write"

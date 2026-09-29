@@ -43,6 +43,7 @@ from backend.llm.provider_contracts import (
     ProviderDefinition,
     ProviderRegistrationError,
     UnsupportedProviderCapabilityError,
+    normalize_tool_mode,
 )
 from backend.llm.model_runtime_definitions import (
     DEFAULT_CONTEXT_WINDOW,
@@ -1937,6 +1938,7 @@ class ModelRuntime:
             native_compaction=_declared_optional_boolean(definition.get("native_compaction"), field=f"Model {model_id}: native_compaction"),
             model_instructions=_clean_text(definition.get("model_instructions")),
             parallel_tool_calls=_declared_optional_boolean(definition.get("parallel_tool_calls"), field=f"Model {model_id}: parallel_tool_calls"),
+            tool_mode=normalize_tool_mode(definition.get("tool_mode")),
             input=input_types or ("text",),
             cost=(
                 dict(raw_cost)
@@ -2144,6 +2146,10 @@ class ModelRuntime:
                     parallel_tool_calls=_declared_optional_boolean(
                         override.get("parallel_tool_calls", model.parallel_tool_calls),
                         field=f"Model {model.id}: parallel_tool_calls",
+                    ),
+                    tool_mode=(
+                        normalize_tool_mode(override["tool_mode"])
+                        if "tool_mode" in override else model.tool_mode
                     ),
                     input=input_types,
                     cost=_merge_model_cost(
@@ -2408,6 +2414,9 @@ class ModelRuntime:
                     parallel_tool_calls=_declared_optional_boolean(
                         model.get("parallel_tool_calls", defaults.parallel_tool_calls if defaults is not None else None),
                         field=f"Provider {provider_id}, model {model_id}: parallel_tool_calls",
+                    ),
+                    tool_mode=normalize_tool_mode(
+                        model.get("tool_mode", defaults.tool_mode if defaults is not None else "")
                     ),
                     headers=headers,
                     extra=_extension_model_extra(model),
@@ -3188,6 +3197,7 @@ class ModelRuntime:
             native_compaction=model.native_compaction,
             model_instructions=model.model_instructions,
             parallel_tool_calls=model.parallel_tool_calls,
+            tool_mode=model.tool_mode,
             extension_defined=extension_defined,
         )
 

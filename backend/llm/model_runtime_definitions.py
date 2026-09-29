@@ -31,6 +31,7 @@ from backend.llm.provider_contracts import (
     ProviderRegistrationError,
     TokenNumber,
     UnsupportedProviderCapabilityError,
+    normalize_tool_mode,
 )
 
 
@@ -182,6 +183,7 @@ _MODEL_KNOWN_KEYS = frozenset(
         "native_compaction",
         "model_instructions",
         "parallel_tool_calls",
+        "tool_mode",
     }
 )
 
@@ -1035,6 +1037,7 @@ def _base_model(
         native_compaction=metadata["native_compaction"],
         model_instructions=metadata["model_instructions"],
         parallel_tool_calls=metadata["parallel_tool_calls"],
+        tool_mode=metadata["tool_mode"],
     )
 
 

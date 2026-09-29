@@ -45,7 +45,7 @@ MAX_RECONNECT_BACKOFF_SECONDS = 30.0
 _REMOTE_RECONNECT_TRANSPORTS = frozenset({"sse", "http", "ws"})
 MCP_REQUEST_TIMEOUT_SECONDS = 60.0
 MCP_DEFAULT_STARTUP_TIMEOUT_SECONDS = 30.0
-MCP_DEFAULT_TOOL_TIMEOUT_SECONDS = 100_000.0
+MCP_DEFAULT_TOOL_TIMEOUT_SECONDS = 300.0
 _MCP_SERVER_FIELDS = frozenset({
     "transport", "command", "args", "env", "env_vars", "cwd", "url",
     "headers", "headers_helper", "oauth", "auto_start", "startup_timeout_sec",
@@ -573,6 +573,27 @@ class MCPServerManager:
         return self._apply_mcp_policies(
             sorted(merged.values(), key=_mcp_catalog_sort_key),
             policy=policy,
+        )
+
+    def allows_user_server_install(self, config: MCPServerConfig) -> bool:
+        """Check a proposed global server against the current managed MCP policy."""
+        from backend.config import load_config_layer_stack
+
+        stack = load_config_layer_stack(
+            cwd=self.workspace_root,
+            requirements_path=self._requirements_path,
+            managed_settings_dir=self._managed_settings_dir,
+        )
+        policy = load_mcp_policy(
+            managed_settings_dir=self._managed_settings_dir,
+            config_stack=stack,
+        )
+        enterprise_exists, _ = self._load_enterprise_configs()
+        return (
+            not enterprise_exists
+            and not policy.strict_plugin_only
+            and policy.allows(config)
+            and policy.disabled_reason(config) is None
         )
 
     def _load_enterprise_configs(self) -> tuple[bool, list[MCPServerConfig]]:

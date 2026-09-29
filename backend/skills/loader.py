@@ -39,6 +39,7 @@ class SkillMeta:
     default_prompt: str = ""
     source_path: Path = field(default_factory=lambda: Path("."))
     source_level: str = "builtin"  # managed / plugin / user / workspace / builtin
+    mcp_dependency_specs: list[dict[str, Any]] = field(default_factory=list)
 
     def to_layer1_summary(self) -> str:
         """Render MiniCode's absolute-path catalog line."""
@@ -472,13 +473,16 @@ class SkillLoader:
         policy = agent_meta.get("policy") if isinstance(agent_meta.get("policy"), dict) else {}
         dependencies = agent_meta.get("dependencies") if isinstance(agent_meta.get("dependencies"), dict) else {}
         dependency_tools = dependencies.get("tools") if isinstance(dependencies.get("tools"), list) else []
-        mcp_dependencies = [
-            str(item.get("value") or "").strip()
+        mcp_dependency_specs = [
+            {key: item[key] for key in ("value", "transport", "url", "command", "oauth_callback_port") if key in item}
             for item in dependency_tools
             if isinstance(item, dict)
             and str(item.get("type") or "").strip().lower() == "mcp"
             and str(item.get("value") or "").strip()
         ]
+        mcp_dependencies = list(dict.fromkeys(
+            str(item["value"]).strip() for item in mcp_dependency_specs
+        ))
         disable_model_invocation = self._to_bool(
             fm.get("disable-model-invocation", False),
             default=False,
@@ -495,6 +499,7 @@ class SkillLoader:
             icon_large=self._safe_skill_asset(skill_file.parent, interface.get("icon_large")),
             brand_color=self._metadata_text(interface.get("brand_color")),
             mcp_dependencies=mcp_dependencies,
+            mcp_dependency_specs=mcp_dependency_specs,
             allow_implicit_invocation=(
                 self._to_bool(policy.get("allow_implicit_invocation", True), default=True)
                 and not disable_model_invocation

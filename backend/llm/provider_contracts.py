@@ -11,6 +11,12 @@ from typing import Any, Mapping
 
 
 TokenNumber = int | float
+TOOL_MODES = frozenset({"direct", "code_mode", "code_mode_only"})
+
+
+def normalize_tool_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in TOOL_MODES else ""
 
 
 class ProviderRegistrationError(ValueError):
@@ -29,6 +35,7 @@ _MODEL_KNOWN_KEYS = frozenset(
         "max_context_window", "maxTokens", "max_tokens", "headers",
         "supports_custom_tools", "model_instructions", "responses_websocket", "native_compaction",
         "parallel_tool_calls",
+        "tool_mode",
     }
 )
 
@@ -64,6 +71,7 @@ class ModelDefinition:
     parallel_tool_calls: bool | None = None
     headers: Mapping[str, str] = field(default_factory=dict)
     extra: Mapping[str, Any] = field(default_factory=dict)
+    tool_mode: str = ""
 
     @property
     def model_id(self) -> str:
@@ -91,6 +99,8 @@ class ModelDefinition:
             result["model_instructions"] = self.model_instructions
         if self.parallel_tool_calls is not None:
             result["parallel_tool_calls"] = self.parallel_tool_calls
+        if self.tool_mode:
+            result["tool_mode"] = self.tool_mode
         return result
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -122,6 +132,7 @@ class ModelDefinition:
         result["native_compaction"] = self.native_compaction
         result["model_instructions"] = self.model_instructions
         result["parallel_tool_calls"] = self.parallel_tool_calls
+        result["tool_mode"] = self.tool_mode
         return result
 
 
@@ -181,6 +192,7 @@ class ProviderAdapterSpec:
     native_compaction: bool | None = None
     model_instructions: str = ""
     parallel_tool_calls: bool | None = None
+    tool_mode: str = ""
 
 
 @dataclass(frozen=True)

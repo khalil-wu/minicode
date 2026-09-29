@@ -1145,6 +1145,9 @@ class ContextBuilder:
             messages.append(
                 LLMMessage(role="developer", content=tool_runtime_instructions)
             )
+        project_instructions = prompt_parts.render_user_instructions()
+        if project_instructions:
+            messages.append(LLMMessage(role="user", content=project_instructions))
         supports_images = capabilities_for_adapter(self._llm).vision is not False
         supports_pdf = supports_native_pdf_input(self._llm)
         history = self._get_history_within_budget()

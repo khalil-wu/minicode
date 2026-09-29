@@ -41,6 +41,7 @@ class Model(LLMAdapter):
         self._settings = settings
         self.behavior = behavior
         self.inputs = []
+        self.tool_names = []
         self.closed = False
 
     @property
@@ -57,6 +58,7 @@ class Model(LLMAdapter):
     async def stream_chat(self, messages, tools=None, metadata=None):
         assert not self.closed
         self.inputs.append(messages)
+        self.tool_names.append({item["function"]["name"] for item in tools or []})
         call = await self.behavior(self, messages)
         if call is not None:
             yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=[call], tool_calls_committed=True)
@@ -70,13 +72,17 @@ class Model(LLMAdapter):
 
 
 class ModelCatalog:
+    def __init__(self, tool_modes=None):
+        self.tool_modes = tool_modes or {}
+
     def get_model(self, provider, name):
         if provider != "custom" or name not in {"model-a", "model-b"}:
             return None
         return ModelDefinition(provider=provider, id=name, name=name, api="openai-completions",
             base_url="https://example.invalid/v1", reasoning=True,
             context_window=96000 if name == "model-a" else 32768, max_tokens=4096,
-            reasoning_effort_levels=("low", "high"), default_reasoning_effort="low")
+            reasoning_effort_levels=("low", "high"), default_reasoning_effort="low",
+            tool_mode=self.tool_modes.get(name, ""))
 
     def get_models(self, provider):
         return tuple(self.get_model(provider, name) for name in ("model-a", "model-b"))
@@ -126,13 +132,13 @@ class InspectModel(BaseTool):
         return ToolResult(json.dumps(observation))
 
 
-def setup(tmp_path, monkeypatch, behavior, extra_tools=()):
+def setup(tmp_path, monkeypatch, behavior, extra_tools=(), tool_modes=None):
     settings = LLMSettings(api_key="fixture", provider="custom", base_url="https://example.invalid/v1",
         model="model-a", reasoning_effort="low", reasoning_effort_levels=("low", "high"), model_instructions="INSTRUCTION-model-a")
     config = AppConfig(llm=settings, token_budget=TokenBudget(total=96000, response_reserve=4096),
-        agent=AgentSettings(max_iterations=6, max_turn_seconds=20, stream_max_attempts=0))
+        agent=AgentSettings(max_iterations=6, max_turn_seconds=20, stream_max_attempts=0, code_mode_only=False))
     model = Model(settings, behavior)
-    catalog = ModelCatalog()
+    catalog = ModelCatalog(tool_modes)
     created = []
 
     def build(config, *, provider_override, model_override, model_runtime):
@@ -205,6 +211,29 @@ async def test_live_selection_changes_next_request_and_keeps_issued_tools_bound(
 
 
 @pytest.mark.asyncio
+async def test_selected_model_tool_mode_changes_the_next_provider_surface(tmp_path, monkeypatch):
+    fixture = None
+
+    async def behavior(model, messages):
+        visible = model.tool_names[-1]
+        if model.model_id() == "model-a":
+            assert "tool_exec" in visible and "inspect_model" not in visible
+            assert await fixture.runner.actions["set_model"]({"provider": "custom", "id": "model-b"})
+            return ToolCallEvent(id="from-code-mode", name="tool_exec", arguments={"code": "text('ready');"})
+        assert "inspect_model" in visible and "tool_exec" not in visible
+        return None
+
+    fixture = setup(tmp_path, monkeypatch, behavior, tool_modes={"model-a": "code_mode_only", "model-b": "direct"})
+    fixture.owner.model_execution = replace(
+        fixture.owner.model_execution,
+        model_info=fixture.owner.model_execution.model_runtime.get_model("custom", "model-a"),
+    )
+    await execute(fixture, tmp_path)
+    assert len(fixture.model.inputs) == 1
+    assert [len(model.inputs) for model in fixture.created] == [1]
+
+
+@pytest.mark.asyncio
 async def test_yielded_cell_keeps_its_model_when_later_request_switches(tmp_path, monkeypatch):
     ready = asyncio.Event()
 
@@ -247,7 +276,7 @@ async def test_sdk_tools_receive_supplied_config_without_global_reload(tmp_path,
         return None
 
     settings = LLMSettings(api_key="fixture", provider="custom", model="sdk-model", reasoning_effort="high", reasoning_effort_levels=("low", "high"))
-    config = AppConfig(llm=settings, token_budget=TokenBudget(total=65536, response_reserve=4096), agent=AgentSettings(max_iterations=3))
+    config = AppConfig(llm=settings, token_budget=TokenBudget(total=65536, response_reserve=4096), agent=AgentSettings(max_iterations=3, code_mode_only=False))
     model, inspector = Model(settings, behavior), InspectModel()
     monkeypatch.setattr("backend.sdk.load_config", Mock(side_effect=AssertionError("Supplied config must be used")))
     events = [event async for event in query("Check configured model", config=config, llm=model, tools=[inspector], tool_registry=ToolRegistry(),

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
+import mimetypes
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
@@ -553,7 +554,7 @@ def generated_artifact_native_payload(
     artifact_id: str,
     ws_manager: Any,
 ) -> tuple[bytes, str, str]:
-    """Return one owner-scoped generated image or audio without WebSocket binary bodies."""
+    """Return one owner-scoped binary artifact without WebSocket binary bodies."""
 
     session = ws_manager.get_session(session_id)
     if session is None:
@@ -587,6 +588,13 @@ def generated_artifact_native_payload(
     media_type = str(getattr(meta, "media_type", "") or "").split(";", 1)[0].strip().lower()
     if media_type == "image/jpg":
         media_type = "image/jpeg"
+    if meta.type == "mcp_resource" and media_type:
+        try:
+            body = base64.b64decode(content, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ChatApiServiceError(500, "The stored MCP resource body is invalid.") from exc
+        extension = mimetypes.guess_extension(media_type) or ".bin"
+        return body, media_type, f"mcp-resource-{artifact_id}{extension}"
     if meta.type == "audio" and media_type in AUDIO_MEDIA_EXTENSIONS:
         try:
             body = base64.b64decode(content, validate=True)

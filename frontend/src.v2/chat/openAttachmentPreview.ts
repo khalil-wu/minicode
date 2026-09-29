@@ -240,7 +240,9 @@ export const openArtifactPreview = (target: ArtifactPreviewTarget): boolean => {
   // Native image artifacts are already owner-scoped in ArtifactStore. Fetch
   // them through the signed raw endpoint instead of sending megabytes of
   // base64 through the WebSocket read_artifact response.
-  const nativeUrl = mediaType && supportsNativePreview(mediaType) && sessionId
+  const nativeUrl = mediaType && (
+    supportsNativePreview(mediaType) || target.kind === "binary" || kindForMediaType(mediaType) === "binary"
+  ) && sessionId
     ? artifactRawResourceUrlWithToken(artifactId, sessionId, conversationId)
     : "";
   if (nativeUrl) {

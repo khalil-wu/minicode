@@ -12,13 +12,15 @@ import {
   withPreviewCacheBust,
 } from "../lib/artifact-resource";
 import { selectPreviewSurface } from "../lib/preview-projection";
-import { fetchAttachmentOriginal } from "../protocol/api";
+import { fetchArtifactOriginal, fetchAttachmentOriginal } from "../protocol/api";
 import { pushToast } from "../overlays/ToastContainer";
+import { kindForMediaType } from "../lib/media-types";
 
 interface AttachmentDownloadTarget {
   artifactId: string;
   conversationId: string;
   name: string;
+  source: "attachment" | "artifact";
 }
 
 const PdfAttachmentPreview = lazy(() =>
@@ -79,8 +81,11 @@ const ArtifactView = () => {
 
   const artifactUrl = previewArtifact.url ?? "";
   const name = previewArtifact.name || "生成文件";
-  const downloadTarget = previewArtifact.source === "attachment" && previewArtifact.hasNative && conversationId
-    ? { artifactId: previewArtifact.artifactId, conversationId, name }
+  const downloadTarget = conversationId && (
+    (previewArtifact.source === "attachment" && previewArtifact.hasNative)
+    || (previewArtifact.source === "artifact" && previewArtifact.url)
+  )
+    ? { artifactId: previewArtifact.artifactId, conversationId, name, source: previewArtifact.source as "attachment" | "artifact" }
     : undefined;
   const sizeLabel = formatArtifactSize(previewArtifact.sizeBytes, previewArtifact.content.length);
   const rawContent = String(previewArtifact.content || "");
@@ -88,7 +93,7 @@ const ArtifactView = () => {
   const hasContent = rawContent.trim().length > 0;
   const normalizedMediaType = String(previewArtifact.mediaType || "").split(";", 1)[0].trim().toLowerCase();
   const isBinary = previewArtifact.kind === "binary"
-    || normalizedMediaType === "application/octet-stream";
+    || (Boolean(normalizedMediaType) && kindForMediaType(normalizedMediaType) === "binary");
   const contentIsDiagnostic = Boolean(warning && rawContent.trim() === warning);
   const isOwnerScopedImage = isDisplayableImageMediaType(previewArtifact.mediaType)
     && (previewArtifact.source === "artifact" || previewArtifact.source === "attachment");
@@ -305,7 +310,9 @@ const AttachmentDownloadButton = ({ target }: { target: AttachmentDownloadTarget
     }
     setDownloading(true);
     try {
-      const blob = await fetchAttachmentOriginal(sessionId, target.conversationId, target.artifactId);
+      const blob = await (
+        target.source === "artifact" ? fetchArtifactOriginal : fetchAttachmentOriginal
+      )(sessionId, target.conversationId, target.artifactId);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;

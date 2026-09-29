@@ -8,6 +8,7 @@ agent can call them like built-in tools. Tool names follow:
 
 from __future__ import annotations
 
+import base64
 import logging
 import json
 import re
@@ -47,6 +48,12 @@ def _truncate_mcp_description(description: str) -> str:
     if len(desc) <= MAX_MCP_DESCRIPTION_LENGTH:
         return desc
     return desc[:MAX_MCP_DESCRIPTION_LENGTH] + "… [truncated]"
+
+
+def _model_visible(tool_def: MCPToolDef) -> bool:
+    ui = (tool_def.meta or {}).get("ui")
+    visibility = ui.get("visibility") if isinstance(ui, dict) else None
+    return not isinstance(visibility, list) or "model" in visibility
 
 class MCPToolProxy(BaseTool):
     """Adapter that exposes an MCP tool through the local tool registry.
@@ -293,7 +300,7 @@ class MCPToolProxy(BaseTool):
         images: list[dict[str, str]] = []
         audios: list[dict[str, str]] = []
         resource_text: list[str] = []
-        output_files: list[dict[str, Any]] = []
+        resource_artifacts: list[dict[str, Any]] = []
         for block in result.content:
             if not isinstance(block, dict):
                 continue
@@ -310,6 +317,12 @@ class MCPToolProxy(BaseTool):
                         "data": data,
                     })
                 continue
+            if block_type == "resource_link":
+                uri = str(block.get("uri") or "").strip()
+                name = str(block.get("name") or uri).strip()
+                if uri:
+                    resource_text.append(f"[resource link: {name}] {uri}")
+                continue
             if block_type != "resource":
                 continue
             resource = block.get("resource")
@@ -325,17 +338,18 @@ class MCPToolProxy(BaseTool):
                 continue
             blob = resource.get("blob")
             if isinstance(blob, str) and self._artifact_store is not None:
+                body = base64.b64decode(blob, validate=True)
                 artifact_id = self._artifact_store.save(
                     blob,
                     source=f"mcp:{self._server_name}:{uri}",
                     type="mcp_resource",
-                    media_type=media_type,
+                    media_type=media_type or "application/octet-stream",
                 )
-                output_files.append({
+                resource_artifacts.append({
                     "artifact_id": artifact_id,
                     "uri": uri,
-                    "media_type": media_type,
-                    "encoding": "base64",
+                    "media_type": media_type or "application/octet-stream",
+                    "bytes": len(body),
                 })
 
         content_parts = [part for part in (result.text.strip(), *resource_text) if part]
@@ -343,12 +357,13 @@ class MCPToolProxy(BaseTool):
             structured_text = json.dumps(result.structured_content, ensure_ascii=False)
             if structured_text not in content_parts:
                 content_parts.append(structured_text)
-        if output_files:
+        if resource_artifacts:
             content_parts.extend(
                 f"[resource artifact: {item['uri']} -> {item['artifact_id']}]"
-                for item in output_files
+                for item in resource_artifacts
             )
         typed_content = "\n\n".join(content_parts) or result_text
+        first_artifact = resource_artifacts[0] if resource_artifacts else None
 
         # Result sizing and artifact promotion belong to the shared tool
         # execution path (Pi's 2,000-line/50-KiB contract). Keeping an MCP-only
@@ -358,9 +373,19 @@ class MCPToolProxy(BaseTool):
             content=typed_content,
             images=images,
             audios=audios,
-            output_files=output_files,
+            artifact_id=first_artifact["artifact_id"] if first_artifact else None,
+            artifact_kind=(
+                "image" if first_artifact["media_type"].startswith("image/")
+                else "file" if first_artifact["media_type"].startswith("audio/") or first_artifact["media_type"] == "application/pdf"
+                else "binary"
+            ) if first_artifact else None,
+            artifact_media_type=first_artifact["media_type"] if first_artifact else None,
+            artifact_bytes=first_artifact["bytes"] if first_artifact else None,
             status="success",
-            runtime_metadata={"mcp": {"structuredContent": result.structured_content, "_meta": result.meta}},
+            runtime_metadata={
+                "mcp": {"structuredContent": result.structured_content, "_meta": result.meta},
+                "mcp_resource_artifacts": resource_artifacts,
+            },
         )
 
 
@@ -412,6 +437,8 @@ class MCPToolRegistry:
         registered_names: list[str] = []
 
         for tool_def in tools:
+            if not _model_visible(tool_def):
+                continue
             proxy = MCPToolProxy(
                 server_name=server_name,
                 tool_def=tool_def,

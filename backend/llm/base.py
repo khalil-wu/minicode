@@ -965,6 +965,16 @@ class LLMAdapter(ABC):
             getattr(settings, "model", "") or getattr(self, "_model", "") or ""
         ).strip()
 
+    def configured_tool_mode(self) -> str:
+        settings = getattr(self, "_settings", None)
+        spec = self.provider_adapter_spec
+        return str(
+            getattr(settings, "tool_mode", "")
+            or getattr(spec, "tool_mode", "")
+            or getattr(self, "_tool_mode", "")
+            or ""
+        )
+
     def model_instructions(self) -> str:
         """Return instructions bound to this adapter's selected model."""
         settings = getattr(self, "_settings", None)
