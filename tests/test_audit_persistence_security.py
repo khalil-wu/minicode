@@ -28,6 +28,15 @@ def test_artifact_save_failure_does_not_publish_partial_record(tmp_path, monkeyp
     assert list(tmp_path.glob("*.txt")) == []
 
 
+@pytest.mark.parametrize("preview_lines", [0, -1])
+def test_artifact_save_rejects_unloadable_preview_metadata(tmp_path, preview_lines) -> None:
+    store = ArtifactStore(storage_dir=tmp_path)
+    with pytest.raises(ValueError, match="preview_lines"):
+        store.save("body", source="invalid-preview", preview_lines=preview_lines)
+    assert store.count == 0
+    assert list(tmp_path.glob("*.meta.json")) == []
+
+
 def test_conversation_repository_instances_preserve_interleaved_updates(tmp_path) -> None:
     first = ConversationRepository(base_dir=tmp_path)
     second = ConversationRepository(base_dir=tmp_path)

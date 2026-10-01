@@ -97,6 +97,13 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
 
   useEffect(() => {
     collectMatches(query);
+    const container = containerRef.current;
+    if (!container || !query) return;
+    // The ref owns transcript DOM only, so updating the match label/selection
+    // cannot feed this observer. Streams and history hydration update it.
+    const observer = new MutationObserver(() => collectMatches(query));
+    observer.observe(container, { childList: true, characterData: true, subtree: true });
+    return () => observer.disconnect();
   }, [query, collectMatches]);
 
   const findNext = useCallback(

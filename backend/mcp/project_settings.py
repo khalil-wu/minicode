@@ -7,7 +7,6 @@ from typing import Any
 
 from backend.atomic_io import atomic_write_text, file_mutation_locks
 from backend.config_requirements import normalize_string_array
-from backend.mcp.registry import normalize_name_for_mcp
 from backend.workspace.trust import is_workspace_trusted
 
 
@@ -60,12 +59,11 @@ def project_mcp_server_status(server_name: str, workspace_root: Path) -> str:
     """Resolve rejected, approved/all, then pending project MCP status."""
 
     settings = read_project_local_settings(workspace_root)
-    normalized = normalize_name_for_mcp(server_name)
-    disabled = _normalized_name_set(settings.get("disabled_servers"))
-    if normalized in disabled:
+    disabled = _server_name_set(settings.get("disabled_servers"))
+    if server_name in disabled:
         return PROJECT_MCP_REJECTED
-    enabled = _normalized_name_set(settings.get("enabled_servers"))
-    if normalized in enabled or settings.get("approve_all") is True:
+    enabled = _server_name_set(settings.get("enabled_servers"))
+    if server_name in enabled or settings.get("approve_all") is True:
         return PROJECT_MCP_APPROVED
     return PROJECT_MCP_PENDING
 
@@ -85,8 +83,7 @@ def approve_project_mcp_server(
             source=path,
             reject_empty=True,
         )
-        normalized = normalize_name_for_mcp(server_name)
-        if normalized not in {normalize_name_for_mcp(item) for item in enabled}:
+        if server_name not in enabled:
             enabled.append(server_name)
         settings["enabled_servers"] = enabled
         disabled = [
@@ -97,7 +94,7 @@ def approve_project_mcp_server(
                 source=path,
                 reject_empty=True,
             )
-            if normalize_name_for_mcp(item) != normalized
+            if item != server_name
         ]
         if disabled:
             settings["disabled_servers"] = disabled
@@ -118,8 +115,7 @@ def reject_project_mcp_server(server_name: str, workspace_root: Path) -> Path:
             source=path,
             reject_empty=True,
         )
-        normalized = normalize_name_for_mcp(server_name)
-        if normalized not in {normalize_name_for_mcp(item) for item in disabled}:
+        if server_name not in disabled:
             disabled.append(server_name)
         settings["disabled_servers"] = disabled
         enabled = [
@@ -130,7 +126,7 @@ def reject_project_mcp_server(server_name: str, workspace_root: Path) -> Path:
                 source=path,
                 reject_empty=True,
             )
-            if normalize_name_for_mcp(item) != normalized
+            if item != server_name
         ]
         if enabled:
             settings["enabled_servers"] = enabled
@@ -151,7 +147,7 @@ def _write_project_local_settings(workspace_root: Path, settings: dict[str, Any]
     return path
 
 
-def _normalized_name_set(value: Any) -> set[str]:
+def _server_name_set(value: Any) -> set[str]:
     if value is None:
         return set()
     values = normalize_string_array(
@@ -160,4 +156,4 @@ def _normalized_name_set(value: Any) -> set[str]:
         source="project local settings",
         reject_empty=True,
     )
-    return {normalize_name_for_mcp(item) for item in values}
+    return set(values)

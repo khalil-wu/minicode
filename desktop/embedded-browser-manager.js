@@ -102,10 +102,10 @@ function getBrowserSettings(url = "") {
 
 function setBrowserSettings(payload = {}) {
   loadBrowserSettings();
+  let policy;
   if (payload.downloadPolicy != null) {
-    const policy = String(payload.downloadPolicy);
+    policy = String(payload.downloadPolicy);
     if (!DOWNLOAD_POLICIES.has(policy)) throw new Error("Invalid browser download policy.");
-    browserSettings.downloadPolicy = policy;
   }
   const origin = normalizeOrigin(payload.origin);
   const permission = String(payload.permission || "");
@@ -115,6 +115,9 @@ function setBrowserSettings(payload = {}) {
   if (permission && !origin) throw new Error("Browser site permissions require a valid origin.");
   if (origin && permission) {
     if (!SITE_PERMISSIONS.has(permission)) throw new Error("Unsupported browser site permission.");
+  }
+  if (policy != null) browserSettings.downloadPolicy = policy;
+  if (origin && permission) {
     const current = new Set(Array.isArray(browserSettings.sitePermissions[origin]) ? browserSettings.sitePermissions[origin] : []);
     if (payload.allowed) current.add(permission); else current.delete(permission);
     if (current.size) browserSettings.sitePermissions[origin] = Array.from(current).sort();
@@ -841,6 +844,11 @@ async function create(payload = {}) {
   }
   const navigation = await confirmNavigationUrl(url, conversationId, entry);
   const requestedUrl = navigation.url;
+  // Approval/DNS can yield while another create claims this id or closes it.
+  entry = views.get(requestedId);
+  if (entry && entry.conversationId !== conversationId) {
+    throw new Error("Embedded browser tab id belongs to another conversation.");
+  }
   if (!entry) {
     const mainWindow = getMainWindow();
     if (!mainWindow || mainWindow.isDestroyed()) throw new Error("Main window is unavailable.");
@@ -854,10 +862,6 @@ async function create(payload = {}) {
       },
     });
     const approvedPrivateOrigins = new Set();
-    if (navigation.privateNetworkApproved) {
-      const origin = normalizeOrigin(requestedUrl);
-      if (origin) approvedPrivateOrigins.add(origin);
-    }
     entry = {
       id: requestedId,
       conversationId,
@@ -875,6 +879,9 @@ async function create(payload = {}) {
     configureGuestSession(view.webContents.session);
     attachViewEvents(entry);
     mainWindow.contentView.addChildView(view);
+  }
+  if (navigation.privateNetworkApproved) {
+    entry.approvedPrivateOrigins.add(normalizeOrigin(requestedUrl));
   }
   activate(requestedId, conversationId);
   await entry.view.webContents.loadURL(requestedUrl);

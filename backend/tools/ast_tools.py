@@ -131,7 +131,7 @@ def _python_ast_definitions(content: str, name: str) -> list[int]:
                 lines.append(node.lineno)
         elif isinstance(node, ast.Import):
             for alias in node.names:
-                canonical = alias.asname or alias.name.split(".")[-1]
+                canonical = alias.asname or alias.name.split(".", 1)[0]
                 if canonical == name:
                     lines.append(node.lineno)
         elif isinstance(node, ast.ImportFrom):
@@ -159,7 +159,7 @@ def _find_definitions_in_file(path: Path, name: str) -> list[dict[str, Any]]:
         return []
 
     ext = path.suffix.lower().lstrip(".")
-    if ext == "py":
+    if ext in {"py", "pyi"}:
         line_nums = _python_ast_definitions(content, name)
     else:
         # Try tree-sitter first for non-Python languages
@@ -201,7 +201,7 @@ def _find_references_in_file(path: Path, name: str, include_defs: bool) -> list[
     )
 
     # For non-Python files, try tree-sitter AST-based reference finding
-    if ext != "py":
+    if ext not in {"py", "pyi"}:
         ts_lang = _ts_language_for_ext(ext)
         if ts_lang is not None and _ts_is_available():
             ts_refs = _ts_find_references(content, name, ts_lang)

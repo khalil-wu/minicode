@@ -562,6 +562,79 @@ def test_official_gpt56_chat_side_query_uses_explicit_only_mode() -> None:
     assert client.requests[0]["prompt_cache_options"] == {"mode": "explicit"}
 
 
+def test_glm_chat_compaction_disables_provider_thinking() -> None:
+    client = _ChatHTTPClient(text="compact summary")
+    adapter = OpenAIAdapter(
+        LLMSettings(
+            provider="custom",
+            api_key="test-key",
+            base_url="https://gateway.example/v1",
+            model="glm-5.3",
+            wire_api="chat",
+        ),
+        http_client=client,
+    )
+
+    result = asyncio.run(
+        adapter.side_query(
+            [LLMMessage(role="user", content="summarize")],
+            options=SideQueryOptions(
+                operation="compact",
+                disable_reasoning=True,
+                enable_prompt_cache=False,
+            ),
+        )
+    )
+
+    assert result == "compact summary"
+    assert client.requests[0]["thinking"] == {"type": "disabled"}
+
+
+def test_glm_chat_none_reasoning_setting_disables_main_thinking() -> None:
+    client = _ChatHTTPClient(text=None)
+    adapter = OpenAIAdapter(
+        LLMSettings(
+            provider="custom",
+            api_key="test-key",
+            base_url="https://gateway.example/v1",
+            model="glm-5.3",
+            wire_api="chat",
+            reasoning_effort="none",
+        ),
+        http_client=client,
+    )
+
+    events = asyncio.run(
+        _collect(adapter.stream_chat([LLMMessage(role="user", content="continue")]))
+    )
+
+    assert events[-1].type == StreamEventType.DONE
+    assert client.requests[0]["thinking"] == {"type": "disabled"}
+
+
+def test_chat_request_preserves_configured_output_when_local_estimate_is_too_high() -> None:
+    client = _ChatHTTPClient(text=None)
+    adapter = OpenAIAdapter(
+        LLMSettings(
+            provider="custom",
+            api_key="test-key",
+            base_url="https://gateway.example/v1",
+            model="glm-5.3",
+            wire_api="chat",
+            context_window=24_000,
+            max_tokens=16_384,
+        ),
+        http_client=client,
+    )
+
+    events = asyncio.run(
+        _collect(adapter.stream_chat([LLMMessage(role="user", content="x" * 96_000)]))
+    )
+
+    assert events[-1].type == StreamEventType.DONE
+    assert client.requests[0]["max_tokens"] == 16_384
+
+
 @pytest.mark.parametrize(
     ("provider", "base_url", "model"),
     [
@@ -1978,7 +2051,10 @@ def test_installed_openai_response_stream_union_is_explicitly_classified() -> No
 
     assert installed_event_types <= _OPENAI_RESPONSE_STREAM_EVENT_TYPES
     assert _OPENAI_RESPONSE_STREAM_EVENT_TYPES - installed_event_types == {
-        "response.error"
+        "response.error",
+        "response.metadata",
+        "codex.response.metadata",
+        "responsesapi.websocket_timing",
     }
 
 
@@ -2739,3 +2815,175 @@ def test_response_completed_without_a_response_object_is_refused() -> None:
     assert len(errors) == 1
     assert errors[0].raw["protocol_error_code"] == "terminal_event_without_response"
     assert errors[0].raw["provider_error_type"] == "protocol"
+
+
+def test_codex_metadata_http_retains_first_turn_state_without_payload_projection():
+    adapter, responses = _adapter([
+        SimpleNamespace(type="response.metadata", headers={"X-Codex-Turn-State": ["first-route"]}, metadata={"private": "do-not-project"}),
+        SimpleNamespace(type="codex.response.metadata", headers={"x-codex-turn-state": "not-a-turn-state-event"}),
+        SimpleNamespace(type="responsesapi.websocket_timing", payload="do-not-project"),
+        SimpleNamespace(type="response.metadata", headers={"x-codex-turn-state": "later-route"}),
+        _completed_response(),
+    ])
+
+    async def scenario():
+        try:
+            for turn_id in ("turn-1", "turn-1", "turn-2"):
+                events = await _collect(adapter.stream_chat(
+                    [LLMMessage(role="user", content="hello")],
+                    metadata={"thread_id": "thread", "turn_id": turn_id},
+                ))
+                assert events[-1].type == StreamEventType.DONE
+                assert "do-not-project" not in str(events[-1].raw)
+                assert "first-route" not in str(events[-1].raw)
+        finally:
+            await adapter.aclose()
+
+    asyncio.run(scenario())
+    assert "x-codex-turn-state" not in responses.requests[0]["extra_headers"]
+    assert responses.requests[1]["extra_headers"]["x-codex-turn-state"] == "first-route"
+    assert "x-codex-turn-state" not in responses.requests[2]["extra_headers"]
+
+
+@pytest.mark.parametrize("api", ["chat", "responses"])
+@pytest.mark.parametrize("cancel_task", [False, True])
+def test_provider_stream_close_awaits_nested_http_response_close(api, cancel_task):
+    import httpx
+
+    async def scenario():
+        reading = asyncio.Event()
+
+        class Body(httpx.AsyncByteStream):
+            closed = False
+
+            async def __aiter__(self):
+                event = {"choices": [{"delta": {"content": "abcdefghijklmnopqrstuvwxyz"}, "finish_reason": None}]} if api == "chat" else {
+                    "type": "response.output_text.delta", "item_id": "message", "delta": "abcdefghijklmnopqrstuvwxyz",
+                }
+                yield ("data: " + json.dumps(event) + "\n\n").encode()
+                reading.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                self.closed = True
+
+        body = Body()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, stream=body))) as client:
+            adapter = OpenAIAdapter(LLMSettings(api_key="fixture", model="fixture", wire_api=api), http_client=client)
+            try:
+                stream = adapter.stream_chat([LLMMessage(role="user", content="hello")])
+                if cancel_task:
+                    task = asyncio.create_task(_collect(stream))
+                    await asyncio.wait_for(reading.wait(), 2)
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                else:
+                    event = await anext(stream)
+                    assert event.type == StreamEventType.TEXT_CHUNK
+                    await stream.aclose()
+                # Check before yielding back to the loop; GC cleanup isn't a
+                # substitute for an awaited owner close boundary.
+                assert body.closed
+            finally:
+                await adapter.aclose()
+            assert not client.is_closed
+
+    asyncio.run(scenario())
+
+
+def test_chat_side_error_closes_nested_http_response_before_raising():
+    import httpx
+
+    async def scenario():
+        class Body(httpx.AsyncByteStream):
+            closed = False
+
+            async def __aiter__(self):
+                yield b'data: {"error":{"message":"fixture error"}}\n\n'
+
+            async def aclose(self):
+                self.closed = True
+
+        body = Body()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, stream=body))) as client:
+            adapter = OpenAIAdapter(LLMSettings(api_key="fixture", model="fixture", wire_api="chat"), http_client=client)
+            try:
+                with pytest.raises(RuntimeError, match="fixture error"):
+                    await adapter.simple_chat([LLMMessage(role="user", content="hello")])
+                assert body.closed
+            finally:
+                await adapter.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("entry", ["simple_chat", "side_query", "context_compact"])
+def test_chat_length_cannot_commit_a_successful_compaction_summary(tmp_path, monkeypatch, entry):
+    from backend.agent.context import ContextBuilder
+    from backend.config import AgentSettings, TokenBudget
+
+    monkeypatch.setenv("MINICODE_STATE_ROOT", str(tmp_path / "state"))
+
+    class LimitedClient:
+        requests = 0
+
+        def stream(self, *args, **kwargs):
+            self.requests += 1
+            chunk = {"choices": [{"delta": {"content": "Partial summary: constraints cut off"}, "finish_reason": "length"}]}
+            usage = {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 3}}
+            return _ResponsesHTTPContext(["data: " + json.dumps(chunk), "data: " + json.dumps(usage), "data: [DONE]"])
+
+    async def scenario():
+        client = LimitedClient()
+        adapter = OpenAIAdapter(LLMSettings(api_key="fixture", model="fixture", wire_api="chat"), http_client=client)
+        turn = LLMTurnContext()
+        context = ContextBuilder(llm=adapter, token_budget=TokenBudget(total=32768, response_reserve=4096),
+                                 agent_settings=AgentSettings(compaction_keep_recent_tokens=0), workspace_root=tmp_path)
+        context.bind_llm_turn_context(turn)
+        context.append_user("Keep every user constraint and do not drop progress")
+        context.append_assistant("The first change is committed; validation is still pending")
+        before = context.export_snapshot()
+        try:
+            with pytest.raises(RuntimeError, match="Incomplete Chat completion returned, reason: length"):
+                if entry == "context_compact":
+                    await context.compact()
+                elif entry == "side_query":
+                    await adapter.side_query([LLMMessage(role="user", content="summarize")],
+                                             options=SideQueryOptions(operation="compact", max_tokens=16), turn_context=turn)
+                else:
+                    await adapter.simple_chat([LLMMessage(role="user", content="summarize")], max_tokens=16)
+            assert client.requests == 1
+            assert context.export_snapshot() == before
+            if entry != "simple_chat":
+                assert turn.usage.input_tokens == 7 and turn.usage.output_tokens == 3
+                assert len(turn.side_call_records) == 1
+        finally:
+            await adapter.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("source", ["terminal_only", "already_streamed", "incremental_citation"])
+@pytest.mark.parametrize("terminal_kind", ["response.completed", "response.incomplete"])
+def test_terminal_response_citations_are_preserved_and_deduplicated(source, terminal_kind):
+    citation = SimpleNamespace(type="url_citation", url="https://example.test/source", title="Source", start_index=0, end_index=6)
+    events = []
+    if source != "terminal_only":
+        events.append(SimpleNamespace(type="response.output_text.delta", item_id="message", content_index=0, delta="Answer"))
+    if source == "incremental_citation":
+        events.append(SimpleNamespace(type="response.output_text.annotation.added", item_id="message", annotation=citation))
+    events.append(SimpleNamespace(type=terminal_kind, response=SimpleNamespace(
+        status="completed" if terminal_kind == "response.completed" else "incomplete",
+        incomplete_details=SimpleNamespace(reason="max_output_tokens") if terminal_kind == "response.incomplete" else None,
+        output=[SimpleNamespace(type="message", id="message", role="assistant", content=[
+            SimpleNamespace(type="output_text", text="Answer", annotations=[citation]),
+        ])],
+    )))
+    adapter, _ = _adapter(events)
+
+    collected = asyncio.run(_collect(adapter.stream_chat([LLMMessage(role="user", content="hello")])))
+
+    assert "".join(event.content for event in collected if event.type == StreamEventType.TEXT_CHUNK) == "Answer"
+    assert collected[-1].type == StreamEventType.DONE
+    assert collected[-1].raw["citations"] == [{"url": "https://example.test/source", "title": "Source", "range": [0, 6]}]

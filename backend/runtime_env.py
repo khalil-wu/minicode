@@ -10,6 +10,22 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
+
+def powershell_script(command: str, *, cwd: str | None = None) -> str:
+    """Keep native exit codes and plain UTF-8 output on host and container pwsh."""
+    location = "" if cwd is None else "Set-Location -LiteralPath '" + cwd.replace("'", "''") + "'; "
+    return (
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "if ($null -ne $PSStyle) { $PSStyle.OutputRendering = 'PlainText' }; "
+        "$ProgressPreference = 'SilentlyContinue'; "
+        f"{location}$global:LASTEXITCODE = $null; {command}"
+        "; $minicodeCommandSucceeded = $?; "
+        "$minicodeNativeExit = $global:LASTEXITCODE; "
+        "if ($null -ne $minicodeNativeExit) { exit $minicodeNativeExit } "
+        "elseif ($minicodeCommandSucceeded) { exit 0 } else { exit 1 }"
+    )
+
 # MiniCode treats host-owned launch context as non-inheritable regardless of the
 # user's shell-environment policy. MiniCode's two desktop bearer tokens are the
 # same kind of runtime-owned capability and therefore share this boundary.
@@ -19,6 +35,8 @@ _NON_INHERITABLE_ENV_NAMES = frozenset(
         "OPENAI_IDENTITY_TOKEN_FILE",
         "MINICODE_RUNTIME_TOKEN",
         "MINICODE_EMBEDDED_BROWSER_TOKEN",
+        "MINICODE_EVAL_API_KEY",
+        "MINICODE_AUDIT_API_KEY",
     }
 )
 

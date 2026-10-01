@@ -801,6 +801,20 @@ export const BrowserPanel = () => {
     );
   }
 
+  if (!conversationId) {
+    return (
+      <div className="mc-browser-panel">
+        <div className="mc-browser-surface" data-empty="true">
+          <div className="mc-browser-empty" role="status" tabIndex={0}>
+            <Globe2 size={24} strokeWidth={1.8} aria-hidden="true" />
+            <strong>请先选择会话，再使用浏览器</strong>
+            <span>从侧边栏选择一个会话，或创建新会话后打开浏览器。</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (!browserHydrated) {
     return (
       <div className="mc-browser-panel">

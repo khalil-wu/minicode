@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 from backend.permissions.network import actual_peer_network_error as _network_actual_peer_network_error
+from backend.permissions.network import _ip_is_private_or_local
 from typing import Any
 from urllib.parse import urlparse
 import os
@@ -27,6 +28,54 @@ HOSTILE_FETCH_DOMAINS = {
 
 
 WEB_FETCH_MAX_WIRE_BYTES = 10 * 1024 * 1024
+
+
+class _PublicConnectionBackend:
+    """Verify a direct TCP stream before httpcore can send TLS/HTTP bytes."""
+
+    def __init__(self, backend: Any) -> None:
+        self._backend = backend
+
+    async def connect_tcp(
+        self, host: str, port: int, timeout: float | None = None,
+        local_address: str | None = None, socket_options: Any = None,
+    ) -> Any:
+        stream = await self._backend.connect_tcp(
+            host, port, timeout=timeout, local_address=local_address,
+            socket_options=socket_options,
+        )
+        try:
+            peer_ip = str(stream.get_extra_info("server_addr")[0])
+            private, local = _ip_is_private_or_local(peer_ip)
+            if private or local:
+                raise RuntimeError(
+                    "Network connection resolved to a local or private peer "
+                    f"({peer_ip}); rejected before sending the HTTP request"
+                )
+        except BaseException:
+            # The pool does not own this stream until connect_tcp returns.
+            await stream.aclose()
+            raise
+        return stream
+
+    async def connect_unix_socket(
+        self, path: str, timeout: float | None = None, socket_options: Any = None,
+    ) -> Any:
+        return await self._backend.connect_unix_socket(
+            path, timeout=timeout, socket_options=socket_options,
+        )
+
+    async def sleep(self, seconds: float) -> None:
+        await self._backend.sleep(seconds)
+
+
+def public_http_transport() -> Any:
+    """Keep httpx's URL/Host/TLS contract and bind its direct connection boundary."""
+    import httpx
+
+    transport = httpx.AsyncHTTPTransport(trust_env=False)
+    transport._pool._network_backend = _PublicConnectionBackend(transport._pool._network_backend)
+    return transport
 
 
 def _is_hostile_fetch_url(url: str) -> bool:

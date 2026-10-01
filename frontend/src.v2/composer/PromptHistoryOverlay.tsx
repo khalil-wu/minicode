@@ -34,6 +34,8 @@ export const PromptHistoryOverlay = ({ open, items, placement = "above", onSelec
         event.preventDefault();
         event.stopPropagation();
         onClose();
+      } else if (event.target !== inputRef.current) {
+        return;
       } else if (event.key === "ArrowDown") {
         event.preventDefault();
         setActiveIndex((index) => filtered.length ? (index + 1) % filtered.length : 0);

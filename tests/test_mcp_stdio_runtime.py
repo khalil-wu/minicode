@@ -246,7 +246,9 @@ def test_stdio_resources_and_prompts_work_without_tools_capability(tmp_path: Pat
             inventory = await list_mcp_inventory(manager, config.name)
             assert [resource["uri"] for resource in inventory["resources"]] == ["fixture://guide"]
             assert [prompt["name"] for prompt in inventory["prompts"]] == ["review"]
-            assert await client.read_resource("fixture://guide") == "RESOURCE_MARKER"
+            assert await client.read_resource("fixture://guide") == [
+                {"uri": "fixture://guide", "text": "RESOURCE_MARKER"},
+            ]
             assert await client.get_prompt("review") == "user: PROMPT_MARKER"
         finally:
             assert await manager.stop_server(config.name)
@@ -318,9 +320,11 @@ def test_stdio_actual_transport_exit_still_notifies_manager_after_tool_call(tmp_
             state = manager._servers[config.name]
             assert state.status == ServerStatus.ERROR
             assert state.last_error == "MCP stdio transport closed"
-            assert state.client is None
+            assert state.client is client
             assert not client.connected
             assert manager._reconnect_tasks == {}
+            assert await manager.stop_server(config.name)
+            assert state.client is None
         finally:
             assert await manager.stop_server(config.name)
             if client is not None:

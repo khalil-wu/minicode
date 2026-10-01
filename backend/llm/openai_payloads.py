@@ -4,10 +4,12 @@ from typing import Any
 
 
 def _strip_openai_unsupported_fields(value: Any) -> Any:
-    """Remove Anthropic-only fields before sending OpenAI-compatible payloads."""
+    """Remove Anthropic envelope fields, not schema or metadata property names."""
     if isinstance(value, dict):
         return {
-            key: _strip_openai_unsupported_fields(item)
+            key: item
+            if key in {"parameters", "input_schema", "schema", "metadata", "client_metadata"}
+            else _strip_openai_unsupported_fields(item)
             for key, item in value.items()
             if key != "cache_control"
         }
@@ -17,13 +19,12 @@ def _strip_openai_unsupported_fields(value: Any) -> Any:
 
 
 def _normalize_schema_for_openai(schema: Any) -> Any:
+    """Preserve non-strict schemas, including implicitly open object nodes."""
     if isinstance(schema, list):
         return [_normalize_schema_for_openai(item) for item in schema]
     if not isinstance(schema, dict):
         return schema
     normalized = {key: _normalize_schema_for_openai(value) for key, value in schema.items()}
-    if normalized.get("type") == "object" and "additionalProperties" not in normalized:
-        normalized["additionalProperties"] = False
     return normalized
 
 

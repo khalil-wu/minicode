@@ -89,6 +89,8 @@ class ChatResponse(BaseModel):
     errors: list[str] = Field(default_factory=list)
     iterations: int
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
+    lifecycle_cleanup_receipts: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    lifecycle_cleanup_pending_count: int = 0
 
 
 class UploadResponse(BaseModel):

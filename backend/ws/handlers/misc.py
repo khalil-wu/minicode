@@ -233,16 +233,24 @@ async def handle_agent_resume(session: "WebSocketSession", data: dict[str, Any])
         )
         return True
 
+    try:
+        await session.start_agent_run(
+            resume.user_message,
+            conversation_id=resume.conversation_id,
+            metadata={
+                "resume_from_checkpoint": True,
+                "resume_checkpoint_run_id": resume.run_id,
+                "conversation_id": resume.conversation_id,
+            },
+        )
+    except (RuntimeError, ValueError) as exc:
+        await session.send_payload(
+            scope.apply({"type": "checkpoint.run.resume", "resumed": False, "message": str(exc)}),
+            log_context="checkpoint.run.resume",
+        )
+        await emit_command_error(session, str(data.get("type") or "agent.resume"), exc)
+        return True
     await session.send_payload(scope.apply(resume.to_payload()), log_context="checkpoint.run.resume")
-    await session.start_agent_run(
-        resume.user_message,
-        conversation_id=resume.conversation_id,
-        metadata={
-            "resume_from_checkpoint": True,
-            "resume_checkpoint_run_id": resume.run_id,
-            "conversation_id": resume.conversation_id,
-        },
-    )
     return True
 
 

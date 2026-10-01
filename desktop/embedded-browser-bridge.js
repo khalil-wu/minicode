@@ -96,7 +96,12 @@ async function stop() {
   server = null;
   endpoint = "";
   if (!active) return;
-  await new Promise((resolve) => active.close(() => resolve()));
+  const closed = new Promise((resolve) => active.close(() => resolve()));
+  // Stop owns the live HTTP connections, including requests which have not
+  // finished sending their body. server.close alone waits for those bodies
+  // indefinitely and prevents the desktop quit lifecycle from completing.
+  active.closeAllConnections();
+  await closed;
   if (inFlight.size) await Promise.allSettled(Array.from(inFlight));
 }
 

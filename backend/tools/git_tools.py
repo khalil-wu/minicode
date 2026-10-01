@@ -13,7 +13,6 @@ checkpoint/worktree 相关机制另见对应模块的上游标注。
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -22,13 +21,12 @@ from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.subprocesses import (
     SubprocessOutputLimitError,
     decode_process_output,
-    spawn_exec,
 )
 
 logger = logging.getLogger(__name__)
 _WORKSPACE_ROOT_UNSET = object()
 from backend.tools.git_support import (
-    _communicate_git,
+    _run_git,
     _is_denied_path,
     _raise_if_cancelled,
     _resolve_work_dir,
@@ -96,17 +94,11 @@ class GitStatusTool(BaseTool):
             return self._error_result(f"路径不存在: {path_str} (workspace: {root})")
 
         try:
-            proc = await spawn_exec(
-                "git",
-                "status",
-                "--short",
-                "--branch",
-                cwd=str(work_dir),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            proc = await _run_git(
+                ["git", "status", "--short", "--branch"],
+                root=root, cwd=work_dir, context=context,
             )
-
-            stdout, stderr = await _communicate_git(proc)
+            stdout, stderr = proc.stdout, proc.stderr
 
             if proc.returncode != 0:
                 error_msg = decode_process_output(stderr).strip()
@@ -219,14 +211,8 @@ class GitDiffTool(BaseTool):
                 return denied_or_result
             cmd.extend(f":(exclude,literal){path}" for path in denied_or_result)
 
-            proc = await spawn_exec(
-                *cmd,
-                cwd=str(root),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-            stdout, stderr = await _communicate_git(proc)
+            proc = await _run_git(cmd, root=root, context=context)
+            stdout, stderr = proc.stdout, proc.stderr
 
             if proc.returncode != 0:
                 error_msg = decode_process_output(stderr).strip()
@@ -269,13 +255,8 @@ class GitDiffTool(BaseTool):
             cmd.append("--staged")
         if file_path:
             cmd.extend(["--", f":(literal){file_path}"])
-        proc = await spawn_exec(
-            *cmd,
-            cwd=str(root),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await _communicate_git(proc)
+        proc = await _run_git(cmd, root=root, context=context)
+        stdout, stderr = proc.stdout, proc.stderr
         if proc.returncode != 0:
             error_msg = decode_process_output(stderr).strip()
             if "not a git repository" in error_msg.lower():
@@ -365,14 +346,8 @@ class GitLogTool(BaseTool):
             cmd.extend(["--", file_path])
 
         try:
-            proc = await spawn_exec(
-                *cmd,
-                cwd=str(root),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-            stdout, stderr = await _communicate_git(proc)
+            proc = await _run_git(cmd, root=root, context=context)
+            stdout, stderr = proc.stdout, proc.stderr
 
             if proc.returncode != 0:
                 error_msg = decode_process_output(stderr).strip()
@@ -459,15 +434,11 @@ class GitCommitTool(BaseTool):
         try:
             # 如果需要，先添加所有文件
             if add_all:
-                add_proc = await spawn_exec(
-                    "git",
-                    "add",
-                    "-A",
-                    cwd=str(root),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                add_proc = await _run_git(
+                    ["git", "add", "-A"], root=root, context=context,
+                    write_git_metadata=True,
                 )
-                _add_stdout, add_stderr = await _communicate_git(add_proc)
+                add_stderr = add_proc.stderr
                 if add_proc.returncode != 0:
                     error_msg = decode_process_output(add_stderr).strip()
                     return self._error_result(f"暂存失败，未创建提交: {error_msg}")
@@ -477,17 +448,11 @@ class GitCommitTool(BaseTool):
                 _raise_if_cancelled(context)
 
             # 创建提交
-            proc = await spawn_exec(
-                "git",
-                "commit",
-                "-m",
-                message,
-                cwd=str(root),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            proc = await _run_git(
+                ["git", "commit", "-m", message], root=root, context=context,
+                write_git_metadata=True,
             )
-
-            stdout, stderr = await _communicate_git(proc)
+            stdout, stderr = proc.stdout, proc.stderr
 
             if proc.returncode != 0:
                 error_msg = decode_process_output(stderr).strip()

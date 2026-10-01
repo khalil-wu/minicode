@@ -29,6 +29,7 @@ class ToolSchemaView:
     schema: dict[str, Any] | None
     direct: bool = False
     schema_available: bool = False
+    code_mode_available: bool = False
     catalog_text: str = ""
     search_hint: str = ""
     short_description: str = ""

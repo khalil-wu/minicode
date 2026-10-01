@@ -20,6 +20,8 @@ venv/
 
 # Build
 build/
+!/desktop/build/
+!/desktop/build/installer.nsh
 dist/
 *.egg-info/
 minicode.egg-info/

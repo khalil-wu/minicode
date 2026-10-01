@@ -19,6 +19,7 @@ import time
 from copy import deepcopy
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -170,7 +171,8 @@ class ModelRuntime:
             raise RuntimeError("Model runtime belongs to a retired extension generation")
 
     def retire(self) -> None:
-        self._active = False
+        with self._dynamic_refresh_guard:
+            self._active = False
         self._adapter_models.clear()
         self._adapter_model_source_ids.clear()
         self._on_change = None
@@ -253,11 +255,12 @@ class ModelRuntime:
         return int(self._provider_generations.get(_clean_text(provider_id), 0))
 
     def _bump_provider_generation(self, provider_id: str) -> int:
-        clean_id = _clean_text(provider_id)
-        generation = self._provider_generation(clean_id) + 1
-        self._provider_generations[clean_id] = generation
-        self._dynamic_refresh_epoch += 1
-        return generation
+        with self._dynamic_refresh_guard:
+            clean_id = _clean_text(provider_id)
+            generation = self._provider_generation(clean_id) + 1
+            self._provider_generations[clean_id] = generation
+            self._dynamic_refresh_epoch += 1
+            return generation
 
     def _assert_provider_generation(self, provider_id: str, generation: int) -> None:
         self.assert_active()
@@ -807,7 +810,7 @@ class ModelRuntime:
             current: dict[str, Any] | None,
         ) -> dict[str, Any] | None:
             nonlocal refreshed
-            self.assert_active()
+            self._assert_provider_generation(clean_id, provider_generation)
             if not current or current.get("type") != "oauth":
                 return None
             provider_credentials = _provider_credential_payload(current) or {}
@@ -1484,6 +1487,8 @@ class ModelRuntime:
                     store=_ProviderModelsStore(
                         self._models_store,
                         provider_id,
+                        assert_current=partial(self._assert_provider_generation, provider_id, self._provider_generation(provider_id)),
+                        mutation_lock=self._dynamic_refresh_guard,
                     ),
                     allow_network=(
                         effective_allow_network if auth_error is None else False
@@ -1885,7 +1890,11 @@ class ModelRuntime:
             )
         if float(context_window).is_integer():
             context_window = int(context_window)
-        max_context_window = context_window
+        declared_max_context = _declared_finite_number(
+            definition.get("max_context_window"),
+            field=f"Provider {provider_id}, model {model_id}: max_context_window",
+        )
+        max_context_window = declared_max_context if declared_max_context is not None else context_window
         max_tokens = (
             _finite_number(
                 definition.get("max_tokens"),
@@ -1949,12 +1958,12 @@ class ModelRuntime:
             context_window_source="models_json" if definition.get("context_window") is not None else "fallback",
             context_window_verified=definition.get("context_window") is not None,
             max_context_window=max_context_window,
-            max_context_window_source="models_json" if definition.get("context_window") is not None else "fallback",
-            max_context_window_verified=definition.get("context_window") is not None,
+            max_context_window_source="models_json" if declared_max_context is not None or definition.get("context_window") is not None else "fallback",
+            max_context_window_verified=declared_max_context is not None or definition.get("context_window") is not None,
             max_tokens=max_tokens,
             max_output_tokens=max_tokens,
-            max_output_tokens_source="models_json",
-            max_output_tokens_verified=True,
+            max_output_tokens_source="models_json" if definition.get("max_tokens") is not None else "models_json_default",
+            max_output_tokens_verified=definition.get("max_tokens") is not None,
         )
 
     def _apply_model_config(
@@ -2171,7 +2180,10 @@ class ModelRuntime:
                     ),
                     max_context_window=max_context_window,
                     max_tokens=max_tokens,
-                    max_output_tokens=max_tokens,
+                    max_output_tokens=(
+                        max_tokens if override.get("max_tokens") is not None
+                        else model.max_output_tokens
+                    ),
                     max_output_tokens_source=(
                         "models_json_override"
                         if override.get("max_tokens") is not None
@@ -2572,7 +2584,7 @@ class ModelRuntime:
                 field=f"Provider {provider_id}: auth_header",
             )
             if config_value is not None
-            else False
+            else bool(self._base_providers.get(provider_id, {}).get("auth_header", False))
         )
 
     def _resolve_provider_headers(
@@ -3168,7 +3180,7 @@ class ModelRuntime:
             auth_header=auth_header,
             max_tokens=model.max_tokens,
             model=request_model,
-            small_fast_model=_clean_text(base.get("small_fast_model")) or model.id,
+            small_fast_model=_clean_text(base.get("small_fast_model")),
             reasoning_effort=_clean_text(base.get("reasoning_effort")),
             responses_reasoning_summary=_clean_text(
                 base.get("responses_reasoning_summary")

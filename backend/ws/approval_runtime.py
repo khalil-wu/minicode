@@ -247,13 +247,24 @@ class SessionApprovalRuntimeMixin:
                 return False
             payload["request_digest"] = expected_digest
         self.approval_diff_cache.pop(request_key, None)
-        future = self.turn_wait_state.remove_waiter(request_key)
-        if future and not future.done():
+        # The consumer's finally owns removal. Keeping its settled future here
+        # distinguishes a duplicate decision from a response arriving before
+        # waiter registration, without a second approval registry.
+        state = self.turn_wait_state
+        future = (
+            state.pending_approvals.get(request_key)
+            or state.pending_user_input.get(request_key)
+            or state.pending_elicitations.get(request_key)
+            or state.provider_oauth_pending.get(request_key)
+        )
+        if future is not None:
+            if future.done():
+                return False
             future.set_result(payload)
             return True
         # The request is emitted before the waiter is registered. Keep a valid
         # response that races with that hand-off instead of dropping it.
-        if request_key in self.turn_wait_state.pending_approval_payloads:
+        if request_key in state.pending_approval_payloads and request_key not in state.pending_approval_responses:
             self.turn_wait_state.pending_approval_responses[request_key] = payload
             return True
         return False
@@ -907,6 +918,8 @@ class SessionApprovalRuntimeMixin:
             "input": payload["args"],
             "tool_use_id": request_id,
         }
+        if event.data.get("network_unisolated") is True:
+            request["network_unisolated"] = True
         if request_digest:
             request["request_digest"] = request_digest
         if "diff" in payload:

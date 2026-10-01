@@ -517,6 +517,18 @@ export interface AskUserEvent {
   message_id?: string;
 }
 
+export interface LifecycleCleanupReceipt {
+  resource_kind: string;
+  resource_id: string;
+  reason: string;
+  requested: boolean;
+  acknowledged: boolean;
+  completed: boolean;
+  timed_out: boolean;
+  pending: number;
+  error?: string;
+}
+
 export interface DoneEvent {
   type: "done";
   conversation_id: string;
@@ -525,6 +537,8 @@ export interface DoneEvent {
   reason?: string;
   duration_ms?: number;
   failure_recoverable?: boolean;
+  lifecycle_cleanup_receipts?: Record<string, LifecycleCleanupReceipt>;
+  lifecycle_cleanup_pending_count?: number;
   usage: {
     input_tokens: number;
     output_tokens: number;
@@ -691,6 +705,7 @@ export interface SubagentProgressEvent {
   activity_summary?: string;
   user_visible?: boolean;
   transcript_snapshot?: SubagentTranscriptSnapshot;
+  transcript_delta?: { seq: number; message_id: string; item_id: string; delta: string; offset: number };
 }
 
 export interface SubagentDoneEvent {

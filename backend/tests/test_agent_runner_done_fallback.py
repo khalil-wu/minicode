@@ -205,6 +205,7 @@ class _Session(SessionAgentRunnerMixin):
         self.checkpoint_manager = None
         self.approval_handler = None
         self._conversation_streams = {}
+        self.cleanup_tasks: set[asyncio.Task[Any]] = set()
         self.session_lifecycle = SessionLifecycle(self)
         # Keep this lightweight host on the same explicit ownership seams as
         # WebSocketSession.  Projection locks remain local because several
@@ -244,6 +245,11 @@ class _Session(SessionAgentRunnerMixin):
 
     def refresh_tool_registry_if_mcp_changed(self):
         return False
+
+    def schedule_next_queued_user_message(self, conversation_id):
+        # This host owns no user-message consumer; production WS sessions
+        # resume the durable queue only after the real cleanup claim releases.
+        return None
 
     def _conversation_tool_registry(
         self,
@@ -2030,12 +2036,16 @@ def test_runner_persists_completed_agent_message_as_final_text_block(tmp_path, m
 
 def test_runner_settles_in_progress_item_as_partial_when_done_has_no_completed_item(tmp_path, monkeypatch):
     events: list[dict] = []
+    started = AgentEvent.agent_message_started()
+    started.data["item"]["phase"] = "final_answer"
+    delta = AgentEvent.agent_message_delta("北京今天雷阵雨。")
+    delta.data["phase"] = "final_answer"
     session = _Session(
         tmp_path,
         events,
         runner_events=[
-            AgentEvent.agent_message_started(),
-            AgentEvent.agent_message_delta("北京今天雷阵雨。"),
+            started,
+            delta,
             AgentEvent.done(),
         ],
     )

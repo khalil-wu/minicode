@@ -1604,6 +1604,7 @@ export interface PendingApproval {
   sourceAgent?: string;
   sourceThread?: string;
   sourceTool?: string;
+  networkUnisolated?: boolean;
   expiresAt?: number;
   status?: "pending" | "submitted" | "error";
   error?: string;
@@ -1755,7 +1756,7 @@ export interface CheckpointResumeProjection {
   sessionId?: string;
   conversationId: string;
   workspaceRoot: string;
-  runId?: string;
+  checkpointRunId?: string;
   iteration?: number;
   stoppedReason?: string | null;
   message?: string;

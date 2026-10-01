@@ -47,6 +47,14 @@ async def project_provider_text_chunk(
 
     if provider_phase in {"final_answer", "final"}:
         if not stream_text.saw_final_answer_phase:
+            # Relabeling the same provisional item also relabels its prefix.
+            # A distinct item can still leave the earlier text as commentary.
+            if (
+                not event.item_id
+                or not stream_text.pending_unphased_item_id
+                or event.item_id == stream_text.pending_unphased_item_id
+            ):
+                stream_text.accept_unphased_answer()
             process_event = stream_text.flush_pending_process_text(
                 None,
                 source=None,

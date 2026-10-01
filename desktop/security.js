@@ -269,6 +269,7 @@ function trustedPathCandidates(targetPath) {
 const IPC_CAPABILITIES = new Set([
   "minicode:browser:captureScreenshot", "minicode:browser:click", "minicode:browser:discover",
   "minicode:browser:navigate", "minicode:browser:type", "minicode:deepLink:ack",
+  "minicode:deepLink:pending",
   "minicode:embeddedBrowser:activate", "minicode:embeddedBrowser:clearSiteData", "minicode:embeddedBrowser:close",
   "minicode:embeddedBrowser:closeConversation",
   "minicode:embeddedBrowser:create", "minicode:embeddedBrowser:list", "minicode:embeddedBrowser:navigate",

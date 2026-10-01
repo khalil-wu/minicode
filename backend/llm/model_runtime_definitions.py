@@ -17,7 +17,7 @@ import tempfile
 import threading
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from backend.config import (
     MINICODE_CAPPED_DEFAULT_MAX_TOKENS,
@@ -26,6 +26,7 @@ from backend.config import (
     get_provider_model_metadata,
 )
 from backend.llm.model_selection import REASONING_LEVEL_ORDER
+from backend.llm.provider_models import ProviderModelsStorage
 from backend.llm.provider_contracts import (
     ModelDefinition,
     ProviderRegistrationError,
@@ -96,9 +97,11 @@ class _ProviderAuthContext(_AttributeMapping):
 class _ProviderModelsStore(_AttributeMapping):
     """Provider-scoped view over MiniCode's persistent model catalog."""
 
-    def __init__(self, backend: Any, provider_id: str) -> None:
+    def __init__(self, backend: Any, provider_id: str, *, assert_current: Callable[[], None], mutation_lock: Any) -> None:
         self._backend = backend
         self._provider_id = provider_id
+        self._assert_current = assert_current
+        self._mutation_lock = mutation_lock
         super().__init__(read=self.read, write=self.write, delete=self.delete)
 
     async def read(self) -> dict[str, Any] | None:
@@ -122,7 +125,11 @@ class _ProviderModelsStore(_AttributeMapping):
             raise ProviderRegistrationError(
                 "refresh_models store backend does not expose write"
             )
-        result = write(self._provider_id, dict(entry))
+        self._assert_current()
+        if isinstance(self._backend, ProviderModelsStorage):
+            result = write(self._provider_id, dict(entry), assert_current=self._assert_current, mutation_lock=self._mutation_lock)
+        else:
+            result = write(self._provider_id, dict(entry))
         if inspect.isawaitable(result):
             await result
 
@@ -132,7 +139,11 @@ class _ProviderModelsStore(_AttributeMapping):
             raise ProviderRegistrationError(
                 "refresh_models store backend does not expose delete"
             )
-        result = delete(self._provider_id)
+        self._assert_current()
+        if isinstance(self._backend, ProviderModelsStorage):
+            result = delete(self._provider_id, assert_current=self._assert_current, mutation_lock=self._mutation_lock)
+        else:
+            result = delete(self._provider_id)
         if inspect.isawaitable(result):
             await result
 
@@ -1075,6 +1086,8 @@ def _load_base_providers(
             "api_key": str(settings.get("api_key") or ""),
             "base_url": _clean_text(settings.get("base_url")),
             "api": api,
+            "headers": dict(settings.get("default_headers") or ()),
+            "auth_header": bool(settings.get("auth_header", False)),
             "proxy_mode": _clean_text(settings.get("proxy_mode")) or "inherit",
             "models": tuple(
                 _base_model(

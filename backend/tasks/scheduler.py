@@ -425,7 +425,7 @@ class TaskScheduler:
             if run.task_id:
                 self._runs[run.id] = run
 
-    def _save(self) -> None:
+    def _save(self, *, workspace_root: str | None = None) -> None:
         ordered_runs = sorted(
             self._runs.values(),
             key=lambda run: (run.started_at or run.scheduled_at, run.id),
@@ -444,6 +444,23 @@ class TaskScheduler:
         for run in history:
             run.workspace_root = _normalize_workspace_root(run.workspace_root)
             runs_by_workspace.setdefault(run.workspace_root, []).append(run)
+
+        if workspace_root is not None:
+            # A claim and its cursor have one commit point: their own project
+            # file. Registry discovery and other projects cannot undo it.
+            root = _normalize_workspace_root(workspace_root)
+            self._write_state_file(
+                _project_schedule_file(root) if root else SCHEDULE_FILE,
+                tasks_by_workspace.get(root, []),
+                runs_by_workspace.get(root, []),
+            )
+            retained_ids = {run.id for run in runs_by_workspace.get(root, [])}
+            self._runs = {
+                run_id: run for run_id, run in self._runs.items()
+                if run.workspace_root != root or run_id in retained_ids
+            }
+            self._notify_changed()
+            return
 
         # Keep only unbound legacy/embedded tasks in the process-level file.
         self._write_state_file(
@@ -673,7 +690,7 @@ class TaskScheduler:
         """Persist the new conversation before its model turn can be interrupted."""
         run = self._runs[run_id]
         run.conversation_id = conversation_id
-        self._save()
+        self._save(workspace_root=run.workspace_root)
 
     def cancel_run(self, run_id: str, *, workspace_root: str | None = None) -> bool:
         active = self._run_tasks.get(run_id)
@@ -687,7 +704,7 @@ class TaskScheduler:
         run.cleanup_reason = "cancel_requested"
         run.cleanup_requested_at = run.finished_at
         run.cleanup_completed_at = None
-        self._save()
+        self._save(workspace_root=run.workspace_root)
         return True
 
     async def destroy_for_conversation(self, conversation_id: str) -> int:
@@ -929,7 +946,7 @@ class TaskScheduler:
             # The worker already exists but is gated.  Once this commit
             # succeeds, a crash leaves a replayable pending run; before it
             # succeeds, the durable schedule cursor remains unconsumed.
-            self._save()
+            self._save(workspace_root=task.workspace_root)
         except Exception:
             (
                 task.last_run_at,
@@ -951,7 +968,7 @@ class TaskScheduler:
             run.status = "running"
             run.started_at = datetime.now(UTC).isoformat()
             task.last_run_status = "running"
-            self._save()
+            self._save(workspace_root=task.workspace_root)
             if self._on_fire is None:
                 raise RuntimeError("Scheduled task runner is not configured")
             result = await self._invoke_callback(task, run)
@@ -999,7 +1016,7 @@ class TaskScheduler:
         task.last_error = run.error or None
         self._run_tasks.pop(run.id, None)
         try:
-            self._save()
+            self._save(workspace_root=task.workspace_root)
         except OSError:
             logger.error("Failed to persist terminal state for scheduled run %s", run.id, exc_info=True)
 

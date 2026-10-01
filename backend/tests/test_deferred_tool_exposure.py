@@ -132,7 +132,7 @@ def test_empty_model_tool_mode_uses_explicit_adapter_setting() -> None:
         config=SimpleNamespace(llm=SimpleNamespace(tool_mode="direct")),
     )
     assert requested_tool_mode(default_code_mode_only=True, model_execution=snapshot, llm=llm) == "direct"
-    assert "in code_mode_only, call them through tool_exec" in ToolSearchTool().model_description()
+    assert "in code-only mode, call them through tool_exec" in ToolSearchTool().model_description()
 
 
 def test_per_tool_exposure_separates_direct_nested_and_deferred_surfaces() -> None:
@@ -640,3 +640,56 @@ def test_registry_rejects_a_selection_naming_unknown_tools_or_toolsets(tmp_path)
             disabled_toolsets=["not-installed"], disabled_tools=["not_installed"]
         )
     )
+
+
+def test_runtime_review_same_object_replacement_refreshes_only_visible_schemas():
+    from backend.tools.base import BaseTool, ToolSchema
+    from backend.tools.registry import ToolRegistry
+    from backend.tools.toolsets import ToolsetPolicy
+
+    class RevisedDirectTool(BaseTool):
+        name = "runtime_review_direct"
+        description = "original description"
+        field = "old_arg"
+        def get_schema(self):
+            return ToolSchema(name=self.name, description=self.description, parameters={
+                "type": "object", "properties": {self.field: {"type": "string"}},
+                "required": [self.field],
+            })
+        async def execute(self, args, context=None):
+            raise AssertionError("schema-only verification must not execute")
+
+    class DeferredTool(RevisedDirectTool):
+        name = "runtime_review_deferred"
+        should_defer = True
+
+    registry = ToolRegistry()
+    direct = RevisedDirectTool()
+    deferred = DeferredTool()
+    registry.register(direct)
+    registry.register(deferred)
+    default_schemas = registry.get_schemas()
+    assert default_schemas[0]["function"]["parameters"]["required"] == ["old_arg"]
+    deferred.field = "changed_deferred_arg"
+    registry.register(deferred, replace=True)
+    assert registry.get_schemas() is default_schemas
+    fork = registry.fork()
+    assert fork.get_schemas() == default_schemas
+    direct.field = "new_arg"
+    direct.description = "updated description"
+    registry.register(direct, replace=True)
+    refreshed = registry.get_schemas()
+    assert refreshed[0]["function"]["parameters"]["required"] == ["new_arg"]
+    assert refreshed[0]["function"]["description"] == "updated description"
+    assert default_schemas[0]["function"]["parameters"]["required"] == ["old_arg"]
+    fork.register(direct, replace=True)
+    assert fork.get_schemas()[0]["function"]["parameters"]["required"] == ["new_arg"]
+    activated = ToolsetPolicy.from_iterables(enabled_tools=[deferred.name])
+    visible_deferred = registry.get_schemas(toolset_policy=activated)
+    deferred.field = "another_deferred_arg"
+    registry.register(deferred, replace=True)
+    changed = registry.get_schemas(toolset_policy=activated)
+    before = next(s for s in visible_deferred if s["function"]["name"] == deferred.name)
+    after = next(s for s in changed if s["function"]["name"] == deferred.name)
+    assert before["function"]["parameters"]["required"] == ["changed_deferred_arg"]
+    assert after["function"]["parameters"]["required"] == ["another_deferred_arg"]

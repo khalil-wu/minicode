@@ -37,7 +37,7 @@ from backend.agent.turn_kernel import (
     TurnKernel,
     _set_terminal_reason,
 )
-from backend.agent.runtime import AgentRuntime
+from backend.agent.runtime import AgentRuntime, default_runtime
 from backend.agent.run_context import RunContext
 from backend.agent.turn_budget import TurnBudgetController
 from backend.agent.turn_iteration_admission import (
@@ -113,7 +113,7 @@ async def run_agent_loop(
     ) or RunContext()
     runtime_value = run_context.agent_runtime
     if runtime_value is None:
-        runtime_value = AgentRuntime()
+        runtime_value = default_runtime()
     elif not isinstance(runtime_value, AgentRuntime):
         raise TypeError("RunContext agent_runtime must be an AgentRuntime")
     run_context.agent_runtime = runtime_value

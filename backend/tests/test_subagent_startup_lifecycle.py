@@ -153,6 +153,31 @@ async def _launch(case, delivery: str, **arguments):
     return launch.runtime_metadata["subagent_id"], launch
 
 
+@pytest.mark.asyncio
+async def test_child_text_stream_uses_deltas_between_durable_snapshots(startup_case):
+    import json
+
+    class BurstModel(_RecordingLLM):
+        async def stream_chat(self, messages, tools=None, metadata=None):
+            for _ in range(80):
+                yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="观察😀并验证。")
+            yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop")
+
+    startup_case.tool._llm_provider = BurstModel()
+    _, result = await _launch(startup_case, "foreground")
+    assert not result.is_error, result.content
+    progress = [data for kind, data in startup_case.events if kind == "subagent.progress"]
+    deltas = [data["transcript_delta"] for data in progress if "transcript_delta" in data]
+    assert len(deltas) >= 70
+    assert all("transcript_snapshot" not in data for data in progress if "transcript_delta" in data)
+    assert len([data for data in progress if "transcript_snapshot" in data]) < 8
+    assert deltas[0]["offset"] == len("观察😀并验证。")
+    assert deltas[-1]["offset"] == 79 * len("观察😀并验证。")
+    terminal = next(data for kind, data in reversed(startup_case.events) if kind == "subagent.done")
+    assert terminal["transcript_snapshot"]["messages"][-1]["content"] == "观察😀并验证。" * 80
+    assert len(json.dumps(startup_case.events, ensure_ascii=False)) < 200_000
+
+
 def _assert_terminal(case, subagent_id: str, status: str, epoch: int = 1):
     record = case.runtime.get_subagent(subagent_id)
     result = case.runtime._subagent_results[subagent_id]

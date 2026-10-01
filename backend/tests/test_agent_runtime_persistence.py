@@ -810,3 +810,78 @@ def test_forgotten_subagent_result_stays_forgotten_after_restart(tmp_path) -> No
 
     assert snapshot is not None
     assert snapshot["result_available"] is False
+
+
+def test_runtime_review_inaccessible_child_stays_owned_until_real_reaper(tmp_path):
+    import os
+    import subprocess
+    import sys
+    import time
+    from unittest.mock import patch
+    import psutil
+    from backend.terminal import task_persistence as persistence
+
+    child = subprocess.Popen([sys.executable, "-B", "-c", "import time; time.sleep(60)"])
+    try:
+        child_start = psutil.Process(child.pid).create_time()
+        owner_start = psutil.Process(os.getpid()).create_time()
+        persistence.save_task(
+            "runtime-review", "inaccessible-child", "harmless sleeping child", "identity oracle",
+            str(tmp_path), child.pid, time.time(), 60000, base_dir=tmp_path,
+            owner_task_id="review-owner", process_start_time=child_start,
+            owner_pid=os.getpid(), owner_start_time=owner_start + 1000,
+        )
+        real_process = psutil.Process
+        def restricted_process(pid):
+            if pid == child.pid:
+                raise psutil.AccessDenied(pid)
+            return real_process(pid)
+        with patch.object(persistence.psutil, "Process", side_effect=restricted_process):
+            state = persistence.load_task("runtime-review", "inaccessible-child", tmp_path)
+            assert persistence.process_identity_matches(child.pid, child_start) is None
+            assert persistence.child_is_live(state) is None
+            assert persistence._terminate_owned_process(state) is False
+            recovered = persistence.cleanup_orphaned_tasks("runtime-review", tmp_path)
+            assert len(recovered) == 1 and recovered[0].cleanup_pending
+            assert recovered[0].cleanup_reason == "process_identity_unavailable"
+            assert recovered[0].cleanup_completed_at is None
+            report = persistence.reconcile_owned_tasks(
+                "runtime-review", owner_task_ids={"review-owner"}, base_dir=tmp_path,
+                owner_terminal=True,
+            )
+            assert not report.completed and report.pending_task_ids == ("inaccessible-child",)
+            assert child.poll() is None
+        report = persistence.reconcile_owned_tasks(
+            "runtime-review", owner_task_ids={"review-owner"}, base_dir=tmp_path,
+            owner_terminal=True,
+        )
+        assert report.completed and report.completed_task_ids == ("inaccessible-child",)
+        child.wait(timeout=5)
+        state = persistence.load_task("runtime-review", "inaccessible-child", tmp_path)
+        assert not state.cleanup_pending and state.cleanup_completed_at is not None
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=5)
+
+
+def test_runtime_review_unknown_owner_and_legacy_child_cannot_be_cleaned(tmp_path):
+    from dataclasses import replace
+    from unittest.mock import patch
+    import psutil
+    from backend.terminal import task_persistence as persistence
+
+    task = persistence.PersistedTaskState(
+        task_id="unknown", command="not executed", description="identity oracle", cwd=str(tmp_path),
+        pid=123, started_at=1, timeout_ms=1000, status="running",
+        owner_task_id="review-owner", owner_pid=456, owner_start_time=10, process_start_time=20,
+    )
+    with patch.object(persistence.psutil, "Process", side_effect=psutil.AccessDenied(123)), \
+         patch.object(persistence, "list_persisted_tasks", return_value=[task]), \
+         patch.object(persistence, "save_task") as save, \
+         patch.object(persistence, "load_task", return_value=task):
+        assert persistence.is_process_alive(123) is None
+        assert persistence._terminate_owned_process(replace(task, process_start_time=None)) is False
+        persistence.cleanup_orphaned_tasks("runtime-review", tmp_path)
+        assert save.call_args.kwargs["cleanup_pending"] is True
+        assert save.call_args.kwargs["cleanup_completed_at"] is None

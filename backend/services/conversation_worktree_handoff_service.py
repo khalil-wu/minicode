@@ -4,14 +4,19 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from uuid import uuid4
 
-from backend.services.workspace_service import sanitized_git_env
+from backend.services.workspace_service import readonly_git_policy, run_readonly_git, sanitized_git_env
 from backend.workspace.worktree import isolated_worktree_root
+from backend.sandbox.runner import SandboxUnavailableError
+
+if TYPE_CHECKING:
+    from backend.sandbox import SandboxPolicy
 
 
 def _git(root: Path, *args: str) -> tuple[bool, str]:
+    """Explicit worktree control-plane writes, not readonly UI snapshots."""
     try:
         result = subprocess.run(
             ["git", *args], cwd=root, env=sanitized_git_env(), capture_output=True,
@@ -22,23 +27,32 @@ def _git(root: Path, *args: str) -> tuple[bool, str]:
         return False, str(getattr(exc, "stderr", "") or exc)
 
 
-def _status(root: Path) -> str:
-    ok, output = _git(root, "status", "--porcelain=v1", "--untracked-files=all")
+def _git_snapshot(root: Path, *args: str, sandbox_policy: SandboxPolicy | None = None) -> tuple[bool, str]:
+    try:
+        result = run_readonly_git(root, *args, timeout=10, sandbox_policy=sandbox_policy)
+        result.check_returncode()
+        return True, result.stdout.strip()
+    except (OSError, subprocess.SubprocessError, SandboxUnavailableError) as exc:
+        return False, str(getattr(exc, "stderr", "") or exc)
+
+
+def _status(root: Path, *, sandbox_policy: SandboxPolicy | None = None) -> str:
+    ok, output = _git_snapshot(root, "status", "--porcelain=v1", "--untracked-files=all", sandbox_policy=sandbox_policy)
     return output if ok else "<status unavailable>"
 
 
-def _head(root: Path) -> str:
-    ok, output = _git(root, "rev-parse", "HEAD")
+def _head(root: Path, *, sandbox_policy: SandboxPolicy | None = None) -> str:
+    ok, output = _git_snapshot(root, "rev-parse", "HEAD", sandbox_policy=sandbox_policy)
     return output if ok else ""
 
 
-def _branch(root: Path) -> str:
-    ok, output = _git(root, "branch", "--show-current")
+def _branch(root: Path, *, sandbox_policy: SandboxPolicy | None = None) -> str:
+    ok, output = _git_snapshot(root, "branch", "--show-current", sandbox_policy=sandbox_policy)
     return output if ok else ""
 
 
-def _ignored_sample(root: Path) -> list[str]:
-    ok, output = _git(root, "ls-files", "--others", "--ignored", "--exclude-standard")
+def _ignored_sample(root: Path, *, sandbox_policy: SandboxPolicy | None = None) -> list[str]:
+    ok, output = _git_snapshot(root, "ls-files", "--others", "--ignored", "--exclude-standard", sandbox_policy=sandbox_policy)
     return output.splitlines()[:20] if ok and output else []
 
 
@@ -60,6 +74,8 @@ def build_handoff_preflight(
     direction = "worktree_to_local" if target == "local" else "local_to_worktree"
     source_path = Path(str(getattr(conversation, "worktree_path", "") or getattr(conversation, "workspace_root", "") or ".")).resolve()
     base_root = main_worktree_root(source_path)
+    source_policy = readonly_git_policy(source_path)
+    main_policy = readonly_git_policy(base_root)
     worktree_path = isolated_worktree_root(base_root) / conversation_id
     worktree_branch = str(getattr(conversation, "git_branch", "") or f"minicode/{conversation_id}")
     checks: list[dict[str, Any]] = []
@@ -73,10 +89,10 @@ def build_handoff_preflight(
     if not base_root.exists():
         checks.append(_check("repository.missing", "blocking", "The main Git checkout no longer exists.", path=str(base_root)))
 
-    source_status = _status(source_path) if source_path.exists() else "<missing>"
-    main_status = _status(base_root) if base_root.exists() else "<missing>"
-    main_head = _head(base_root) if base_root.exists() else ""
-    main_branch = _branch(base_root) if base_root.exists() else ""
+    source_status = _status(source_path, sandbox_policy=source_policy) if source_path.exists() else "<missing>"
+    main_status = _status(base_root, sandbox_policy=main_policy) if base_root.exists() else "<missing>"
+    main_head = _head(base_root, sandbox_policy=main_policy) if base_root.exists() else ""
+    main_branch = _branch(base_root, sandbox_policy=main_policy) if base_root.exists() else ""
     if source_status and source_status != "<missing>" and source_status != "<status unavailable>":
         if dirty_action == "stash":
             checks.append(_check("source.dirty.stash", "warning", "Local changes will be stashed and restored in the destination workspace."))
@@ -86,7 +102,7 @@ def build_handoff_preflight(
         checks.append(_check("source.status_unavailable", "blocking", "Could not verify source Git status."))
 
     if direction == "local_to_worktree":
-        ok, branch_ref = _git(base_root, "show-ref", "--verify", f"refs/heads/{worktree_branch}") if base_root.exists() else (False, "")
+        ok, branch_ref = _git_snapshot(base_root, "show-ref", "--verify", f"refs/heads/{worktree_branch}", sandbox_policy=main_policy) if base_root.exists() else (False, "")
         if ok and branch_ref:
             checks.append(_check("branch.collision", "blocking", "The isolated branch already exists.", branch=worktree_branch))
         if worktree_path.exists():
@@ -106,7 +122,7 @@ def build_handoff_preflight(
         if shared:
             checks.append(_check("target.shared", "blocking", "Another active task uses the local checkout; switching its branch would affect that task.", conversation_ids=shared))
 
-    ignored = _ignored_sample(source_path) if source_path.exists() else []
+    ignored = _ignored_sample(source_path, sandbox_policy=source_policy) if source_path.exists() else []
     if ignored:
         checks.append(_check("ignored.files", "warning", "Ignored dependencies and local files are not copied between workspaces.", sample=ignored))
 
@@ -114,8 +130,8 @@ def build_handoff_preflight(
         "conversation_id": conversation_id,
         "direction": direction,
         "source_path": str(source_path),
-        "source_head": _head(source_path) if source_path.exists() else "",
-        "source_branch": _branch(source_path) if source_path.exists() else "",
+        "source_head": _head(source_path, sandbox_policy=source_policy) if source_path.exists() else "",
+        "source_branch": _branch(source_path, sandbox_policy=source_policy) if source_path.exists() else "",
         "source_status": source_status,
         "target_path": str(worktree_path if direction == "local_to_worktree" else base_root),
         "target_head": main_head,
@@ -154,7 +170,7 @@ def stash_workspace_changes(root: Path, *, label: str) -> tuple[bool, str]:
     # choosing the stash path does not block an otherwise valid handoff.
     if "No local changes" in output:
         return True, ""
-    ok, entries = _git(root, "stash", "list", "--format=%H%x00%gs")
+    ok, entries = _git_snapshot(root, "stash", "list", "--format=%H%x00%gs")
     if not ok:
         return False, entries
     for entry in entries.splitlines():

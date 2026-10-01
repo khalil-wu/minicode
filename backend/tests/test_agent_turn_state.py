@@ -1,5 +1,7 @@
 from backend.agent.turn_state import AgentTurnState
 
+import pytest
+
 
 def _running_state() -> AgentTurnState:
     state = AgentTurnState(now_ms=lambda: 1234)
@@ -90,3 +92,26 @@ def test_completed_turn_closes_progress_but_fails_missing_tool_result() -> None:
     assert process["status"] == "completed"
     assert snapshot.tool_calls[0]["status"] == "failed"
     assert snapshot.tool_calls[0]["terminationReason"] == "missing_tool_result"
+
+
+@pytest.mark.parametrize("terminal_status", ["cancelled", "failed", "partial"])
+@pytest.mark.parametrize("source", ["commentary", "pending", None])
+def test_interrupted_narration_never_becomes_a_partial_answer(terminal_status, source):
+    state = AgentTurnState(now_ms=lambda: 1234)
+    state.start_agent_message("narration", {"source": source} if source else None)
+    state.append_agent_message_delta("narration", "I will inspect the repository.")
+    snapshot = state.finalize(terminal_status=terminal_status)
+    assert snapshot.content == ""
+    assert snapshot.blocks[0]["source"] == (source or "pending")
+    assert snapshot.blocks[0]["content"] == "I will inspect the repository."
+    assert snapshot.blocks[0]["isStreaming"] is False
+
+
+@pytest.mark.parametrize("source", ["model_final", "reply", "partial"])
+def test_interrupted_answer_candidate_keeps_usable_partial_answer(source):
+    state = AgentTurnState(now_ms=lambda: 1234)
+    state.start_agent_message("answer", {"source": source})
+    state.append_agent_message_delta("answer", "Verified result")
+    snapshot = state.finalize(terminal_status="cancelled")
+    assert snapshot.content == "Verified result"
+    assert snapshot.blocks[0]["source"] == "partial"

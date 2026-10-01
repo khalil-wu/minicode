@@ -200,7 +200,7 @@ def test_skill_install_prompt_is_delivered_before_waiting_for_answer(tmp_path, m
     monkeypatch.setattr(mcp_service, "install_skill_mcp_servers", install)
 
     async def run():
-        nested = NestedToolEvents(_Journal())
+        nested = NestedToolEvents(_Journal(), run_context=RunContext())
         answered = asyncio.Event()
 
         async def approve(_request_id):

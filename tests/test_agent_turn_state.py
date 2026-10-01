@@ -180,7 +180,7 @@ def test_turn_state_preserves_immutable_cancelled_and_completed_items() -> None:
 
 def test_turn_state_terminalizes_in_progress_item_as_partial_answer() -> None:
     state = AgentTurnState(now_ms=lambda: 100)
-    state.start_agent_message('agent-message')
+    state.start_agent_message('agent-message', {'source': 'model_final'})
     state.append_agent_message_delta('agent-message', '等待中的半句话')
 
     snapshot = state.finalize(terminal_status='failed')

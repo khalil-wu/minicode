@@ -46,7 +46,7 @@ def test_nested_workspace_cannot_offer_removal_of_its_active_worktree(tmp_path: 
     entries = [WorktreeInfo(main, "main", "abc", False, False), WorktreeInfo(child, "feature", "def", False, False)]
     monkeypatch.setattr(WorktreeManager, "_is_git_repo", lambda self: True)
     monkeypatch.setattr(WorktreeManager, "list_worktrees", lambda self: entries)
-    monkeypatch.setattr("backend.services.workspace_api_service.resolve_git_common_dir", lambda root: main / ".git")
+    monkeypatch.setattr("backend.services.workspace_api_service.resolve_git_common_dir", lambda root, **kwargs: main / ".git")
 
     payload = workspace_git_worktree_payload(nested)
 

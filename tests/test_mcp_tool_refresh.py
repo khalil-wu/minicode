@@ -266,7 +266,11 @@ def test_disconnect_after_catalog_error_keeps_transport_lifecycle_behavior(
         else:
             assert reconnects == []
             assert state.last_error == "MCP stdio transport closed"
-        assert state.client is None
+        # Disconnect is not a closure receipt; the reconnect stub does not
+        # retire resources. An explicit Stop must acknowledge the real close.
+        assert state.client is client
         assert state.tools == []
+        assert await manager.stop_server("fixture")
+        assert state.client is None
 
     asyncio.run(scenario())

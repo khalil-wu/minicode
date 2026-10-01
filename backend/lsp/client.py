@@ -27,14 +27,13 @@ import json
 import logging
 import os
 import shutil
-import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote, unquote, urlparse
 
 from backend.runtime_env import sanitized_subprocess_env
-from backend.sandbox.policy import SandboxPolicy
+from backend.sandbox.policy import ResolvedSandboxPolicy, SandboxPolicy
 from backend.sandbox.runner import SandboxRunner, SandboxUnavailableError
 
 logger = logging.getLogger(__name__)
@@ -221,12 +220,10 @@ class LSPClient:
                 await self._send_notification("exit", {})
             except Exception:
                 pass
-        if self._process is not None:
-            try:
-                if not await self._sandbox_runner.terminate(self._process):
-                    raise RuntimeError("Language server termination is unconfirmed; retaining its process")
-            except ProcessLookupError:
-                pass
+        # A failed spawn may retain resources before it returns a process to
+        # this client. The runner owns that launch attempt in either case.
+        if not await self._sandbox_runner.cleanup():
+            raise RuntimeError("Language server termination is unconfirmed; retaining its process")
         for task_attr in ("_reader_task", "_stderr_task"):
             task = getattr(self, task_attr)
             if not task:
@@ -490,17 +487,20 @@ class LSPClient:
 
 
 class LSPManager:
-    """Manages LSP clients per workspace root and language server type."""
+    """Manages clients per workspace, language server and launch authority."""
 
     def __init__(self) -> None:
-        self._clients: dict[tuple[str, str], LSPClient] = {}
+        self._clients: dict[tuple[str, str, ResolvedSandboxPolicy, str], LSPClient] = {}
         self._lock = asyncio.Lock()
 
     def server_for_file(self, file_path: str) -> str | None:
         ext = Path(file_path).suffix.lstrip(".")
         return _LANGUAGE_SERVERS.get(ext)
 
-    def is_available(self, file_path: str, workspace_root: str) -> bool:
+    def is_available(
+        self, file_path: str, workspace_root: str, *,
+        sandbox_policy: SandboxPolicy | None = None,
+    ) -> bool:
         server = self.server_for_file(file_path)
         if not server:
             return False
@@ -508,9 +508,12 @@ class LSPManager:
         executable = _resolve_server_executable(server, workspace_root)
         if executable is None:
             return False
-        return _lsp_sandbox_runner(workspace_root).capability().available
+        return _lsp_sandbox_runner(workspace_root, sandbox_policy).capability().available
 
-    async def get_client(self, file_path: str, workspace_root: str) -> LSPClient | None:
+    async def get_client(
+        self, file_path: str, workspace_root: str, *,
+        sandbox_policy: SandboxPolicy | None = None,
+    ) -> LSPClient | None:
         server = self.server_for_file(file_path)
         if not server:
             return None
@@ -518,7 +521,15 @@ class LSPManager:
         executable = _resolve_server_executable(server, workspace_root)
         if executable is None:
             return None
-        key = (workspace_root, server)
+        runner = _lsp_sandbox_runner(workspace_root, sandbox_policy)
+        policy = runner._policy
+        key = (
+            workspace_root, server, policy.resolve(cwd=workspace_root),
+            json.dumps({
+                "environment": vars(policy.shell_environment_policy),
+                "overrides": policy.env_overrides,
+            }, sort_keys=True),
+        )
         async with self._lock:
             client = self._clients.get(key)
             if client is not None and not client.is_running():
@@ -527,7 +538,6 @@ class LSPManager:
                 self._clients.pop(key, None)
             if client is None:
                 args = _SERVER_ARGS.get(server, [])
-                runner = _lsp_sandbox_runner(workspace_root)
                 if not runner.capability().available:
                     logger.warning(
                         "LSP sandbox unavailable for %s: %s",
@@ -562,9 +572,10 @@ class LSPManager:
         server = self.server_for_file(file_path)
         if not server:
             return
-        client = self._clients.get((workspace_root, server))
-        if client is not None and client.is_running():
-            await client.close_file(file_path)
+        workspace_root = str(Path(workspace_root).expanduser().resolve())
+        for key, client in list(self._clients.items()):
+            if key[:2] == (workspace_root, server) and client.is_running():
+                await client.close_file(file_path)
 
     async def shutdown_all(self) -> None:
         async with self._lock:
@@ -621,19 +632,18 @@ def _resolve_server_executable(server: str, workspace_root: str) -> str | None:
     return str(resolved)
 
 
-def _lsp_sandbox_runner(workspace_root: str) -> SandboxRunner:
+def _lsp_sandbox_runner(
+    workspace_root: str, sandbox_policy: SandboxPolicy | None = None,
+) -> SandboxRunner:
+    if sandbox_policy is not None:
+        return SandboxRunner(replace(sandbox_policy, timeout=0))
     workspace = Path(workspace_root).expanduser().resolve()
     return SandboxRunner(
         SandboxPolicy(
             workspace_root=workspace,
             writable_roots=(),
             readable_roots=(),
-            # Codex's Windows restricted-token backend provides the required
-            # filesystem boundary only for network-enabled policies unless its
-            # elevated WFP layer is installed. LSP servers are trusted host
-            # executables and need cross-platform availability, so use that
-            # established Codex boundary instead of requiring a container.
-            allow_network=sys.platform == "win32",
+            allow_network=False,
             timeout=0,
         )
     )

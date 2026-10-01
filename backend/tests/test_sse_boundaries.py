@@ -70,3 +70,20 @@ def test_malformed_sse_budget_tolerates_one_bad_event_then_fails_closed(monkeypa
 
     with pytest.raises(ProviderStreamLimitError, match="malformed event budget"):
         budget.reject("again not json")
+
+
+@pytest.mark.parametrize("separator", [b"\n", b"\r", b"\r\n"])
+@pytest.mark.parametrize("chunk_size", [1, 2, 7, 1000])
+def test_sse_all_line_endings_and_fragmented_utf8(separator, chunk_size):
+    wire = separator.join([
+        b": ping", b"event: message", b"data: {", 'data: "text":"中文"}'.encode(),
+        b"", b"data: {\"second\":2}", b"", b"",
+    ])
+    response = _ByteResponse([wire[i:i + chunk_size] for i in range(0, len(wire), chunk_size)])
+    assert asyncio.run(_collect(response)) == ['{\n"text":"中文"}', '{"second":2}']
+
+
+def test_sse_trailing_cr_is_not_part_of_line_byte_budget(monkeypatch):
+    monkeypatch.setenv("MINICODE_PROVIDER_SSE_MAX_LINE_BYTES", "1024")
+    payload = b"data: " + b"x" * 1018
+    assert asyncio.run(_collect(_ByteResponse([payload + b"\r", b"\r"]))) == ["x" * 1018]

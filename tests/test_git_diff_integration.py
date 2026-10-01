@@ -59,6 +59,7 @@ def test_git_diff_tool_hides_denied_files_but_keeps_renegated_ones(tmp_path) -> 
     from backend.config import PermissionSettings
     from backend.permissions.checker import PermissionChecker
     from backend.tools.git_tools import GitDiffTool
+    from backend.sandbox import SandboxPolicy
 
     _init_repo(tmp_path)
     for name in (".env", ".env.example", "keep.txt"):
@@ -76,6 +77,7 @@ def test_git_diff_tool_hides_denied_files_but_keeps_renegated_ones(tmp_path) -> 
         workspace_root = tmp_path
         permission = None
         permission_checker = checker
+        sandbox_policy = SandboxPolicy(workspace_root=tmp_path, readable_roots=(tmp_path,))
         cancel_event = None
 
     result = asyncio.run(GitDiffTool().execute({}, context=_Ctx()))

@@ -19,6 +19,7 @@ import { isWindowsLikeWorkspacePath, normalizeWorkspacePath } from "../../lib/wo
 import { mediaTypeForPath } from "../../lib/media-types";
 import { pushToast } from "../../overlays/ToastContainer";
 import { getWebSocket } from "../../hooks/useWebSocket";
+import { useEscapeKey, useFocusTrap } from "../../hooks/useFocusTrap";
 import {
   artifactMediaTypeForProjection,
   canonicalArtifactKind,
@@ -93,12 +94,12 @@ export function AssistantMarkdownCell({
     const progress = cell.imageProgress ?? [];
     if (imageArtifacts.length === 0) return progress;
     // The validated Artifact is the completed state. Keep only a genuine
-    // failure alongside it; completed/running placeholders must be replaced
+    // failure or incomplete result alongside it; live/completed placeholders must be replaced
     // rather than rendered as a second image-generation row.
-    return progress.filter((item) => item.status === "failed");
+    return progress.filter((item) => item.status === "failed" || item.status === "partial");
   }, [cell.imageProgress, imageArtifacts.length]);
   const hasPendingImage = imageArtifacts.length === 0
-    && (cell.imageProgress ?? []).some((progress) => progress.status !== "failed");
+    && (cell.imageProgress ?? []).some((progress) => progress.status !== "failed" && progress.status !== "partial");
   const isSettled = !cell.isStreaming && !hasPendingImage;
 
   const copy = useCallback(() => {
@@ -396,11 +397,12 @@ function ImageGenerationProgress({
   recoverable?: boolean;
 }) {
   const failed = progress.status === "failed";
+  const incomplete = progress.status === "partial";
   const completed = progress.status === "completed";
-  const awaitingImage = !failed;
+  const awaitingImage = !failed && !incomplete;
   const detail = String(
     progress.detail
-      || (failed ? fallbackFailureMessage : "")
+      || (failed || incomplete ? fallbackFailureMessage : "")
       || progress.summary
       || progress.message,
   ).trim();
@@ -423,9 +425,11 @@ function ImageGenerationProgress({
         <strong>
           {failed
             ? "图像生成失败"
-            : completed
-              ? "正在载入生成结果"
-              : progress.message || "正在生成图像"}
+            : incomplete
+              ? "图像生成未完整结束"
+              : completed
+                ? "正在载入生成结果"
+                : progress.message || "正在生成图像"}
         </strong>
         {detail && detail !== progress.message && <small>{detail}</small>}
         {failed && (
@@ -448,6 +452,8 @@ function GeneratedArtifactCard({
   const [loadedImageUrl, setLoadedImageUrl] = useState("");
   const [failedImageUrl, setFailedImageUrl] = useState("");
   const [imageReloadNonce, setImageReloadNonce] = useState(0);
+  const lightboxRef = useFocusTrap(lightboxOpen);
+  useEscapeKey(() => setLightboxOpen(false), lightboxOpen, lightboxRef);
   const isConnected = useAppStore((state) => state.isConnected);
   const kind = canonicalArtifactKind(artifact.kind, artifact.mediaType);
   const mediaType = artifactMediaTypeForProjection(artifact.mediaType, kind) || "";
@@ -500,15 +506,6 @@ function GeneratedArtifactCard({
       conversationId,
     });
   };
-
-  useEffect(() => {
-    if (!lightboxOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setLightboxOpen(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [lightboxOpen]);
 
   const copyImage = async () => {
     const sourceUrl = freshImageUrl();
@@ -627,6 +624,8 @@ function GeneratedArtifactCard({
         )}
         {lightboxOpen && lightboxUrl && createPortal(
           <div
+              ref={lightboxRef}
+              tabIndex={-1}
               className="assistant-cell-image-lightbox"
               role="dialog"
               aria-modal="true"

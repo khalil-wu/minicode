@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { readableToolLabel } from "./toolDisplayName";
 
 describe("readableToolLabel", () => {
+  it("localizes exact runtime labels without rewriting file names", () => {
+    expect(readableToolLabel("Read")).toBe("读取文件");
+    expect(readableToolLabel("Script failed")).toBe("脚本执行失败");
+    expect(readableToolLabel("src/Read.ts")).toBe("src/Read.ts");
+  });
   it("never exposes concatenated provider web protocol identifiers", () => {
     const label = readableToolLabel("webfetchweb_fetch, web_fetch web_search");
 

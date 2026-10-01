@@ -124,7 +124,7 @@ def test_skill_directory_stays_readable_after_a_live_permission_refresh() -> Non
             ),
             artifact_store=ArtifactStore(storage_dir=str(root / "artifacts")),
             permission_checker=checker,
-            agent_settings=AgentSettings(max_iterations=3),
+                agent_settings=AgentSettings(max_iterations=3, code_mode_only=False),
             permission_context=session_context,
             skill_manager=skill_manager,
             metadata={"permission_context_provider": lambda: session_context},

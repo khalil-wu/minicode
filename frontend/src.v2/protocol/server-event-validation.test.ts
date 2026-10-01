@@ -341,6 +341,17 @@ describe("normalizeInboundServerEvent", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it("validates the child transcript delta at the wire boundary", () => {
+    const base = { type: "subagent.progress", subagent_id: "child", transcript_delta: {
+      seq: 3, message_id: "assistant", item_id: "item", delta: "观察😀", offset: 2,
+    } };
+    expect(normalizeInboundServerEvent(base)).toMatchObject(base);
+    expect(normalizeInboundServerEvent({ ...base, transcript_delta: { ...base.transcript_delta, delta: "\n " } })).not.toBeNull();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(normalizeInboundServerEvent({ ...base, transcript_delta: { ...base.transcript_delta, offset: -1 } })).toBeNull();
+    expect(normalizeInboundServerEvent({ ...base, transcript_delta: { ...base.transcript_delta, delta: {} } })).toBeNull();
+  });
+
   it("accepts image-generation and cache agent progress stages from the backend contract", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const base = {
@@ -1855,4 +1866,34 @@ describe("normalizeInboundServerEvent", () => {
     });
     expect(warn).not.toHaveBeenCalled();
   });
+});
+
+
+it("accepts checkpoint provenance separately from the new run envelope", () => {
+  const event = { type: "checkpoint.run.resume", resumed: true, session_id: "session-1",
+    conversation_id: "conversation-1", workspace_root: "C:/workspace", iteration: 3,
+    checkpoint_run_id: "checkpoint-old", run_id: "run-new" };
+  expect(normalizeInboundServerEvent(event)).toMatchObject(event);
+  const { checkpoint_run_id, ...missingProvenance } = event;
+  expect(normalizeInboundServerEvent(missingProvenance)).toBeNull();
+});
+
+it("retains terminal cleanup evidence and rejects malformed cleanup counters at the wire boundary", () => {
+  const event = {
+    type: "done", status: "cancelled", conversation_id: "conversation-1", message_id: "message-1",
+    usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0, input_includes_cache_read: false },
+    lifecycle_cleanup_pending_count: 1,
+    lifecycle_cleanup_receipts: {
+      observer: { resource_kind: "lifecycle", resource_id: "observer", reason: "cancelled",
+        requested: true, acknowledged: false, completed: false, timed_out: true, pending: 1 },
+    },
+  };
+  expect(normalizeInboundServerEvent(event)).toMatchObject(event);
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  for (const count of [-1, 1.5, "1", null]) {
+    expect(normalizeInboundServerEvent({ ...event, lifecycle_cleanup_pending_count: count })).toBeNull();
+  }
+  expect(normalizeInboundServerEvent({ ...event, lifecycle_cleanup_receipts: [] })).toBeNull();
+  warn.mockRestore();
 });

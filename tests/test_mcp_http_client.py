@@ -26,7 +26,7 @@ def test_sse_uses_official_sse_transport_without_rewriting_url(monkeypatch) -> N
     assert context is sentinel
     assert captured["url"] == "http://127.0.0.1:3845/mcp"
     assert captured["kwargs"]["timeout"] == 60.0
-    assert captured["kwargs"]["sse_read_timeout"] == 100_000.0
+    assert captured["kwargs"]["sse_read_timeout"] == 300.0
 
 
 def test_streamable_http_uses_official_transport_and_bearer_header(monkeypatch) -> None:
@@ -57,7 +57,7 @@ def test_streamable_http_uses_official_transport_and_bearer_header(monkeypatch) 
     assert context is sentinel
     assert captured["kwargs"]["headers"] == {"Authorization": "Bearer secret-token"}
     assert captured["kwargs"]["timeout"] == 60.0
-    assert captured["kwargs"]["sse_read_timeout"] == 100_000.0
+    assert captured["kwargs"]["sse_read_timeout"] == 300.0
 
 
 def test_call_tool_forwards_meta_through_official_session() -> None:
@@ -88,7 +88,7 @@ def test_call_tool_forwards_meta_through_official_session() -> None:
 
     assert result.text == "ok"
     assert session.call["meta"] == {"trace": "turn-1"}
-    assert session.call["timeout"] == 100_000.0
+    assert session.call["timeout"] == 300.0
 
 
 def test_call_tool_preserves_official_sdk_rpc_error() -> None:

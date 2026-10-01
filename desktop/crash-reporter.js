@@ -4,8 +4,9 @@ function validatedCrashSubmitUrl(rawUrl) {
   const value = String(rawUrl || "").trim();
   if (!value) return "";
   const parsed = new URL(value);
-  const isLoopback = ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname.toLowerCase());
-  const allowLoopbackHttp = process.env.MINICODE_ALLOW_INSECURE_CRASH_ENDPOINT === "1" && isLoopback;
+  const isLoopback = ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname.toLowerCase());
+  const allowLoopbackHttp = parsed.protocol === "http:"
+    && process.env.MINICODE_ALLOW_INSECURE_CRASH_ENDPOINT === "1" && isLoopback;
   if (parsed.protocol !== "https:" && !allowLoopbackHttp) {
     throw new Error("Crash report endpoint must use HTTPS; HTTP is limited to explicit loopback testing.");
   }

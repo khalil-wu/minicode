@@ -104,6 +104,7 @@ export interface AgentCapabilitySummary {
   direct_tools?: number;
   core_tools?: number;
   deferred_tools?: number;
+  code_mode_tools?: number;
   hidden_tools?: number;
   mcp_proxy_tools?: number;
   commands?: number;
@@ -125,6 +126,7 @@ export interface AgentCapabilityToolView {
   exposure?: unknown;
   direct?: unknown;
   schema_available?: unknown;
+  code_mode_available?: unknown;
   toolset?: unknown;
   capability?: unknown;
   permission?: unknown;
@@ -160,6 +162,7 @@ export interface ToolViewSummary {
   total?: number;
   direct: string[];
   deferred: string[];
+  codeMode: string[];
   hidden: string[];
   core?: number;
   hasViews: boolean;
@@ -218,6 +221,7 @@ export const withDerivedCapabilitySummary = (
   const directTools = finiteNumber(summary?.direct_tools) ?? (exposure.hasViews ? exposure.direct.length : undefined);
   const coreTools = finiteNumber(summary?.core_tools) ?? exposure.core;
   const deferredTools = finiteNumber(summary?.deferred_tools) ?? (exposure.hasViews ? exposure.deferred.length : undefined);
+  const codeModeTools = finiteNumber(summary?.code_mode_tools) ?? (exposure.hasViews ? exposure.codeMode.length : undefined);
   const hiddenTools = finiteNumber(summary?.hidden_tools) ?? (exposure.hasViews ? exposure.hidden.length : undefined);
   const commands = finiteNumber(summary?.commands) ?? arrayLength(capabilities.commands);
   const skills = finiteNumber(summary?.skills) ?? arrayLength(capabilities.skills);
@@ -239,6 +243,7 @@ export const withDerivedCapabilitySummary = (
         ...(directTools != null ? { direct_tools: directTools } : {}),
         ...(coreTools != null ? { core_tools: coreTools } : {}),
         ...(deferredTools != null ? { deferred_tools: deferredTools } : {}),
+        ...(codeModeTools != null ? { code_mode_tools: codeModeTools } : {}),
         ...(hiddenTools != null ? { hidden_tools: hiddenTools } : {}),
         ...(commands != null ? { commands } : {}),
         ...(skills != null ? { skills } : {}),
@@ -455,10 +460,11 @@ export const summarizeToolViews = (
   toolViews: AgentCapabilityToolView[] | undefined,
 ): ToolViewSummary => {
   if (!Array.isArray(toolViews)) {
-    return { total: undefined, direct: [], deferred: [], hidden: [], core: undefined, hasViews: false };
+    return { total: undefined, direct: [], deferred: [], codeMode: [], hidden: [], core: undefined, hasViews: false };
   }
   const direct: string[] = [];
   const deferred: string[] = [];
+  const codeMode: string[] = [];
   const hidden: string[] = [];
   let core = 0;
 
@@ -468,15 +474,17 @@ export const summarizeToolViews = (
     const exposure = cleanCapabilityName(view.exposure).toLowerCase();
     const isHidden = exposure === "hidden" || view.schema_available === false;
     const isDirect = view.direct === true && !isHidden;
-    if (exposure === "core") core += 1;
+    if (["core", "direct_model_only", "code_mode_only"].includes(exposure)) core += 1;
     if (isHidden) {
       hidden.push(name);
     } else if (isDirect) {
       direct.push(name);
-    } else {
+    } else if (exposure === "deferred" || exposure === "deferred_model_only") {
       deferred.push(name);
+    } else if (view.code_mode_available !== false && (exposure === "core" || exposure === "code_mode_only")) {
+      codeMode.push(name);
     }
   });
 
-  return { total: toolViews.length, direct, deferred, hidden, core, hasViews: true };
+  return { total: toolViews.length, direct, deferred, codeMode, hidden, core, hasViews: true };
 };

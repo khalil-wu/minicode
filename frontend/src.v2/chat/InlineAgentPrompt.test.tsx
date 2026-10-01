@@ -1,13 +1,12 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
   const sendClientCommand = vi.fn(() => true);
   const sendPromptResponseCommand = vi.fn(async (command: { type?: string }) => {
     sendClientCommand(command);
-    if (command.type === "control_response" || command.type === "control_cancel_request") return null;
     return {
       type: "command.result" as const,
       command: command.type || "approval",
@@ -53,7 +52,7 @@ vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommand: mocks.sendClientCommand,
   sendClientCommandAwaitResult: mocks.sendClientCommandAwaitResult,
   sendPromptResponseCommand: mocks.sendPromptResponseCommand,
-  commandResultSucceeded: () => true,
+  commandResultSucceeded: (event: { level: string }) => !["error", "failed"].includes(event.level),
 }));
 
 import { InlineAgentPrompt } from "./InlineAgentPrompt";
@@ -73,11 +72,59 @@ describe("InlineAgentPrompt control protocol responses", () => {
       diffReview: null,
       pendingAskUser: null,
       askUserQueue: [],
+      runtimeSession: null,
     });
   });
 
   afterEach(() => {
     cleanup();
+  });
+
+  it.each(["approval", "plan", "diff", "answer", "cancel"])(
+    "keeps an unresolved %s prompt visible and retryable after semantic refusal",
+    async (kind) => {
+      let finish!: (result: { type: "command.result"; command: string; level: string; message: string; data: {} }) => void;
+      mocks.sendPromptResponseCommand.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+      if (kind === "approval" || kind === "plan") {
+        useAppStore.getState().setApproval({ requestId: "unconfirmed", conversationId: "conv-inline",
+          toolName: kind === "plan" ? "exit_plan_mode" : "write_file", args: kind === "plan" ? { plan: "# Plan\nImplement verified behavior" } : {} });
+      } else if (kind === "diff") {
+        useAppStore.getState().setDiffReview({ requestId: "unconfirmed", conversationId: "conv-inline", diff: "+proposed" });
+      } else {
+        useAppStore.getState().setAskUser({ requestId: "unconfirmed", conversationId: "conv-inline", question: "Still unresolved?" });
+      }
+      render(<InlineAgentPrompt />);
+      if (kind === "answer") fireEvent.change(screen.getByPlaceholderText("输入你的回答…"), { target: { value: "yes" } });
+      const label = kind === "approval" ? "允许使用工具" : kind === "plan" ? "批准计划并开始实现"
+        : kind === "diff" ? "允许文件更改" : kind === "answer" ? "发送" : "取消";
+      fireEvent.click(screen.getByRole("button", { name: label }));
+      expect((screen.getByRole("button", { name: label }) as HTMLButtonElement).disabled).toBe(true);
+      await act(async () => { await Promise.resolve(); });
+      expect(mocks.sendPromptResponseCommand).toHaveBeenCalledOnce();
+      await act(async () => finish({ type: "command.result", command: kind === "cancel" ? "control_cancel_request" : "control_response",
+        level: "error", message: "The request was not accepted; retry explicitly", data: {} }));
+      expect(screen.getByText("The request was not accepted; retry explicitly")).toBeTruthy();
+      expect((screen.getByRole("button", { name: label }) as HTMLButtonElement).disabled).toBe(false);
+      expect(mocks.sendPromptResponseCommand).toHaveBeenCalledOnce();
+      fireEvent.click(screen.getByRole("button", { name: label }));
+      await waitFor(() => expect(screen.queryByRole("button", { name: label })).toBeNull());
+      expect(mocks.sendPromptResponseCommand).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each(["comments", "partial"])("retains DiffPanel %s review until the semantic outcome", async (action) => {
+    let fail!: (reason: Error) => void;
+    mocks.sendPromptResponseCommand.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    const review = { requestId: "panel-unconfirmed", conversationId: "conv-inline", diff: "+new",
+      files: [{ path: "file.txt" }], status: "pending" as const, fileDecisions: { "file.txt": "approved" as const }, lineComments: [] };
+    useAppStore.getState().setDiffReview({ requestId: review.requestId, conversationId: review.conversationId, diff: review.diff, reviewState: review });
+    const pending = action === "comments" ? useAppStore.getState().submitDiffReviewWithComments() : useAppStore.getState().submitPartialApproval();
+    expect(useAppStore.getState().pendingDiffReview?.requestId).toBe(review.requestId);
+    expect(useAppStore.getState().diffReview?.status).toBe("submitted");
+    fail(new Error("command.persistence"));
+    await pending;
+    expect(useAppStore.getState().pendingDiffReview?.requestId).toBe(review.requestId);
+    expect(useAppStore.getState().diffReview).toMatchObject({ status: "error", error: "command.persistence" });
   });
 
   it("responds to control approval prompts with control_response", () => {
@@ -103,6 +150,31 @@ describe("InlineAgentPrompt control protocol responses", () => {
         response: { action: "approve" },
       },
     });
+  });
+
+  it("explains an unisolated network boundary and requires individual command approval", () => {
+    useAppStore.setState({
+      pendingApproval: {
+        requestId: "network-command",
+        conversationId: "conv-inline",
+        toolName: "run_command",
+        args: { command: "python -V" },
+        networkUnisolated: true,
+      },
+      approvalQueue: [{
+        requestId: "next-command",
+        conversationId: "conv-inline",
+        toolName: "run_command",
+        args: { command: "python -m pytest" },
+        networkUnisolated: true,
+      }],
+    });
+
+    render(<InlineAgentPrompt />);
+
+    expect(screen.getByRole("alert").textContent).toContain("无法隔离网络");
+    expect(screen.queryByRole("button", { name: /全局始终允许/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "允许所有未提升权限的待处理工具请求" })).toBeNull();
   });
 
   it("persists always-allow command rules with explicit global scope", async () => {

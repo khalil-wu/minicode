@@ -325,40 +325,64 @@ export const fetchWithTimeout = async (
     : DEFAULT_HTTP_TIMEOUT_MS;
   const controller = new AbortController();
   const callerSignal = init.signal;
-  let timedOut = false;
 
   const abortFromCaller = () => {
-    try {
-      controller.abort(callerSignal?.reason);
-    } catch {
-      controller.abort();
-    }
+    controller.abort(callerSignal?.reason);
+    cleanup();
   };
 
-  if (callerSignal?.aborted) {
-    abortFromCaller();
-  } else {
-    callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
-  }
-
   const timeout = globalThis.setTimeout(() => {
-    timedOut = true;
-    controller.abort();
+    controller.abort(new Error(
+      options.timeoutMessage
+      || `请求超时：${Math.ceil(timeoutMs / 1000)} 秒内没有收到完整响应`,
+    ));
+    cleanup();
   }, timeoutMs);
-
-  try {
-    return await fetch(input, { ...init, signal: controller.signal });
-  } catch (error) {
-    if (timedOut) {
-      throw new Error(
-        options.timeoutMessage
-        || `请求超时：${Math.ceil(timeoutMs / 1000)} 秒内没有收到响应`,
-      );
-    }
-    throw error;
-  } finally {
+  const cleanup = () => {
     globalThis.clearTimeout(timeout);
     callerSignal?.removeEventListener("abort", abortFromCaller);
+  };
+
+  if (callerSignal?.aborted) abortFromCaller();
+  else callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+
+  try {
+    const response = await fetch(input, { ...init, signal: controller.signal });
+    if (!response.body) {
+      cleanup();
+      return response;
+    }
+    // Fetch resolves at headers. The same request authority must remain alive
+    // through json/text/blob consumption, or a stalled body escapes its deadline.
+    const reader = response.body.getReader();
+    const body = new ReadableStream<Uint8Array>({
+      async pull(stream) {
+        try {
+          const chunk = await reader.read();
+          if (chunk.done) {
+            cleanup();
+            stream.close();
+          } else stream.enqueue(chunk.value);
+        } catch (error) {
+          cleanup();
+          stream.error(controller.signal.aborted ? controller.signal.reason : error);
+        }
+      },
+      cancel(reason) {
+        cleanup();
+        return reader.cancel(reason);
+      },
+    });
+    const boundedResponse = new Response(body, response);
+    Object.defineProperties(boundedResponse, {
+      url: { value: response.url },
+      redirected: { value: response.redirected },
+      type: { value: response.type },
+    });
+    return boundedResponse;
+  } catch (error) {
+    cleanup();
+    throw controller.signal.aborted ? controller.signal.reason : error;
   }
 };
 

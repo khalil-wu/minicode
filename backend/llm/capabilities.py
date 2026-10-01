@@ -217,6 +217,7 @@ def capabilities_from_openai_settings(
         limitations=tuple(limitations),
     )
 def capabilities_from_anthropic_adapter(adapter: Any) -> ProviderCapabilities:
+    spec = getattr(adapter, "provider_adapter_spec", None)
     model = str(getattr(adapter, "_model", "") or "").strip()
     base_url = str(getattr(adapter, "_base_url", "") or "").strip()
     configured_effort = getattr(adapter, "_configured_reasoning_effort", "")
@@ -259,9 +260,9 @@ def capabilities_from_anthropic_adapter(adapter: Any) -> ProviderCapabilities:
             adapter._max_context_window_verified if adapter._max_context_window
             else bool(adapter._context_window and adapter._context_window_verified)
         ),
-        max_output_tokens=max(0, getattr(adapter, "_max_tokens", 0) or 0),
-        max_output_tokens_source="provider",
-        max_output_tokens_verified=True,
+        max_output_tokens=spec.max_output_tokens if spec is not None else 0,
+        max_output_tokens_source=spec.max_output_tokens_source if spec is not None else "",
+        max_output_tokens_verified=spec.max_output_tokens_verified if spec is not None else False,
         vision=None,
         native_pdf=None,
         image_generation=False,

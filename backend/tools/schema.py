@@ -1,8 +1,38 @@
 from __future__ import annotations
 
 import re
+import json
 from copy import deepcopy
 from typing import Any, Iterable
+
+
+def code_mode_parameters(parameters: dict[str, Any]) -> str:
+    """Render the object actually accepted by tools.name(args), including unions.
+
+    This directory is model input. Positional-looking signatures and an arbitrary
+    four-field cutoff caused invalid search calls and omitted delegation prompts.
+    ALL_TOOLS retains the complete JSON Schema, including numeric constraints.
+    """
+    if "enum" in parameters:
+        return " | ".join(json.dumps(value, ensure_ascii=False) for value in parameters["enum"])
+    alternatives = parameters.get("anyOf") or parameters.get("oneOf")
+    if alternatives:
+        base = {key: value for key, value in parameters.items() if key not in {"anyOf", "oneOf"}}
+        return " | ".join(code_mode_parameters({**base, **branch}) for branch in alternatives)
+    kind = parameters.get("type", "object" if "properties" in parameters else "unknown")
+    if kind == "object" and "properties" in parameters:
+        required = parameters.get("required", [])
+        fields = [
+            f"{name if re.fullmatch(r'[A-Za-z_$][A-Za-z0-9_$]*', name) else json.dumps(name)}"
+            f"{'' if name in required else '?'}: {code_mode_parameters(value)}"
+            for name, value in parameters["properties"].items()
+        ]
+        return "{ " + ", ".join(fields) + " }"
+    if kind == "array":
+        return f"Array<{code_mode_parameters(parameters.get('items', {}))}>"
+    if isinstance(kind, list):
+        return " | ".join("number" if item == "integer" else item for item in kind)
+    return "number" if kind == "integer" else kind
 
 
 def postprocess_tool_schema(schema: dict[str, Any], *, visible_tool_names: Iterable[str]) -> dict[str, Any]:

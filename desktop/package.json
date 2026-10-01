@@ -22,9 +22,10 @@
     "version:check": "python ../scripts/version_sync.py --check",
     "version:sync": "python ../scripts/version_sync.py",
     "runtime:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-python-runtime.ps1",
+    "runtime:windows-sandbox": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-windows-sandbox-runtime.ps1",
     "native:check": "chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=1&& electron scripts/verify-node-pty-runtime.js",
-    "pack:dir": "npm run version:check && npm run runtime:prepare && npm run build:frontend:desktop && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --dir",
-    "dist:win": "npm run version:check && npm run runtime:prepare && npm run build:frontend:desktop && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --win nsis"
+    "pack:dir": "npm run version:check && npm run runtime:windows-sandbox && npm run runtime:prepare && npm run build:frontend:desktop && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --dir",
+    "dist:win": "npm run version:check && npm run runtime:windows-sandbox && npm run runtime:prepare && npm run build:frontend:desktop && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --win nsis"
   },
   "devDependencies": {
     "@divriots/h2d-electron-sdk": "^0.0.4",
@@ -39,6 +40,7 @@
     "copyright": "Copyright (c) MiniCode",
     "asar": true,
     "npmRebuild": false,
+    "beforePack": "./scripts/verify-windows-sandbox-runtime.js",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -107,6 +109,16 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "windows-sandbox-runtime",
+        "to": "windows-sandbox",
+        "filter": [
+          "*.exe",
+          "runtime.json",
+          "LICENSE.openai-codex",
+          "NOTICE.openai-codex"
+        ]
       }
     ],
     "win": {
@@ -124,6 +136,8 @@
       ]
     },
     "nsis": {
+      "include": "build/installer.nsh",
+      "perMachine": true,
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,

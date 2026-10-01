@@ -391,12 +391,12 @@ async def _invalidate_turn_diff_after_inexact_mutation(
     tool_registry: ToolRegistry,
     tool_ctx: ToolExecutionContext,
 ) -> None:
-    """Any successful non-exact mutation invalidates the turn diff.
+    """Any executed non-exact mutation invalidates the turn diff.
 
     Exact file tools publish their own committed before/after deltas. Commands,
     git/worktree, notebooks, MCP and other workspace/external mutations cannot
-    provide that proof, so an existing aggregate must be cleared instead of
-    presenting a stale authoritative snapshot.
+    provide that proof, including when they fail after partial effects. Clear
+    the aggregate instead of presenting a stale authoritative snapshot.
     """
 
     if tc.name in _EXACT_TURN_DIFF_TOOLS:
@@ -427,14 +427,14 @@ async def _invalidate_turn_diff_after_inexact_mutation(
                 "workspace cache invalidation failed for %s", tc.name, exc_info=True
             )
 
-    if result.is_error:
+    if result.status == "blocked":
         return
     tracker = getattr(tool_ctx, "turn_diff_tracker", None)
     if tracker is None or not hasattr(tracker, "lock"):
         return
     emit = getattr(tool_ctx, "emit_event", None)
     async with tracker.lock:
-        # The lock is the commit-order boundary. A successful mutation whose
+        # The lock is the commit-order boundary. An executed mutation whose
         # exact before/after content is unknown always invalidates everything
         # committed before it. Exact file mutations that acquire the lock later
         # see the invalid tracker and cannot recreate a misleading partial diff.
@@ -566,10 +566,16 @@ def _watch_cleanup_receipt_settlement(
     tool_ctx: ToolExecutionContext,
     tool_call_id: str,
 ) -> None:
-    """Refresh the live receipt when a post-deadline task finally settles."""
+    """Settle a call only after its wrapper and registered child have finished."""
 
     def settled(completed: asyncio.Task[Any]) -> None:
         tool_ctx.pending_cleanup_tasks.discard(completed)
+        if not task.done():
+            return
+        child = tool_ctx.cleanup_tasks_by_call.get(tool_call_id)
+        if child is not None and not child.done():
+            child.add_done_callback(settled)
+            return
         tool_ctx.cleanup_tasks_by_call.pop(tool_call_id, None)
         receipt = tool_ctx.cleanup_receipts.get(tool_call_id)
         if not isinstance(receipt, dict) or not receipt.get("pending"):
@@ -1335,6 +1341,7 @@ async def _apply_pre_tool_hook(
             _apply_pre_tool_hook_owned(tc, tool_ctx),
             deadline=tool_ctx.deadline_monotonic,
             cancel_event=tool_ctx.cancel_event,
+            run_context=tool_ctx.run_context, llm=tool_ctx.llm,
         )
     except PhaseDeadlineExceeded:
         return ToolResult(

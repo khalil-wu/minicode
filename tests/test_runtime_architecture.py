@@ -173,6 +173,7 @@ def test_capability_registry_builds_stable_snapshot() -> None:
             "exposure": "deferred",
             "direct": False,
             "schema_available": True,
+            "code_mode_available": True,
             "toolset": "default",
             "capability": "",
             "permission": "auto",
@@ -193,6 +194,7 @@ def test_capability_registry_builds_stable_snapshot() -> None:
     assert snapshot["summary"] == {
         "tools_total": 1,
         "direct_tools": 0,
+        "code_mode_tools": 0,
         "core_tools": 0,
         "deferred_tools": 1,
         "hidden_tools": 0,
@@ -224,6 +226,7 @@ def test_capability_registry_tool_views_explain_direct_deferred_and_hidden_tools
         "exposure": "core",
         "direct": True,
         "schema_available": True,
+        "code_mode_available": True,
         "toolset": "core",
         "capability": "test.core",
         "permission": "auto",

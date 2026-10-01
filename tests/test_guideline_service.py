@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import asyncio
 from pathlib import Path
 import shutil
 from uuid import uuid4
@@ -241,12 +242,19 @@ def test_guideline_hooks_receive_include_parent_and_compact_reason(
 
         def capture(path, source_kind, **kwargs) -> None:
             calls.append({"path": str(path), "source_kind": source_kind, **kwargs})
+            return True
+
+        class Owner:
+            pass
+
+        owner = Owner()
 
         monkeypatch.setattr(instruction_discovery, "_schedule_instructions_loaded_hook", capture)
         instruction_discovery.clear_guideline_cache()
         load_project_guideline_bundle(
             workspace_dir=workspace_dir,
             load_reason="compact",
+            hook_manager=owner,
         )
 
         root_call = next(call for call in calls if call["path"] == str(root))
@@ -280,3 +288,66 @@ def test_conditional_rules_are_excluded_until_a_touched_path_matches() -> None:
         assert "python-only guidance" not in initial
         assert "python-only guidance" in matched
         assert unmatched == ""
+
+
+def test_cached_guidelines_notify_each_hook_owner_once(tmp_path, monkeypatch):
+    root = tmp_path / "AGENTS.md"
+    root.write_text("Keep the source contract", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+
+    class Owner:
+        def __init__(self):
+            self.tasks = []
+            self.calls = []
+
+        def _track_async_task(self, task, event):
+            self.tasks.append(task)
+
+        async def run_instructions_loaded(self, **kwargs):
+            self.calls.append(kwargs)
+
+    first, second = Owner(), Owner()
+    instruction_discovery.clear_guideline_cache()
+    # No running loop: there was no delivered event to reuse later.
+    load_project_guideline_bundle(tmp_path, hook_manager=first)
+
+    async def scenario():
+        for owner in (first, second, second):
+            load_project_guideline_bundle(tmp_path, hook_manager=owner)
+            await asyncio.gather(*owner.tasks)
+
+    asyncio.run(scenario())
+    assert len([call for call in first.calls if call["file_path"] == str(root)]) == 1
+    assert len([call for call in second.calls if call["file_path"] == str(root)]) == 1
+    assert second.calls[0]["load_reason"] == "session_start"
+
+
+def test_conditional_imports_expand_only_matching_graph_and_keep_scope(tmp_path, monkeypatch):
+    workspace = tmp_path / "repo"
+    rules = workspace / ".minicode" / "rules"
+    rules.mkdir(parents=True)
+    (workspace / ".git").mkdir()
+    root = rules / "python.md"
+    root.write_text("---\npaths: src/**/*.py\n---\npython root\n@shared.txt\n@nested.md\n@../../../outside.txt", encoding="utf-8")
+    (rules / "shared.txt").write_text("shared constraint\n@python.md", encoding="utf-8")
+    (rules / "nested.md").write_text("---\npaths: frontend/**/*.ts\n---\nnot a Python constraint", encoding="utf-8")
+    (tmp_path / "outside.txt").write_text("must not enter model context", encoding="utf-8")
+    calls = []
+
+    def capture(path, source_kind, **kwargs):
+        calls.append((path, kwargs))
+        return True
+
+    monkeypatch.setattr(instruction_discovery, "_schedule_instructions_loaded_hook", capture)
+    initial = load_project_guidelines(workspace)
+    target = workspace / "src" / "module.py"
+    matched = load_matching_project_rules(workspace, [target])
+
+    assert "python root" not in initial and "shared constraint" not in initial
+    assert "python root" in matched and "shared constraint" in matched
+    assert "not a Python constraint" not in matched
+    assert "must not enter model context" not in matched
+    assert matched.count("shared constraint") == 1
+    child_calls = [kwargs for path, kwargs in calls if path == rules / "shared.txt"]
+    assert child_calls[-1]["parent_file_path"] == str(root)
+    assert child_calls[-1]["trigger_file_path"] == str(target)

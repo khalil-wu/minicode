@@ -14,9 +14,26 @@ import httpx
 import pytest
 
 import backend.plugins.package as package
+from backend.commands.plugins import _active_versioned_manifests
 from backend.main import app
 from backend.plugins.policy import ManagedPluginPolicy, PluginSettingsError
 from backend.services.plugin_settings_service import import_plugin_from_path
+
+
+def test_legacy_active_version_cannot_select_a_manifest_outside_its_plugin(tmp_path: Path) -> None:
+    root = tmp_path / "installed"
+    plugin = root / "marketplace" / "demo"
+    local_manifest = plugin / "1.0.0" / ".minicode-plugin" / "plugin.json"
+    local_manifest.parent.mkdir(parents=True)
+    local_manifest.write_text("{}", encoding="utf-8")
+    outside_manifest = tmp_path / "outside" / ".minicode-plugin" / "plugin.json"
+    outside_manifest.parent.mkdir(parents=True)
+    outside_manifest.write_text("{}", encoding="utf-8")
+    (plugin / "active.json").write_text(
+        json.dumps({"version": "../../../outside"}), encoding="utf-8",
+    )
+
+    assert _active_versioned_manifests(root) == [local_manifest]
 
 
 def _linked_manifest(tmp_path: Path, kind: str) -> tuple[Path, Path]:

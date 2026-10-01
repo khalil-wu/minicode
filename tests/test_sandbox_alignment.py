@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from backend.artifact.store import ArtifactStore
+from backend.config import PermissionSettings
+from backend.permissions.checker import PermissionChecker, evaluate_permission_decision
 from backend.permissions.context import PermissionContext
 from backend.sandbox.policy import (
     FileSystemAccessMode,
@@ -17,6 +20,7 @@ from backend.sandbox.policy import (
     sandbox_policy_from_config_snapshot,
 )
 from backend.sandbox.runner import (
+    SandboxCapability,
     SandboxRunner,
     SandboxUnavailableError,
     _bubblewrap_command,
@@ -373,6 +377,36 @@ def test_auto_allow_commands_never_auto_allows_excluded_or_escalated_commands(
         {"command": "python -V", "with_escalated_permissions": True},
         context,
     ) is PermissionLevel.CONFIRM
+
+
+def test_auto_allow_command_requires_approval_when_network_is_not_isolated(tmp_path, monkeypatch) -> None:
+    checker = PermissionChecker(PermissionSettings(), tmp_path)
+    context = PermissionContext(
+        mode="auto",
+        workspace_root=tmp_path,
+        sandbox_mode="workspace-write",
+        sandbox_auto_allow_commands=True,
+        session_overrides={"run_command": PermissionLevel.AUTO},
+    )
+    tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+
+    monkeypatch.setattr(SandboxRunner, "capability", lambda self, **kwargs: SandboxCapability(
+        available=True, backend="low-integrity", filesystem_isolated=True, network_isolated=False,
+    ))
+    decision = evaluate_permission_decision(
+        checker, "run_command", {"command": "python -V"}, context=context, tool=tool,
+    )
+    assert decision.decision == "ask"
+    assert decision.matched_rule_source == "sandbox_capability"
+    assert decision.matched_rule == "network_not_isolated"
+
+    monkeypatch.setattr(SandboxRunner, "capability", lambda self, **kwargs: SandboxCapability(
+        available=True, backend="bubblewrap", filesystem_isolated=True, network_isolated=True,
+    ))
+    isolated = evaluate_permission_decision(
+        checker, "run_command", {"command": "python -V"}, context=context, tool=tool,
+    )
+    assert isolated.decision == "allow"
 
 
 def test_managed_unsandboxed_false_blocks_escalation_before_execution(tmp_path: Path) -> None:

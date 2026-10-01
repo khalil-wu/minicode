@@ -108,18 +108,27 @@ def _call_with_signature(
         return func(*positional_fallback)
 
     parameters = list(signature.parameters.values())
-    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters):
-        return func(**dict(values))
-
+    has_keywords = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters)
     kwargs: dict[str, Any] = {}
     positional: list[Any] = []
     fallback_iter = iter(positional_fallback)
+    missing = object()
+    used_values: set[str] = set()
     for parameter in parameters:
-        if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
-            positional.extend(fallback_iter)
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
             continue
+        if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+            if not has_keywords:
+                positional.extend(fallback_iter)
+            continue
+        fallback = (
+            next(fallback_iter, missing)
+            if parameter.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
+            else missing
+        )
         if parameter.name in values:
             value = values[parameter.name]
+            used_values.add(parameter.name)
         else:
             aliases = {
                 "args": "params",
@@ -142,28 +151,21 @@ def _call_with_signature(
             source_name = aliases.get(parameter.name)
             if source_name is not None and source_name in values:
                 value = values[source_name]
+                used_values.add(source_name)
             elif parameter.default is not inspect.Parameter.empty:
-                continue
+                value = parameter.default
+            elif fallback is not missing:
+                value = fallback
             else:
-                try:
-                    value = next(fallback_iter)
-                except StopIteration as exc:
-                    raise TypeError(
-                        f"Cannot bind extension callback parameter '{parameter.name}'"
-                    ) from exc
+                raise TypeError(f"Cannot bind extension callback parameter '{parameter.name}'")
 
-        if parameter.kind == inspect.Parameter.POSITIONAL_ONLY:
+        if parameter.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}:
             positional.append(value)
         else:
             kwargs[parameter.name] = value
 
-    # A callback with only positional-only parameters cannot receive kwargs.
-    if all(
-        parameter.kind
-        in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.VAR_POSITIONAL}
-        for parameter in parameters
-    ):
-        return func(*positional)
+    if has_keywords:
+        kwargs.update({name: value for name, value in values.items() if name not in used_values and name not in signature.parameters})
     return func(*positional, **kwargs)
 
 
@@ -256,7 +258,7 @@ class _BoundEventBus:
     """Generation-guarded view exposed to one extension factory."""
 
     def __init__(
-        self, runtime: "ExtensionRuntime", event_bus: ExtensionEventBus, owner: str = ""
+        self, runtime: "ExtensionRuntime", event_bus: ExtensionEventBus, owner: tuple[object, str]
     ) -> None:
         self._runtime = runtime
         self._event_bus = event_bus
@@ -292,7 +294,7 @@ class ExtensionRuntime:
         self.pending_provider_registrations: list[ExtensionProvider] = []
         self.provider_diagnostics: list[dict[str, str]] = []
         self._provider_sink: Any | None = None
-        self._event_unsubscribers: dict[str, list[Callable[[], None]]] = {}
+        self._event_unsubscribers: dict[tuple[object, str], list[Callable[[], None]]] = {}
         self._event_bus: ExtensionEventBus | None = None
         self._actions: dict[str, Callable[..., Any]] = dict(actions or {})
         self._execution_context = ContextVar("extension_execution_context", default=None)
@@ -393,6 +395,8 @@ class ExtensionRuntime:
         name: str,
         config: Mapping[str, Any],
         extension_path: str = "<unknown>",
+        *,
+        owner: object | None = None,
     ) -> None:
         self.assert_active()
         clean_name = str(name or "").strip()
@@ -400,7 +404,7 @@ class ExtensionRuntime:
             raise ExtensionRegistrationError("provider name must be non-empty")
         if not isinstance(config, Mapping):
             raise ExtensionRegistrationError("provider config must be an object")
-        registration = ExtensionProvider(clean_name, dict(config), extension_path)
+        registration = ExtensionProvider(clean_name, dict(config), extension_path, _owner=owner)
         if self._provider_sink is None:
             # MiniCode keeps registration call order and ModelRuntime merges each
             # defined value over the previous registration. Replacing the
@@ -425,31 +429,35 @@ class ExtensionRuntime:
         if unregister is not None:
             _call_with_signature(unregister, {"name": clean_name}, (clean_name,))
 
-    def unregister_owner(self, extension_path: str) -> None:
+    def unregister_owner(self, extension_path: str, *, owner: object | None = None) -> None:
         # Helper for callers that discard a factory before the generation is
         # bound. Once bound, provider ownership is the whole
         # ModelRuntime generation rather than an individual extension path.
         self.pending_provider_registrations = [
             item
             for item in self.pending_provider_registrations
-            if item.extension_path != extension_path
+            if item.extension_path != extension_path or (owner is not None and item._owner != owner)
         ]
-        for unsubscribe in self._event_unsubscribers.pop(extension_path, ()):
-            unsubscribe()
+        for key in tuple(self._event_unsubscribers):
+            if key[1] == extension_path and (owner is None or key == owner):
+                for unsubscribe in self._event_unsubscribers.pop(key):
+                    unsubscribe()
 
     def track_event_subscription(
-        self, owner: str, unsubscribe: Callable[[], None]
+        self, owner: tuple[object, str], unsubscribe: Callable[[], None]
     ) -> None:
         self._event_unsubscribers.setdefault(owner, []).append(unsubscribe)
 
-    def cleanup_event_subscriptions(self) -> None:
-        for unsubscribers in tuple(self._event_unsubscribers.values()):
+    def cleanup_event_subscriptions(self, *, owner_token: object | None = None) -> None:
+        for key in tuple(self._event_unsubscribers):
+            if owner_token is not None and key[0] is not owner_token:
+                continue
+            unsubscribers = self._event_unsubscribers.pop(key)
             for unsubscribe in unsubscribers:
                 try:
                     unsubscribe()
                 except Exception:
                     logger.exception("failed to remove extension event subscription")
-        self._event_unsubscribers.clear()
 
     # Action/context methods are thin and guarded by the generation check.
     # Unknown actions fail closed instead of becoming a
@@ -679,7 +687,7 @@ class ExtensionAPI:
     def __init__(self, runner: "ExtensionRunner", extension: Extension) -> None:
         self._runner = runner
         self._extension = extension
-        self.events = _BoundEventBus(runner.runtime, runner.event_bus, extension.path)
+        self.events = _BoundEventBus(runner.runtime, runner.event_bus, (runner._resource_owner, extension.path))
 
     def _assert(self) -> None:
         self._runner.assert_active()
@@ -828,10 +836,11 @@ class ExtensionAPI:
             name=name,
             config=dict(config),
             extension_path=self._extension.path,
+            _owner=(self._runner._resource_owner, self._extension.path),
         )
         self._extension.providers[name] = registration
         self._runner.runtime.register_provider(
-            name, registration.config, self._extension.path
+            name, registration.config, self._extension.path, owner=registration._owner
         )
 
     def unregister_provider(self, name: str) -> None:
@@ -1156,6 +1165,7 @@ class ExtensionRunner:
         self.diagnostics: list[dict[str, str]] = []
         self._active = True
         self._startup_emitted = False
+        self._resource_owner = object()
         self._shutdown_started = False
         self._shutdown_requested = False
         self._tool_registry: Any | None = None
@@ -1184,7 +1194,7 @@ class ExtensionRunner:
             raise ExtensionStaleError(DEFAULT_STALE_MESSAGE)
         self.runtime.assert_active()
 
-    def invalidate(self, message: str | None = None) -> None:
+    def invalidate(self, message: str | None = None, *, invalidate_runtime: bool = True) -> None:
         # MiniCode replaces the complete tool/command registry with the new session
         # runtime.  MiniCode binds into host registries, so invalidation must
         # explicitly remove those wrappers before the old API becomes stale;
@@ -1192,7 +1202,14 @@ class ExtensionRunner:
         self.detach_tool_registry()
         self.detach_command_registry()
         self._active = False
-        self.runtime.invalidate(message)
+        if invalidate_runtime:
+            self.runtime.invalidate(message)
+        else:
+            # An injected generation remains caller-owned. Only this failed
+            # load's API, bindings and registrations are revoked.
+            for extension in self.extensions:
+                self.runtime.unregister_owner(extension.path, owner=(self._resource_owner, extension.path))
+            self.runtime.cleanup_event_subscriptions(owner_token=self._resource_owner)
 
     def bind_actions(
         self,

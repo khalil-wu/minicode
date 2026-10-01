@@ -165,7 +165,7 @@ describe("session gate replay", () => {
 
   it.each(process.env.MINICODE_SESSION_GATE_FIXTURE
     ? [process.env.MINICODE_SESSION_GATE_FIXTURE]
-    : ["__fixtures__session_gate.json", "__fixtures__approval_gate.json"])("replays real session and approval behavior: %s", async (name) => {
+    : ["__fixtures__session_gate.json", "__fixtures__approval_gate.json"])("replays captured session behavior (legacy receipt adaptation): %s", async (name) => {
     const fixture = loadFixture(name);
     const [c0, c1, c2, c3] = fixture.connections;
     const logs: string[] = [];
@@ -222,7 +222,10 @@ describe("session gate replay", () => {
             await step(() => { fireEvent.change(screen.getByRole("textbox", { name: "给 Agent 补充说明" }), { target: { value: response.feedback } }); });
             await step(() => { fireEvent.click(screen.getByRole("button", { name: "拒绝并发送说明" })); });
           }
-          expect(useAppStore.getState().pendingApproval).toBeNull();
+          // These captures predate correlated control command results. Sending
+          // the decision is not semantic acceptance: keep the card until the
+          // captured permission/tool terminal event settles the original request.
+          expect(useAppStore.getState().pendingApproval?.requestId).toBe(command.request_id);
           return;
         }
         default:
@@ -246,6 +249,22 @@ describe("session gate replay", () => {
           }
         }
         await step(() => socket.emitMessage(rekeyEvent(event, captured, socket, unmapped)));
+        // This named historical capture predates control command.result.
+        // Its matching tool_result proves the request was semantically resolved,
+        // unlike its admission ACK. Adapt only that legacy fixture's missing
+        // receipt; live captures supplied through MINICODE_SESSION_GATE_FIXTURE
+        // must carry their own real backend receipts and are not enriched.
+        if (name === "__fixtures__approval_gate.json" && event.type === "tool_result") {
+          const response = captured.commands.find((entry) => entry.sent_after_events <= index
+            && entry.command.type === "control_response" && entry.command.request_id === event.id);
+          if (response) {
+            await step(() => socket.emitMessage(rekeyEvent({
+              type: "command.result", command: "control_response", level: "success", message: "",
+              client_command_id: response.command.client_command_id,
+              data: { client_command_id: response.command.client_command_id },
+            }, captured, socket, unmapped)));
+          }
+        }
       }
       await step(() => vi.advanceTimersByTime(FLUSH_MS));
       for (const command of captured.commands) {

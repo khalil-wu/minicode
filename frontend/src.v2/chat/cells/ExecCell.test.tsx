@@ -170,3 +170,15 @@ describe("ExecCell", () => {
     expect(await screen.findByRole("button", { name: "已复制命令输出" })).toBeTruthy();
   });
 });
+
+
+it.each([
+  ["pending_approval", "等待运行命令"],
+  ["failed", "命令失败"],
+] as const)("does not claim a %s command already executed", (status, title) => {
+  render(<ExecCell cell={{ kind: "exec", id: "exec-not-performed", command: "python -m pytest", status,
+    stdoutPreview: [], stderrPreview: [], collapsed: true, createdAt: 1 }} />);
+  expect(screen.getByText(title)).toBeTruthy();
+  expect(screen.queryByText("已运行命令")).toBeNull();
+  expect(screen.queryByText("正在运行")).toBeNull();
+});

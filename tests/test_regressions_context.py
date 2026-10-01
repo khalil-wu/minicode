@@ -435,7 +435,7 @@ def test_context_builder_retries_transient_compaction_failure() -> None:
 
 
 def test_compaction_has_one_side_query_retry_owner(monkeypatch) -> None:
-    """A two-retry compaction budget means exactly three provider requests."""
+    """Compaction retries stay in one owner and cover a short 429 window."""
 
     class _CountingSummaryLLM(_SummaryLLM):
         def __init__(self, model: str, response: str) -> None:
@@ -453,7 +453,7 @@ def test_compaction_has_one_side_query_retry_owner(monkeypatch) -> None:
             self.simple_messages.append(messages)
             options = context.options
             self.options_seen.append(options)
-            if self.simple_calls < 3:
+            if self.simple_calls < 6:
                 raise RuntimeError("503 service unavailable")
             return self.response
 
@@ -484,11 +484,11 @@ def test_compaction_has_one_side_query_retry_owner(monkeypatch) -> None:
     )
 
     assert summary == llm.response
-    assert llm.simple_calls == 3
-    assert len(sleep_calls) == 2
+    assert llm.simple_calls == 6
+    assert len(sleep_calls) == 5
     assert {options.operation for options in llm.options_seen} == {"compact"}
     assert {options.query_source for options in llm.options_seen} == {"compact"}
-    assert {options.max_retries for options in llm.options_seen} == {2}
+    assert {options.max_retries for options in llm.options_seen} == {None}
     assert len({options.session_id for options in llm.options_seen}) == 1
 
 

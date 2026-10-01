@@ -282,23 +282,21 @@ class WorktreeManager:
     # ── 快照 / 恢复 ──────────────────────────────────────────────
 
     def has_local_changes(self, path: Path) -> bool:
-        """worktree 是否有未提交改动(含 untracked)。出错时保守返回 True。
+        """worktree 是否有未提交改动(含 untracked 和 ignored)。出错时保守返回 True。
 
         注意:必须区分「成功且无输出」(干净)与「命令失败」(未知→保守),
         所以不复用 _capture_output(后者把空输出也当成 None)。
         """
+        from backend.services.workspace_service import run_readonly_git
+        from backend.sandbox.runner import SandboxUnavailableError
+
         try:
-            result = subprocess.run(
-                ["git", "status", "--porcelain=v1"],
-                cwd=Path(path),
-                env=sanitized_git_env(),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=True,
+            result = run_readonly_git(
+                Path(path), "status", "--porcelain=v1", "--ignored", "--untracked-files=all",
                 timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
             )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            result.check_returncode()
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, SandboxUnavailableError):
             return True
         return bool(result.stdout.strip())
 
@@ -310,9 +308,9 @@ class WorktreeManager:
         branch: str = "",
         label: str = "",
     ) -> "WorktreeSnapshotRecord | None":
-        """删除前抓一份持久、完整(tracked + untracked)的 worktree 快照。
+        """删除前抓一份持久、完整(tracked + untracked + ignored)的 worktree 快照。
 
-        用 ``git add -A`` + ``write-tree`` + ``commit-tree`` 把整个工作状态
+        用 ``git add -A --force`` + ``write-tree`` + ``commit-tree`` 把整个工作状态
         固化成一个 commit,再用 ``update-ref`` 锚到 ``refs/minicode/wt-snapshots/<id>``。
         该 ref 存于 common git dir,worktree 删除后仍在、且不会被 GC。失败返回 None。
         """
@@ -347,7 +345,7 @@ class WorktreeManager:
                     return None
 
             seeded = _snapshot_git("read-tree", head) if head else _snapshot_git("read-tree", "--empty")
-            if seeded is None or _snapshot_git("add", "-A") is None:
+            if seeded is None or _snapshot_git("add", "-A", "--force") is None:
                 logger.error("Snapshot failed while building temporary index for %s", wt)
                 return None
             tree_result = _snapshot_git("write-tree")
@@ -397,7 +395,7 @@ class WorktreeManager:
         """把快照恢复成一个 worktree(detached 在快照 commit 上)。
 
         默认恢复到原路径;若原路径已存在且非空,则改用 ``<name>-restored``。
-        恢复出的 worktree 处于 detached HEAD,所有文件(tracked + 原 untracked)
+        恢复出的 worktree 处于 detached HEAD,所有文件(tracked + 原 untracked/ignored)
         以快照 commit 的形式回来。
         """
         record = self._snapshots().get(snapshot_id)

@@ -20,6 +20,9 @@ vi.mock("../desktop/runtime", () => ({
   runtime: () => runtimeState,
 }));
 
+const reconnect = vi.hoisted(() => vi.fn());
+vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ reconnect }) }));
+
 vi.mock("./SidebarLeft", () => ({
   SidebarLeft: ({ onNavigate }: { onNavigate?: () => void }) => (
     <button type="button" data-testid="left-sidebar" onClick={onNavigate}>Left sidebar</button>
@@ -380,4 +383,13 @@ describe("WorkbenchShell narrow navigation", () => {
     expect(screen.queryByRole("button", { name: /左侧栏/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /右侧栏/ })).toBeNull();
   });
+  it("offers a keyboard-accessible reconnect action after transport failure", () => {
+    useAppStore.setState({ isConnected: false, connectionPhase: "failed", connectionError: "Service unavailable" });
+    render(<WorkbenchShell />);
+    const button = screen.getByRole("button", { name: "重新连接" });
+    expect(button.closest('[aria-hidden="true"]')).toBeNull();
+    fireEvent.click(button);
+    expect(reconnect).toHaveBeenCalledOnce();
+  });
+
 });

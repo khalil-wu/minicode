@@ -57,6 +57,16 @@ afterEach(() => {
 });
 
 describe("ActivityCell", () => {
+  it.each([
+    ["failed", "编辑失败"],
+    ["interrupted", "已取消编辑"],
+    ["partial", "编辑未完成"],
+  ] as const)("does not claim an edit was applied after %s", (status, label) => {
+    render(<ActivityCell cell={{ kind: "activity", id: "edit", activityKind: "fileChange", title: "Edit", status,
+      toolCallRecords: [{ id: "edit", name: "edit_file", args: { file_path: "pricing.py" }, status: "failed" }] }} />);
+    expect(screen.getByText(label)).toBeTruthy();
+    expect(screen.queryByText("已编辑")).toBeNull();
+  });
   it("preserves a user's disclosure choice across tool status updates", () => {
     const cell: ActivityCellState = { kind: "activity", id: "read", activityKind: "fileRead", title: "Read", status: "running", collapsed: false, startedAt: 1,
       toolCallRecords: [{ id: "read", name: "read_file", args: { path: "a.ts" }, status: "running", startedAt: 1, outputPreview: "content" }] };
@@ -492,7 +502,7 @@ describe("ActivityCell", () => {
       </>,
     );
     const labels = [...container.querySelectorAll(".activity-cell-name")].map((node) => node.textContent);
-    expect(labels).toEqual(["List", "Search"]);
+    expect(labels).toEqual(["列出文件", "搜索文件"]);
     expect(container.querySelectorAll(".activity-cell-detail")[0]?.textContent).toBe("frontend/src.v2/lib");
     expect(container.querySelectorAll(".activity-cell-detail")[1]?.textContent)
       .toBe("AgentTimeline · frontend/src.v2/agent-loop");
@@ -946,7 +956,7 @@ describe("ActivityCell", () => {
 
     render(React.createElement(ActivityCell, { cell }));
 
-    expect(screen.getAllByText("Read").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("读取文件").length).toBeGreaterThanOrEqual(1);
     expect(document.querySelector(".activity-cell-main-button .activity-cell-detail")?.textContent).toContain("art_screen");
     expect(document.body.textContent).toContain("Dimensions: 1029x1071");
   });

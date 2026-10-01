@@ -284,21 +284,19 @@ def test_sandbox_blocks_write_outside_writable_roots(tmp_path: Path) -> None:
         from backend.tools.command_support import _windows_powershell_shell_command
         inside_path = str(workspace / "test_file.txt").replace("'", "''")
         outside_path = str(outside / "escape.txt").replace("'", "''")
-        inside_command = _windows_powershell_shell_command(
-            f"Set-Content -LiteralPath '{inside_path}' -Value 'ok'",
-            cwd=workspace,
-        )
-        outside_command = _windows_powershell_shell_command(
-            f"Set-Content -LiteralPath '{outside_path}' -Value 'denied'",
-            cwd=workspace,
-        )
+        inside_command = f"Set-Content -LiteralPath '{inside_path}' -Value 'ok'"
+        outside_command = f"Set-Content -LiteralPath '{outside_path}' -Value 'denied'"
+        inside_host_command = _windows_powershell_shell_command(inside_command, cwd=workspace)
+        outside_host_command = _windows_powershell_shell_command(outside_command, cwd=workspace)
     else:
         inside_command = f"touch {workspace}/test_file.txt"
         outside_command = f"touch {outside}/escape.txt"
+        inside_host_command = ""
+        outside_host_command = ""
     result = asyncio.run(runner.run(
         inside_command,
         cwd=workspace,
-        host_command=inside_command if sys.platform == "win32" else "",
+        host_command=inside_host_command,
     ))
     if result.sandbox_unavailable:
         pytest.skip(result.stderr)
@@ -309,7 +307,7 @@ def test_sandbox_blocks_write_outside_writable_roots(tmp_path: Path) -> None:
     result = asyncio.run(runner.run(
         outside_command,
         cwd=workspace,
-        host_command=outside_command if sys.platform == "win32" else "",
+        host_command=outside_host_command,
     ))
     assert result.exit_code != 0 or not (outside / "escape.txt").exists()
 
@@ -321,22 +319,26 @@ def test_sandbox_allows_read_from_system_paths(tmp_path: Path) -> None:
 
     policy = SandboxPolicy(writable_roots=(workspace,), allow_network=True, timeout=10)
     runner = SandboxRunner(policy)
-    if not runner.capability().available:
-        pytest.skip(runner.capability().reason)
+    capability = runner.capability()
+    if not capability.available:
+        pytest.skip(capability.reason)
 
-    # Reading a standard system file should work.
+    # Read a platform file from the execution plane selected by the runner.
     if sys.platform == "win32":
         from backend.tools.command_support import _windows_powershell_shell_command
-        command = _windows_powershell_shell_command(
-            "Get-Content -LiteralPath (Join-Path $env:WINDIR 'win.ini')",
-            cwd=workspace,
+        command = (
+            "Get-Content -LiteralPath (Join-Path $env:WINDIR 'win.ini')"
+            if capability.backend == "windows-elevated-wfp"
+            else "Get-Content -LiteralPath '/etc/os-release'"
         )
+        host_command = _windows_powershell_shell_command(command, cwd=workspace)
     else:
         command = "ls /usr/bin/env"
+        host_command = ""
     result = asyncio.run(runner.run(
         command,
         cwd=workspace,
-        host_command=command if sys.platform == "win32" else "",
+        host_command=host_command,
     ))
     if result.sandbox_unavailable:
         pytest.skip(result.stderr)
@@ -400,7 +402,11 @@ def test_container_wrapper_keeps_untrusted_values_out_of_the_host_shell(
     assert wrapped[:2] == ["docker", "run"]
     assert f"--volume={workspace.resolve()}:/workspace:rw" in wrapped
     assert "--env=MINICODE_PROBE=value&echo.HOST_ENV" in wrapped
-    assert wrapped[-1] == "whoami&echo.HOST_COMMAND"
+    if sys.platform == "win32":
+        assert "whoami&echo.HOST_COMMAND" in wrapped[-1]
+        assert "exit $minicodeNativeExit" in wrapped[-1]
+    else:
+        assert wrapped[-1] == "whoami&echo.HOST_COMMAND"
 
 
 def test_workspace_and_writable_roots_are_distinct_policy_fields(tmp_path: Path) -> None:

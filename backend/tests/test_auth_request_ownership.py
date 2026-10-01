@@ -440,3 +440,39 @@ async def test_auth_mode_switch_preserves_the_new_modes_cache(start_with_oauth):
         assert all(isinstance(result, ProviderRegistrationError) for result in results)
         assert runtime.resolve_provider_auth("modern-auth")["auth"]["api_key"] == "new-oauth"
     assert api_calls == ["api"]
+
+
+@pytest.mark.asyncio
+async def test_queued_oauth_refresh_checks_provider_generation_before_rotation():
+    calls = []
+    async def unused(*args):
+        raise AssertionError("No login")
+    async def old_refresh(credential):
+        calls.append("old")
+        return {**credential, "access": "stale-output"}
+    async def new_refresh(credential):
+        calls.append("new")
+        return credential
+    async def to_auth(credential):
+        return {"api_key": credential["access"]}
+    runtime, storage = _oauth_runtime({"login": unused, "refresh": old_refresh, "to_auth": to_auth})
+    original = {"type": "oauth", "access": "original", "refresh": "original-refresh", "expires": 1}
+    storage.set("modern-oauth", original)
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def block(current):
+        entered.set()
+        await release.wait()
+        return None
+    blocker = asyncio.create_task(storage.modify("modern-oauth", block))
+    await entered.wait()
+    queued = asyncio.create_task(runtime.refresh_oauth_credentials("modern-oauth"))
+    await asyncio.sleep(0)
+    runtime.register_provider("modern-oauth", {"auth": {"oauth": {
+        "login": unused, "refresh": new_refresh, "to_auth": to_auth,
+    }}})
+    release.set()
+    await blocker
+    with pytest.raises(RuntimeError, match="changed during"):
+        await queued
+    assert calls == []
+    assert storage.get("modern-oauth") == original

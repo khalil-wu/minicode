@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+from backend.llm.openai_adapter import OpenAIAdapter
 from backend.llm.openai_payloads import strict_schema_for_openai
 
 
@@ -59,3 +62,30 @@ def test_strict_schema_nested_objects() -> None:
     inner = items_schema["items"]
     assert inner["required"] == ["id"]
     assert inner["additionalProperties"] is False
+
+
+@pytest.mark.parametrize("api", ["chat", "responses"])
+@pytest.mark.parametrize("strict", [False, True])
+def test_open_object_contract_survives_non_strict_and_strict_fallback(api, strict):
+    open_object = {"type": "object"}
+    if strict:
+        # Open maps cannot be closed without changing the tool's input contract.
+        open_object["additionalProperties"] = True
+    schema = {
+        "type": "object",
+        "properties": {
+            "options": open_object,
+            "rows": {"type": "array", "items": {"type": "object"}},
+            "closed": {"type": "object", "properties": {"name": {"type": "string"}}, "additionalProperties": False},
+        },
+        "required": ["options"],
+    }
+    tool = {"type": "function", "function": {"name": "mcp__data__configure", "parameters": schema, "strict": strict}}
+    convert = OpenAIAdapter._normalize_chat_tools if api == "chat" else OpenAIAdapter._convert_tools_to_responses_format
+    converted = convert([tool])[0]
+    function = converted["function"] if api == "chat" else converted
+
+    assert function["strict"] is False
+    assert function["parameters"] == schema
+    assert "additionalProperties" not in function["parameters"]
+    assert function["parameters"]["properties"]["closed"]["additionalProperties"] is False

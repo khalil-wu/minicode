@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from backend.agent.message import AgentEvent
+from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.state import AgentState
+from backend.agent.tool_execution_guardrails import rejection_result
 from backend.llm.base import ToolCallEvent
+from backend.permissions.context import ToolExecutionContext
 from backend.tools.base import ToolResult
 
 
@@ -29,6 +33,7 @@ class ControlToolRouter:
         state: AgentState,
         approval_handler: Callable | None,
         skill_manager: Any | None,
+        tool_context: ToolExecutionContext,
         hook_manager: Any | None = None,
         await_response: Callable[[ToolCallEvent], Any] | None = None,
     ) -> None:
@@ -36,20 +41,44 @@ class ControlToolRouter:
         self.approval_handler = approval_handler
         self.skill_manager = skill_manager
         self.hook_manager = hook_manager
+        self.tool_context = tool_context
         # Optional deadline-aware waiter supplied by the executor. ask_user is
         # unbounded work owned by the turn, so it must honour the same
         # wall-clock boundary as tool execution when the caller provides one.
         self.await_response = await_response
 
-    def pre_wait_events(self, tc: ToolCallEvent) -> list[AgentEvent]:
-        if tc.name == "ask_user" and self.approval_handler:
-            return [self._ask_user_event(tc)]
-        return []
-
-    async def execute(self, tc: ToolCallEvent) -> RoutedToolResult | None:
-        if tc.name == "ask_user" and self.approval_handler:
-            return await self._ask_user(tc)
-        return None
+    async def run(self, tc: ToolCallEvent) -> AsyncIterator[AgentEvent | RoutedToolResult]:
+        """Own the elicitation gate, question, wait, and result in that order."""
+        if tc.name != "ask_user" or self.approval_handler is None:
+            return
+        if self.hook_manager is not None:
+            context = self.tool_context
+            try:
+                start = await await_preflight(
+                    self.hook_manager.run_elicitation(
+                        str(tc.arguments.get("question", "")),
+                        mcp_server_name="ask_user", elicitation_id=tc.id, mode="control",
+                    ),
+                    deadline=context.deadline_monotonic, cancel_event=context.cancel_event,
+                    run_context=context.run_context, llm=context.llm,
+                )
+            except PhaseDeadlineExceeded:
+                yield RoutedToolResult(result=ToolResult(
+                    content="Turn deadline reached before the question was shown to the user.",
+                    is_error=True, status="timeout", display_summary="Elicitation start timed out",
+                ))
+                return
+            if start.blocked:
+                message = start.message or start.feedback or "elicitation blocked by hook"
+                yield RoutedToolResult(result=rejection_result(
+                    tc, f"Elicitation blocked by hook: {message}",
+                    display_summary="Question blocked by hook", error_kind="hook_blocked",
+                    user_summary="澄清问题被钩子拒绝，未向用户提问。",
+                    model_observation="The question was not shown. Do not assume a user answer.",
+                ))
+                return
+        yield self._ask_user_event(tc)
+        yield await self._ask_user(tc)
 
     def _ask_user_event(self, tc: ToolCallEvent) -> AgentEvent:
         question = tc.arguments.get("question", "")

@@ -1473,7 +1473,6 @@ class MCPServerManager:
                 await self._notify_status(name, ServerStatus.RECONNECTING)
 
                 stale_client = state.client
-                state.client = None
                 if stale_client is not None:
                     try:
                         closed = await stale_client.close()
@@ -1498,8 +1497,10 @@ class MCPServerManager:
                             "message": state.last_error,
                             "retryable": True,
                         }
+                        self._schedule_cleanup_reaper(name, state, stale_client)
                         await self._notify_status(name, ServerStatus.ERROR)
                         return
+                    state.client = None
 
                 await self._attempt_connection(name, state)
                 if state.status == ServerStatus.CONNECTED:
@@ -1647,7 +1648,7 @@ class MCPServerManager:
             return state
 
         config_changed = not _same_runtime_config(state.config, config)
-        if config_changed and state.client is not None:
+        if state.client is not None and (config_changed or not state.client.connected):
             stale_client = state.client
             try:
                 closed = await stale_client.close()
@@ -1837,9 +1838,8 @@ class MCPServerManager:
             # Its callback must never detach or reconnect the newer client.
             return
         state.tools = []
-        # The transport lifecycle that invoked this callback is already ending.
-        # Detach it before reconnect so a fresh client/session is constructed.
-        state.client = None
+        # Transport end is not client end: OAuth callback peers and the SDK
+        # lifecycle may still be closing. Keep this owner until close completes.
 
         # Only remote transports reconnect automatically. A closed stdio process
         # remains failed for explicit restart because respawning a local command

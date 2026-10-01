@@ -1225,6 +1225,7 @@ class AgentEvent:
         source_thread: str = "",
         source_tool: str = "",
         request_digest: str = "",
+        network_unisolated: bool = False,
     ) -> AgentEvent:
         clean_tool_call_id = _required_event_text(
             tool_call_id,
@@ -1271,6 +1272,8 @@ class AgentEvent:
             data["source_tool"] = clean_source_tool
         if clean_request_digest:
             data["request_digest"] = clean_request_digest
+        if network_unisolated:
+            data["network_unisolated"] = True
         if diff is not None:
             data["diff"] = diff
         return cls(type="approval_request", data=data)

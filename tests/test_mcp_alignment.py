@@ -124,12 +124,12 @@ def test_timeout_defaults_preserve_explicit_config() -> None:
 
     assert MCP_DEFAULT_STARTUP_TIMEOUT_SECONDS == 30.0
     assert MCP_REQUEST_TIMEOUT_SECONDS == 60.0
-    assert MCP_DEFAULT_TOOL_TIMEOUT_SECONDS == 100_000.0
+    assert MCP_DEFAULT_TOOL_TIMEOUT_SECONDS == 300.0
     assert _mcp_connection_timeout_seconds() == 30.0
-    assert _mcp_tool_timeout_seconds() == 100_000.0
+    assert _mcp_tool_timeout_seconds() == 300.0
     assert _mcp_connection_timeout_seconds(config) == 12.0
     assert _mcp_tool_timeout_seconds(config) == 45.0
-    assert _mcp_tool_timeout_seconds(MCPServerConfig(name="websearch")) == 100_000.0
+    assert _mcp_tool_timeout_seconds(MCPServerConfig(name="websearch")) == 300.0
 
 def test_client_uses_only_granular_timeout_budgets() -> None:
     granular = MCPClient("granular", startup_timeout=11, request_timeout=12, tool_timeout=13)

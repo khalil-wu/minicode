@@ -323,11 +323,16 @@ def _write_split_payload(
     """
 
     with file_mutation_locks([meta_path, content_path]):
-        atomic_write_text(content_path, content)
+        # Either file reserves this immutable ID, including an orphan left by
+        # an interrupted save. Never pair new content with an old owner record.
+        if meta_path.exists() or content_path.exists():
+            raise FileExistsError(f"Artifact ID already allocated: {sidecar.artifact_id}")
+        atomic_write_text(content_path, content, overwrite=False)
         try:
             atomic_write_text(
                 meta_path,
                 json.dumps(sidecar.to_json_payload(), ensure_ascii=False, indent=2),
+                overwrite=False,
             )
         except OSError:
             content_path.unlink(missing_ok=True)
@@ -728,8 +733,9 @@ class ArtifactStore:
             raise ValueError(
                 f"invalid content: type={type_of(content)} length={length}"
             )
+        if isinstance(preview_lines, bool) or not isinstance(preview_lines, int) or preview_lines < 1:
+            raise ValueError("preview_lines must be a positive integer")
 
-        artifact_id = f"art_{uuid.uuid4().hex[:8]}"
         created_at = time.time()
         normalized_media_type = str(media_type or "").split(";", 1)[0].strip().lower()
         if normalized_media_type and (
@@ -740,22 +746,29 @@ class ArtifactStore:
         bound_conversation, bound_workspace = self._owner_context.get()
         owner_conversation = bound_conversation if conversation_id is None else str(conversation_id or "")
         owner_workspace = bound_workspace if workspace_root is None else str(workspace_root or "")
-        sidecar = MetaSidecar.from_save(
-            artifact_id=artifact_id,
-            source=source,
-            type=type,
-            content=content,
-            preview_lines=preview_lines,
-            created_at=created_at,
-            media_type=normalized_media_type,
-            conversation_id=owner_conversation,
-            workspace_root=owner_workspace,
-        )
+        while True:
+            artifact_id = f"art_{uuid.uuid4().hex}"
+            sidecar = MetaSidecar.from_save(
+                artifact_id=artifact_id,
+                source=source,
+                type=type,
+                content=content,
+                preview_lines=preview_lines,
+                created_at=created_at,
+                media_type=normalized_media_type,
+                conversation_id=owner_conversation,
+                workspace_root=owner_workspace,
+            )
+            meta_path = self._storage_dir / f"{artifact_id}{META_SIDECAR_SUFFIX}"
+            content_path = self._storage_dir / f"{artifact_id}{CONTENT_UNIT_SUFFIX}"
+            try:
+                _write_split_payload(meta_path, content_path, sidecar, content)
+            except FileExistsError:
+                if not meta_path.exists() and not content_path.exists():
+                    raise
+                continue
+            break
         meta = sidecar.to_meta()
-
-        meta_path = self._storage_dir / f"{artifact_id}{META_SIDECAR_SUFFIX}"
-        content_path = self._storage_dir / f"{artifact_id}{CONTENT_UNIT_SUFFIX}"
-        _write_split_payload(meta_path, content_path, sidecar, content)
 
         # Publish to the in-memory indexes only after the durable record exists.
         with self._lock:

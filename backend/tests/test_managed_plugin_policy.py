@@ -438,3 +438,19 @@ def test_foreign_plugin_enablement_dialects_are_not_runtime_inputs() -> None:
     assert states == {"canonical@official": True}
     assert explicit is True
     assert invalid == {}
+
+
+def test_managed_dropin_enumeration_failure_is_present_invalid_and_blocks_hkcu(monkeypatch, tmp_path):
+    import backend.managed_settings as managed
+    def denied(_path):
+        raise PermissionError("fixture managed directory denied")
+    monkeypatch.setattr(Path, "iterdir", denied)
+    monkeypatch.setattr(managed, "_load_admin_platform_settings", lambda: managed.ManagedSettingsResult({}))
+    def unexpected_hkcu(*args):
+        raise AssertionError("An unreadable admin source must not fall through to HKCU")
+    monkeypatch.setattr(managed, "_load_windows_registry_settings", unexpected_hkcu)
+    result = managed.load_minicode_managed_settings(tmp_path / "managed")
+    assert result.present and result.invalid
+    assert result.source_kind == "managed_files"
+    assert "managed-settings.d" in result.source_location
+    assert "failed to enumerate" in result.validation_errors[0]

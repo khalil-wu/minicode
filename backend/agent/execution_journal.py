@@ -353,6 +353,11 @@ class ExecutionJournal:
             with self._process_lock:
                 yield
 
+    @property
+    def sequence(self) -> int:
+        """Sequence of the last durable append observed by this journal owner."""
+        return self._seq
+
     def _isolate_incomplete_tail_unlocked(self) -> None:
         """Move a crash-truncated final JSONL fragment out of the live chain."""
 
@@ -1291,8 +1296,10 @@ class ExecutionJournal:
 
         committed_run_ids: set[str] = set()
         committed_intent_ids: set[str] = set()
+        receipt_intents_by_run: dict[str, str] = {}
         failed_run_ids: set[str] = set()
         intents: dict[str, JournalEvent] = {}
+        superseded_intent_ids: set[str] = set()
         for event in events:
             lifecycle = str(event.payload.get("lifecycle") or "")
             run_id = str(event.payload.get("run_id") or "").strip()
@@ -1304,13 +1311,39 @@ class ExecutionJournal:
                 ).strip()
                 if intent_id:
                     committed_intent_ids.add(intent_id)
+                if run_id:
+                    receipt_intents_by_run[run_id] = intent_id
             elif lifecycle == "runtime_terminal_commit_failed" and run_id:
                 failed_run_ids.add(run_id)
             elif lifecycle == "terminal_intent":
                 intents[event.event_id] = event
+                superseded = str(event.payload.get("supersedes_terminal_intent_event_id") or "").strip()
+                if superseded:
+                    superseded_intent_ids.add(superseded)
 
         # A later explicit failure always wins over an earlier/malformed receipt.
         committed_run_ids.difference_update(failed_run_ids)
+        legacy_run_ids = {
+            run_id for run_id in committed_run_ids if not receipt_intents_by_run[run_id]
+        }
+        latest_intents_by_run: dict[str, JournalEvent] = {}
+        for intent_id, intent in intents.items():
+            if intent_id not in superseded_intent_ids:
+                latest_intents_by_run[str(intent.payload.get("run_id") or "")] = intent
+        # Exact CAS linkage wins, even over a newer uncommitted replacement.
+        # Only legacy receipts without an intent id may choose the latest leaf.
+        selected_intent_ids = {
+            intent_id for run_id, intent_id in receipt_intents_by_run.items()
+            if run_id not in failed_run_ids and intent_id
+        }
+        selected_intent_ids.update(
+            intent_id for intent_id in committed_intent_ids
+            if intent_id in intents and not str(intents[intent_id].payload.get("run_id") or "")
+        )
+        selected_intent_ids.update(
+            latest_intents_by_run[run_id].event_id for run_id in legacy_run_ids
+            if run_id in latest_intents_by_run
+        )
 
         assistants: dict[str, JournalEvent] = {}
         projections: list[dict[str, Any]] = []
@@ -1325,10 +1358,16 @@ class ExecutionJournal:
             intent_id = str(
                 event.payload.get("terminal_intent_event_id") or ""
             ).strip()
-            if not (
-                (run_id and run_id in committed_run_ids)
-                or (intent_id and intent_id in committed_intent_ids)
-            ):
+            if run_id in failed_run_ids:
+                continue
+            if intent_id:
+                eligible = intent_id in selected_intent_ids
+            else:
+                latest_intent = latest_intents_by_run.get(run_id)
+                eligible = run_id in legacy_run_ids and (
+                    latest_intent is None or latest_intent.seq < event.seq
+                )
+            if not eligible:
                 continue
             if message_id in covered_ids:
                 continue
@@ -1367,13 +1406,9 @@ class ExecutionJournal:
         # The process may crash after the runtime CAS receipt but before the
         # assistant/terminal pair is appended. The intent contains the exact
         # context snapshot captured before CAS and is safe only when its receipt
-        # explicitly names it (or names the same committed run).
+        # explicitly names it (or a legacy receipt names its committed run).
         for intent_id, event in intents.items():
-            run_id = str(event.payload.get("run_id") or "").strip()
-            if not (
-                intent_id in committed_intent_ids
-                or (run_id and run_id in committed_run_ids)
-            ):
+            if intent_id not in selected_intent_ids:
                 continue
             assistant = event.payload.get("assistant_message")
             if not isinstance(assistant, dict):

@@ -36,6 +36,7 @@ const runtimeRevision = Number(mainRuntimeConfig?.revision) || 0;
 const updateActivityRendererInstanceId = globalThis.crypto?.randomUUID?.()
   || `renderer-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 let updateActivityRevision = 0;
+let lastDeliveredDeepLinkId = null;
 
 const runtimeConfig = {
   apiBaseUrl,
@@ -49,9 +50,19 @@ const runtimeConfig = {
     },
     notify: (payload) => ipcRenderer.invoke("minicode:notify", payload),
     onDeepLink: (callback) => {
-      const handler = (_event, payload) => callback(payload);
+      let subscribed = true;
+      const deliver = (payload) => {
+        if (!subscribed || !payload || payload.id === lastDeliveredDeepLinkId) return;
+        lastDeliveredDeepLinkId = payload.id;
+        callback(payload);
+      };
+      const handler = (_event, payload) => deliver(payload);
       ipcRenderer.on("minicode:deep-link", handler);
-      return () => ipcRenderer.removeListener("minicode:deep-link", handler);
+      void ipcRenderer.invoke("minicode:deepLink:pending").then(deliver);
+      return () => {
+        subscribed = false;
+        ipcRenderer.removeListener("minicode:deep-link", handler);
+      };
     },
     ackDeepLink: (id) => ipcRenderer.invoke("minicode:deepLink:ack", id),
     updates: {

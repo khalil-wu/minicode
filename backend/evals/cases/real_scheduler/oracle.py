@@ -99,6 +99,7 @@ class SchedulerOracle(unittest.TestCase):
                 )
                 if case == "expired":
                     task.created_at = (now - timedelta(days=8)).isoformat()
+                    task.auto_expire = True
                 else:
                     task.recurring = False
                     if case == "bad_timezone":

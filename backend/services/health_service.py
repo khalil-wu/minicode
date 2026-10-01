@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -11,6 +10,7 @@ from backend.commands.catalog import get_enabled_composer_command_catalog
 from backend.config import get_available_models, get_llm_provider, get_llm_settings_payload
 from backend.feature_flags import feature_flags_payload
 from backend.version import __version__
+from backend.services.workspace_service import readonly_git_policy, run_readonly_git
 
 
 def build_health_payload(*, bootstrap: Any | None, active_sessions: int) -> dict[str, Any]:
@@ -142,6 +142,7 @@ def build_doctor_payload(
     mcp_status: list[dict[str, Any]],
     capabilities: dict[str, Any],
     preview_processes: list[dict[str, Any]],
+    git_payload: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "backend": {
@@ -157,7 +158,7 @@ def build_doctor_payload(
             "exists": workspace_root.exists(),
             "writable": os.access(workspace_root, os.W_OK),
         },
-        "git": build_git_doctor_payload(workspace_root),
+        "git": git_payload,
         "preview": {
             "count": len(preview_processes),
             "processes": preview_processes,
@@ -173,22 +174,10 @@ def build_doctor_payload(
 
 def build_git_doctor_payload(workspace_root: Any) -> dict[str, Any]:
     try:
-        branch_result = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=workspace_root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=3,
-        )
-        status_result = subprocess.run(
-            ["git", "status", "--porcelain=v1"],
-            cwd=workspace_root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=5,
-        )
+        root = Path(workspace_root)
+        policy = readonly_git_policy(root)
+        branch_result = run_readonly_git(root, "branch", "--show-current", timeout=3, sandbox_policy=policy)
+        status_result = run_readonly_git(root, "status", "--porcelain=v1", sandbox_policy=policy)
         changes = [line for line in status_result.stdout.splitlines() if line.strip()]
         return {
             "available": branch_result.returncode == 0 or status_result.returncode == 0,

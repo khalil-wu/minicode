@@ -841,6 +841,7 @@ class ControlCanUseToolRequestData(TypedDict):
     source_agent: NotRequired[str]
     source_thread: NotRequired[str]
     source_tool: NotRequired[str]
+    network_unisolated: NotRequired[bool]
 
 
 class ControlElicitationRequestData(TypedDict):

@@ -363,7 +363,9 @@ export const reduceToolCallResult = (
     durationMs: e.duration_ms,
     iterationId: e.iteration_id ?? existing.iterationId,
     phase: e.phase ?? existing.phase,
-    diff: normalizeToolDiff(e.diff) ?? existing.diff,
+    // Streamed input diffs are proposals. A rejected/cancelled tool must not
+    // leave that proposal behind as an applied change in history or badges.
+    diff: normalizeToolDiff(e.diff) ?? (status === "success" ? existing.diff : undefined),
     outputFiles: e.output_files?.map((file) => ({
       path: file.path,
       name: file.name,

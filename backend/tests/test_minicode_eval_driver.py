@@ -16,8 +16,8 @@ from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallE
 import backend.evals.minicode_driver as driver
 
 
-def test_repository_eval_exposes_mutation_and_command_tools_without_approval_channel(tmp_path):
-    checker, permission = _repository_eval_permission(tmp_path)
+def test_repository_eval_external_sandbox_exposes_mutation_and_command_tools(tmp_path):
+    checker, permission = _repository_eval_permission(tmp_path, external_sandbox=True)
     registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))
 
     visible = {
@@ -45,6 +45,30 @@ def test_repository_eval_exposes_mutation_and_command_tools_without_approval_cha
 
 def test_repository_eval_approval_handler_returns_explicit_approval():
     assert asyncio.run(_approve_isolated_eval_call("call-1")) == {"action": "approve"}
+
+
+def test_subagent_metrics_use_child_events_before_task_tool_proxies():
+    public = [
+        ("subagent.start", {"subagent_id": "child-a"}),
+        ("subagent.done", {"subagent_id": "child-a", "status": "completed"}),
+        ("subagent.start", {"subagent_id": "child-b"}),
+        ("subagent.done", {"subagent_id": "child-b", "status": "completed"}),
+    ]
+    # Code-mode task calls overlap on the parent stream even when the actual
+    # children start one after the other. They are only an approximation.
+    task_calls = [
+        ("subagent.start", {"subagent_id": "code-a"}),
+        ("subagent.start", {"subagent_id": "code-b"}),
+        ("subagent.done", {"subagent_id": "code-a", "status": "completed"}),
+        ("subagent.done", {"subagent_id": "code-b", "status": "completed"}),
+    ]
+
+    metrics, source = driver._resolve_subagent_metrics(public, [], None, task_calls)
+
+    assert source == "public_events"
+    assert metrics["started"] == {"child-a", "child-b"}
+    assert metrics["completed"] == {"child-a", "child-b"}
+    assert metrics["peak_parallel"] == 1
 
 
 def test_external_eval_runs_commands_without_nested_sandbox_and_counts_failed_searches(tmp_path, monkeypatch, capsys):
@@ -82,6 +106,7 @@ def test_external_eval_runs_commands_without_nested_sandbox_and_counts_failed_se
             return "Verified."
 
     monkeypatch.setenv("MINICODE_EVAL_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("MINICODE_EVAL_CODE_MODE_ONLY", "0")
     monkeypatch.setenv("MINICODE_EVAL_API_KEY", "local-eval-fixture")
     monkeypatch.setenv("MINICODE_EVAL_MODEL", "fixture")
     monkeypatch.setenv("MINICODE_EVAL_EXTERNAL_SANDBOX", "true")
@@ -245,6 +270,7 @@ def test_eval_managed_commands_emit_intervals_and_close_processes(tmp_path, monk
             return "Observed."
 
     monkeypatch.setenv("MINICODE_EVAL_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("MINICODE_EVAL_CODE_MODE_ONLY", "0")
     monkeypatch.setenv("MINICODE_EVAL_API_KEY", "local-eval-fixture")
     monkeypatch.setenv("MINICODE_EVAL_MODEL", "fixture")
     monkeypatch.setenv("MINICODE_EVAL_TASK_ID", "managed-command-test")

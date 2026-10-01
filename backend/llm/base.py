@@ -71,10 +71,9 @@ _LOCAL_REQUEST_METADATA_KEYS = {
 # tighter than upstream.
 _SIDE_QUERY_MAX_RETRIES = 3
 _SIDE_QUERY_OPERATION_MAX_RETRIES = {
-    # Compaction owns its complete retry budget in this layer.  Keeping it
-    # smaller than the foreground stream budget prevents an outer compaction
-    # loop from multiplying provider calls during an outage.
-    "compact": 2,
+    # Compaction owns its complete retry budget here. Five retries cover the
+    # observed 12-second 429 window without an outer loop multiplying calls.
+    "compact": 5,
 }
 _SIDE_QUERY_BASE_DELAY_SECONDS = 0.5
 _SIDE_QUERY_MAX_DELAY_SECONDS = 8.0
@@ -1010,6 +1009,8 @@ class LLMAdapter(ABC):
 
     def configured_small_fast_model_id(self) -> str:
         """Return the optional configured model for auxiliary operations."""
+        if self.provider_adapter_spec is not None:
+            return self.provider_adapter_spec.small_fast_model.strip()
         settings = getattr(self, "_settings", None)
         return str(
             getattr(settings, "small_fast_model", "")

@@ -218,7 +218,7 @@ export const handleControlPlaneProjectionEvent = (event: ServerEvent): boolean =
         sessionId: ev.session_id,
         conversationId: ev.conversation_id,
         workspaceRoot: ev.workspace_root,
-        runId: ev.run_id,
+        checkpointRunId: ev.checkpoint_run_id,
         iteration: ev.iteration,
         stoppedReason: ev.stopped_reason,
         message: ev.message,
@@ -231,7 +231,7 @@ export const handleControlPlaneProjectionEvent = (event: ServerEvent): boolean =
           session_id: ev.session_id,
           conversation_id: ev.conversation_id,
           workspace_root: ev.workspace_root,
-          run_id: ev.run_id,
+          checkpoint_run_id: ev.checkpoint_run_id,
           iteration: ev.iteration,
           stopped_reason: ev.stopped_reason,
           message: ev.message,
@@ -239,7 +239,7 @@ export const handleControlPlaneProjectionEvent = (event: ServerEvent): boolean =
         if (!isReplayed(event)) {
           pushToast(
             ev.resumed
-              ? `已从运行 ${ev.run_id || "未知"} 的第 ${ev.iteration ?? 0} 轮恢复。`
+              ? `已从运行 ${ev.checkpoint_run_id || "未知"} 的第 ${ev.iteration ?? 0} 轮恢复。`
               : ev.message || "没有可恢复的未完成运行。",
             ev.resumed ? "success" : "info",
             5200,

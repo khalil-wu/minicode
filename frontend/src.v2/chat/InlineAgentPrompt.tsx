@@ -90,6 +90,16 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
   // prominently so the user understands they are approving full (unsandboxed)
   // access, not an ordinary command.
   const escalated = isEscalatedApproval(request);
+  const sandboxStatus = useAppStore((s) => s.runtimeSession?.sandbox_status
+    ?? s.runtimeCapabilities?.permission?.sandbox_status);
+  const networkBoundaryUnavailable = sandboxStatus?.requested?.network === true
+    && sandboxStatus.network_isolated === false;
+  const networkUnisolated = request.toolName === "run_command"
+    && (request.networkUnisolated === true || networkBoundaryUnavailable);
+  const requiresIndividualReview = (item: PendingApproval) =>
+    isEscalatedApproval(item) || isExitPlanModeApproval(item)
+    || (item.toolName === "run_command"
+      && (item.networkUnisolated === true || networkBoundaryUnavailable));
   const escalationJustification = String(request.args?.justification ?? "").trim();
   const sourceLabel = approvalSourceLabel(request);
   const expiry = useApprovalExpiry(request.expiresAt);
@@ -113,7 +123,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
         },
       );
       const result = await sendPromptResponseCommand(command);
-      if (result && !commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
+      if (!commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
       useAppStore.getState().clearApproval(request.requestId);
     } catch (error) {
       useAppStore.getState().markApprovalError(
@@ -125,13 +135,13 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
   };
 
   const allowAll = async () => {
+    if (responding) return;
+    setResponding(true);
     const store = useAppStore.getState();
     // "Allow all" is a bulk convenience — it must NOT silently approve elevated
     // (unsandboxed / escalated) requests. Those stay queued for an explicit,
     // individually-reviewed decision so the user always sees the sandbox warning.
-    const all = [request, ...queue].filter((item) =>
-      !isEscalatedApproval(item) && !isExitPlanModeApproval(item),
-    );
+    const all = [request, ...queue].filter((item) => !requiresIndividualReview(item));
     const accepted: string[] = [];
     for (const item of all) {
       try {
@@ -141,7 +151,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
           { owner: { conversationId: item.conversationId, turnId: item.turnId, messageId: item.messageId } },
         );
         const result = await sendPromptResponseCommand(command);
-        if (result && !commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
+        if (!commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
         accepted.push(item.requestId);
       } catch (error) {
         store.markApprovalError(
@@ -151,11 +161,11 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
       }
     }
     if (accepted.length > 0) store.clearApprovals(accepted);
+    setResponding(false);
   };
   // Escalated requests and ExitPlanMode are always reviewed individually.
-  const individuallyReviewedQueueCount = [request, ...queue].filter((item) =>
-    isEscalatedApproval(item) || isExitPlanModeApproval(item),
-  ).length;
+  const individuallyReviewedQueueCount = [request, ...queue].filter(requiresIndividualReview).length;
+  const bulkReviewCount = total - individuallyReviewedQueueCount;
 
   // "Always allow <prefix>": persist a run_command(prefix:*) content rule so future
   // commands with the same prefix skip prompting, then approve this one.
@@ -187,7 +197,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
         { owner: { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId } },
       );
       const approvalResult = await sendPromptResponseCommand(command);
-      if (approvalResult && !commandResultSucceeded(approvalResult)) {
+      if (!commandResultSucceeded(approvalResult)) {
         throw new Error(approvalResult.message || "审批未被后端接受");
       }
       useAppStore.getState().clearApproval(request.requestId);
@@ -232,6 +242,13 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
               <strong>将在沙箱外运行。</strong>
               {escalationJustification ? ` ${escalationJustification}` : " Agent 表示沙箱内运行失败，需要完整访问权限。"}
             </span>
+          </div>
+        )}
+
+        {networkUnisolated && !escalated && (
+          <div style={escalationBannerStyle} role="alert">
+            <ShieldAlert size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+            <span>当前沙箱限制文件写入，但无法隔离网络；此命令仍可直接建立网络连接。请核对完整命令后逐项决定。</span>
           </div>
         )}
 
@@ -304,7 +321,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
           <MessageSquare size={14} />
           说明
         </Button>
-        {alwaysPrefix && (
+        {alwaysPrefix && !networkUnisolated && (
           <Button
             variant="accent"
             size="sm"
@@ -317,7 +334,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
             全局允许 {alwaysPrefix}
           </Button>
         )}
-        {queue.length > 0 && (
+        {queue.length > 0 && bulkReviewCount > 0 && (
           <Button
             variant="accent"
             size="sm"
@@ -370,7 +387,7 @@ const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
         },
       );
       const result = await sendPromptResponseCommand(command);
-      if (result && !commandResultSucceeded(result)) throw new Error(result.message || "计划审批未被后端接受");
+      if (!commandResultSucceeded(result)) throw new Error(result.message || "计划审批未被后端接受");
       useAppStore.getState().clearApproval(request.requestId);
     } catch (error) {
       useAppStore.getState().markApprovalError(
@@ -579,10 +596,12 @@ const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
   const stats = useMemo(() => diffStats(request.diff), [request.diff]);
   const expiry = useApprovalExpiry(request.expiresAt);
   const [responding, setResponding] = useState(false);
+  const [error, setError] = useState("");
 
   const respond = async (allowed: boolean) => {
     if (responding) return;
     setResponding(true);
+    setError("");
     try {
       const command = buildApprovalResponseCommand(
         request.requestId,
@@ -590,7 +609,7 @@ const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
         { owner: { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId } },
       );
       const result = await sendPromptResponseCommand(command);
-      if (result && !commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
+      if (!commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
       const current = useAppStore.getState().diffReview;
       if (current?.requestId === request.requestId) {
         useAppStore.getState().setDiffReviewState({
@@ -600,6 +619,7 @@ const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
       }
       useAppStore.getState().clearDiffReview(request.requestId);
     } catch (error) {
+      setError(error instanceof Error ? error.message : "审批提交失败");
       const current = useAppStore.getState().diffReview;
       if (current?.requestId === request.requestId) {
         useAppStore.getState().setDiffReviewState({
@@ -652,6 +672,7 @@ const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
         )) : <span style={{ color: "var(--text-muted)" }}>打开差异面板检查拟议更改。</span>}
       </div>
 
+      {error && <div role="alert" style={errorStyle}>{error}</div>}
       <div className="inline-prompt-actions" style={buttonRowStyle}>
         <Button variant="secondary" size="sm" onClick={openDiff}>
           <ExternalLink size={14} />
@@ -715,7 +736,7 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
         { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId },
       );
       const result = await sendPromptResponseCommand(command);
-      if (result && !commandResultSucceeded(result)) throw new Error(result.message || "回答未被后端接受");
+      if (!commandResultSucceeded(result)) throw new Error(result.message || "回答未被后端接受");
       useAppStore.getState().clearAskUser(request.requestId);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "回答发送失败，请重试。";
@@ -737,7 +758,7 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
         ...(request.messageId ? { message_id: request.messageId } : {}),
       };
       const result = await sendPromptResponseCommand(command);
-      if (result && !commandResultSucceeded(result)) throw new Error(result.message || "取消请求未被后端接受");
+      if (!commandResultSucceeded(result)) throw new Error(result.message || "取消请求未被后端接受");
       useAppStore.getState().clearAskUser(request.requestId);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "取消发送失败，请重试。";

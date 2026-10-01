@@ -228,6 +228,7 @@ const ToolExposureCard = ({ toolViews }: { toolViews: AgentCapabilityToolView[] 
       <InfoCard>
         <InfoRow label="直接可用" value={formatCapabilityPreview(exposure.direct)} tone={exposure.direct.length ? 'accent' : 'muted'} mono />
         <InfoRow label="按需加载" value={formatCapabilityPreview(exposure.deferred)} tone={exposure.deferred.length ? 'muted' : 'default'} mono />
+        <InfoRow label="通过脚本调用" value={formatCapabilityPreview(exposure.codeMode)} tone={exposure.codeMode.length ? 'muted' : 'default'} mono />
         <InfoRow label="未开放" value={formatCapabilityPreview(exposure.hidden)} tone={exposure.hidden.length ? 'warning' : 'muted'} mono />
       </InfoCard>
     </>

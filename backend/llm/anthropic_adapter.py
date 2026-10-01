@@ -64,6 +64,7 @@ from backend.tools.catalog import canonicalize_tool_schemas
 logger = logging.getLogger(__name__)
 
 from backend.llm.anthropic_protocol import (
+    anthropic_tool_input_schema,
     _adaptive_thinking_effort,
     _anthropic_container_metadata,
     _anthropic_content_delta_protocol_code,
@@ -299,13 +300,17 @@ class AnthropicAdapter(LLMAdapter):
         tools: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        async for event in self._stream_chat_with_context(
+        stream = self._stream_chat_with_context(
             messages,
             tools=tools,
             metadata=metadata,
             context=None,
-        ):
-            yield event
+        )
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await stream.aclose()
 
     async def _stream_chat_with_context(
         self,
@@ -524,10 +529,11 @@ class AnthropicAdapter(LLMAdapter):
             metadata,
         )
 
+        stream = self._stream_messages(
+            kwargs, request_summary=request_summary, metadata=metadata
+        )
         try:
-            async for event in self._stream_messages(
-                kwargs, request_summary=request_summary, metadata=metadata
-            ):
+            async for event in stream:
                 if event.type == StreamEventType.DONE:
                     self._commit_cache_edit_request(
                         cache_editing_state,
@@ -538,11 +544,13 @@ class AnthropicAdapter(LLMAdapter):
         except ExtensionStaleError:
             raise
         except Exception as exc:
-            logger.error("Anthropic Messages transport failed: %s", exc)
+            logger.error("Anthropic Messages transport failed: %s", sanitize_llm_error_message(exc, include_provider_details=False))
             yield _anthropic_exception_error_event(
                 exc,
                 provider=self._provider_id,
             )
+        finally:
+            await stream.aclose()
         return
 
     def _messages_url(self) -> str:
@@ -563,7 +571,9 @@ class AnthropicAdapter(LLMAdapter):
         }
         if self._use_auth_token and self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
-        elif self._api_key:
+        elif self._api_key and not any(
+            name.casefold() == "authorization" for name in self._default_headers
+        ):
             headers["x-api-key"] = self._api_key
         return headers
 
@@ -893,6 +903,14 @@ class AnthropicAdapter(LLMAdapter):
                                 current_tool_initial_input = (
                                     _detached_anthropic_tool_input(block.get("input"))
                                 )
+                                if current_tool_initial_input is None:
+                                    yield _anthropic_stream_protocol_error(
+                                        "invalid_tool_input",
+                                        event_type=event_type,
+                                        received_index=received_index,
+                                        provider=self._provider_id,
+                                    )
+                                    return
                                 _delta_bytes_since_emit = 0
                                 yield StreamEvent(
                                     type=StreamEventType.TOOL_CALL_START,
@@ -1380,7 +1398,7 @@ class AnthropicAdapter(LLMAdapter):
         except ExtensionStaleError:
             raise
         except Exception as exc:
-            logger.error("Anthropic Messages transport failed: %s", exc)
+            logger.error("Anthropic Messages transport failed: %s", sanitize_llm_error_message(exc, include_provider_details=False))
             yield _anthropic_exception_error_event(
                 exc,
                 provider=self._provider_id,
@@ -1509,13 +1527,14 @@ class AnthropicAdapter(LLMAdapter):
         usage: UsageInfo | None = None
         reported_raw_usage: dict[str, Any] | None = None
         saw_done = False
+        stream = self._stream_chat_with_context(
+            messages,
+            metadata=context.request_metadata() if context is not None else None,
+            context=context,
+            max_tokens=max_tokens,
+        )
         try:
-            async for event in self._stream_chat_with_context(
-                messages,
-                metadata=context.request_metadata() if context is not None else None,
-                context=context,
-                max_tokens=max_tokens,
-            ):
+            async for event in stream:
                 if event.usage is not None:
                     usage = event.usage
                     if "usage" in event.raw:
@@ -1552,6 +1571,7 @@ class AnthropicAdapter(LLMAdapter):
             if not saw_done:
                 raise RuntimeError("Claude stream ended before message_stop")
         finally:
+            await stream.aclose()
             self.record_non_stream_usage(
                 usage,
                 provider=self._provider_id,
@@ -2052,9 +2072,9 @@ class AnthropicAdapter(LLMAdapter):
             at: dict[str, Any] = {
                 "name": func.get("name", ""),
                 "description": func.get("description", ""),
-                "input_schema": func.get(
+                "input_schema": anthropic_tool_input_schema(func.get(
                     "parameters", {"type": "object", "properties": {}}
-                ),
+                )),
             }
             anthropic_tools.append(at)
 
@@ -2065,9 +2085,8 @@ class AnthropicAdapter(LLMAdapter):
     ) -> list[dict[str, Any]]:
         """Convert tools with session-level schema caching.
 
-        Mirrors current Claude Code's ``toolSchemaCache``: description drift is
-        stable for one name/schema pair, while a genuine input-schema change
-        receives a distinct cache entry.
+        Cache the complete wire contract. Descriptions include live capability
+        and routing instructions, so they cannot be frozen across toolset changes.
         """
         result: list[dict[str, Any]] = []
         tools = canonicalize_tool_schemas(tools)
@@ -2078,17 +2097,12 @@ class AnthropicAdapter(LLMAdapter):
             name = str(func.get("name", "")).strip()
             if not name:
                 continue
-            input_schema = func.get("parameters", {"type": "object", "properties": {}})
-            cache_key = f"{name}:{_json_fingerprint(input_schema)}"
+            cache_key = f"{name}:{_json_fingerprint(func)}"
             cached = self._tool_schema_cache.get(cache_key)
             if cached is not None:
                 result.append(cached)
                 continue
-            at: dict[str, Any] = {
-                "name": name,
-                "description": func.get("description", ""),
-                "input_schema": input_schema,
-            }
+            at = self._convert_tools([tool])[0]
             self._tool_schema_cache[cache_key] = at
             result.append(at)
         return result

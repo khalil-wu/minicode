@@ -141,6 +141,7 @@ def reduce_hook_executions(
                 errors.append(
                     f"Hook returned {actual_event!r}; expected {expected_event_name!r}"
                 )
+        if json_result is not None and exit_code == 0:
             if event_matches and json_result.get("continue") is False and not policy.ignore_blocking and execution_blocking_allowed:
                 prevent_continuation = True
                 stop_reason = str(json_result.get("stop_reason") or "")

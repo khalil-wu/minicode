@@ -33,6 +33,7 @@ from backend.config import LLMSettings
 from backend.llm.responses_websocket import (
     ResponsesWebSocketPool, ResponsesWebSocketRequest, WEBSOCKET_BETA,
     TURN_STATE_HEADER,
+    responses_turn_state_from_headers,
 )
 from backend.llm.native_compaction import (
     NATIVE_COMPACTION_TYPE, native_compaction_windows, require_native_context_origin,
@@ -418,6 +419,23 @@ def _chat_reasoning_effort(
             str(getattr(settings, "default_reasoning_effort", "") or "").strip().lower()
         )
     return requested if requested in levels else ""
+
+
+def _chat_thinking_control(
+    settings: LLMSettings,
+    *,
+    model: str | None = None,
+    disable_reasoning: bool = False,
+) -> dict[str, str] | None:
+    """Map GLM's documented Chat thinking switch for auxiliary calls."""
+    wire_model = str(model or settings.model or "").strip().lower()
+    requested = str(settings.reasoning_effort or "").strip().lower()
+    if (
+        re.match(r"^glm(?:[-_.]|$)", wire_model)
+        and (disable_reasoning or requested in {"none", "minimal"})
+    ):
+        return {"type": "disabled"}
+    return None
 
 
 def _prompt_cache_retention_request(settings: LLMSettings) -> str:
@@ -2000,6 +2018,12 @@ _OPENAI_PASSIVE_RESPONSE_STREAM_EVENTS = frozenset(
         "response.created",
         "response.in_progress",
         "response.queued",
+        # Codex origin/main classifies these transport metadata events
+        # separately from executable output. Turn state is captured below at
+        # the HTTP/WebSocket boundary, including metadata-only routing tokens.
+        "response.metadata",
+        "codex.response.metadata",
+        "responsesapi.websocket_timing",
     }
 )
 
@@ -2448,10 +2472,12 @@ class OpenAIAdapter(LLMAdapter):
             finally:
                 await _close_async_iterator(stream)
         else:
-            async for event in self._stream_chat_completions(
-                messages, tools, metadata=metadata
-            ):
-                yield event
+            stream = self._stream_chat_completions(messages, tools, metadata=metadata)
+            try:
+                async for event in stream:
+                    yield event
+            finally:
+                await _close_async_iterator(stream)
 
     async def simple_chat(
         self,
@@ -2577,11 +2603,11 @@ class OpenAIAdapter(LLMAdapter):
         owner = self._responses_turn_owner(metadata)
         if owner is None or headers is None:
             return
-        value = ""
-        if hasattr(headers, "get"):
-            value = str(headers.get(TURN_STATE_HEADER) or "").strip()
+        value = responses_turn_state_from_headers(headers)
         if value:
-            self._responses_turn_states[owner] = value
+            # Codex uses a per-turn OnceLock: later metadata/handshakes cannot
+            # replace the sticky route selected by the first token.
+            self._responses_turn_states.setdefault(owner, value)
 
     def _apply_responses_turn_state(
         self, metadata: dict[str, Any] | None, headers: dict[str, Any],
@@ -2968,6 +2994,8 @@ class OpenAIAdapter(LLMAdapter):
                     )
                     continue
                 malformed_budget.accept()
+                if getattr(event, "type", "") == "response.metadata":
+                    self._remember_responses_turn_state(metadata, getattr(event, "headers", None))
                 yield event
 
     # ══════════════════════════════════════════════════════════════
@@ -2997,6 +3025,8 @@ class OpenAIAdapter(LLMAdapter):
             )
             try:
                 async for event in events:
+                    if event.get("type") == "response.metadata":
+                        self._remember_responses_turn_state(metadata, event.get("headers"))
                     yield _json_to_namespace(event)
                 return
             except InvalidStatus as exc:
@@ -3648,6 +3678,7 @@ class OpenAIAdapter(LLMAdapter):
                             content_kind = "refusal"
                         else:
                             continue
+                        merge_citations(_extract_url_citations(part))
                         if not isinstance(text, str) or not text:
                             continue
                         key = (
@@ -5700,12 +5731,11 @@ class OpenAIAdapter(LLMAdapter):
             kwargs,
             self._chat_unsupported_fields,
         )
+        stream = self._emit_chat_http_stream_events(
+            payload, build_payload_request_summary(payload), metadata=metadata,
+        )
         try:
-            async for event in self._emit_chat_http_stream_events(
-                payload,
-                build_payload_request_summary(payload),
-                metadata=metadata,
-            ):
+            async for event in stream:
                 yield event
             return
         except LifecycleStaleError:
@@ -5733,17 +5763,18 @@ class OpenAIAdapter(LLMAdapter):
             logger.info(
                 "Chat gateway rejected optional field %r; retrying without it", rejected
             )
+        finally:
+            await _close_async_iterator(stream)
 
         retry_payload = _without_unsupported_chat_fields(
             kwargs,
             self._chat_unsupported_fields,
         )
+        stream = self._emit_chat_http_stream_events(
+            retry_payload, build_payload_request_summary(retry_payload), metadata=metadata,
+        )
         try:
-            async for event in self._emit_chat_http_stream_events(
-                retry_payload,
-                build_payload_request_summary(retry_payload),
-                metadata=metadata,
-            ):
+            async for event in stream:
                 yield event
         except LifecycleStaleError:
             raise
@@ -5756,6 +5787,8 @@ class OpenAIAdapter(LLMAdapter):
                 content=_adapter_error_content("LLM API call failed", exc),
                 raw=_adapter_error_raw(exc, "openai_chat_completions"),
             )
+        finally:
+            await _close_async_iterator(stream)
 
     # ══════════════════════════════════════════════════════════════
     #  Chat Completions API 实现（wire_api="chat"）
@@ -5829,14 +5862,12 @@ class OpenAIAdapter(LLMAdapter):
             requested_max_tokens=requested_max_tokens,
         )
         if configured_or_requested_max_tokens > 0:
-            kwargs[_chat_max_tokens_field(self._settings, model=model)] = (
-                clamp_max_tokens_to_context(
-                    context_window=self._settings.context_window,
-                    messages=messages,
-                    tools=tools,
-                    max_tokens=configured_or_requested_max_tokens,
-                )
-            )
+            # The local prompt estimator is an admission signal, not the
+            # provider's tokenizer. Its overcount can shrink a reasoning
+            # model's output allowance to 1024 even while the provider has
+            # ample context left. Let an actual context rejection trigger the
+            # existing compaction path instead of manufacturing max-output loops.
+            kwargs[_chat_max_tokens_field(self._settings, model=model)] = configured_or_requested_max_tokens
         if self._settings.seed is not None:
             kwargs["seed"] = self._settings.seed
         reasoning_effort = _chat_reasoning_effort(
@@ -5846,6 +5877,13 @@ class OpenAIAdapter(LLMAdapter):
         )
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
+        thinking_control = _chat_thinking_control(
+            self._settings,
+            model=model,
+            disable_reasoning=side_options is not None and side_options.disable_reasoning,
+        )
+        if thinking_control is not None:
+            kwargs["thinking"] = thinking_control
         if request_metadata:
             kwargs["metadata"] = request_metadata
             kwargs["store"] = False
@@ -5883,11 +5921,12 @@ class OpenAIAdapter(LLMAdapter):
                 request_params=payload,
             )
 
-        async for event in self._stream_chat_completions_http(
-            kwargs,
-            metadata=metadata,
-        ):
-            yield event
+        stream = self._stream_chat_completions_http(kwargs, metadata=metadata)
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await _close_async_iterator(stream)
         return
 
     async def _simple_chat_completions(
@@ -5908,13 +5947,14 @@ class OpenAIAdapter(LLMAdapter):
         usage: UsageInfo | None = None
         reported_raw_usage: dict[str, Any] | None = None
         saw_done = False
+        stream = self._stream_chat_completions(
+            messages,
+            metadata=context.request_metadata() if context is not None else None,
+            context=context,
+            max_tokens=max_tokens,
+        )
         try:
-            async for event in self._stream_chat_completions(
-                messages,
-                metadata=context.request_metadata() if context is not None else None,
-                context=context,
-                max_tokens=max_tokens,
-            ):
+            async for event in stream:
                 if event.usage is not None:
                     usage = event.usage
                     if "usage" in event.raw:
@@ -5924,6 +5964,10 @@ class OpenAIAdapter(LLMAdapter):
                     text_parts.append(event.content)
                 elif event.type == StreamEventType.DONE:
                     usage = event.usage or usage
+                    if event.finish_reason.strip().lower() in _RESPONSES_MAX_OUTPUT_REASONS:
+                        raise RuntimeError(
+                            f"Incomplete Chat completion returned, reason: {event.finish_reason}"
+                        )
                     saw_done = True
                 elif event.type == StreamEventType.ERROR:
                     raise RuntimeError(event.content or "Chat completion stream failed")
@@ -5931,6 +5975,7 @@ class OpenAIAdapter(LLMAdapter):
             if not saw_done:
                 raise RuntimeError("Chat completion stream ended before DONE")
         finally:
+            await _close_async_iterator(stream)
             self.record_non_stream_usage(
                 usage,
                 provider=str(self._settings.provider or "openai"),

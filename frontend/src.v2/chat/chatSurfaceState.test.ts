@@ -275,10 +275,10 @@ describe("chat surface explicit projection", () => {
     expect(turns[0]?.committedCells).toEqual([
       expect.objectContaining({
         kind: "collaboration",
-        action: "sent_message",
+        action: "delegated",
         entries: [{
           agentId: "subagent-a1b2c3d4",
-          agentLabel: "a1b2c3d4",
+          agentLabel: "审计渲染链路",
           content: "请完整审计渲染链路并返回证据。",
         }],
       }),
@@ -323,7 +323,7 @@ describe("chat surface explicit projection", () => {
     const [cell] = turns[0]?.committedCells ?? [];
     expect(cell).toMatchObject({
       kind: "collaboration",
-      action: "sent_message",
+      action: "delegated",
       status: "success",
       entries: [
         { agentId: "审计前端", content: "检查前端。" },
@@ -1061,4 +1061,14 @@ describe("chat surface explicit projection", () => {
     expect(turns).toHaveLength(1);
     expect(turns[0]?.userCell?.content).toBe("visible");
   });
+});
+
+
+it("projects restored partial response failures instead of hiding them behind answer text", () => {
+  const turns = projectMessagesToTurns([message("assistant-partial", "assistant", [
+    { type: "text", content: "I will inspect the files.", source: "partial", status: "partial" },
+  ], { terminalStatus: "partial", failureMessage: "Provider protocol rejected", failureRecoverable: false })], false);
+  expect(turns[0]?.committedCells).toEqual(expect.arrayContaining([
+    expect.objectContaining({ kind: "error", title: "响应未完整结束", message: "Provider protocol rejected" }),
+  ]));
 });

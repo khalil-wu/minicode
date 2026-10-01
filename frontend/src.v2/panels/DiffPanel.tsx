@@ -15,8 +15,9 @@ import { MonacoDiffView } from "../components/MonacoDiffView";
 import { EmptyState } from "../components/EmptyState";
 import { Button } from "../components/Button";
 import { diffFileDecisionForPath, diffFilePathsEqual } from "../chat/diffReviewState";
-import { workspaceFilePathsEqual } from "../lib/workspace-path";
+import { workspaceFilePathsEqual, workspaceRootsEqual } from "../lib/workspace-path";
 import { parseUnifiedDiffLines } from "../lib/unified-diff";
+import "./DiffPanel.css";
 
 type DiffViewMode = "unified" | "split" | "monaco";
 type ChangeScope = "review" | "history" | "git";
@@ -156,7 +157,7 @@ export const DiffPanel = () => {
   }, [scopeMenuOpen]);
 
   return (
-    <div className="h-full flex flex-col min-h-0">
+    <div className="mc-diff-panel h-full flex flex-col min-h-0">
       <div className="flex items-center gap-2 px-2 shrink-0" style={diffToolbarStyle}>
         <div ref={scopeMenuRef} className="relative inline-flex items-center gap-1.5 min-w-0" style={{ color: "var(--text-muted)" }}>
           <FileDiff size={14} />
@@ -298,6 +299,15 @@ const UnifiedDiffBody = ({ lines, language, comments, onLineClick, filePath, act
         <div key={i}>
           <div
             className="px-2.5 whitespace-pre-wrap break-words relative"
+            role={onLineClick ? "button" : undefined}
+            tabIndex={onLineClick ? 0 : undefined}
+            aria-label={onLineClick ? `评论 Diff 第 ${i + 1} 行` : undefined}
+            onKeyDown={onLineClick ? (event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onLineClick(i);
+              }
+            } : undefined}
             style={{
               background: bgForKind(line.kind),
               borderLeft:
@@ -357,10 +367,11 @@ const InlineCommentInput = ({ lineIndex, onSubmit, onCancel }: { lineIndex: numb
     <div className="flex items-center gap-1.5 py-1.5 px-2.5 pl-3.5" style={{ borderLeft: "3px solid var(--accent-primary)", background: "color-mix(in oklch, var(--accent-primary) 5%, var(--surface-base))" }}>
       <input
         type="text"
+        aria-label={`评论 Diff 第 ${lineIndex + 1} 行`}
         placeholder={`评论第 ${lineIndex + 1} 行...`}
         value={text}
         onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && text.trim()) { e.preventDefault(); onSubmit(lineIndex, text.trim()); } if (e.key === "Escape") onCancel?.(); }}
+        onKeyDown={(e) => { if (e.nativeEvent.isComposing || e.keyCode === 229) return; if (e.key === "Enter" && text.trim()) { e.preventDefault(); onSubmit(lineIndex, text.trim()); } if (e.key === "Escape") onCancel?.(); }}
         className="flex-1 px-2 py-1 outline-none"
         style={{ border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", fontSize: "var(--text-xs)", background: "var(--surface-base)", color: "var(--text-primary)" }}
         autoFocus
@@ -433,21 +444,21 @@ const SplitDiffBody = ({ lines, language, comments, onLineClick, filePath, activ
   return (
     <div className="flex-1 min-h-0 overflow-auto leading-[1.55]" style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}>
       {rows.map((row, i) => {
-        const lineIdx = row.rightIndex ?? row.leftIndex;
-        const hasComment = lineIdx != null && commentMap.has(lineIdx);
-        const isActiveComment = lineIdx != null && activeCommentLine === lineIdx;
+        const commentLineIndices = row.leftIndex === row.rightIndex
+          ? [row.leftIndex]
+          : [row.leftIndex, row.rightIndex];
         return (
           <div key={i}>
             <div className="grid grid-cols-2">
               <SplitRowPair row={row} colorizedMap={colorizedMap} onLineClick={onLineClick} />
             </div>
-            {hasComment && (
-              <div className="py-1 px-2.5 pl-3.5" style={{ background: "color-mix(in oklch, var(--accent-primary) 8%, var(--surface-base))", borderLeft: "3px solid var(--accent-primary)", fontSize: "var(--text-xs)", color: "var(--text-secondary)" }}>
-                {commentMap.get(lineIdx!)!.content}
+            {commentLineIndices.map((lineIdx) => lineIdx != null && commentMap.has(lineIdx) && (
+              <div key={lineIdx} className="py-1 px-2.5 pl-3.5" style={{ background: "color-mix(in oklch, var(--accent-primary) 8%, var(--surface-base))", borderLeft: "3px solid var(--accent-primary)", fontSize: "var(--text-xs)", color: "var(--text-secondary)" }}>
+                {commentMap.get(lineIdx)!.content}
               </div>
-            )}
-            {isActiveComment && onCommentSubmit && (
-              <InlineCommentInput lineIndex={lineIdx!} onSubmit={onCommentSubmit} onCancel={onCommentCancel} />
+            ))}
+            {activeCommentLine != null && (activeCommentLine === row.leftIndex || activeCommentLine === row.rightIndex) && onCommentSubmit && (
+              <InlineCommentInput key={activeCommentLine} lineIndex={activeCommentLine} onSubmit={onCommentSubmit} onCancel={onCommentCancel} />
             )}
           </div>
         );
@@ -499,6 +510,15 @@ const SplitRowPair = ({ row, colorizedMap, onLineClick }: { row: SplitRow; color
     return (
       <div
         className="px-2 whitespace-pre-wrap break-words"
+        role={clickable ? "button" : undefined}
+        tabIndex={clickable ? 0 : undefined}
+        aria-label={clickable ? `评论 Diff 第 ${lineIndex + 1} 行` : undefined}
+        onKeyDown={clickable ? (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onLineClick(lineIndex);
+          }
+        } : undefined}
         style={{ background: bg, cursor: clickable ? "pointer" : undefined }}
         onClick={clickable ? () => onLineClick(lineIndex) : undefined}
       >
@@ -660,7 +680,7 @@ const ReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState | nul
   if (!diffReview) {
     return (
       <div className="flex-1 grid place-items-center p-4" style={{ color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
-        No pending review. Diffs requiring approval will appear here.
+        暂无待审阅的改动。需要审批的 Diff 会显示在这里。
       </div>
     );
   }
@@ -715,9 +735,9 @@ const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState
   };
 
   return (
-    <div className="h-full grid min-h-0 overflow-hidden" style={{ gridTemplateColumns: diffReview.files.length ? "minmax(220px, 320px) 1fr" : "1fr" }}>
+    <div className="mc-diff-review-layout h-full grid min-h-0 overflow-hidden" data-has-files={diffReview.files.length > 0 ? "true" : "false"}>
       {diffReview.files.length > 0 && (
-        <aside className="min-h-0 overflow-hidden p-2.5 flex flex-col" style={{ borderRight: "1px solid var(--border-subtle)" }}>
+        <aside className="mc-diff-review-files min-h-0 overflow-hidden p-2.5 flex flex-col">
           <div className="flex items-center gap-2 mb-2.5" style={{ fontSize: "var(--text-xs)" }}>
             <FileDiff size={14} color="var(--accent-primary)" />
             <span className="flex-1 font-bold" style={{ color: "var(--text-primary)" }}>{isReadOnly ? "Diff" : "Diff 审阅"}</span>
@@ -825,7 +845,7 @@ const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState
       )}
 
       <main className="min-w-0 min-h-0 overflow-hidden flex flex-col">
-        <div className="flex items-center gap-2 px-2.5 py-[7px] shrink-0" style={{ borderBottom: "1px solid var(--border-subtle)", background: "var(--surface-page)", fontSize: "var(--text-xs)" }}>
+        <div className="mc-diff-review-header flex items-center gap-2 px-2.5 py-[7px] shrink-0" style={{ borderBottom: "1px solid var(--border-subtle)", background: "var(--surface-page)", fontSize: "var(--text-xs)" }}>
           <span className="font-bold" style={{ color: "var(--text-primary)" }}>{isReadOnly ? (diffReview.toolName || "工具") : `${diffReview.toolName || "工具"}审批`}</span>
           <span style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{diffReview.requestId.slice(0, 8)}</span>
           {plus > 0 && <span style={{ color: "var(--state-success)" }}>+{plus}</span>}
@@ -840,15 +860,19 @@ const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState
             </button>
           )}
           {diffReview.status === "error" && diffReview.error && (
-            <span style={{ color: "var(--state-danger)" }}>{diffReview.error}</span>
+            <span className="mc-diff-review-error" role="alert" style={{ color: "var(--state-danger)" }}>{diffReview.error}</span>
           )}
           {!isReadOnly && isSubmitted && <span style={{ color: "var(--text-muted)" }}>已提交</span>}
-          {!isReadOnly && <button disabled={isSubmitted} onClick={() => respond(diffReview.requestId, false)} style={{ ...rejectButtonStyle, opacity: isSubmitted ? 0.6 : 1 }}><X size={14} /> 全部拒绝</button>}
-          {!isReadOnly && <button disabled={isSubmitted} onClick={() => respond(diffReview.requestId, true)} style={{ ...acceptButtonStyle, opacity: isSubmitted ? 0.6 : 1 }}><Check size={14} /> 全部接受</button>}
-          {!isReadOnly && comments.length > 0 && (
-            <button disabled={isSubmitted} onClick={() => useAppStore.getState().submitDiffReviewWithComments()} style={{ ...acceptButtonStyle, background: "var(--accent-primary)", borderColor: "var(--accent-primary)", marginLeft: 4, opacity: isSubmitted ? 0.6 : 1 }}>
-              <MessageCircle size={14} /> 提交意见 ({comments.length})
-            </button>
+          {!isReadOnly && (
+            <div className="mc-diff-review-actions">
+              <button disabled={isSubmitted} onClick={() => respond(diffReview.requestId, false)} style={{ ...rejectButtonStyle, opacity: isSubmitted ? 0.6 : 1 }}><X size={14} /> 全部拒绝</button>
+              <button disabled={isSubmitted} onClick={() => respond(diffReview.requestId, true)} style={{ ...acceptButtonStyle, opacity: isSubmitted ? 0.6 : 1 }}><Check size={14} /> 全部接受</button>
+              {comments.length > 0 && (
+                <button disabled={isSubmitted} onClick={() => useAppStore.getState().submitDiffReviewWithComments()} style={{ ...acceptButtonStyle, background: "var(--accent-primary)", borderColor: "var(--accent-primary)", opacity: isSubmitted ? 0.6 : 1 }}>
+                  <MessageCircle size={14} /> 提交意见 ({comments.length})
+                </button>
+              )}
+            </div>
           )}
         </div>
         {needsFetch ? (
@@ -936,6 +960,7 @@ const HistoryTab = ({ sources, viewMode }: { sources: { id: string; name: string
 const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
   const gitChanges = useAppStore((s) => s.gitChanges);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const conversationId = useAppStore((s) => s.conversationId);
   const requestGitChanges = useAppStore((s) => s.requestGitChanges);
   const setGitChangesLoading = useAppStore((s) => s.setGitChangesLoading);
   const [pendingActions, setPendingActions] = useState<Set<string>>(() => new Set());
@@ -998,14 +1023,15 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
   const hiddenUntrackedCount = Math.max(0, gitChanges.untracked.length - visibleUntracked.length);
 
   const gitCommandScope = () => {
-    const state = useAppStore.getState();
     return {
-      conversation_id: String(state.conversationId || "").trim(),
-      workspace: String(state.workingDirectory || "").trim(),
+      conversation_id: String(conversationId || "").trim(),
+      workspace: workingDirectory.trim(),
     };
   };
 
   const beginGitAction = (key: string, command: Parameters<typeof sendClientCommand>[0]) => {
+    const current = useAppStore.getState();
+    if (current.conversationId !== conversationId || !workspaceRootsEqual(current.workingDirectory, workingDirectory)) return false;
     if (pendingActionsRef.current.size > 0) return false;
     setPendingActions(new Set([key]));
     setGitChangesLoading(true);

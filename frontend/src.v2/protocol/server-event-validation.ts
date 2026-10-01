@@ -843,6 +843,7 @@ const hasValidControlRequest = (value: Record<string, unknown>): boolean => {
       // every other projected payload does.
       && hasBoundedJsonShape(request.input)
       && request.tool_use_id === requestId
+      && (!("network_unisolated" in request) || typeof request.network_unisolated === "boolean")
       && (!("diff" in request) || (
         isBoundedString(request.diff, MAX_TERMINAL_OUTPUT_CHARS, { allowEmpty: true })
         || (isRecord(request.diff) && hasBoundedJsonShape(request.diff))
@@ -1239,6 +1240,16 @@ const hasValidSemanticPayload = (
       && (!("item_id" in value) || isBoundedString(value.item_id, 1_024))
       && (!("content_index" in value) || isNonNegativeSafeInteger(value.content_index));
   }
+  if (type === "subagent.progress" && "transcript_delta" in value) {
+    const delta = value.transcript_delta;
+    valid = valid && isRecord(delta)
+      && isNonNegativeSafeInteger(delta.seq)
+      && isNonNegativeSafeInteger(delta.offset)
+      && isBoundedString(delta.message_id, 1_024)
+      && isBoundedString(delta.item_id, 1_024)
+      && isBoundedString(delta.delta, MAX_EVENT_CONTENT_CHARS, { allowEmpty: true })
+      && delta.delta.length > 0;
+  }
   if (type === "tool_call") {
     valid = valid
       && (!("visibility" in value) || AGENT_ITEM_VISIBILITIES.has(String(value.visibility)));
@@ -1419,11 +1430,17 @@ const hasValidSemanticPayload = (
       && (!("reason" in value) || isBoundedString(value.reason, 16_384))
       && (!("duration_ms" in value) || isNonNegativeSafeInteger(value.duration_ms))
       && (!("failure_recoverable" in value) || (
-        status === "failed"
+        (status === "failed" || status === "partial")
         && typeof value.failure_recoverable === "boolean"
       ))
       && (!("provider_raw" in value) || (
         isRecord(value.provider_raw) && hasBoundedJsonShape(value.provider_raw)
+      ))
+      && (!("lifecycle_cleanup_pending_count" in value)
+        || isNonNegativeSafeInteger(value.lifecycle_cleanup_pending_count))
+      && (!("lifecycle_cleanup_receipts" in value) || (
+        isRecord(value.lifecycle_cleanup_receipts)
+        && hasBoundedJsonShape(value.lifecycle_cleanup_receipts)
       ));
   }
   if (type === "error") {
@@ -1927,7 +1944,7 @@ const hasValidSemanticPayload = (
   if (type === "checkpoint.run.resume") {
     valid = value.resumed === true
       ? typeof value.session_id === "string"
-        && typeof value.run_id === "string"
+        && isBoundedString(value.checkpoint_run_id, 1_024)
         && typeof value.iteration === "number"
         && Number.isFinite(value.iteration)
       : typeof value.message === "string";

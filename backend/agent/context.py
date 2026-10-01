@@ -9,10 +9,10 @@ import os
 import re
 import time
 from copy import copy, deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from backend.agent.compaction import (
     COMPACTION_USER_INPUT_MAX_TOKENS,
@@ -69,6 +69,9 @@ from backend.agent.tool_result_persistence import (
 )
 from backend.tools.base import ToolResult
 from backend.tools.untrusted import wrap_untrusted_content
+
+if TYPE_CHECKING:
+    from backend.permissions.context import ToolExecutionContext
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +136,8 @@ def clone_context_builder(builder: "ContextBuilder") -> "ContextBuilder":
     # helper on the source builder and must not be deep-copied.
     cloned._history_store = builder._history_store.clone()
     cloned._withheld_media_timestamps = set()
+    cloned._tool_execution_context = None
+    cloned._git_status_authority = None
     return cloned
 
 
@@ -321,12 +326,16 @@ def _sanitize_media_items(raw_items: Any, *, document: bool = False) -> list[dic
         if not isinstance(raw, dict):
             continue
         data = str(raw.get("data") or "")
-        if not data:
+        artifact_id = str(raw.get("artifact_id") or "")
+        if not data and not artifact_id:
             continue
         item = {
             "media_type": str(raw.get("media_type") or "application/octet-stream"),
-            "data": data,
         }
+        if data:
+            item["data"] = data
+        if artifact_id:
+            item["artifact_id"] = artifact_id
         if document:
             item["file_name"] = str(raw.get("file_name") or "attachment")
         items.append(item)
@@ -641,6 +650,8 @@ class ContextBuilder:
         self._extension_history_floor = 0
         self._git_status_context: str | None = None
         self._git_status_workspace: str = ""
+        self._git_status_authority: tuple[Any, ...] | None = None
+        self._tool_execution_context: ToolExecutionContext | None = None
         self._guideline_load_reason = "session_start"
         self._project_root_markers: tuple[str, ...] | None = None
         self._project_doc_fallback_filenames: tuple[str, ...] = ()
@@ -699,6 +710,16 @@ class ContextBuilder:
 
     def bind_background_commands(self, manager: Any | None) -> None:
         self._background_commands = manager
+
+    def bind_tool_context(self, context: ToolExecutionContext | None) -> None:
+        """Use this turn's captured execution authority for repository probes."""
+        self._tool_execution_context = context
+        if context is None:
+            self._git_status_context = None
+            self._git_status_workspace = ""
+            self._git_status_authority = None
+            self._prepared_prompt_parts = None
+            self._prepared_prompt_state = None
 
     def record_turn_admission(self, message_id: str, boundary: dict[str, Any]) -> None:
         self._turn_admissions[message_id] = dict(boundary)
@@ -947,7 +968,6 @@ class ContextBuilder:
 
     async def start_turn(self, user_message: str, state: AgentState) -> None:
         """Render and store one model-visible user turn."""
-        self._withheld_media_timestamps.clear()
         user_message = str(user_message or "")
         if not user_message.strip() and not state.attachments:
             return
@@ -981,6 +1001,7 @@ class ContextBuilder:
         ):
             return
 
+        self._withheld_media_timestamps.clear()
         self._compact_old_user_runtime_context_for_cache()
         for skill_injection in skill_injections:
             self._history_store.append(
@@ -1405,17 +1426,33 @@ class ContextBuilder:
 
     async def _ensure_git_status_context(self, workspace_root: Path | None) -> None:
         workspace_key = str(workspace_root or "")
+        context = self._tool_execution_context
+        if context is not None:
+            policy = context.sandbox_policy
+            authority = (
+                policy.resolve(cwd=workspace_root),
+                json.dumps({
+                    "shell_environment_policy": asdict(policy.shell_environment_policy),
+                    "env_overrides": policy.env_overrides,
+                }, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+            )
+        else:
+            authority = ("internal-readonly",)
         if (
             self._git_status_context is not None
             and self._git_status_workspace == workspace_key
+            and self._git_status_authority == authority
         ):
             return
         self._git_status_context = (
-            await build_git_status_context_async(workspace_root)
+            await build_git_status_context_async(workspace_root, context=context)
             if workspace_root is not None
             else ""
         )
         self._git_status_workspace = workspace_key
+        self._git_status_authority = authority
+        self._prepared_prompt_parts = None
+        self._prepared_prompt_state = None
 
     def _rehydrate_attachment_refs(
         self,
@@ -1426,24 +1463,42 @@ class ContextBuilder:
         changed = False
         for index, message in enumerate(self._history):
             refs = list(getattr(message, "attachment_refs", []) or [])
-            needs_images = not message.images and any(ref.get("kind") == "image" for ref in refs)
-            needs_pdf = not message.documents and any(ref.get("media_type") == "application/pdf" for ref in refs)
-            if message.role != "user" or not (needs_images or needs_pdf):
+            present_ids = {item["artifact_id"] for item in message.images + message.documents
+                           if item.get("artifact_id") and item.get("data")}
+            marker_ids = {item["artifact_id"] for item in message.images + message.documents
+                          if item.get("artifact_id") and not item.get("data")}
+            needed_refs = [ref for ref in refs if ref["artifact_id"] not in present_ids and (
+                ref["artifact_id"] in marker_ids or ref.get("kind") == "image"
+                or ref.get("media_type") == "application/pdf"
+            )]
+            if message.role != "user" or not needed_refs:
                 continue
             plan = build_attachment_input_plan(
-                refs,
+                needed_refs,
                 llm=self._llm,
                 attachment_store=self._attachment_store,
                 conversation_id=conversation_id,
                 workspace_root=str(workspace_root or ""),
                 retain_native_media=True,
             )
-            if not plan.images and not plan.documents:
-                continue
+            if plan.unavailable:
+                raise AttachmentUnavailableError(plan.unavailable)
+            hydrated = {item["artifact_id"]: item for item in plan.images + plan.documents}
+            unresolved = marker_ids - hydrated.keys() - present_ids
+            if unresolved:
+                raise AttachmentUnavailableError([ref for ref in refs if ref["artifact_id"] in unresolved])
+
+            def restore_media(items: list[dict[str, str]], fresh: list[dict[str, str]]) -> list[dict[str, str]]:
+                restored = [dict(item) if item.get("data") else {**item, "data": hydrated[item["artifact_id"]]["data"]}
+                            for item in items]
+                known = {item["artifact_id"] for item in items if item.get("artifact_id")}
+                restored.extend(item for item in fresh if item["artifact_id"] not in known)
+                return restored
+
             self._history[index] = replace(
                 message,
-                images=message.images or plan.images,
-                documents=message.documents or plan.documents,
+                images=restore_media(message.images, plan.images),
+                documents=restore_media(message.documents, plan.documents),
                 attachment_refs=refs,
             )
             changed = True
@@ -1537,7 +1592,7 @@ class ContextBuilder:
                     "user_attachment_metadata",
                 )
             )
-        if len(chunks) <= 1:
+        if not chunks:
             return user_message
         return "\n\n".join(chunk for chunk in chunks if chunk and chunk.strip())
 
@@ -2345,7 +2400,8 @@ class ContextBuilder:
             stripped = self._strip_trusted_runtime_context(message)
             if stripped == content:
                 if (
-                    not str(message.runtime_context or "").strip()
+                    not message.is_user_input
+                    and not str(message.runtime_context or "").strip()
                     and self._is_standalone_legacy_runtime_update(content)
                 ):
                     changed += 1
@@ -3258,9 +3314,8 @@ class ContextBuilder:
                 if ref["artifact_id"] not in retained_refs:
                     summary_message.attachment_refs.append(ref)
                     retained_refs[ref["artifact_id"]] = ref
-            if not message.attachment_refs:
-                summary_message.images.extend(message.images)
-                summary_message.documents.extend(message.documents)
+            summary_message.images.extend(message.images)
+            summary_message.documents.extend(message.documents)
         self._install_compacted_history(
             # Retained requests are historical input. Put the checkpoint after
             # them so the model continues from progress instead of treating an
@@ -3330,7 +3385,6 @@ class ContextBuilder:
             max_tokens=max_tokens,
             disable_reasoning=True,
             enable_prompt_cache=False,
-            max_retries=2,
             query_source="compact",
         )
 
@@ -3483,6 +3537,8 @@ class ContextBuilder:
         self._last_prompt_section_summary = {}
         self._git_status_context = None
         self._git_status_workspace = ""
+        self._git_status_authority = None
+        self._tool_execution_context = None
         self._tool_result_budget_seen_ids.clear()
         self._tool_result_budget_replacements.clear()
         self._invoked_skill_payloads.clear()
@@ -3568,14 +3624,17 @@ class ContextBuilder:
             # inline bytes.  Stable object shape matters to provider replay;
             # the bytes themselves remain omitted when an attachment ref is
             # authoritative.
-            serialized["images"] = (
-                _sanitize_media_items(message.images) if not attachment_refs else []
-            )
-            serialized["documents"] = (
-                _sanitize_media_items(message.documents, document=True)
-                if not attachment_refs
-                else []
-            )
+            ref_ids = {ref["artifact_id"] for ref in attachment_refs}
+            for key, items in (("images", message.images), ("documents", message.documents)):
+                native = _sanitize_media_items(items, document=key == "documents")
+                # Keep ordered identity markers for stored pixels and inline
+                # bytes for every unreferenced item. Ref presence alone never
+                # proves ownership of a different media item's contents.
+                serialized[key] = [
+                    {name: value for name, value in item.items() if name != "data"}
+                    if item.get("artifact_id") in ref_ids else item
+                    for item in native
+                ]
             return serialized
 
         serialized_groups = [
@@ -3886,11 +3945,12 @@ class ContextBuilder:
                     call_name = str(tool_call.get("name") or "").strip()
                     if not call_id or not call_name:
                         continue
+                    raw_arguments = tool_call.get("arguments")
                     parsed_tool_calls.append(
                         ToolCallEvent(
                             id=call_id,
                             name=call_name,
-                            arguments=dict(tool_call.get("arguments") or {}),
+                            arguments=dict(raw_arguments) if isinstance(raw_arguments, dict) else {},
                         )
                     )
                 if not parsed_tool_calls:
@@ -3959,6 +4019,8 @@ class ContextBuilder:
             str(raw_git_status) if isinstance(raw_git_status, str) else None
         )
         self._git_status_workspace = str(snapshot.get("git_status_workspace") or "")
+        # A durable projection is not proof of its original execution authority.
+        self._git_status_authority = None
         self._invoked_skill_payloads = {}
         raw_invoked_skills = snapshot.get("invoked_skills")
         if isinstance(raw_invoked_skills, list):

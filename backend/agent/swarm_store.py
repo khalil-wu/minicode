@@ -299,16 +299,14 @@ class FileSwarmStore:
         self._migration_duration_ms = (time.monotonic() - migration_start) * 1000.0
 
     def wal_diagnostics(self) -> dict[str, Any]:
-        """Return WAL mode, checkpoint, file-size, and telemetry diagnostics.
+        """Return WAL mode, file-size, and telemetry diagnostics.
 
         Useful when multi-agent coordination produces lock contention or
-        stale-read symptoms.  Safe to call at any time; opens a read-only
-        connection so it never blocks writers.
+        stale-read symptoms. The inspection does not trigger a WAL checkpoint.
         """
         conn = self._connect()
         try:
             journal_mode = conn.execute("PRAGMA journal_mode").fetchone()
-            wal_checkpoint = conn.execute("PRAGMA wal_checkpoint").fetchone()
             busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()
             synchronous = conn.execute("PRAGMA synchronous").fetchone()
             page_size = conn.execute("PRAGMA page_size").fetchone()
@@ -329,11 +327,6 @@ class FileSwarmStore:
             freelist = conn.execute("PRAGMA freelist_count").fetchone()
             return {
                 "journal_mode": str(journal_mode[0]) if journal_mode else "unknown",
-                "wal_checkpoint": {
-                    "busy": int(wal_checkpoint[0]) if wal_checkpoint else -1,
-                    "log_frames": int(wal_checkpoint[1]) if wal_checkpoint else -1,
-                    "checkpointed_frames": int(wal_checkpoint[2]) if wal_checkpoint else -1,
-                },
                 "busy_timeout_ms": int(busy_timeout[0]) if busy_timeout else -1,
                 "synchronous": str(synchronous[0]) if synchronous else "unknown",
                 "page_size": int(page_size[0]) if page_size else -1,
@@ -1207,8 +1200,8 @@ class FileSwarmStore:
         recipient = str(message.get("recipient_id") or "")
         if recipient in {"all", "*"}:
             epochs = message.get("recipient_mailbox_epochs")
-            if isinstance(epochs, dict) and participant_id in epochs:
-                return int(epochs.get(participant_id) or 0) == mailbox_epoch
+            if epochs:
+                return participant_id in epochs and int(epochs[participant_id]) == mailbox_epoch
             return mailbox_epoch <= 1
         if recipient != participant_id:
             return False

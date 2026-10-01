@@ -35,7 +35,10 @@ import re
 import shlex
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from backend.hooks.runners import PendingAsyncCommand
 
 from backend.hooks.models import HookEvent
 from backend.hooks.value_utils import coerce_bool as _coerce_hook_bool
@@ -577,6 +580,7 @@ class _HookSessionRuntime:
     """
 
     async_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
+    async_commands: dict[asyncio.Task[Any], PendingAsyncCommand] = field(default_factory=dict)
     consumed_once_hooks: set[str] = field(default_factory=set)
     inflight_once_hooks: set[str] = field(default_factory=set)
     async_context: list[str] = field(default_factory=list)
@@ -742,12 +746,14 @@ class HookManager:
 
     @property
     def pending_async_hooks(self) -> int:
-        return len(self._async_tasks)
+        return len(self._async_tasks | self._session_runtime.async_commands.keys())
 
     async def drain_async_hooks(self) -> None:
         while self._async_tasks:
             tasks = tuple(self._async_tasks)
             await asyncio.gather(*tasks, return_exceptions=True)
+        if self._session_runtime.async_commands:
+            await self.finalize_async_hooks()
 
     async def finalize_async_hooks(self) -> None:
         """Cancel and drain unfinished session hooks during final teardown."""
@@ -758,6 +764,15 @@ class HookManager:
                 task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        # A wrapper cancelled before its first poll never enters the coroutine's
+        # finally block. The session already owns the physical command here.
+        from backend.hooks.runners import HookExecutionError, _terminate_hook_operation
+
+        for task, command in tuple(self._session_runtime.async_commands.items()):
+            await _terminate_hook_operation(command.process, command.operation, command.capture)
+            if command.process.returncode is None:
+                raise HookExecutionError("Async hook process is still running after termination")
+            self._session_runtime.async_commands.pop(task, None)
         self._async_tasks.clear()
         self._inflight_once_hooks.clear()
 
@@ -1511,6 +1526,7 @@ class HookManager:
             ),
             name=f"hook:{event.value}:{entry.raw_matcher or '*'}:{process_id}",
         )
+        self._session_runtime.async_commands[task] = command
         self._track_async_task(task, event)
 
     def _track_async_task(
@@ -1522,6 +1538,9 @@ class HookManager:
 
         def _done(done: asyncio.Task[Any]) -> None:
             self._async_tasks.discard(done)
+            command = self._session_runtime.async_commands.get(done)
+            if command is not None and command.operation.done() and command.process.returncode is not None:
+                self._session_runtime.async_commands.pop(done, None)
             if done.cancelled():
                 return
             try:

@@ -16,7 +16,9 @@ RUN apt-get update \
         jq \
         python3 \
         python3-pip \
+        python3-pytest \
         python3-venv \
+        python-is-python3 \
         ripgrep \
     && curl -fsSLo /tmp/packages-microsoft-prod.deb \
         https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb \

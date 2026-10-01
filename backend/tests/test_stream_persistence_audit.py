@@ -301,6 +301,8 @@ class ApprovalSession(SessionApprovalRuntimeMixin):
         self.approval_diff_cache = {}
         self.run_manager = SimpleNamespace(run_tasks={})
         self.sent = []
+    async def send_event(self, event):
+        self.sent.append(event.to_ws_message())
     async def send_payload(self, payload, **kwargs):
         self.sent.append(payload)
         return True

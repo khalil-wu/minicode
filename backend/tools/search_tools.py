@@ -305,27 +305,27 @@ class GrepFilesTool(BaseTool):
                         "type": "string",
                         "enum": ["content", "files_with_matches", "count"],
                         "description": (
-                            "'content' shows matching lines (supports -A/-B/-C and -n), "
+                            "'content' shows matching lines and supports the named context fields, "
                             "'files_with_matches' shows paths, 'count' shows per-file counts. "
                             "Defaults to 'files_with_matches'."
                         ),
                     },
-                    "-i": {"type": "boolean", "description": "Case-insensitive search."},
-                    "-n": {
+                    "case_insensitive": {"type": "boolean", "description": "Case-insensitive search."},
+                    "line_numbers": {
                         "type": "boolean",
                         "description": "Show line numbers (content mode). Default true.",
                     },
-                    "-A": {
+                    "after_context": {
                         "type": "integer",
                         "description": "Lines of context after each match (content mode).",
                     },
-                    "-B": {
+                    "before_context": {
                         "type": "integer",
                         "description": "Lines of context before each match (content mode).",
                     },
-                    "-C": {
+                    "context": {
                         "type": "integer",
-                        "description": "Lines before/after each match; when supplied, overrides -A and -B.",
+                        "description": "Lines before/after each match; overrides before_context and after_context.",
                     },
                     "multiline": {
                         "type": "boolean",
@@ -444,12 +444,12 @@ class GrepFilesTool(BaseTool):
         file_extensions = _normalize_file_extensions(args.get("file_extensions", []), file_type)
         case_insensitive = _as_bool(args.get("-i", args.get("case_insensitive", False)))
         context_lines = _coerce_nonnegative_int(args.get("-C", args.get("context", 0)))
-        before_context = _coerce_nonnegative_int(args.get("-B", 0))
-        after_context = _coerce_nonnegative_int(args.get("-A", 0))
+        before_context = _coerce_nonnegative_int(args.get("-B", args.get("before_context", 0)))
+        after_context = _coerce_nonnegative_int(args.get("-A", args.get("after_context", 0)))
         if "-C" in args or "context" in args:
             before_context = 0
             after_context = 0
-        line_numbers = _as_bool(args.get("-n", True), default=True)
+        line_numbers = _as_bool(args.get("-n", args.get("line_numbers", True)), default=True)
         glob_filter = args.get("glob")
         multiline = _as_bool(args.get("multiline", False))
         head_limit = _coerce_head_limit(args.get("head_limit"), GREP_MAX_MATCHES)

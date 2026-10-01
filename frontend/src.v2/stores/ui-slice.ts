@@ -742,7 +742,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     );
     try {
       const result = await sendPromptResponseCommand(command);
-      if (result && !commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
+      if (!commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
       get().clearDiffReview(requestId);
     } catch (error) {
       set((state) => ({
@@ -784,7 +784,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     );
     try {
       const result = await sendPromptResponseCommand(command);
-      if (result && !commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
+      if (!commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
       get().clearDiffReview(requestId);
     } catch (error) {
       set((state) => ({

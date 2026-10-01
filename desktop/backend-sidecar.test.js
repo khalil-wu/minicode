@@ -29,7 +29,7 @@ function exitChild(child, code = 0, signal = null) {
   child.emit("exit", code, signal);
 }
 
-function initialize({ spawnProcess, sleep } = {}) {
+function initialize({ spawnProcess, sleep, config: configOverrides = {} } = {}) {
   backendSidecar.resetStopRequested();
   backendSidecar.clearBackendRestartTimer();
   backendSidecar.init({
@@ -47,6 +47,7 @@ function initialize({ spawnProcess, sleep } = {}) {
       restartInitialDelayMs: 60_000,
       restartMaxDelayMs: 60_000,
       restartJitterRatio: 0,
+      ...configOverrides,
     },
   });
 }
@@ -92,6 +93,36 @@ test("stale child exit and error events do not clear the current owner", () => {
   assert.equal(backendSidecar.getBackendProcess(), second);
   assert.equal(backendSidecar.isBackendManagedByApp(), true);
   releaseChild(second);
+});
+
+test("backend receives the packaged resources directory separately from user folders", () => {
+  const child = createChild(151);
+  let spawnOptions;
+  initialize({
+    config: {
+      pythonCommand: "C:\\Program Files\\MiniCode\\resources\\python-runtime\\python.exe",
+      appResourcesDir: "C:\\Program Files\\MiniCode\\resources",
+      desktopDir: "C:\\Users\\alice\\Desktop",
+    },
+    spawnProcess: (_command, _args, options) => {
+      spawnOptions = options;
+      return child;
+    },
+  });
+
+  backendSidecar.startBackendSidecar();
+
+  assert.equal(
+    spawnOptions.env.MINICODE_APP_RESOURCES_DIR,
+    "C:\\Program Files\\MiniCode\\resources",
+  );
+  assert.equal(spawnOptions.env.MINICODE_DESKTOP_DIR, "C:\\Users\\alice\\Desktop");
+  const pathKey = Object.keys(spawnOptions.env).find((name) => name.toLowerCase() === "path");
+  assert.equal(
+    spawnOptions.env[pathKey].split(require("node:path").delimiter)[0],
+    "C:\\Program Files\\MiniCode\\resources\\python-runtime",
+  );
+  releaseChild(child);
 });
 
 test("concurrent managed launches resolve runtime and spawn only once", async () => {

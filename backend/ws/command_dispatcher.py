@@ -11,6 +11,7 @@ from typing import Any
 from backend.agent.message import AgentEvent, UserCommand
 from backend.services.misc_command_service import is_conversation_effort_command
 from backend.ws.client_command_log import ClientCommandDedupStore, _clean_command_id
+from backend.ws.command_results import emit_command_error
 from backend.ws.conversation_errors import emit_conversation_not_found
 from backend.ws.event_outbox import EventOutbox
 from backend.ws.utils import normalize_attachment_payloads, normalize_permission_mode
@@ -655,20 +656,11 @@ class SessionCommandDispatcher:
               return False
 
     async def _handle_control_response(self, command: UserCommand) -> None:
-        """Resolve a control response without creating a user-visible result.
-
-        Control responses are a low-level approval protocol.  Codex treats
-        malformed or stale responses as idempotent no-ops (logged, never
-        surfaced as a user-visible result); the originating control request
-        (or its timeout) is the observable state transition.  Emitting a ``command.result`` for a stale response races
-        ordinary control traffic such as ``ping`` and can make a client bind
-        the wrong response to its request.  Keep ownership validation and the
-        fail-closed resolver, but log and discard rejected responses.
-        """
+        """Acknowledge decision acceptance, not completion of the approved tool."""
 
         request_id, payload = self._session._normalize_control_response(command.data)
         if not payload:
-            logger.debug("Ignoring empty control response for %s", request_id or "<missing>")
+            await emit_command_error(self._session, command.type, "Control response is empty")
             return
         oauth_pending = self._session.turn_wait_state.provider_oauth_pending
         oauth_future = oauth_pending.get(request_id)
@@ -682,17 +674,31 @@ class SessionCommandDispatcher:
                 or ""
             ).strip()
             if expected_conversation and expected_conversation != conversation_id:
-                logger.debug("Ignoring OAuth control response with invalid owner: %s", request_id)
+                await emit_command_error(
+                    self._session, command.type,
+                    "Approval response does not belong to the pending conversation",
+                )
                 return
-            if not oauth_future.done():
-                oauth_future.set_result(payload)
+            if oauth_future.done():
+                await emit_command_error(
+                    self._session, command.type,
+                    f"Approval request '{request_id}' is stale or no longer pending",
+                )
+                return
+            oauth_future.set_result(payload)
+            await self._session.send_event(AgentEvent.command_result(command.type, "", level="success"))
             return
         owner_error = self._session.approval_response_owner_error(request_id, payload)
         if owner_error:
-            logger.debug("Ignoring control response with invalid owner: %s", owner_error)
+            await emit_command_error(self._session, command.type, owner_error)
             return
         if not self._session._resolve_pending_approval(request_id, payload):
-            logger.debug("Ignoring stale control response for %s", request_id or "<missing>")
+            await emit_command_error(
+                self._session, command.type,
+                f"Control decision for '{request_id}' was not accepted: the request is stale or the response is invalid",
+            )
+            return
+        await self._session.send_event(AgentEvent.command_result(command.type, "", level="success"))
 
     async def _handle_user_message_workspace(
         self,
@@ -853,20 +859,29 @@ class SessionCommandDispatcher:
                 or ""
             ).strip()
             if expected_conversation_id != supplied_conversation_id:
-                logger.debug("Ignoring OAuth control cancellation with invalid owner: %s", request_id)
+                await emit_command_error(
+                    self._session, command.type,
+                    "Approval response does not belong to the pending conversation",
+                )
                 return
         else:
             owner_error = self._session.approval_response_owner_error(request_id, command.data)
             if owner_error:
-                logger.debug("Ignoring control cancellation with invalid owner: %s", owner_error)
+                await emit_command_error(self._session, command.type, owner_error)
                 return
-        self._session._resolve_pending_approval(
+        if not self._session._resolve_pending_approval(
             request_id,
             {
                 "action": "reject",
                 "guidance": "control request cancelled by client",
             },
-        )
+        ):
+            await emit_command_error(
+                self._session, command.type,
+                f"Control cancellation for '{request_id}' was not accepted: the request is stale or already settled",
+            )
+            return
+        await self._session.send_event(AgentEvent.command_result(command.type, "", level="success"))
 
     async def _handle_command_inner(self, command: UserCommand) -> None:
         if self._session._extension_shutdown_requested and command.type not in {
@@ -1186,7 +1201,11 @@ class SessionCommandDispatcher:
                         await self._session.send_event(error_event)
                         return
                 running_for_target = self._session.running_agent_task_for(target_conversation_id)
-                if (running_for_target or self._session.run_manager.is_queue_dispatching(target_conversation_id)) and not queued_dispatch:
+                if (
+                    running_for_target
+                    or self._session.run_manager.is_queue_dispatching(target_conversation_id)
+                    or self._session.run_manager.has_pending_lifecycle_cleanup(target_conversation_id)
+                ) and not queued_dispatch:
                     queued_command = UserCommand(
                         type="user_message",
                         data={

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from contextlib import aclosing
 from dataclasses import dataclass, replace
 import hashlib
 import inspect
@@ -824,7 +825,8 @@ async def execute_tool_batch(
                         tool_call_id=tc.id,
                         session_id=tool_ctx.session_id,
                         permission_mode=tool_ctx.permission.mode,
-                    ), deadline=tool_ctx.deadline_monotonic, cancel_event=tool_ctx.cancel_event)
+                    ), deadline=tool_ctx.deadline_monotonic, cancel_event=tool_ctx.cancel_event,
+                        run_context=tool_ctx.run_context, llm=tool_ctx.llm)
                     permission_denied_retry = denied_hook.retry
                 except Exception as exc:
                     logger.warning("permission_denied hook failed: %s", exc)
@@ -1320,6 +1322,8 @@ async def _await_approval_within_turn_deadline(
             timeout=remaining,
             return_when=asyncio.FIRST_COMPLETED,
         )
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError
         if approval_task in done:
             raw_result = approval_task.result()
             if not isinstance(raw_result, dict):
@@ -1518,7 +1522,8 @@ async def execute_serial(
                     tool_call_id=tc.id,
                     session_id=tool_ctx.session_id,
                     permission_mode=tool_ctx.permission.mode,
-                ), deadline=tool_ctx.deadline_monotonic, cancel_event=tool_ctx.cancel_event)
+                ), deadline=tool_ctx.deadline_monotonic, cancel_event=tool_ctx.cancel_event,
+                    run_context=tool_ctx.run_context, llm=tool_ctx.llm)
                 _remember_hook_model_context(tc, permission_hook)
                 if (
                     permission_hook.blocked
@@ -1800,6 +1805,7 @@ async def execute_serial(
                 ).strip(),
                 source_tool=tc.name,
                 request_digest=_final_tool_request_digest(tc),
+                network_unisolated=permission_decision.matched_rule == "network_not_isolated",
             )
             if approval_handler:
                 approval = await _await_approval_within_turn_deadline(
@@ -1897,15 +1903,6 @@ async def execute_serial(
                     ):
                         yield event
                     return
-
-                # Carry explicit approval as exact request evidence into the
-                # execution context.  Catastrophic command checks consume this
-                # digest; they never infer approval from a broad session mode.
-                approved_digests = tool_ctx.metadata.setdefault(
-                    "_approved_request_digests", set()
-                )
-                if isinstance(approved_digests, set):
-                    approved_digests.add(_final_tool_request_digest(tc))
 
                 generic_updated_input = approval.get("updated_input")
                 if generic_updated_input is None:
@@ -2087,6 +2084,14 @@ async def execute_serial(
                             if inspect.isawaitable(setter_result):
                                 await setter_result
 
+                # Only the final, fully approved request owns approval evidence.
+                # Atomic rejection and edited-input validation above must finish
+                # before catastrophic command checks can consume this digest.
+                approved_digests = tool_ctx.metadata.setdefault(
+                    "_approved_request_digests", set()
+                )
+                approved_digests.add(_final_tool_request_digest(tc))
+
                 if not tool_call_emitted:
                     yield final_tool_call_event()
                     tool_call_emitted = True
@@ -2153,6 +2158,7 @@ async def execute_serial(
         state=state,
         approval_handler=approval_handler,
         skill_manager=skill_manager,
+        tool_context=tool_ctx,
         hook_manager=_tool_hook_manager(tool_ctx),
         await_response=(
             (
@@ -2166,9 +2172,13 @@ async def execute_serial(
             else None
         ),
     )
-    for event in control_router.pre_wait_events(tc):
-        yield event
-    routed = await control_router.execute(tc)
+    routed = None
+    async with aclosing(control_router.run(tc)) as control_events:
+        async for update in control_events:
+            if isinstance(update, AgentEvent):
+                yield update
+            else:
+                routed = update
     if routed is not None:
         for event in routed.events:
             yield event

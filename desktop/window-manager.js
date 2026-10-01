@@ -34,8 +34,6 @@ let desktopIconPath;
 let frontendDevUrl = "";
 let getAppRoot = () => process.cwd();
 let onMainWindowCreated = null;
-let onDeepLink = null;
-let getPendingDeepLink = () => null;
 let onDiagnosticIncident = null;
 
 // ---------------------------------------------------------------------------
@@ -51,8 +49,6 @@ function init(deps) {
   if (typeof deps.frontendDevUrl === "string") frontendDevUrl = deps.frontendDevUrl;
   if (typeof deps.getAppRoot === "function") getAppRoot = deps.getAppRoot;
   if (typeof deps.onMainWindowCreated === "function") onMainWindowCreated = deps.onMainWindowCreated;
-  if (typeof deps.onDeepLink === "function") onDeepLink = deps.onDeepLink;
-  if (typeof deps.getPendingDeepLink === "function") getPendingDeepLink = deps.getPendingDeepLink;
   if (typeof deps.onDiagnosticIncident === "function") onDiagnosticIncident = deps.onDiagnosticIncident;
 }
 
@@ -349,18 +345,6 @@ async function createMainWindow() {
 
   if (savedWindowState.isMaximized) {
     mainWindow.maximize();
-  }
-
-  if (getPendingDeepLink()) {
-    mainWindow.webContents.once("did-finish-load", () => {
-      // Send the pending record as-is. It is already `{ id, target }` — the
-      // shape the renderer's onDeepLink consumer requires and the shape the warm
-      // path in main.js sends. Wrapping it again produced `{ target: { id,
-      // target } }`, which the renderer discarded, so a cold-start deep link was
-      // dropped and never acknowledged.
-      const pending = getPendingDeepLink();
-      if (pending) mainWindow?.webContents.send("minicode:deep-link", pending);
-    });
   }
 
   if (typeof onMainWindowCreated === "function") {

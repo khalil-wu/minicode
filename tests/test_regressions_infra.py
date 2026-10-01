@@ -262,7 +262,7 @@ def test_mcp_manager_uses_default_tool_timeout_without_name_special_cases() -> N
         MCPServerConfig(name="external", command="external-mcp")
     )
 
-    assert client._tool_timeout == 100_000.0
+    assert client._tool_timeout == 300.0
 
 
 def test_load_config_normalizes_legacy_orchestrator_settings(tmp_path, monkeypatch) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 import time
 from typing import Any
 
@@ -15,6 +16,7 @@ from backend.services.health_service import (
     build_capability_unavailable_payload,
     build_capability_status_payload,
     build_doctor_payload,
+    build_git_doctor_payload,
     build_health_payload,
     build_llm_status_payload,
     build_status_payload,
@@ -71,7 +73,7 @@ async def system_status(response: Response) -> dict[str, Any]:
 async def doctor_status(response: Response) -> dict[str, Any]:
     """Aggregate desktop workbench diagnostics for the right-side Doctor panel."""
     response.headers["Cache-Control"] = "no-store"
-    return _build_doctor_payload()
+    return await _build_doctor_payload()
 
 
 @router.get("/api/guidelines")
@@ -145,8 +147,9 @@ def _build_capability_status_payload() -> dict[str, Any]:
 def _build_llm_status_payload() -> dict[str, Any]:
     return build_llm_status_payload()
 
-def _build_doctor_payload() -> dict[str, Any]:
+async def _build_doctor_payload() -> dict[str, Any]:
     workspace_root = get_active_workspace_root(PROJECT_ROOT).resolve()
+    git_payload = await asyncio.to_thread(build_git_doctor_payload, workspace_root)
     return build_doctor_payload(
         workspace_root=workspace_root,
         runtime_snapshot=_state.ws_manager.runtime_snapshot(),
@@ -155,6 +158,7 @@ def _build_doctor_payload() -> dict[str, Any]:
         mcp_status=get_mcp_status(),
         capabilities=_build_capability_status_payload(),
         preview_processes=_build_preview_doctor_payload(),
+        git_payload=git_payload,
     )
 
 def _build_preview_doctor_payload() -> list[dict[str, Any]]:

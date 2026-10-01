@@ -97,7 +97,7 @@ export function readableTimelineTitle(cell: ActivityCellState): string {
 export function readableRecordLabel(record: ActivityToolRecord): string {
   const summary = readableToolLabel(record.displaySummary);
   const operation = readableToolLabel(record.displayHint || record.name);
-  const normalized = summary.match(/^(?:Completed|Failed|Blocked|Cancelled|Timed out):\s*(.+)$/i)?.[1]?.trim();
+  const normalized = readableToolLabel(summary.match(/^(?:Completed|Failed|Blocked|Cancelled|Timed out):\s*(.+)$/i)?.[1]);
   return normalized && operation && normalized.toLowerCase() === operation.toLowerCase()
     ? operation
     : summary || operation || "工具";

@@ -286,31 +286,9 @@ def _windows_powershell_shell_command(
     *,
     cwd: str | Path | None = None,
 ) -> str:
-    location = ""
-    if cwd:
-        escaped_cwd = str(Path(cwd).expanduser().resolve()).replace("'", "''")
-        location = f"Set-Location -LiteralPath '{escaped_cwd}'; "
-    prelude = (
-        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
-        "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
-        # PowerShell 7 colours error records with ANSI escapes; the model reads
-        # the raw bytes, so render plain text. $PSStyle is absent on 5.1.
-        "if ($null -ne $PSStyle) { $PSStyle.OutputRendering = 'PlainText' }; "
-        "$ProgressPreference = 'SilentlyContinue'; "
-        f"{location}"
-        "$global:LASTEXITCODE = $null; "
-    )
-    # PowerShell can return 1 for a successful native command when the command
-    # redirects stderr into stdout (``2>&1``). Preserve the native process exit
-    # code explicitly so test runners that report progress on stderr aren't
-    # presented to the agent as failures.
-    epilogue = (
-        "; $minicodeCommandSucceeded = $?; "
-        "$minicodeNativeExit = $global:LASTEXITCODE; "
-        "if ($null -ne $minicodeNativeExit) { exit $minicodeNativeExit } "
-        "elseif ($minicodeCommandSucceeded) { exit 0 } else { exit 1 }"
-    )
-    script = f"{prelude}{command}{epilogue}"
+    from backend.runtime_env import powershell_script
+
+    script = powershell_script(command, cwd=str(Path(cwd).expanduser().resolve()) if cwd else None)
     # -EncodedCommand avoids cmd.exe corrupting nested quotes, pipes, dollar
     # expressions, or non-ASCII text when SandboxRunner launches its command
     # string through the host shell.
@@ -566,5 +544,4 @@ def _windows_command_portability_hint(
         "Check the executable name and retry with a PowerShell-compatible command; use cwd/env "
         "fields instead of shell setup."
     )
-
 

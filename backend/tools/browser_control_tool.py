@@ -543,6 +543,8 @@ class BrowserControlTool(BaseTool):
         async with _cdp_session(target_ws) as session:
             await session.call("Page.enable")
             result = await session.call("Page.navigate", {"url": nav_url})
+            if result.get("errorText"):
+                return self._error_result(str(result["errorText"]))
             if wait_ms > 0:
                 await session.drain_events(wait_ms / 1000)
         lines = [
@@ -552,8 +554,6 @@ class BrowserControlTool(BaseTool):
         ]
         if isinstance(result, dict) and result.get("loaderId"):
             lines.append(f"loaderId: {result.get('loaderId')}")
-        if isinstance(result, dict) and result.get("errorText"):
-            lines.append(f"errorText: {result.get('errorText')}")
         return ToolResult(content="\n".join(lines), result_kind=self.result_kind, display_summary="Browser navigated")
 
     async def _screenshot(

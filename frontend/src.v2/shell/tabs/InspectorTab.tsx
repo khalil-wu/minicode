@@ -215,7 +215,7 @@ const ControlPlaneSection = () => {
           <InfoRow
             label="最近恢复"
             value={resume.resumed
-              ? `${resume.runId || '未知运行'} · 第 ${resume.iteration ?? 0} 轮${resume.stoppedReason ? ` · 原因 ${resume.stoppedReason}` : ''}`
+              ? `${resume.checkpointRunId || '未知运行'} · 第 ${resume.iteration ?? 0} 轮${resume.stoppedReason ? ` · 原因 ${resume.stoppedReason}` : ''}`
               : resume.message || '没有可恢复运行'}
             tone={resume.resumed ? 'accent' : 'muted'}
           />

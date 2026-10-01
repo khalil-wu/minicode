@@ -33,6 +33,7 @@ class CapabilityRegistry:
         self._commands: dict[str, Any] = {}
         self._skills: dict[str, dict[str, Any]] = {}
         self._tool_owners: dict[str, str] = {}
+        self._tool_schema_revisions: dict[str, int] = {}
         self._schema_cache: dict[str, list[dict[str, Any]]] = {}
         self._validated_policies: set[tuple[str, int]] = set()
         self._version = 0
@@ -55,6 +56,7 @@ class CapabilityRegistry:
                 )
             logger.warning("Replacing tool '%s' owned by %s", tool.name, self._tool_owners.get(tool.name, "unknown"))
         self._tools[tool.name] = tool
+        self._tool_schema_revisions[tool.name] = self._version + 1
         self._tool_owners[tool.name] = str(owner or getattr(tool, "owner", None) or "builtin")
         self._touch()
 
@@ -62,6 +64,7 @@ class CapabilityRegistry:
         removed = self._tools.pop(name, None) is not None
         if removed:
             self._tool_owners.pop(name, None)
+            self._tool_schema_revisions.pop(name)
             self._touch()
         return removed
 
@@ -127,6 +130,7 @@ class CapabilityRegistry:
         clone = CapabilityRegistry()
         clone._tools = dict(self._tools)
         clone._tool_owners = dict(self._tool_owners)
+        clone._tool_schema_revisions = dict(self._tool_schema_revisions)
         clone._commands = deepcopy(self._commands)
         clone._skills = deepcopy(self._skills)
         clone._schema_cache = deepcopy(self._schema_cache)
@@ -296,6 +300,11 @@ class CapabilityRegistry:
             exposure = "hidden"
         direct = direct and not denied
         schema_available = exposure != "hidden"
+        code_mode_available = (
+            schema_available and active_policy.code_mode_enabled
+            and exposure not in {"direct_model_only", "deferred_model_only"}
+            and name not in {"tool_exec", "tool_wait"}
+        )
         description_for_policy = getattr(
             tool,
             "model_description_for_policy",
@@ -326,6 +335,7 @@ class CapabilityRegistry:
             schema=schema,
             direct=direct,
             schema_available=schema_available,
+            code_mode_available=code_mode_available,
             catalog_text=self._build_catalog_text(name, tool, spec),
             search_hint=getattr(tool, "search_hint", "") or "",
             short_description=model_description,
@@ -385,6 +395,7 @@ class CapabilityRegistry:
             toolset_policy=toolset_policy,
             permission_checker=permission_checker,
             permission_context=permission_context,
+            materialize_schema=False,
         )
         return {
             "version": self._version,
@@ -501,6 +512,7 @@ class CapabilityRegistry:
                     0 if exposure == "core" else 1,
                     name,
                     id(tool),
+                    self._tool_schema_revisions[name],
                     getattr(spec, "toolset", ""),
                     getattr(spec, "exposure", ""),
                     bool(getattr(spec, "always_load", False)),
@@ -578,6 +590,15 @@ class CapabilityRegistry:
             permission_checker=permission_checker,
             permission_context=permission_context,
         )
+        if active_policy.code_mode_only and not active_policy.nested_surface:
+            # exec's description contains the nested directory. Its cache must
+            # change when an internal tool is registered, replaced or denied,
+            # even though the outer tools array still has the same three names.
+            direct_fingerprint += self._direct_schema_fingerprint(
+                replace(active_policy, code_mode_only=False, nested_surface=True),
+                permission_checker=permission_checker,
+                permission_context=permission_context,
+            )
         cache_key = f"{active_policy.cache_key()}_{direct_fingerprint}"
         if permission_checker and permission_context:
             overrides_hash = hash(frozenset(permission_context.session_overrides.items())) if permission_context.session_overrides else 0
@@ -619,6 +640,7 @@ class CapabilityRegistry:
         ]
         if active_policy.code_mode_only and not active_policy.nested_surface and "tool_exec" in visible_names:
             from backend.tools.toolsets import CODE_MODE_DIRECT_TOOLS
+            from backend.tools.schema import code_mode_parameters
 
             nested_schemas = self.get_schemas(
                 permission_checker=permission_checker,
@@ -632,10 +654,8 @@ class CapabilityRegistry:
                 if not name or name in CODE_MODE_DIRECT_TOOLS:
                     continue
                 parameters = function.get("parameters") or {}
-                required = parameters.get("required") or []
-                optional = [key for key in (parameters.get("properties") or {}) if key not in required]
-                args = ", ".join([*required, *(f"[{key}]" for key in optional[:4])])
-                description = str(function.get("description") or "").partition("\n")[0][:120]
+                args = code_mode_parameters(parameters)
+                description = str(function.get("description") or "")
                 catalog.append(f"- {name}({args}): {description}")
             directory = "\n\nNested tools available through tools.name(args):\n" + "\n".join(catalog)
             directory += "\nUse ALL_TOOLS to inspect complete schemas before calling unfamiliar tools."
@@ -712,6 +732,14 @@ class CapabilityRegistry:
                 label=f"{cancel_reason} registry tool {name}",
                 owner=getattr(context, "pending_cleanup_tasks", None),
             )
+            if receipt.pending and context is not None:
+                # The wrapper can finish while the concrete tool still owns
+                # resources. Its call watcher must follow that actual child.
+                if context.tool_call_id:
+                    context.cleanup_tasks_by_call[context.tool_call_id] = execution_task
+                run_context = context.run_context
+                if run_context is not None and run_context.retain_model is not None:
+                    run_context.retain_model(context.llm, execution_task)
             _publish_registry_cleanup_receipt(context, name, receipt, reason=cancel_reason)
             raise
         except Exception as exc:
@@ -763,6 +791,7 @@ class CapabilityRegistry:
             "exposure": str(view.exposure),
             "direct": bool(view.direct),
             "schema_available": bool(getattr(view, "schema_available", False)),
+            "code_mode_available": view.code_mode_available,
             "toolset": str(getattr(spec, "toolset", "") or ""),
             "capability": str(getattr(spec, "capability", "") or ""),
             "permission": str(runtime_metadata.get("permission") or "auto"),
@@ -771,7 +800,7 @@ class CapabilityRegistry:
         }
 
     def _build_capability_summary(self, views: list[Any]) -> dict[str, Any]:
-        tool_names = {str(view.name) for view in views}
+        tool_names = {str(view.name) for view in views if view.schema_available}
         exposure_counts = Counter(str(view.exposure) for view in views)
         mcp_resource_bridge = {"list_mcp_resources", "read_mcp_resource"} <= tool_names
         mcp_resource_template_bridge = {"list_mcp_resource_templates"} <= tool_names
@@ -789,8 +818,9 @@ class CapabilityRegistry:
                 for view in views
                 if bool(view.direct) and bool(getattr(view, "schema_available", False))
             ),
-            "core_tools": exposure_counts.get("core", 0),
-            "deferred_tools": exposure_counts.get("deferred", 0),
+            "core_tools": sum(exposure_counts.get(kind, 0) for kind in ("core", "direct_model_only", "code_mode_only")),
+            "deferred_tools": sum(1 for view in views if not view.direct and view.exposure in {"deferred", "deferred_model_only"}),
+            "code_mode_tools": sum(1 for view in views if not view.direct and view.code_mode_available and view.exposure in {"core", "code_mode_only"}),
             "hidden_tools": exposure_counts.get("hidden", 0),
             "mcp_proxy_tools": sum(1 for name in tool_names if name.startswith("mcp__")),
             "commands": len(self._commands),
@@ -835,4 +865,6 @@ def _publish_registry_cleanup_receipt(
     call_id = str(getattr(context, "tool_call_id", "") or "").strip()
     receipts = getattr(context, "cleanup_receipts", None)
     if call_id and isinstance(receipts, dict):
-        receipts[call_id] = evidence
+        # Keep the call's receipt object and watchdog provenance alive: a
+        # ToolResult may already hold this exact dictionary after a timeout.
+        receipts.setdefault(call_id, {}).update(evidence)

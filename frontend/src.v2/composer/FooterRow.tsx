@@ -10,6 +10,8 @@ import { UsageRing } from "../shell/UsageRing";
 import { openSettings } from "../lib/settings-navigation";
 import { selectableModelsForProvider } from "../lib/provider-models";
 import { ModelBrandIcon } from "../components/ModelBrandIcon";
+import { workspaceRootsEqual } from "../lib/workspace-path";
+import { pushToast } from "../overlays/ToastContainer";
 
 interface Props {
   sendState: SendButtonState;
@@ -181,6 +183,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   };
 
   const switchPermissionMode = async (mode: PermissionMode) => {
+    const owner = useAppStore.getState();
     // Gate Full access (bypass) behind an explicit accept-responsibility
     // confirm, mirroring cc's BypassPermissionsModeDialog. Other modes switch
     // instantly. The dialog fires on every entry into bypass (no persisted
@@ -198,6 +201,12 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
       });
       if (!ok) return;
     }
+    const current = useAppStore.getState();
+    if (current.conversationId !== owner.conversationId
+      || !workspaceRootsEqual(current.workingDirectory, owner.workingDirectory)) {
+      pushToast("会话或工作区已切换，未应用原完全访问确认；请重新选择权限。", "warning");
+      return;
+    }
     setPermissionMode(mode);
     setPermissionOpen(false);
     queueMicrotask(() => permissionRef.current?.querySelector<HTMLButtonElement>(':scope > button')?.focus());
@@ -205,6 +214,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
 
   const togglePRAutomation = async (key: "autoFix" | "autoMerge") => {
     if (!prMonitor) return;
+    const owner = useAppStore.getState();
     const next = !prMonitor[key];
     if (next) {
       const label = key === "autoFix" ? "自动修复" : "自动合并";
@@ -216,9 +226,21 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
       });
       if (!ok) return;
     }
+    const current = useAppStore.getState();
+    if (current.conversationId !== owner.conversationId
+      || !workspaceRootsEqual(current.workingDirectory, owner.workingDirectory)
+      || current.prMonitor?.prNumber !== prMonitor.prNumber
+      || current.prMonitor?.prUrl !== prMonitor.prUrl) {
+      pushToast("会话、工作区或 PR 已变化，原自动化确认已取消；请重新选择。", "warning");
+      return;
+    }
     const automationKey = key === "autoFix" ? "auto_fix" : "auto_merge";
-    sendClientCommand({ type: "git.pr_automation.set", [automationKey]: next });
-    useAppStore.getState().setPRMonitor({ ...prMonitor, [key]: next });
+    const scope = {
+      ...(owner.conversationId ? { conversation_id: owner.conversationId } : {}),
+      workspace_root: owner.workingDirectory,
+    };
+    // git.pr_status is the semantic projection; admission alone does not enable automation.
+    sendClientCommand({ type: "git.pr_automation.set", ...scope, [automationKey]: next });
   };
 
   const modelLabel = availableModelLabels[currentModel] || formatModelLabel(currentModel, "选择模型");

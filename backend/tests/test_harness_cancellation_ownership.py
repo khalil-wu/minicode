@@ -8,10 +8,30 @@ from unittest.mock import AsyncMock
 import pytest
 
 from backend.agent.runtime import AgentRuntime
+from backend.agent.tool_batch_execution import _await_approval_within_turn_deadline
+from backend.llm.base import ToolCallEvent
 from backend.tasks.manager import TaskManager
 from backend.ws.run_manager import SessionRunManager
 from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
 from backend.ws.handler import WebSocketSession
+
+
+def test_turn_cancellation_wins_a_simultaneous_approval() -> None:
+    async def scenario() -> None:
+        cancelled = asyncio.Event()
+
+        async def approve(_call_id: str) -> dict[str, str]:
+            cancelled.set()
+            return {"action": "allow"}
+
+        with pytest.raises(asyncio.CancelledError):
+            await _await_approval_within_turn_deadline(
+                approve,
+                ToolCallEvent(id="call-1", name="write_file", arguments={}),
+                SimpleNamespace(cancel_event=cancelled, deadline_monotonic=None),
+            )
+
+    asyncio.run(scenario())
 
 
 def _manager() -> SessionRunManager:

@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from backend.agent.attachment_policy import AttachmentUnavailableError
-from backend.async_cleanup import to_thread_cancel_safe
+from backend.async_cleanup import retain_cleanup_task, to_thread_cancel_safe
 from backend.agent.context import ContextBuilder
 from backend.agent.execution_journal import execution_journal_owner
 from backend.agent.lifecycle_generation import LifecycleGenerationState
@@ -2371,6 +2371,9 @@ class SessionAgentRunnerMixin:
     ) -> None:
         """Retire an old lifecycle generation after its captured turn releases it."""
 
+        defer_until = self.run_manager.lifecycle_release_fence(
+            conversation_id, after=defer_until
+        )
         if isinstance(defer_until, asyncio.Task) and not defer_until.done():
             state = self._extension_runtime_state(conversation_id)
             state.retire(
@@ -2418,15 +2421,18 @@ class SessionAgentRunnerMixin:
         if not isinstance(lock, asyncio.Lock):
             return
         async with lock:
-            ready = state.take_ready_retirements(force=force)
+            # force is a teardown request, not proof that the captured turn or
+            # its cancellation-resistant callbacks released this generation.
+            ready = state.take_ready_retirements()
         for record in ready:
-            await self._shutdown_extension_generation(
+            await self._retire_lifecycle_runtime(
                 conversation_id,
                 record.get("runtime"),
                 record.get("loader"),
                 record.get("model_runtime"),
                 reason=str(record.get("reason") or "reload"),
                 clear_loader_cache=bool(record.get("clear_loader_cache")),
+                defer_until=None,
             )
 
     async def _shutdown_extension_generation(
@@ -2480,91 +2486,119 @@ class SessionAgentRunnerMixin:
             return
         cleanup_tasks: list[asyncio.Task[Any]] = []
         current_task = asyncio.current_task()
-        try:
-            for conversation_id, state in list(states.items()):
-                if not isinstance(state, LifecycleGenerationState):
-                    continue
-                state.fence_shutdown()
-                refresh_task = state.get("model_refresh_task")
-                if (
-                    isinstance(refresh_task, asyncio.Task)
-                    and refresh_task is not current_task
-                    and not refresh_task.done()
-                ):
-                    refresh_task.cancel()
-                    cleanup_tasks.append(refresh_task)
-                generations: list[tuple[Any, Any, Any]] = [
-                    (
-                        state.get("runtime"),
-                        state.get("loader"),
-                        state.get("model_runtime"),
-                    )
-                ]
-                generations.extend(
-                    (
-                        record.get("runtime"),
-                        record.get("loader"),
-                        record.get("model_runtime"),
-                    )
-                    for record in list(
-                        state.get("retired_generations") or []
-                    )
-                    if isinstance(record, dict)
+        for conversation_id, state in list(states.items()):
+            if not isinstance(state, LifecycleGenerationState):
+                continue
+            state.fence_shutdown()
+            refresh_task = state.get("model_refresh_task")
+            if (
+                isinstance(refresh_task, asyncio.Task)
+                and refresh_task is not current_task
+                and not refresh_task.done()
+            ):
+                refresh_task.cancel()
+                retain_cleanup_task(refresh_task, self.cleanup_tasks)
+                cleanup_tasks.append(refresh_task)
+            shutdown_task = state.get("shutdown_task")
+            if shutdown_task is None:
+                shutdown_task = asyncio.create_task(
+                    self._shutdown_conversation_lifecycle(
+                        conversation_id, state, reason=reason
+                    ),
+                    name=f"extension-generation-shutdown:{conversation_id}",
                 )
-                seen_runners: set[int] = set()
-                seen_loaders: set[int] = set()
-                seen_model_runtimes: set[int] = set()
-                for runner, loader, model_runtime in generations:
-                    shutdown_runner = runner
-                    if runner is None or id(runner) in seen_runners:
-                        shutdown_runner = None
-                    elif runner is not None:
-                        seen_runners.add(id(runner))
-                    clear_loader_cache = (
-                        loader is not None and id(loader) not in seen_loaders
-                    )
-                    if clear_loader_cache:
-                        seen_loaders.add(id(loader))
-                    retire_model_runtime = model_runtime
-                    if (
-                        model_runtime is None
-                        or id(model_runtime) in seen_model_runtimes
-                    ):
-                        retire_model_runtime = None
-                    elif model_runtime is not None:
-                        seen_model_runtimes.add(id(model_runtime))
-                    if (
-                        shutdown_runner is None
-                        and not clear_loader_cache
-                        and retire_model_runtime is None
-                    ):
+                state["shutdown_task"] = shutdown_task
+                retain_cleanup_task(shutdown_task, self.cleanup_tasks)
+            cleanup_tasks.append(shutdown_task)
+        if cleanup_tasks:
+            # The session's bounded teardown owns these tasks after its
+            # deadline. It must not cancel them into invalidating resources
+            # which a pending callback still borrows.
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in cleanup_tasks),
+                return_exceptions=True,
+            )
+
+    async def _shutdown_conversation_lifecycle(
+        self,
+        conversation_id: str,
+        state: LifecycleGenerationState,
+        *,
+        reason: str,
+    ) -> None:
+        release = self.run_manager.lifecycle_release_fence(
+            conversation_id, after=self.run_manager.run_tasks.get(conversation_id)
+        )
+        if release is not None:
+            while not release.done():
+                try:
+                    await asyncio.shield(release)
+                except asyncio.CancelledError:
+                    continue
+        # Deferred generations may have captured an earlier main task which
+        # is no longer the conversation's registered run.
+        for record in list(state.get("retired_generations") or []):
+            release = self.run_manager.lifecycle_release_fence(
+                conversation_id, after=record.get("defer_until")
+            )
+            if release is not None:
+                while not release.done():
+                    try:
+                        await asyncio.shield(release)
+                    except asyncio.CancelledError:
                         continue
-                    cleanup_tasks.append(
-                        asyncio.create_task(
-                            self._shutdown_extension_generation(
-                                conversation_id,
-                                shutdown_runner,
-                                loader,
-                                retire_model_runtime,
-                                reason=reason,
-                                clear_loader_cache=clear_loader_cache,
-                            ),
-                            name=f"extension-generation-shutdown:{conversation_id}",
-                        )
-                    )
-            if cleanup_tasks:
-                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
-        finally:
-            # The session is the owner. Even if its bounded shutdown cancels
-            # this drain, every generation task receives cancellation together
-            # and its own finally block invalidates the remaining resources.
-            for state in list(states.values()):
-                if isinstance(state, dict):
-                    state.clear()
-            states.clear()
-            registries = getattr(self, "_conversation_tool_registries", None)
-            if isinstance(registries, dict):
-                registries.clear()
+        generations: list[tuple[Any, Any, Any]] = [
+            (
+                state.get("runtime"),
+                state.get("loader"),
+                state.get("model_runtime"),
+            )
+        ]
+        generations.extend(
+            (
+                record.get("runtime"),
+                record.get("loader"),
+                record.get("model_runtime"),
+            )
+            for record in list(state.get("retired_generations") or [])
+            if isinstance(record, dict)
+        )
+        seen_runners: set[int] = set()
+        seen_loaders: set[int] = set()
+        seen_model_runtimes: set[int] = set()
+        for runner, loader, model_runtime in generations:
+            shutdown_runner = runner
+            if runner is None or id(runner) in seen_runners:
+                shutdown_runner = None
+            elif runner is not None:
+                seen_runners.add(id(runner))
+            clear_loader_cache = loader is not None and id(loader) not in seen_loaders
+            if clear_loader_cache:
+                seen_loaders.add(id(loader))
+            retire_model_runtime = model_runtime
+            if model_runtime is None or id(model_runtime) in seen_model_runtimes:
+                retire_model_runtime = None
+            elif model_runtime is not None:
+                seen_model_runtimes.add(id(model_runtime))
+            if (
+                shutdown_runner is None
+                and not clear_loader_cache
+                and retire_model_runtime is None
+            ):
+                continue
+            await self._shutdown_extension_generation(
+                conversation_id,
+                shutdown_runner,
+                loader,
+                retire_model_runtime,
+                reason=reason,
+                clear_loader_cache=clear_loader_cache,
+            )
+        state.clear()
+        self._extension_runtime_states.pop(conversation_id, None)
+        registries = getattr(self, "_conversation_tool_registries", None)
+        if isinstance(registries, dict):
+            registries.pop(conversation_id, None)
 
     def _bind_lifecycle_runtime_host_actions(
         self,
@@ -3786,6 +3820,10 @@ class SessionAgentRunnerMixin:
                     str(run_metadata.get("_run_task_id") or ""),
                 )
             return
+        run_context = run_context or RunContext()
+        run_context.lifecycle_cleanup_tasks = self.run_manager.lifecycle_cleanup_tasks_for(
+            target_conversation_id
+        )
         try:
             run_metadata["conversation_run_generation"] = query_claim.generation
             await self._run_agent_locked(
@@ -3924,7 +3962,7 @@ class SessionAgentRunnerMixin:
                 return
             raise
         finally:
-            query_guards.end(query_claim)
+            self.run_manager.release_query_claim(query_claim)
 
     async def _run_agent_locked(
         self,
@@ -3952,6 +3990,9 @@ class SessionAgentRunnerMixin:
         if not target_conversation_id:
             self._ensure_active_conversation()
             target_conversation_id = self.active_conversation_id or ""
+        run_context.lifecycle_cleanup_tasks = self.run_manager.lifecycle_cleanup_tasks_for(
+            target_conversation_id
+        )
         conversation = self.conversation_repo.get_conversation(target_conversation_id)
         if conversation is None:
             await emit_conversation_not_found(self, target_conversation_id)
@@ -4396,6 +4437,7 @@ class SessionAgentRunnerMixin:
             lifecycle_observer_factory=lifecycle_observer_factory,
             lifecycle_runtime=lifecycle_runtime,
         )
+        run_agent_session.lifecycle_cleanup_tasks = run_context.lifecycle_cleanup_tasks
 
         def _active_run_llm() -> Any:
             snapshot = run_context.active_model_execution
@@ -5243,6 +5285,13 @@ class SessionAgentRunnerMixin:
                         conversation.id,
                     )
                     break
+                if event.type == "agent.run.started" and run_metadata.get("resume_from_checkpoint"):
+                    # Checkpoint recovery has no new user-message admission.
+                    # Its durable run-start event is the acceptance boundary;
+                    # otherwise /resume waits until the whole run finishes.
+                    admission_future = run_metadata.get("_turn_admission_future")
+                    if isinstance(admission_future, asyncio.Future) and not admission_future.done():
+                        admission_future.set_result(None)
                 if event.type == "context_compacted":
                     summary_text = str(event.data.get("summary", "")).strip()
                     await _commit_automatic_compaction(

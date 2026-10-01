@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import TYPE_CHECKING, Any, Callable
 
 from filelock import Timeout as FileLockTimeout
 
+from backend.async_cleanup import to_thread_cancel_safe
 from backend.memory.file_memory import FileMemory
 from backend.memory.local_backend import LocalMemoryBackend, MemoryBackendError
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
@@ -63,7 +63,7 @@ class _MemoryTool(BaseTool):
         project tree, so keeping that work in the coroutine would stall every
         WebSocket conversation while another process holds the reset lock.
         """
-        return await asyncio.to_thread(
+        return await to_thread_cancel_safe(
             self._execute_backend_sync,
             context,
             operation,

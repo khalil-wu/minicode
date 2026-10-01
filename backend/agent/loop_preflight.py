@@ -9,9 +9,11 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, TypeVar
 
 from backend.async_cleanup import cancel_and_drain
+from backend.agent.run_context import RunContext
 from backend.hooks.manager import HookEvent
 
 logger = logging.getLogger(__name__)
+_PREFLIGHT_DRAIN_TIMEOUT_SECONDS = 2.5
 
 
 class PhaseDeadlineExceeded(asyncio.TimeoutError):
@@ -46,6 +48,8 @@ async def prepare_turn_input(
     cancel_event: asyncio.Event | None,
     hook_manager: Any | None,
     input_restored: bool = False,
+    run_context: RunContext | None = None,
+    llm: Any = None,
 ) -> TurnPreflightResult:
     """Run hooks and schedule the one canonical turn input."""
     deadline_reached = False
@@ -68,6 +72,8 @@ async def prepare_turn_input(
                 hook_manager.run_session_start_once(session_id),
                 deadline=deadline,
                 cancel_event=cancel_event,
+                run_context=run_context,
+                llm=llm,
             )
             initial_user_message = str(
                 getattr(session_hook_result, "initial_user_message", "") or ""
@@ -102,6 +108,8 @@ async def prepare_turn_input(
                 hook_manager.run_user_prompt_submit(user_message),
                 deadline=deadline,
                 cancel_event=cancel_event,
+                run_context=run_context,
+                llm=llm,
             )
             if prompt_hook_result.blocked:
                 blocked = True
@@ -136,9 +144,12 @@ async def await_preflight(
     *,
     deadline: float | None,
     cancel_event: asyncio.Event | None,
+    run_context: RunContext | None = None,
+    llm: Any = None,
 ) -> PreflightResult:
     """Wait for preflight work under the turn's cancellation/deadline fence."""
     task = asyncio.ensure_future(operation)
+    owner = run_context if run_context is not None else RunContext()
     cancel_task = asyncio.create_task(cancel_event.wait()) if cancel_event is not None else None
     waiters = {task, *([cancel_task] if cancel_task is not None else [])}
     timeout = max(0.0, deadline - time.monotonic()) if deadline is not None else None
@@ -156,7 +167,10 @@ async def await_preflight(
             return task.result()
         raise PhaseDeadlineExceeded
     except (asyncio.CancelledError, PhaseDeadlineExceeded):
-        await cancel_and_drain([task], timeout=2.5, label="agent preflight operation")
+        await owner.drain_lifecycle_task(
+            task, timeout=_PREFLIGHT_DRAIN_TIMEOUT_SECONDS,
+            label="agent preflight operation", llm=llm,
+        )
         raise
     finally:
         if cancel_task is not None:

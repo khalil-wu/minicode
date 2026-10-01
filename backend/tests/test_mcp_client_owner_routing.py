@@ -120,6 +120,9 @@ class _OAuthControlSession(SessionApprovalRuntimeMixin):
         self.command_dispatcher = object.__new__(SessionCommandDispatcher)
         self.command_dispatcher._session = self
 
+    async def send_event(self, event) -> None:
+        self.sent.append(event.to_ws_message())
+
     async def send_payload(self, payload: dict, *, log_context: str) -> bool:
         assert log_context in {
             "llm.provider.oauth.prompt",

@@ -167,13 +167,14 @@ def test_web_tool_model_schemas_hide_optional_tuning_fields() -> None:
     assert search_schema.parameters["required"] == ["query"]
 
 
-def test_search_tool_model_schemas_expose_cc_parameters() -> None:
+def test_search_tool_model_schemas_expose_named_search_parameters() -> None:
     glob_schema = GlobFilesTool().model_schema()
     grep_schema = GrepFilesTool().model_schema()
 
     # OpenAI payload normalization stamps additionalProperties=false on every
     # object, so a parameter missing from the model-facing schema is rejected
-    # rather than ignored. These sets mirror cc's GlobTool/GrepTool.
+    # rather than ignored. The model sees named fields while the executor also
+    # accepts the historical short flag aliases.
     assert set(glob_schema.parameters["properties"].keys()) == {
         "pattern",
         "path",
@@ -187,11 +188,11 @@ def test_search_tool_model_schemas_expose_cc_parameters() -> None:
         "glob",
         "type",
         "output_mode",
-        "-i",
-        "-n",
-        "-A",
-        "-B",
-        "-C",
+        "case_insensitive",
+        "line_numbers",
+        "after_context",
+        "before_context",
+        "context",
         "multiline",
         "head_limit",
         "offset",
@@ -222,8 +223,8 @@ def test_common_direct_tool_model_descriptions_stay_short() -> None:
     assert ToolSearchTool().model_schema().description == (
         "Activate deferred tools named in <available-deferred-tools>. "
         "Until fetched, only each tool's name is known and it cannot be invoked. "
-        "Use 'select:ToolName' for an exact tool. Selected tools become directly "
-        "callable on the next iteration."
+        "Use 'select:ToolName' for an exact tool. Selected tools become available "
+        "on the next iteration; in code-only mode, call them through tool_exec."
     )
 
 

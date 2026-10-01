@@ -100,6 +100,7 @@ export const ComposerTextarea = ({
   const textarea = (
     <textarea
       ref={ref}
+      aria-label="消息输入"
       value={value}
       onChange={(e) => onChange(e.target.value)}
       onPaste={handlePaste}

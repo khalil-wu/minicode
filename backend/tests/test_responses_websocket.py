@@ -47,6 +47,53 @@ def test_chat_transport_is_not_switched_by_an_unused_websocket_setting():
     asyncio.run(scenario())
 
 
+def test_codex_metadata_websocket_replays_first_route_in_body_and_headers():
+    async def scenario():
+        handshakes = []
+
+        def handshake(socket, request):
+            handshakes.append(dict(request.headers))
+
+        async def respond(socket, request, index):
+            await socket.send(json.dumps({
+                "type": "response.metadata",
+                "headers": {"X-Codex-Turn-State": ["first-route" if index == 1 else "later-route"]},
+            }))
+            await socket.send(json.dumps({"type": "codex.response.metadata", "headers": {"x-codex-turn-state": "not-a-turn-state-event"}}))
+            await socket.send(json.dumps({"type": "responsesapi.websocket_timing", "private": "do-not-project"}))
+            await socket.send(json.dumps(terminal(str(index), text="answer")))
+
+        async with endpoint(respond, process_request=handshake) as (adapter, requests, connections):
+            messages = [LLMMessage(role="user", content="hello")]
+            events = await collect(adapter, messages)
+            assert events[-1].type == StreamEventType.DONE
+            second = [*messages, LLMMessage(role="assistant", content="answer"), LLMMessage(role="user", content="next")]
+            events = await collect(adapter, second)
+            assert events[-1].type == StreamEventType.DONE
+            assert requests[1]["previous_response_id"] == "1"
+            assert requests[1]["client_metadata"]["x-codex-turn-state"] == "first-route"
+            third = [*second, LLMMessage(role="assistant", content="answer"), LLMMessage(role="user", content="again")]
+            await collect(adapter, third)
+            assert requests[2]["client_metadata"]["x-codex-turn-state"] == "first-route"
+            assert len(connections) == 1
+            assert "first-route" not in str(events[-1].raw)
+            assert "do-not-project" not in str(events[-1].raw)
+
+            # Reconnect within the same turn must keep the token in both
+            # transport representations, without a stale replay baseline.
+            await adapter._responses_websocket.idle.socket.close()
+            await collect(adapter, third)
+            assert handshakes[1]["x-codex-turn-state"] == "first-route"
+            assert requests[3]["client_metadata"]["x-codex-turn-state"] == "first-route"
+            assert "previous_response_id" not in requests[3]
+
+            await collect(adapter, messages, owner="other-thread")
+            assert "x-codex-turn-state" not in handshakes[2]
+            assert "x-codex-turn-state" not in requests[4]["client_metadata"]
+
+    asyncio.run(scenario())
+
+
 def test_responses_http_replays_sticky_turn_state_only_within_one_turn():
     async def scenario():
         requests = []
@@ -247,7 +294,8 @@ def test_partial_stream_close_and_cancellation_release_connection(cancel_task):
 
 
 @pytest.mark.parametrize("failure", ["disconnect", "expired_id", "expired_id_flat", "expired_id_failed", "committed_disconnect"])
-def test_existing_harness_recovery_uses_full_context_and_never_repeats_tools(tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize("continuation_code", ["previous_response_id_not_found", "previous_response_not_found"])
+def test_existing_harness_recovery_uses_full_context_and_never_repeats_tools(tmp_path, monkeypatch, failure, continuation_code):
     monkeypatch.setenv("MINICODE_STATE_ROOT", str(tmp_path / "state"))
     async def scenario():
         async def respond(socket, request, index):
@@ -262,13 +310,17 @@ def test_existing_harness_recovery_uses_full_context_and_never_repeats_tools(tmp
                     await socket.send(json.dumps(terminal("original", output=[function_call()])))
             elif failure.startswith("expired_id") and index == 2:
                 assert request["previous_response_id"] == "original"
-                error = {"code": "previous_response_id_not_found", "message": "Not cached"}
+                error = {"code": continuation_code, "message": "Not cached"}
                 event = {"type": "error", "error": error}
                 if failure == "expired_id_flat": event = {"type": "error", **error}
                 if failure == "expired_id_failed": event = {"type": "response.failed", "response": {"status": "failed", "error": error}}
                 await socket.send(json.dumps(event))
             else:
                 assert "previous_response_id" not in request
+                if failure.startswith("expired_id"):
+                    assert any(item.get("role") == "user" and "Complete the fixture work" in str(item.get("content")) for item in request["input"])
+                    assert any(item.get("type") == "function_call" and item.get("call_id") == "call-1" for item in request["input"])
+                    assert any(item.get("type") == "function_call_output" and item.get("call_id") == "call-1" for item in request["input"])
                 await socket.send(json.dumps(terminal("recovered", text="Correct final answer.")))
         async with endpoint(respond) as (adapter, requests, connections):
             tool = WorkTool("inspect")
@@ -278,6 +330,81 @@ def test_existing_harness_recovery_uses_full_context_and_never_repeats_tools(tmp
             assert "discard me" not in state.reply
             assert tool.executions == (0 if failure == "disconnect" else 1)
             assert len(requests) == (3 if failure.startswith("expired_id") else 2)
+    asyncio.run(scenario())
+
+
+def test_codex_missing_previous_response_recovers_native_patch_once(tmp_path, monkeypatch):
+    monkeypatch.setenv("MINICODE_STATE_ROOT", str(tmp_path / "state"))
+
+    async def scenario():
+        executions = 0
+        tool = ApplyPatchTool()
+        execute = tool.execute
+
+        async def counted(args, context=None):
+            nonlocal executions
+            executions += 1
+            return await execute(args, context)
+
+        monkeypatch.setattr(tool, "execute", counted)
+
+        async def respond(socket, request, index):
+            if index == 1:
+                await socket.send(json.dumps(terminal("original", output=[custom_item()])))
+            elif index == 2:
+                assert request["previous_response_id"] == "original"
+                await socket.send(json.dumps({"type": "error", "status": 400, "error": {
+                    "code": "previous_response_not_found", "message": "Previous response was not found.",
+                }}))
+            else:
+                assert "previous_response_id" not in request
+                assert any(item.get("type") == "custom_tool_call" and item.get("input") == PATCH for item in request["input"])
+                assert any(item.get("type") == "custom_tool_call_output" for item in request["input"])
+                await socket.send(json.dumps(terminal("rebuilt", text="Recovered after patch.")))
+
+        async with endpoint(respond) as (adapter, requests, connections):
+            adapter._settings = replace(adapter._settings, supports_custom_tools=True)
+            state, _, _ = await run_case(tmp_path, adapter, [tool])
+            assert state.terminal_status == "completed", state.stopped_reason
+            assert executions == 1 and len(state.tool_calls) == 1
+            assert len(requests) == 3 and len(connections) == 2
+            assert (tmp_path / "result.txt").read_text(encoding="utf-8").startswith("中文 😀")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("continuation_code", ["previous_response_id_not_found", "previous_response_not_found"])
+def test_missing_continuation_discards_lease_without_leaking_owner(continuation_code):
+    async def scenario():
+        handshakes = []
+
+        def handshake(socket, request):
+            handshakes.append(dict(request.headers))
+
+        async def respond(socket, request, index):
+            if index == 1:
+                await socket.send(json.dumps({"type": "response.metadata", "headers": {"x-codex-turn-state": "owner-a-secret-route"}}))
+                await socket.send(json.dumps(terminal("owner-a-baseline", text="answer")))
+            elif index == 2:
+                assert request["previous_response_id"] == "owner-a-baseline"
+                await socket.send(json.dumps({"type": "error", "error": {"code": continuation_code, "message": "Not cached"}}))
+            else:
+                await socket.send(json.dumps(terminal("owner-b-response")))
+
+        async with endpoint(respond, process_request=handshake) as (adapter, requests, connections):
+            messages = [LLMMessage(role="user", content="owner-a-secret-prompt")]
+            await collect(adapter, messages, owner="owner-a")
+            events = await collect(adapter, [*messages, LLMMessage(role="assistant", content="answer"), LLMMessage(role="user", content="continue-a")], owner="owner-a")
+            error = next(event for event in events if event.type == StreamEventType.ERROR)
+            assert error.raw["provider_error_type"] == "network"
+            assert adapter._responses_websocket.idle is None
+            assert not adapter._responses_websocket.active
+            await collect(adapter, [LLMMessage(role="user", content="public-b")], owner="owner-b")
+            assert len(connections) == 2
+            assert "previous_response_id" not in requests[2]
+            assert "owner-a-secret" not in json.dumps(requests[2])
+            assert "x-codex-turn-state" not in handshakes[1]
+
     asyncio.run(scenario())
 
 

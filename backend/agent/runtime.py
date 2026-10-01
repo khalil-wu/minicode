@@ -1955,16 +1955,18 @@ class AgentRuntime:
                         if task in initially_timed_out
                     ],
                     "reason": reason,
-                    "drained_to_completion": True,
+                    "drained_to_completion": False,
                 },
             )
             for subagent_id, task in owned:
                 if task in initially_timed_out:
                     self._retain_subagent_cleanup_owner(subagent_id, task)
-        for subagent_id, task in owned:
-            if task not in initially_timed_out and task.done():
-                self._reconcile_terminal_subagent_cleanup(subagent_id)
-        return True
+        pending_ids = {subagent_id for subagent_id, task in owned if task in initially_timed_out}
+        completed = not pending_ids
+        for subagent_id in subagent_ids:
+            if subagent_id not in pending_ids:
+                completed = self._reconcile_terminal_subagent_cleanup(subagent_id) and completed
+        return completed
 
 
     async def stop_subagent_tasks_for_session(
@@ -2003,16 +2005,17 @@ class AgentRuntime:
                         if task in initially_timed_out
                     ],
                     "reason": reason,
-                    "drained_to_completion": True,
+                    "drained_to_completion": False,
                 },
             )
             for subagent_id, task in owned:
                 if task in initially_timed_out:
                     self._retain_subagent_cleanup_owner(subagent_id, task)
+        completed = not initially_timed_out
         for subagent_id, task in owned:
             if task not in initially_timed_out and task.done():
-                self._reconcile_terminal_subagent_cleanup(subagent_id)
-        return True
+                completed = self._reconcile_terminal_subagent_cleanup(subagent_id) and completed
+        return completed
 
     async def stop_subagent_tasks_for_conversation(
         self,
@@ -2091,16 +2094,18 @@ class AgentRuntime:
                         if task in initially_timed_out
                     ],
                     "reason": reason,
-                    "drained_to_completion": True,
+                    "drained_to_completion": False,
                 },
             )
             for subagent_id, task in owned_tasks:
                 if task in initially_timed_out:
                     self._retain_subagent_cleanup_owner(subagent_id, task)
-        for subagent_id, task in owned_tasks:
-            if task not in initially_timed_out and task.done():
-                self._reconcile_terminal_subagent_cleanup(subagent_id)
-        return True
+        pending_ids = {subagent_id for subagent_id, task in owned_tasks if task in initially_timed_out}
+        completed = not pending_ids
+        for subagent_id in subagent_ids:
+            if subagent_id not in pending_ids:
+                completed = self._reconcile_terminal_subagent_cleanup(subagent_id) and completed
+        return completed
 
     def get_subagent(self, subagent_id: str) -> SubagentRunRecord | None:
         return self._subagents.get(subagent_id)
@@ -2957,9 +2962,9 @@ class AgentRuntime:
 
             def belongs_to_incarnation(message: SwarmMessageRecord) -> bool:
                 if message.recipient_id in {"all", "*"}:
-                    target_epoch = message.recipient_mailbox_epochs.get(participant)
-                    if target_epoch is not None:
-                        return int(target_epoch) == current_epoch
+                    epochs = message.recipient_mailbox_epochs
+                    if epochs:
+                        return participant in epochs and int(epochs[participant]) == current_epoch
                     # Legacy broadcasts had no recipient snapshot. They are
                     # visible only to an initial incarnation and never cross a
                     # restart boundary.
@@ -3291,6 +3296,18 @@ class AgentRuntime:
             if len(next_ids) == len(memory_subagent_ids):
                 break
             memory_subagent_ids = next_ids
+        durable_ids = self._swarm_store.conversation_agent_ids(owner)
+        owned_subagent_ids = memory_subagent_ids | set(durable_ids["subagent_ids"])
+        if any(
+            task is not None and not task.done()
+            for subagent_id in owned_subagent_ids
+            for task in [self._subagent_tasks.get(subagent_id)]
+        ) or any(
+            record is not None and record.cleanup_pending
+            for subagent_id in owned_subagent_ids
+            for record in [self._subagents.get(subagent_id)]
+        ):
+            raise RuntimeError("Conversation still owns pending subagent cleanup; wait before purging it.")
         memory_message_ids = {
             message_id
             for message_id, record in self._swarm_messages.items()

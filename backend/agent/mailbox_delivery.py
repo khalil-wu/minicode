@@ -179,11 +179,7 @@ def _leader_plan_review_required(
     provider = run_context.permission_context_provider
     mode = ""
     if callable(provider):
-        try:
-            context = provider()
-        except Exception as exc:
-            logger.warning("plan approval permission probe failed: %s", exc)
-            context = None
+        context = provider()
         mode = str(getattr(context, "mode", "") or "").strip().lower()
     if not mode:
         mode = str(
@@ -533,8 +529,8 @@ async def inject_subagent_mailbox_updates(
         recipient = str(getattr(message, "recipient_id", "") or "")
         if recipient in {"all", "*"}:
             recipient_epochs = getattr(message, "recipient_mailbox_epochs", None)
-            if isinstance(recipient_epochs, dict) and participant_id in recipient_epochs:
-                return int(recipient_epochs.get(participant_id) or 0) == current_epoch
+            if recipient_epochs:
+                return participant_id in recipient_epochs and int(recipient_epochs[participant_id]) == current_epoch
             created_at = int(getattr(message, "created_at", 0) or 0)
             return current_epoch <= 1 and (not current_started_at or created_at >= current_started_at)
         target_epoch = int(getattr(message, "recipient_mailbox_epoch", 0) or 0)

@@ -5,14 +5,18 @@ import json
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from backend.agent.message import AgentEvent
 from backend.atomic_io import atomic_write_text, file_mutation_locks
 from backend.runtime_env import sanitized_git_env
 from backend.subprocesses import communicate, spawn_exec
+
+if TYPE_CHECKING:
+    from backend.sandbox import SandboxPolicy
 
 
 @dataclass(frozen=True)
@@ -218,20 +222,118 @@ def clear_workspace_recent(*, limit: int | None = None) -> tuple[int, dict[str, 
     return removed, workspace_recent_payload(store.list(limit=limit))
 
 
+def readonly_git_policy(root: Path) -> SandboxPolicy:
+    """Capture readonly authority, including registered MiniCode worktree metadata.
+
+    The selected checkout's .git file is NOT a source of grants. Only the
+    trusted original repository's worktree registry can admit shared metadata.
+    """
+    from backend.sandbox import SandboxPolicy
+    from backend.config import load_config_layer_stack
+    from backend.permissions.context import PermissionContext
+    from backend.sandbox.policy import (
+        FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry,
+        FileSystemSandboxPolicy, NetworkSandboxPolicy, PermissionProfile,
+        sandbox_policy_for_permission_context,
+    )
+    from backend.workspace.trust import is_workspace_trusted
+
+    root = root.resolve()
+    stack = load_config_layer_stack(cwd=root)
+    captured = sandbox_policy_for_permission_context(
+        root, PermissionContext(mode="confirm", workspace_root=root, source="control-plane-readonly"),
+        config_stack=stack,
+    )
+    authority = captured.resolve(cwd=root)
+    denied_roots = tuple(path for path, access in authority.resolved_entries if access is FileSystemAccessMode.DENY)
+
+    def may_read(path: Path) -> bool:
+        # Snapshot grants never reopen a captured ancestor DENY, even where
+        # the base workspace-write profile has a more specific workspace grant.
+        return authority.resolve_access(path).can_read and not any(path.is_relative_to(denied) for denied in denied_roots)
+
+    readable = [root]
+    if root.parent.name == "worktrees" and root.parent.parent.name == ".minicode":
+        original = root.parents[2]
+        metadata = (original / ".git").resolve()
+        registry = metadata / "worktrees"
+        if (is_workspace_trusted(original) and metadata.is_relative_to(original)
+                and may_read(metadata) and registry.is_dir()):
+            for entry in registry.iterdir():
+                backlink = entry / "gitdir"
+                if not backlink.resolve().is_relative_to(metadata) or not backlink.is_file():
+                    continue
+                if not may_read(backlink) or not may_read(backlink.resolve()):
+                    continue
+                registered = Path(backlink.read_text(encoding="utf-8").strip())
+                if not registered.is_absolute():
+                    registered = backlink.parent / registered
+                if registered.resolve() == root / ".git":
+                    readable.append(metadata)
+                    break
+    # Intersect the legacy snapshot grants with the captured canonical profile.
+    # An ancestor managed DENY must not be reopened by a more precise READ.
+    requested = SandboxPolicy(workspace_root=root, readable_roots=tuple(readable)).resolve(cwd=root)
+    entries = []
+    for path, access in requested.resolved_entries:
+        allowed = authority.resolve_access(path)
+        if may_read(path):
+            narrowed = FileSystemAccessMode.READ if not allowed.can_write else access
+            entries.append(FileSystemSandboxEntry(FileSystemPath.path(path), narrowed))
+    entries.extend(entry for entry in captured.permission_profile.file_system.entries if entry.access is FileSystemAccessMode.DENY)
+    profile = PermissionProfile.managed(FileSystemSandboxPolicy.restricted(
+        entries, glob_scan_max_depth=captured.permission_profile.file_system.glob_scan_max_depth,
+    ), network=NetworkSandboxPolicy.RESTRICTED)
+    return replace(
+        captured, permission_profile=profile,
+        readable_roots=tuple(path for path in readable if may_read(path)),
+        allow_unsandboxed_commands=False, auto_allow_commands_if_sandboxed=False,
+        fail_if_unavailable=True,
+    )
+
+
+def run_readonly_git(
+    root: Path, *args: str, timeout: float = 5,
+    sandbox_policy: SandboxPolicy | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Keep synchronous snapshot callers inside the canonical Git boundary.
+
+    These services also run in existing async WS/scheduler hosts. A joined
+    worker owns the coroutine through pipe and sandbox cleanup; no task is
+    detached, and no session's bypass authority is borrowed for a snapshot.
+    """
+    from backend.tools.git_support import _run_git
+
+    policy = sandbox_policy or readonly_git_policy(root)
+
+    def execute() -> subprocess.CompletedProcess[bytes]:
+        return asyncio.run(_run_git(
+            ["git", *args], root=policy.workspace_root, cwd=root,
+            sandbox_policy=policy, timeout=timeout,
+        ))
+
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        result = worker.submit(execute).result()
+    return subprocess.CompletedProcess(
+        result.args, result.returncode,
+        result.stdout.decode("utf-8"),
+        result.stderr.decode("utf-8"),
+    )
+
+
+def readonly_git_host_path(root: Path, value: str, *, sandbox_policy: SandboxPolicy | None = None) -> Path:
+    from backend.sandbox import SandboxRunner
+
+    mapper = SandboxRunner(sandbox_policy or readonly_git_policy(root))
+    return Path(mapper.map_path_from_sandbox(value))
+
+
 def git_branch_for(path: Path) -> str:
     """Return the current branch for a workspace path."""
     root = path.resolve()
     try:
-        result = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=root,
-            env=sanitized_git_env(),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=5,
-            check=True,
-        )
+        result = run_readonly_git(root, "branch", "--show-current")
+        result.check_returncode()
         return result.stdout.strip()
     except Exception:
         return ""
@@ -240,22 +342,20 @@ def git_branch_for(path: Path) -> str:
 def main_worktree_root(path: Path) -> Path:
     root = path.resolve()
     try:
-        result = subprocess.run(
-            ["git", "worktree", "list", "--porcelain"],
-            cwd=root,
-            env=sanitized_git_env(),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=5,
-            check=True,
-        )
+        policy = readonly_git_policy(root)
+        if len(policy.readable_roots) == 2:
+            # The original owner was admitted by its trusted worktree registry,
+            # not inferred from an untrusted checkout's .git pointer or a
+            # container alias for the metadata directory's parent.
+            return root.parents[2]
+        result = run_readonly_git(root, "worktree", "list", "--porcelain", sandbox_policy=policy)
+        result.check_returncode()
     except Exception:
         return root
 
     for line in result.stdout.splitlines():
         if line.startswith("worktree "):
-            candidate = Path(line[9:].strip()).resolve()
+            candidate = readonly_git_host_path(root, line[9:].strip(), sandbox_policy=policy).resolve()
             if (candidate / ".git").is_dir():
                 return candidate
             return candidate
@@ -309,16 +409,8 @@ def validate_git_relative_path(path: str) -> str:
 
 def worktree_has_local_changes(path: Path) -> bool:
     try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain=v1"],
-            cwd=path,
-            env=sanitized_git_env(),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=5,
-            check=True,
-        )
+        result = run_readonly_git(path, "status", "--porcelain=v1")
+        result.check_returncode()
         return bool(result.stdout.strip())
     except Exception:
         return True

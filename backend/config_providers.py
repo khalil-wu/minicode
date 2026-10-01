@@ -69,23 +69,15 @@ def _set_runtime_image_api_key(provider: str, api_key: str, base_url: str) -> No
     if not scoped_names:
         raise SettingsError("An independent image API key requires an image base URL.")
     runtime_key = _normalize_provider(provider)
+    from backend.vault import EnvVault
+
+    vault = EnvVault()
+    host = urlsplit(base_url).netloc or base_url
+    for name in scoped_names:
+        vault.set(name, api_key, description=f"{runtime_key} image provider API key for {host}", scope="global")
     _RUNTIME_IMAGE_API_KEY_SCOPES[runtime_key] = _provider_key_scope(base_url)
     for name in scoped_names:
         os.environ[name] = api_key
-    try:
-        from backend.vault import EnvVault
-
-        vault = EnvVault()
-        host = urlsplit(base_url).netloc or base_url
-        for name in scoped_names:
-            vault.set(
-                name,
-                api_key,
-                description=f"{runtime_key} image provider API key for {host}",
-                scope="global",
-            )
-    except Exception as exc:
-        logger.debug("vault image API key write failed for %s: %s", runtime_key, exc)
 
 
 
@@ -94,45 +86,23 @@ def _set_runtime_api_key(provider: str, api_key: str, base_url: str = "") -> Non
         _clear_runtime_api_key(provider, base_url)
         return
     if provider == "anthropic":
-        os.environ["ANTHROPIC_API_KEY"] = api_key
         vault_name = "ANTHROPIC_API_KEY"
     elif provider == "custom":
-        os.environ["CUSTOM_API_KEY"] = api_key
         vault_name = "CUSTOM_API_KEY"
     else:
-        os.environ["OPENAI_API_KEY"] = api_key
         vault_name = "OPENAI_API_KEY"
-    try:
-        from backend.vault import EnvVault
+    from backend.vault import EnvVault
 
-        EnvVault().set(
-            vault_name,
-            api_key,
-            description=f"{provider} provider API key",
-            scope="global",
-        )
-    except Exception as exc:
-        logger.debug("vault API key write failed for %s: %s", vault_name, exc)
-
+    vault = EnvVault()
     scoped_names = _scoped_vault_names(provider, base_url)
-    if not scoped_names:
-        return
-    _RUNTIME_API_KEY_SCOPES[provider] = _provider_key_scope(base_url)
+    vault.set(vault_name, api_key, description=f"{provider} provider API key", scope="global")
+    for scoped_name in scoped_names:
+        vault.set(scoped_name, api_key, description=f"{provider} provider API key for {urlsplit(base_url).netloc or base_url}", scope="global")
+    os.environ[vault_name] = api_key
+    if scoped_names:
+        _RUNTIME_API_KEY_SCOPES[provider] = _provider_key_scope(base_url)
     for scoped_name in scoped_names:
         os.environ[scoped_name] = api_key
-    try:
-        from backend.vault import EnvVault
-
-        vault = EnvVault()
-        for scoped_name in scoped_names:
-            vault.set(
-                scoped_name,
-                api_key,
-                description=f"{provider} provider API key for {urlsplit(base_url).netloc or base_url}",
-                scope="global",
-            )
-    except Exception as exc:
-        logger.debug("vault scoped API key write failed for %s: %s", provider, exc)
 
 
 def _clear_runtime_api_key(provider: str, base_url: str = "") -> None:
@@ -142,22 +112,18 @@ def _clear_runtime_api_key(provider: str, base_url: str = "") -> None:
         vault_name = "CUSTOM_API_KEY"
     else:
         vault_name = "OPENAI_API_KEY"
-    os.environ.pop(vault_name, None)
     names = [vault_name]
     scoped_names = _scoped_vault_names(provider, base_url)
     names.extend(name for name in scoped_names if name not in names)
-    for scoped_name in scoped_names:
-        os.environ.pop(scoped_name, None)
+    from backend.vault import EnvVault
+
+    vault = EnvVault()
+    for name in names:
+        vault.delete(name)
+    for name in names:
+        os.environ.pop(name, None)
     if not base_url or _RUNTIME_API_KEY_SCOPES.get(provider) == _provider_key_scope(base_url):
         _RUNTIME_API_KEY_SCOPES.pop(provider, None)
-    try:
-        from backend.vault import EnvVault
-
-        vault = EnvVault()
-        for name in names:
-            vault.delete(name)
-    except Exception as exc:
-        logger.debug("vault API key clear failed for %s: %s", vault_name, exc)
 
 
 

@@ -8,7 +8,9 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from backend.runtime_env import sanitized_git_env
+from backend.services.workspace_service import readonly_git_host_path, readonly_git_policy, run_readonly_git
+from backend.sandbox import SandboxPolicy
+from backend.sandbox.runner import SandboxUnavailableError
 
 
 def search_workspace_directories(root: Path, query: str, limit: int) -> list[dict[str, Any]]:
@@ -188,32 +190,26 @@ def resolve_workspace_git_root(path: str, fallback_root: Path) -> Path:
     return fallback_root
 
 
-def _run_workspace_git(root: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", "--literal-pathspecs", *args],
-        cwd=root,
-        env=sanitized_git_env(root),
-        input="",
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=10,
-        check=True,
-    ).stdout
+def _run_workspace_git(root: Path, *args: str, sandbox_policy: SandboxPolicy) -> str:
+    result = run_readonly_git(root, "--literal-pathspecs", *args, timeout=10, sandbox_policy=sandbox_policy)
+    result.check_returncode()
+    return result.stdout
 
 
-def workspace_git_status_payload(root: Path) -> dict[str, Any]:
+def workspace_git_status_payload(root: Path, *, workspace_root: Path | None = None) -> dict[str, Any]:
     try:
-        prefix = _run_workspace_git(root, "rev-parse", "--show-prefix").removesuffix("\n")
+        policy = readonly_git_policy(workspace_root or root)
+        prefix = _run_workspace_git(root, "rev-parse", "--show-prefix", sandbox_policy=policy).removesuffix("\n")
         status = parse_workspace_git_status(_run_workspace_git(
             root, "status", "--porcelain=v1", "--branch", "-z", "--untracked-files=all", "--", ".",
+            sandbox_policy=policy,
         ))
         # Porcelain paths are repository-relative even when Git runs in a
         # subdirectory. The workspace API and file buttons use workspace paths.
         for field in ("modified", "staged", "untracked"):
             status[field] = [path.removeprefix(prefix) for path in status[field]]
         return status
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError, SandboxUnavailableError) as exc:
         return {"branch": "", "modified": [], "staged": [], "untracked": [], "error": str(getattr(exc, "stderr", None) or exc).strip()}
 
 
@@ -240,44 +236,45 @@ def parse_workspace_git_status(stdout: str) -> dict[str, Any]:
     return {"branch": branch, "modified": modified, "staged": staged, "untracked": untracked}
 
 
-def workspace_git_diff_payload(root: Path, file: str) -> dict[str, Any]:
+def workspace_git_diff_payload(root: Path, file: str, *, workspace_root: Path | None = None) -> dict[str, Any]:
     try:
+        policy = readonly_git_policy(workspace_root or root)
         # Verify the repository separately: an unborn HEAD is a normal state,
         # while a failed Git command must never look like an empty diff.
-        _run_workspace_git(root, "rev-parse", "--show-toplevel")
+        _run_workspace_git(root, "rev-parse", "--show-toplevel", sandbox_policy=policy)
         try:
-            baseline = _run_workspace_git(root, "rev-parse", "--verify", "--quiet", "HEAD").strip()
+            baseline = _run_workspace_git(root, "rev-parse", "--verify", "--quiet", "HEAD", sandbox_policy=policy).strip()
         except subprocess.CalledProcessError as exc:
             if exc.returncode != 1:
                 raise
-            baseline = _run_workspace_git(root, "hash-object", "-t", "tree", "--stdin").strip()
+            baseline = _run_workspace_git(root, "hash-object", "-t", "tree", "--stdin", sandbox_policy=policy).strip()
 
         paths = (file,) if file else (".",)
         diff_args = ("diff", "--relative", "--no-color", "--no-textconv", "--no-ext-diff")
-        patches = [_run_workspace_git(root, *diff_args, baseline, "--", *paths)]
-        untracked = _run_workspace_git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", *paths)
+        patches = [_run_workspace_git(root, *diff_args, baseline, "--", *paths, sandbox_policy=policy)]
+        untracked = _run_workspace_git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", *paths, sandbox_policy=policy)
         for path in untracked.split("\0"):
             if not path:
                 continue
             try:
-                patches.append(_run_workspace_git(root, *diff_args, "--no-index", "--", "/dev/null", path))
+                patches.append(_run_workspace_git(root, *diff_args, "--no-index", "--", "/dev/null", path, sandbox_policy=policy))
             except subprocess.CalledProcessError as exc:
                 if exc.returncode != 1:  # --no-index returns 1 when there are differences.
                     raise
                 patches.append(exc.stdout)
         return {"diff": "".join(patches)}
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError, SandboxUnavailableError) as exc:
         return {"diff": "", "error": str(getattr(exc, "stderr", None) or exc).strip()}
 
 
-def workspace_git_worktree_payload(root: Path) -> dict[str, Any]:
+def workspace_git_worktree_payload(root: Path, *, workspace_root: Path | None = None) -> dict[str, Any]:
     try:
         from backend.workspace.worktree import WorktreeManager, isolated_worktree_root, summarize_worktree_status
 
+        common_dir = resolve_git_common_dir(root, sandbox_policy=readonly_git_policy(workspace_root or root))
         manager = WorktreeManager(root)
         worktrees = manager.list_worktrees()
         status = summarize_worktree_status(root, worktrees)
-        common_dir = resolve_git_common_dir(root)
         isolated_root = isolated_worktree_root(status.main_repo_path or root)
 
         entries: list[dict[str, Any]] = []
@@ -309,21 +306,14 @@ def workspace_git_worktree_payload(root: Path) -> dict[str, Any]:
         return {"current_path": str(root), "error": str(exc)}
 
 
-def resolve_git_common_dir(root: Path) -> Path | None:
-    result = subprocess.run(
-        ["git", "rev-parse", "--git-common-dir"],
-        cwd=root,
-        env=sanitized_git_env(),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=5,
-        check=True,
-    )
+def resolve_git_common_dir(root: Path, *, sandbox_policy: SandboxPolicy | None = None) -> Path | None:
+    policy = sandbox_policy or readonly_git_policy(root)
+    result = run_readonly_git(root, "rev-parse", "--git-common-dir", sandbox_policy=policy)
+    result.check_returncode()
     common_dir_raw = result.stdout.strip()
     if not common_dir_raw:
         return None
-    common_dir_path = Path(common_dir_raw)
+    common_dir_path = readonly_git_host_path(root, common_dir_raw, sandbox_policy=policy)
     if common_dir_path.is_absolute():
         return common_dir_path.resolve()
     return (root / common_dir_path).resolve()

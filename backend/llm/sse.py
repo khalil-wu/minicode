@@ -156,15 +156,25 @@ async def iter_sse_data(response: Any) -> AsyncIterator[str]:
             chunk = bytes(chunk)
         line_buffer.extend(chunk)
         while True:
-            newline = line_buffer.find(b"\n")
+            lf = line_buffer.find(b"\n")
+            cr = line_buffer.find(b"\r")
+            newline = lf if cr < 0 else cr if lf < 0 else min(lf, cr)
             if newline < 0:
                 break
+            separator_bytes = 1
+            if line_buffer[newline] == 13:
+                if newline + 1 == len(line_buffer):
+                    # Keep a trailing CR until the next chunk distinguishes CRLF.
+                    break
+                if line_buffer[newline + 1] == 10:
+                    separator_bytes = 2
             raw_line = bytes(line_buffer[:newline])
-            del line_buffer[: newline + 1]
+            del line_buffer[: newline + separator_bytes]
             payload = consume_line(raw_line)
             if payload is not None:
                 yield payload
-        if len(line_buffer) > max_line_bytes:
+        pending_line_bytes = len(line_buffer) - int(line_buffer.endswith(b"\r"))
+        if pending_line_bytes > max_line_bytes:
             raise ProviderStreamLimitError(
                 f"Provider SSE line exceeded {max_line_bytes} bytes"
             )

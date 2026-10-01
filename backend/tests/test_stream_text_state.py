@@ -1,14 +1,73 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
+
+import pytest
 
 from backend.agent.answer_committer import AnswerCommitDependencies, AnswerCommitter
 from backend.agent.answer_commit_projection import AnswerCommitProjection
 from backend.agent.answer_commit_projection import build_answer_commit_projection
 from backend.agent.response_utils import provider_items_for_final_answer
+from backend.agent.response_utils import append_assistant_history
+from backend.agent.context import ContextBuilder
+from backend.agent.provider_text_projection import project_provider_text_chunk
+from backend.agent.stream_sanitizer import ThinkingStreamSanitizer, scrub_thinking_tags
 from backend.agent.stream_attempt import StreamAttemptState, StreamTextState
 from backend.agent.loop_process_events import model_process_text_event
 from backend.llm.base import StreamEvent, StreamEventType, ToolCallEvent, UsageInfo
+
+
+@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize("item_id", ["same-item", ""])
+def test_final_phase_reclassification_preserves_the_same_item_prefix_in_history(live, item_id):
+    async def scenario():
+        text = StreamTextState(iteration_id="phase")
+        stream = StreamAttemptState()
+        sanitizer = ThinkingStreamSanitizer()
+        for content, phase in [("Hello ", ""), ("world", "final_answer")]:
+            event = StreamEvent(StreamEventType.TEXT_CHUNK, content=content, phase=phase, item_id=item_id)
+            _ = [update async for update in project_provider_text_chunk(event,
+                stream_state=stream, stream_text=text, visible_text_sanitizer=sanitizer,
+                provider_raw_final_text={}, live_text_streaming=live, awaiting_trailing_done=False,
+                process_event_factory=model_process_text_event)]
+        assert text.final_candidate_text == text.full_text == "Hello world"
+        assert text.accepted_answer_text(scrub_thinking_tags) == "Hello world"
+        projection = build_answer_commit_projection(stream_text=text,
+            final_text=text.final_candidate_text, finish_reason="stop", provider_raw={}, degraded_reason="")
+        assert projection.text_events[-1].data["item"]["text"] == "Hello world"
+        builder = ContextBuilder()
+        state = SimpleNamespace(reply="")
+
+        def set_terminal_reason(target, reason, *, status):
+            target.stopped_reason = reason
+            target.terminal_status = status
+
+        AnswerCommitter(AnswerCommitDependencies(context=builder, state=state,
+            append_assistant_history=append_assistant_history,
+            set_terminal_reason=set_terminal_reason)).commit_answer(
+                projection=projection, final_text=text.final_candidate_text,
+                provider_phase="final_answer", provider_items=[], usage=UsageInfo(),
+                provider_raw={}, finish_reason="stop")
+        assert state.reply == builder._history[-1].content == "Hello world"
+
+    asyncio.run(scenario())
+
+
+def test_distinct_final_item_does_not_adopt_an_unphased_commentary_prefix():
+    async def scenario():
+        text = StreamTextState(iteration_id="phase")
+        stream = StreamAttemptState()
+        sanitizer = ThinkingStreamSanitizer()
+        for content, phase, item_id in [("Checking. ", "", "commentary"), ("Answer.", "final_answer", "answer")]:
+            _ = [update async for update in project_provider_text_chunk(
+                StreamEvent(StreamEventType.TEXT_CHUNK, content=content, phase=phase, item_id=item_id),
+                stream_state=stream, stream_text=text, visible_text_sanitizer=sanitizer,
+                provider_raw_final_text={}, live_text_streaming=False, awaiting_trailing_done=False,
+                process_event_factory=model_process_text_event)]
+        assert text.final_candidate_text == "Answer."
+
+    asyncio.run(scenario())
 
 
 def test_final_answer_history_drops_anthropic_thinking_but_keeps_protocol_blocks() -> None:

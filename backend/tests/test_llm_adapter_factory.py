@@ -359,3 +359,56 @@ def test_small_fast_model_requires_explicit_configuration() -> None:
         provider_id="custom",
     )
     assert configured.small_fast_model_id() == "gateway-haiku"
+
+
+def test_builtin_runtime_preserves_auth_headers_capacity_and_missing_small_model():
+    import asyncio
+    import json
+    import httpx
+    from backend.llm.model_runtime_definitions import _load_base_providers
+    from backend.llm.base import LLMMessage, SideQueryOptions, StreamEventType
+    section = {
+        "api_key": "fixture", "model": "m", "available_models": ["m"],
+        "base_url": "https://fixture.invalid/v1", "wire_api": "anthropic", "max_tokens": 8000,
+        "default_headers": (("X-Required-Route", "account-a"),), "auth_header": True,
+        "model_metadata": {"m": {"max_output_tokens": 32000}},
+    }
+    class Runtime(ModelRuntime):
+        def __init__(self):
+            self._auth_storage = SimpleNamespace(get=lambda _id: None)
+            super().__init__(models_store=SimpleNamespace(), provider_configs={})
+        def _load_base_providers(self):
+            return _load_base_providers(openai={}, custom={}, anthropic=section)
+    async def scenario():
+        runtime = Runtime()
+        spec = runtime.resolve_adapter_spec("anthropic", "m")
+        adapter = build_provider_adapter("anthropic", model_override="m", model_runtime=runtime)
+        assert spec.auth_header and spec.headers["X-Required-Route"] == "account-a"
+        assert spec.small_fast_model == ""
+        assert adapter.capabilities.max_output_tokens == 32000
+        assert adapter.capabilities.max_output_tokens_source == "provider"
+        assert adapter.capabilities.max_output_tokens_verified
+        requests = []
+        def endpoint(request):
+            requests.append(request)
+            events = [{"type": "message_start", "message": {"id": "m"}},
+                      {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}, {"type": "message_stop"}]
+            return httpx.Response(200, content="".join("data: " + json.dumps(e) + "\n\n" for e in events))
+        async with httpx.AsyncClient(transport=httpx.MockTransport(endpoint)) as client:
+            adapter._http_client = client
+            events = [event async for event in adapter.stream_chat([LLMMessage("user", "hi")])]
+            assert events[-1].type == StreamEventType.DONE
+            assert requests[0].headers.get_list("Authorization") == ["Bearer fixture"]
+            assert requests[0].headers["X-Required-Route"] == "account-a"
+            assert "x-api-key" not in requests[0].headers
+            with pytest.raises(RuntimeError, match="explicit configured model"):
+                await adapter.side_query([LLMMessage("user", "hi")], options=SideQueryOptions(operation="summary", use_small_fast_model=True))
+            assert len(requests) == 1
+    asyncio.run(scenario())
+
+
+def test_anthropic_request_budget_is_not_verified_provider_output_capacity():
+    adapter = AnthropicAdapter("fixture", model="unknown", max_tokens=8000)
+    assert adapter.capabilities.max_output_tokens == 0
+    assert not adapter.capabilities.max_output_tokens_verified
+    assert adapter.capabilities.max_output_tokens_source == ""

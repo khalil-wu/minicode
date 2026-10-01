@@ -1734,3 +1734,73 @@ def test_anthropic_explicit_effort_reaches_both_factories_and_respects_side_quer
             await _collect_events(adapter.stream_chat(messages))
             assert captured[-1]["output_config"]["effort"] == "medium"
         asyncio.run(scenario())
+
+
+def test_anthropic_outer_close_releases_actual_http_response_with_inner_refs_retained():
+    class Body(httpx.AsyncByteStream):
+        closed = False
+        async def __aiter__(self):
+            for frame in [
+                {"type": "message_start", "message": {"id": "m"}},
+                {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": "hi"}},
+            ]:
+                yield ("data: " + json.dumps(frame) + "\n\n").encode()
+            await asyncio.Event().wait()
+        async def aclose(self):
+            self.closed = True
+
+    async def scenario():
+        body = Body()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, stream=body),
+        )) as client:
+            adapter = AnthropicAdapter("fixture", model="fixture", proxy_mode="direct")
+            adapter._http_client = client
+            middle, wire = [], []
+            original_middle, original_wire = adapter._stream_chat_with_context, adapter._stream_messages
+            def capture_middle(*args, **kwargs):
+                stream = original_middle(*args, **kwargs)
+                middle.append(stream)
+                return stream
+            def capture_wire(*args, **kwargs):
+                stream = original_wire(*args, **kwargs)
+                wire.append(stream)
+                return stream
+            adapter._stream_chat_with_context = capture_middle
+            adapter._stream_messages = capture_wire
+            stream = adapter.stream_chat([LLMMessage("user", "hi")])
+            assert (await anext(stream)).type == StreamEventType.TEXT_CHUNK
+            await stream.aclose()
+            assert body.closed
+            assert middle[0].ag_frame is None and wire[0].ag_frame is None
+    asyncio.run(scenario())
+
+
+def test_anthropic_transport_logs_do_not_record_raw_exception_secrets(caplog):
+    class Client:
+        def stream(self, *args, **kwargs):
+            raise RuntimeError("api_key=sk-AuditSyntheticSecretValue01234567890")
+    adapter = AnthropicAdapter("fixture", model="fixture")
+    adapter._http_client = Client()
+    events = asyncio.run(_collect_events(adapter.stream_chat([LLMMessage("user", "hi")])))
+    assert events[-1].type == StreamEventType.ERROR
+    assert "AuditSyntheticSecretValue" not in caplog.text
+
+
+def test_anthropic_invalid_initial_input_never_commits_a_tool():
+    for value in (None, [], 1, True, "{}"):
+        async def fake_call(**kwargs):
+            return _ClosableAsyncStream([
+                {"type": "message_start", "message": {"id": "m"}},
+                {"type": "content_block_start", "index": 0, "content_block": {
+                    "type": "tool_use", "id": "c", "name": "no_args", "input": value,
+                }},
+                {"type": "content_block_stop", "index": 0},
+                {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+                {"type": "message_stop"},
+            ])
+        adapter = AnthropicAdapter("fixture", model="fixture")
+        _install_anthropic_fake(adapter, fake_call)
+        events = asyncio.run(_collect_events(adapter.stream_chat([LLMMessage("user", "go")])))
+        assert events[-1].raw["protocol_error_code"] == "invalid_tool_input"
+        assert not any(event.tool_calls or event.tool_calls_committed for event in events)

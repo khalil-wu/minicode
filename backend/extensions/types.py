@@ -296,6 +296,7 @@ class ExtensionProvider:
     name: str
     config: Mapping[str, Any]
     extension_path: str = ""
+    _owner: object | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass

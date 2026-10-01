@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   LONG_COMMAND_RESULT_TIMEOUT_MS,
   rejectClientCommandResult,
+  rejectPendingPromptResponseResults,
   registerWebSocketSender,
   resetPendingCommandResultsForTests,
   resolveClientCommandResult,
@@ -113,21 +114,11 @@ describe("ws-outbox", () => {
     await expect(pending).rejects.toThrow("command.persistence");
   });
 
-  it("sends control responses without registering a command-result timeout", async () => {
-    const sender = vi.fn(() => true);
+  it("waits for a correlated semantic result for control responses", async () => {
+    const sender = vi.fn((_command: import("./events").ClientCommand) => true);
     registerWebSocketSender(sender);
 
-    await expect(sendPromptResponseCommand({
-      type: "control_response",
-      request_id: "control-1",
-      conversation_id: "conversation-1",
-      response: {
-        subtype: "success",
-        response: { action: "approve" },
-      },
-    })).resolves.toBeNull();
-
-    expect(sender).toHaveBeenCalledWith({
+    const pending = sendPromptResponseCommand({
       type: "control_response",
       request_id: "control-1",
       conversation_id: "conversation-1",
@@ -136,7 +127,45 @@ describe("ws-outbox", () => {
         response: { action: "approve" },
       },
     });
-    expect(sender.mock.calls[0]?.[0]).not.toHaveProperty("client_command_id");
+    const observed = vi.fn();
+    void pending.then(observed);
+    await Promise.resolve();
+    expect(observed).not.toHaveBeenCalled();
+
+    expect(sender).toHaveBeenCalledWith(expect.objectContaining({
+      type: "control_response",
+      request_id: "control-1",
+      conversation_id: "conversation-1",
+      response: {
+        subtype: "success",
+        response: { action: "approve" },
+      },
+    }));
+    const command = sender.mock.calls[0]?.[0];
+    expect(command.client_command_id).toMatch(/^cmd_/);
+    const result = { type: "command.result" as const, command: "control_response", level: "success", message: "",
+      client_command_id: command.client_command_id };
+    expect(resolveClientCommandResult(result)).toBe(true);
+    await expect(pending).resolves.toEqual(result);
+  });
+
+  it("rejects control result waiters on a negative admission ACK", async () => {
+    const commands: Array<Record<string, unknown>> = [];
+    registerWebSocketSender((command) => { commands.push(command as unknown as Record<string, unknown>); return true; });
+    const pending = sendPromptResponseCommand({ type: "control_cancel_request", request_id: "ask-negative" });
+    expect(rejectClientCommandResult(String(commands[0].client_command_id), "command.persistence")).toBe(true);
+    await expect(pending).rejects.toThrow("command.persistence");
+  });
+
+  it("withdraws only unconfirmed control results on disconnect", async () => {
+    registerWebSocketSender(() => true);
+    const response = sendPromptResponseCommand({ type: "control_cancel_request", request_id: "ask-disconnect", client_command_id: "control-disconnect" });
+    const normal = sendClientCommandAwaitResult({ type: "conversation.list", client_command_id: "normal-pending" }, "conversation.list");
+    expect(rejectPendingPromptResponseResults("connection lost")).toEqual(["control-disconnect"]);
+    await expect(response).rejects.toThrow("connection lost");
+    const result = { type: "command.result" as const, command: "conversation.list", level: "success", message: "", data: { client_command_id: "normal-pending" } };
+    expect(resolveClientCommandResult(result)).toBe(true);
+    await expect(normal).resolves.toEqual(result);
   });
 
   it("rejects control responses immediately when the websocket sender refuses them", async () => {

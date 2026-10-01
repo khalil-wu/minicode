@@ -9,8 +9,13 @@ REST, and scheduled entry points can address the same durable conversation.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from threading import RLock
+from typing import Any
+
+from backend.async_cleanup import retain_cleanup_task
 
 
 @dataclass
@@ -83,6 +88,42 @@ class ConversationQueryGuardRegistry:
             if state is None or state.status != "running":
                 return None
             return ConversationQueryClaim(conversation_id, state.owner_id, state.generation)
+
+    def end_after_cleanup(
+        self,
+        claim: ConversationQueryClaim,
+        *,
+        tasks: set[asyncio.Task[Any]],
+        waiters: set[asyncio.Task[Any]],
+        on_released: Callable[[], None] | None = None,
+    ) -> None:
+        """Release the process claim only after actual callback ownership ends."""
+
+        if not any(not task.done() for task in tasks):
+            released = self.end(claim)
+            if released and on_released is not None:
+                on_released()
+            return
+
+        async def wait_for_cleanup() -> None:
+            while pending := {task for task in tasks if not task.done()}:
+                try:
+                    await asyncio.wait(pending)
+                except asyncio.CancelledError:
+                    # Cancelling the host waiter does not stop the borrower.
+                    continue
+
+        waiter = asyncio.create_task(
+            wait_for_cleanup(), name=f"query-claim-cleanup:{claim.conversation_id}"
+        )
+        retain_cleanup_task(waiter, waiters)
+        # Recheck also covers cancellation before the waiter first executes
+        # and any owned generator close registered by a settled callback.
+        waiter.add_done_callback(
+            lambda _done: self.end_after_cleanup(
+                claim, tasks=tasks, waiters=waiters, on_released=on_released
+            )
+        )
 
     def owns(self, claim: ConversationQueryClaim) -> bool:
         """Return whether ``claim`` still owns the active generation."""

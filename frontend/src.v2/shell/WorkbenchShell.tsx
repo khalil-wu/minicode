@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { X } from "lucide-react";
+import { RefreshCw, X } from "lucide-react";
+import { getWebSocket } from "../hooks/useWebSocket";
 import { HeaderBar } from "./HeaderBar";
 import { SidebarLeft } from "./SidebarLeft";
 import { SidebarRight } from "./SidebarRight";
@@ -75,12 +76,17 @@ const ConnectionBanner = () => {
       </span>
       {!connectionState.isConnected && (
         <div
-          aria-hidden="true"
           className="mc-connection-banner"
           data-kind={presentation.kind}
         >
-          <span className="mc-connection-banner-dot" />
+          <span className="mc-connection-banner-dot" aria-hidden="true" />
           <span>{presentation.bannerMessage}</span>
+          {connectionPhase === "failed" && (
+            <button type="button" className="mc-connection-retry" onClick={() => getWebSocket()?.reconnect()}>
+              <RefreshCw size={13} aria-hidden="true" />
+              重新连接
+            </button>
+          )}
         </div>
       )}
     </>

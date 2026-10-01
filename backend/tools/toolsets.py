@@ -399,7 +399,7 @@ class ToolsetPolicy:
         else:
             if spec.exposure == "code_mode_only":
                 return False
-            if not self.code_mode_enabled and spec.name == "tool_exec":
+            if not self.code_mode_enabled and spec.name in {"tool_exec", "tool_wait"}:
                 return False
             if self.code_mode_only and spec.exposure not in {"direct_model_only", "deferred_model_only"} and spec.name not in CODE_MODE_DIRECT_TOOLS:
                 return False

@@ -506,6 +506,28 @@
   line-height: 1.45;
 }
 
+.mc-connection-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  min-height: 28px;
+  margin-left: auto;
+  padding: 3px 9px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.mc-connection-retry:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+
 .mc-connection-banner[data-kind="warning"] {
   color: color-mix(in oklch, var(--state-warning) 76%, var(--text-primary));
   background: color-mix(in oklch, var(--surface-base) 92%, var(--state-warning));

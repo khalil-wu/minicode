@@ -306,7 +306,7 @@ def test_permissions_auto_alias_matches_frontend_auto_mode() -> None:
 
     assert handled is True
     assert next_content == ""
-    assert calls == [{"mode": "auto", "source": "slash:/permissions"}]
+    assert calls == [{"mode": "auto", "source": "slash:/permissions", "conversation_id": "conv_test"}]
 
 
 def test_skills_without_arg_requests_skill_lists_and_opens_marketplace() -> None:

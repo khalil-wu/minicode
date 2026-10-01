@@ -88,9 +88,10 @@ async def emit_cache_metric(context: ToolExecutionContext | None, **kwargs: Any)
     emit = getattr(context, "emit_event", None) if context else None
     if emit is None:
         return
+    metadata = context.metadata or {}
     event = cache_metric_event(
-        run_id=str(getattr(context, "task_id", "") or (context.metadata or {}).get("run_id", "")),
-        turn_id=str((context.metadata or {}).get("run_id") or (context.metadata or {}).get("turn_id") or ""),
+        run_id=str(metadata.get("run_id") or context.task_id or ""),
+        turn_id=str(metadata.get("turn_id") or metadata.get("run_id") or ""),
         **kwargs,
     )
     await emit(event.type, dict(event.data))

@@ -9,6 +9,12 @@ import {
 } from "./tool-call-reducer";
 
 describe("toolCallReducer", () => {
+  it.each(["blocked", "failed", "cancelled", "timeout", "partial"] as const)("discards proposed changes when a write ends %s without committed diff", (status) => {
+    const proposal: ToolCallRecord = { id: "write", name: "write_file", args: { file_path: "checkout.py", content: "" }, status: "running", diff: { plus: 0, minus: 52 } };
+    const records = reduceToolCallResult(new Map([[proposal.id, proposal]]), { type: "tool_result", id: proposal.id, summary: "not applied", status, is_error: true });
+    expect(records.get(proposal.id)?.diff).toBeUndefined();
+    expect(aggregateDiffBadge(records.values())).toEqual({ plus: 0, minus: 0 });
+  });
   it("clears approval waits when execution starts or settles without a start frame", () => {
     const waiting: ToolCallRecord = {
       id: "approved", name: "run_command", args: {}, startedAt: 1, seq: 1,

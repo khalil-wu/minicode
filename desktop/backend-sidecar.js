@@ -2,6 +2,7 @@
 
 const { spawn } = require("node:child_process");
 const { StringDecoder } = require("node:string_decoder");
+const path = require("node:path");
 
 // ---------------------------------------------------------------------------
 // State
@@ -106,15 +107,20 @@ function startBackendSidecar() {
     resolvedFrontendUrl = "",
     runtimeToken = "",
     stateRoot = "",
+    appResourcesDir = "",
     desktopDir = "",
     documentsDir = "",
     downloadsDir = "",
   } = config;
+  const pathKey = Object.keys(process.env).find((name) => name.toLowerCase() === "path") || "PATH";
+  const pythonDirectory = path.isAbsolute(pythonCommand) ? path.dirname(pythonCommand) : "";
+  const childPath = [pythonDirectory, process.env[pathKey]].filter(Boolean).join(path.delimiter);
 
   const child = spawnProcess(pythonCommand, ["-m", "backend"], {
     cwd: getAppRoot(),
     env: {
       ...process.env,
+      [pathKey]: childPath,
       PYTHONUNBUFFERED: "1",
       PYTHONUTF8: "1",
       PYTHONIOENCODING: "utf-8",
@@ -126,10 +132,11 @@ function startBackendSidecar() {
       MINICODE_FRONTEND_URL: resolvedFrontendUrl,
       MINICODE_RUNTIME_TOKEN: runtimeToken,
       MINICODE_STATE_ROOT: stateRoot,
+      MINICODE_APP_RESOURCES_DIR: appResourcesDir,
       MINICODE_DESKTOP_DIR: desktopDir,
       MINICODE_DOCUMENTS_DIR: documentsDir,
       MINICODE_DOWNLOADS_DIR: downloadsDir,
-      PYTHONPATH: [getAppRoot(), process.env.PYTHONPATH].filter(Boolean).join(require("node:path").delimiter),
+      PYTHONPATH: [getAppRoot(), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
     },
     windowsHide: true,
   });

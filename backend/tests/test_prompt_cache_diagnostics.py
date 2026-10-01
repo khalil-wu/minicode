@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from backend.agent.cache_metrics import cache_metric_payload
+import asyncio
+
+from backend.agent.cache_metrics import cache_metric_payload, emit_cache_metric
+from backend.agent.runtime_spans import runtime_span_from_tool_context
+from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.agent.provider_protocol import (
     merge_prompt_cache_safe_request_summary as _merge_prompt_cache_safe_request_summary,
     provider_raw_for_projection,
@@ -103,6 +107,37 @@ def test_cache_metric_payload_uses_uniform_lookup_contract() -> None:
         "observed_at": payload["observed_at"],
         "payload_size_bytes": 42,
     }
+
+
+def test_tool_cache_metric_uses_distinct_run_and_turn_ids() -> None:
+    emitted: list[dict] = []
+
+    async def collect(_event_type: str, data: dict) -> None:
+        emitted.append(data)
+
+    context = ToolExecutionContext(
+        permission=PermissionContext(),
+        task_id="task-id",
+        metadata={"run_id": "run-id", "turn_id": "turn-id"},
+        emit_event=collect,
+    )
+    asyncio.run(emit_cache_metric(context, cache_layer="read_file.file_state", hit=True))
+
+    assert emitted[0]["payload"]["run_id"] == "run-id"
+    assert emitted[0]["payload"]["turn_id"] == "turn-id"
+
+
+def test_tool_runtime_span_uses_the_host_turn_id() -> None:
+    context = ToolExecutionContext(
+        permission=PermissionContext(),
+        metadata={"run_id": "run-id", "turn_id": "turn-id"},
+    )
+    event = runtime_span_from_tool_context(
+        "tool.queued", span_id="span-1", tool_ctx=context,
+        tool_call_id="call-1", tool_name="read_file",
+    )
+    assert event.data["run_id"] == "run-id"
+    assert event.data["turn_id"] == "turn-id"
 
 
 def test_prompt_cache_safe_params_hashes_only_stable_prefix() -> None:

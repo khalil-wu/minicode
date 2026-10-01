@@ -231,6 +231,9 @@ async def test_extension_exec_from_an_old_cell_uses_its_calling_tool_plan(tmp_pa
 
     fixture = setup(tmp_path, monkeypatch, behavior, [old, Gate("gate")])
     fixture.session.permission_checker = PermissionChecker(PermissionSettings(auto_allow=["*"], require_confirm=[]), tmp_path)
+    async def approve(_request):
+        return {"action": "approve"}
+    fixture.session.approval_handler = approve
     runner = await bind(fixture, tmp_path, factory)
     fixture.owner.lifecycle_runtime = runner
     fixture.session.lifecycle_observer_factory = lifecycle_observer_factory

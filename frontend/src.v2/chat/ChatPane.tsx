@@ -12,6 +12,7 @@ import { useAppStore } from "../stores";
 export const ChatPane = () => {
   const [showSearch, setShowSearch] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const messageContainerRef = useRef<HTMLDivElement>(null);
   const conversationId = useAppStore((state) => state.conversationId);
   const pendingConversationSwitchId = useAppStore((state) => state.pendingConversationSwitchId);
   const isHydrating = useAppStore((state) => Boolean(
@@ -79,7 +80,7 @@ export const ChatPane = () => {
         <div className="chat-pane-layout">
         <div className="chat-pane-main">
           {showSearch && (
-            <ChatSearch onClose={handleCloseSearch} containerRef={containerRef} />
+            <ChatSearch onClose={handleCloseSearch} containerRef={messageContainerRef} />
           )}
           {isHydrating && (
             <div
@@ -102,9 +103,9 @@ export const ChatPane = () => {
               正在恢复会话上下文、运行状态和工具记录…
             </div>
           )}
-          <div className="chat-pane-message-transition" data-hydrating={isHydrating ? "true" : "false"}>
+          <div ref={messageContainerRef} className="chat-pane-message-transition" data-hydrating={isHydrating ? "true" : "false"}>
             <SafeBoundary fallback={<ChatErrorFallback />}>
-              <MessageList />
+              <MessageList searchActive={showSearch} />
             </SafeBoundary>
           </div>
           <div className="chat-pane-composer-region">

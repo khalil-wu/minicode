@@ -359,6 +359,14 @@ export function projectTurn(
       ? [String(block.record.name || "").trim().toLowerCase()].filter(Boolean)
       : []),
   );
+  const composedParents = new Set<string>();
+  const composedCells = new Set<string>();
+  for (const block of blocks) {
+    if (block.type !== "tool_call" || block.record.callSource?.kind !== "code_mode") continue;
+    if (!isVisibleActivity(block, false)) continue;
+    composedParents.add(block.record.callSource.parent_call_id);
+    composedCells.add(block.record.callSource.cell_id);
+  }
   const hasTypedActivity = blocks.some((block) => block.type === "tool_call" || block.type === "progress");
   const isProjectedFinalAnswer = (block: ContentBlock): block is Extract<ContentBlock, { type: "text" }> =>
     block.type === "text"
@@ -389,6 +397,13 @@ export function projectTurn(
     if (block.type === "tool_call") {
       if (!isVisibleActivity(block, Boolean(options.includeHiddenActivity))) return;
       if (!options.includeHiddenActivity && isPlanStateWrite(block.record)) return;
+      // Leaf calls already show the actual read, edit, command and approval.
+      // Successful orchestration receipts add duplicate rows on every poll.
+      // Preserve failures, standalone scripts and the complete debug history.
+      if (!options.includeHiddenActivity && block.record.status === "success" && (
+        (block.record.name === "tool_exec" && composedParents.has(block.record.id))
+        || (block.record.name === "tool_wait" && composedCells.has(String(block.record.args.cell_id || "")))
+      )) return;
       if (!block.record.temporaryRemoved) activityItems.push(projectToolBlock(block, segment));
       return;
     }

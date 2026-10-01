@@ -122,20 +122,27 @@ export const sendClientCommandAwaitResult = (
 };
 
 /**
- * Submit a blocking-prompt response using the acknowledgement semantics owned
- * by its wire protocol. Legacy approval/answer commands return a
- * `command.result`; low-level control responses deliberately do not, because
- * the originating request (or its terminal cancellation event) is the
- * observable state transition.
+ * Wait for the backend's semantic acceptance of a blocking-prompt response.
+ * A transport ACK only admits the command durably; it neither settles the
+ * prompt nor proves the tool ran. All prompt responses use the existing
+ * command-result registry, including control responses and cancellations.
  */
 export const sendPromptResponseCommand = async (
   command: ClientCommand,
-): Promise<CommandResultEvent | null> => {
-  if (command.type === "control_response" || command.type === "control_cancel_request") {
-    if (!sendClientCommand(command)) throw new Error("连接已断开");
-    return null;
-  }
+): Promise<CommandResultEvent> => {
   return sendClientCommandAwaitResult(command, command.type);
+};
+
+/** A lost connection leaves control decisions unconfirmed, not completed.
+ * Return their ids so the transport withdraws them instead of silently
+ * replaying a decision after its caller has been offered an explicit retry. */
+export const rejectPendingPromptResponseResults = (reason: string): string[] => {
+  const ids = Array.from(pendingCommandResults.entries())
+    .filter(([, pending]) => pending.expectedCommand === "control_response"
+      || pending.expectedCommand === "control_cancel_request")
+    .map(([id]) => id);
+  for (const id of ids) rejectClientCommandResult(id, reason);
+  return ids;
 };
 
 export const commandResultSucceeded = (event: CommandResultEvent): boolean => {
@@ -143,10 +150,10 @@ export const commandResultSucceeded = (event: CommandResultEvent): boolean => {
   return level !== "error" && level !== "failed";
 };
 
-export const resolveClientCommandResult = (event: CommandResultEvent): boolean => {
-  const clientCommandId = typeof event.data?.client_command_id === "string"
+export const resolveClientCommandResult = (event: CommandResultEvent & { client_command_id?: string }): boolean => {
+  const clientCommandId = event.client_command_id || (typeof event.data?.client_command_id === "string"
     ? event.data.client_command_id
-    : "";
+    : "");
   if (!clientCommandId) return false;
   const pending = pendingCommandResults.get(clientCommandId);
   if (!pending || pending.expectedCommand !== event.command) return false;

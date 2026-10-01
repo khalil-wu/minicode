@@ -42,7 +42,7 @@ function normalizeLoopbackCdpEndpoint(targetEndpoint) {
     throw new Error("Chrome DevTools endpoint must be local.");
   }
   const port = parsed.port || "9222";
-  return `http://${host === "[::1]" ? "::1" : host}:${port}`;
+  return `http://${host}:${port}`;
 }
 
 function normalizeHost(value) {
@@ -82,6 +82,7 @@ async function fetchJsonWithTimeout(url, timeoutMs = 1800) {
     const response = await fetch(url, {
       signal: controller.signal,
       headers: { Accept: "application/json" },
+      redirect: "error",
     });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
@@ -521,8 +522,9 @@ async function navigateChromeTarget(targetEndpoint, targetId, url, options = {})
   const assessment = assertBrowserNavigationPolicy(url, options);
   const targetUrl = assessment.url;
   return await withChromePageTarget(targetEndpoint, targetId, async ({ call, target, discovery }) => {
-    await call("Page.navigate", { url: targetUrl }, 8000);
-    await waitForDocumentReady(call, 15000).catch(() => null);
+    const navigation = await call("Page.navigate", { url: targetUrl }, 8000);
+    if (navigation.errorText) throw new Error(navigation.errorText);
+    await waitForDocumentReady(call, 15000);
     const page = await getPageMetadata(call);
     const screenshot = await captureScreenshotWithCall(call);
     return {

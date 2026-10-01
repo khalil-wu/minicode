@@ -111,6 +111,7 @@ def provider_error_details(event: Any):
     provider_failure_data = {
         "error_type": classification.error_type,
         "provider_error_type": classification.provider_error_type,
+        **({"protocol_error_code": raw["protocol_error_code"]} if raw.get("protocol_error_code") else {}),
         **({"status_code": status_code} if status_code is not None else {}),
         **({"provider_error_code": provider_error_code} if provider_error_code else {}),
         **(
@@ -431,7 +432,7 @@ async def handle_provider_error_event(
             error_message=(
                 "模型开始生成工具调用，但工具参数流没有完整结束。请重试本轮请求。"
                 if incomplete_tool_stream
-                else format_llm_error(event.content)
+                else format_llm_error(classification_input)
             ),
             error_type=(
                 "incomplete_tool_stream"
@@ -441,6 +442,7 @@ async def handle_provider_error_event(
             recoverable=True if incomplete_tool_stream else not classification.fatal,
             provider_error_type=classification.provider_error_type,
             saw_partial_tool_call=stream_state.saw_partial_tool_call,
+            error_code=str(raw.get("protocol_error_code") or raw.get("provider_error_code") or ""),
         ),
     ):
         yield recovery_event

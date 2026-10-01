@@ -43,7 +43,7 @@ def arena():
     shutil.rmtree(root, ignore_errors=True)
 
 
-def _run(ws: Path, command: str, *, timeout: float = 60, allow_network: bool = False):
+def _run(ws: Path, command: str, *, timeout: float = 60, allow_network: bool = True):
     policy = (
         SandboxPolicy.permissive(ws, timeout=timeout)
         if allow_network
@@ -53,18 +53,20 @@ def _run(ws: Path, command: str, *, timeout: float = 60, allow_network: bool = F
     capability = runner.capability(cwd=ws)
     if not capability.available:
         pytest.skip(f"low-integrity backend unavailable: {capability.reason}")
-    assert capability.backend == "low-integrity"
+    if capability.backend != "low-integrity":
+        pytest.skip("Legacy low-integrity backend is retired; this host uses container isolation")
     return asyncio.run(runner.run(command, cwd=ws, host_command=command))
 
 
-def test_capability_reports_filesystem_but_not_network_isolation(arena):
+def test_retired_low_integrity_cannot_claim_workspace_isolation(arena, monkeypatch):
+    from backend.sandbox import runner as runner_module
     ws, _ = arena
-    capability = SandboxRunner(SandboxPolicy.workspace_default(ws)).capability(cwd=ws)
-    if not capability.available:
-        pytest.skip(capability.reason)
-    assert capability.backend == "low-integrity"
-    assert capability.filesystem_isolated is True
+    monkeypatch.setattr(runner_module, "_container_runtime", lambda: ("", "", "no container"))
+    capability = SandboxRunner(SandboxPolicy.permissive(ws)).capability(cwd=ws)
+    assert not capability.available
+    assert capability.filesystem_isolated is False
     assert capability.network_isolated is False
+    assert "another Low-labelled workspace" in capability.reason
 
 
 def test_write_inside_workspace_allowed(arena):
@@ -200,18 +202,27 @@ def test_protected_git_metadata_write_denied(arena):
     assert (ws / ".git" / "config").read_text(encoding="utf-8") == "[core]\n"
 
 
-def test_network_environment_rewritten_when_denied(arena):
+def test_network_denial_rejects_before_process_creation(arena, monkeypatch):
+    from backend.sandbox import runner as runner_module
     ws, _ = arena
-    result = _run(ws, _py("import os; print(os.environ.get('HTTPS_PROXY'), os.environ.get('PIP_NO_INDEX'), os.environ.get('MINICODE_SANDBOX'))"))
-    assert result.exit_code == 0, result.stderr
-    assert "127.0.0.1:9 1 low-integrity" in result.stdout
+    monkeypatch.setattr(runner_module, "_container_runtime", lambda: ("", "", "no container"))
+    runner = SandboxRunner(SandboxPolicy.workspace_default(ws))
+    capability = runner.capability(cwd=ws)
+    assert not capability.available
+    assert "network isolation" in capability.reason
+    result = asyncio.run(runner.run(_py("open('must-not-run','w').write('ran')"), cwd=ws))
+    assert result.sandbox_unavailable
+    assert result.exit_code == 126
+    assert not (ws / "must-not-run").exists()
 
 
-def test_ssh_stubbed_when_network_denied(arena):
+def test_proxy_settings_cannot_satisfy_network_isolation(arena, monkeypatch):
+    from backend.sandbox import runner as runner_module
     ws, _ = arena
-    result = _run(ws, "cmd /c ssh -V")
-    assert result.exit_code != 0
-    assert "unavailable inside the sandbox" in (result.stderr + result.stdout)
+    monkeypatch.setattr(runner_module, "_container_runtime", lambda: ("", "", "no container"))
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    capability = SandboxRunner(SandboxPolicy.workspace_default(ws)).capability(cwd=ws)
+    assert not capability.available
 
 
 def test_network_environment_untouched_when_allowed(arena):

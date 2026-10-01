@@ -320,7 +320,7 @@ export const ActivityCell = memo(function ActivityCell({
 
           {isFileChange ? (
             <>
-              <span className="activity-cell-name" data-failed={isFailed}>{isRunning ? "正在编辑" : "已编辑"}</span>
+              <span className="activity-cell-name" data-failed={isFailed}>{isRunning ? "正在编辑" : cell.status === "interrupted" ? "已取消编辑" : isFailed ? "编辑失败" : isPartial ? "编辑未完成" : "已编辑"}</span>
               {fileChangeTarget && <span className="activity-cell-file-change-target">{fileChangeTarget}</span>}
               {fileChangeStats && (
                 <span className="activity-cell-file-change-stats">
@@ -634,12 +634,12 @@ function inlineActionLabel(
   // The turn projection already owns tool classification. Render from that
   // canonical activity kind instead of reclassifying broad result metadata
   // such as resultKind="file", which also appears on list_files results.
-  if (activityKind === "workspaceList") return "List";
-  if (activityKind === "workspaceSearch") return "Search";
-  if (activityKind === "fileRead") return "Read";
+  if (activityKind === "workspaceList") return "列出文件";
+  if (activityKind === "workspaceSearch") return "搜索文件";
+  if (activityKind === "fileRead") return "读取文件";
   if (activityKind === "webSearch") {
-    if (isWebFetchRecord(record)) return "Fetch";
-    return "Search";
+    if (isWebFetchRecord(record)) return "获取网页";
+    return "搜索网页";
   }
   return readableToolLabel(record.displayHint || record.name);
 }

@@ -193,13 +193,13 @@ describe("handleControlPlaneProjectionEvent", () => {
       session_id: "session-1",
       conversation_id: "conv-active",
       workspace_root: "C:\\repo",
-      run_id: "run-1",
+      checkpoint_run_id: "run-1",
       iteration: 4,
       stopped_reason: "timeout",
     } as ServerEvent)).toBe(true);
     expect(useAppStore.getState().checkpointResumeByConversation["conv-active"]).toMatchObject({
       resumed: true,
-      runId: "run-1",
+      checkpointRunId: "run-1",
       iteration: 4,
     });
     expect(pushToast).toHaveBeenCalledWith("已从运行 run-1 的第 4 轮恢复。", "success", 5200);

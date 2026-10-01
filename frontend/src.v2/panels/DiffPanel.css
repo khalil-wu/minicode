@@ -1,0 +1,53 @@
+.mc-diff-panel {
+  container-type: inline-size;
+  container-name: mc-diff-panel;
+}
+
+.mc-diff-review-layout {
+  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+}
+
+.mc-diff-review-layout[data-has-files="false"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.mc-diff-review-files {
+  border-right: 1px solid var(--border-subtle);
+}
+
+.mc-diff-review-header,
+.mc-diff-review-actions {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.mc-diff-review-error,
+.mc-diff-review-actions {
+  flex-basis: 100%;
+}
+
+.mc-diff-review-error {
+  overflow-wrap: anywhere;
+}
+
+.mc-diff-review-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.mc-diff-review-actions > button {
+  white-space: nowrap;
+}
+
+@container mc-diff-panel (max-width: 640px) {
+  .mc-diff-review-layout[data-has-files="true"] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .mc-diff-review-files {
+    max-height: 230px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+}

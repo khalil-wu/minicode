@@ -109,6 +109,7 @@ def build_agent_loop_components(
     if configured_session_policy is None:
         configured_session_policy = ToolsetPolicy.default()
     metadata[SESSION_TOOLSET_POLICY_METADATA_KEY] = configured_session_policy
+    tool_context.metadata[SESSION_TOOLSET_POLICY_METADATA_KEY] = configured_session_policy
     bootstrap.run_context.session_toolset_policy = configured_session_policy
 
     def current_session_toolset_policy() -> ToolsetPolicy | None:

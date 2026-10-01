@@ -90,7 +90,7 @@ export function ExecCell({
           <span className={`exec-cell-status-badge exec-cell-status-${statusColor}`}>
             <TerminalSquare size={15} aria-hidden="true" />
           </span>
-          <span className="exec-cell-title">{running ? "正在运行" : title}</span>
+          <span className="exec-cell-title">{cell.status === "running" ? "正在运行" : title}</span>
           <span className="exec-cell-command-preview" title={cell.command}>{cell.command}</span>
           <ToolSourceBadge source={cell.callSource} />
           {(status !== "success" || cell.background) && <span className="exec-cell-meta">
@@ -147,5 +147,6 @@ function commandTitle(status: ExecCellState["status"], background: boolean): str
   if (background && status === "success") return "已启动后台命令";
   if (status === "partial") return "命令未完整结束";
   if (status === "cancelled") return "命令已取消";
+  if (status === "failed") return "命令失败";
   return "已运行命令";
 }

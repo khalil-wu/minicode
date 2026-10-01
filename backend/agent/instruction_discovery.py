@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 import os
 from pathlib import Path
 import re
 from threading import Lock
 from typing import Any
+from weakref import ReferenceType, ref
 
 import yaml
 from pathspec.gitignore import GitIgnoreSpec
@@ -59,6 +60,7 @@ class GuidelineBundle:
     blocks: tuple[GuidelineBlock, ...]
     rendered_markdown: str
     cache_signature: tuple[tuple[str, int, int], ...]
+    notified_hook_owners: list[ReferenceType[Any]] = field(default_factory=list, compare=False, repr=False)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -316,6 +318,15 @@ def _instruction_candidates(
     project_doc_fallback_filenames: tuple[str, ...],
 ) -> list[tuple[Path, str, str, int]]:
     """Resolve MiniCode's project instruction hierarchy for a scope."""
+    # Filename configuration crosses into filesystem access here. Reject path
+    # syntax before any probes: Windows UNC probes can send ambient credentials.
+    fallback_names = []
+    for filename in project_doc_fallback_filenames:
+        if (filename in {".", ".."} or "/" in filename or "\0" in filename
+                or (os.name == "nt" and ("\\" in filename or ":" in filename))):
+            logger.warning("Ignoring project instruction fallback that is not a filename")
+            continue
+        fallback_names.append(filename)
     chain = _instruction_scope_chain(scope_dir, project_root_markers)
     candidates: list[tuple[Path, str, str, int]] = []
     for depth, directory in enumerate(chain):
@@ -327,7 +338,7 @@ def _instruction_candidates(
             directory / SHARED_INSTRUCTIONS_FILENAME,
             *(
                 directory / ".minicode" / filename
-                for filename in project_doc_fallback_filenames
+                for filename in fallback_names
             ),
         ):
             if candidate.exists() and candidate.is_file():
@@ -496,6 +507,8 @@ def _expand_guideline_imports(
     specs: list[tuple[Path, str, str, int, str]],
     *,
     project_root_markers: tuple[str, ...],
+    workspace_dir: Path,
+    matched_targets: list[Path] | None = None,
 ) -> list[tuple[Path, str, str, int, str]]:
     """Expand MiniCode instruction imports with bounded depth and deduplication."""
     expanded: list[tuple[Path, str, str, int, str]] = []
@@ -524,7 +537,11 @@ def _expand_guideline_imports(
         if source_kind.endswith("_rule"):
             _, conditional_paths = _parse_rule_content(content)
             if conditional_paths:
-                return
+                if matched_targets is None:
+                    return
+                if not _matching_rule_target(resolved, source_kind, conditional_paths, workspace_dir, matched_targets):
+                    expanded.pop()
+                    return
         scope_dir = Path(scope).resolve()
         allowed_root = scope_dir
         if source_kind.startswith("project_"):
@@ -572,6 +589,7 @@ def _read_blocks(
     load_reason: str = "session_start",
     project_doc_max_bytes: int = INSTRUCTIONS_MAX_BYTES,
     hook_manager: Any | None = None,
+    include_conditional_rules: bool = False,
 ) -> tuple[GuidelineBlock, ...]:
     blocks: list[GuidelineBlock] = []
     project_instruction_bytes_used = 0
@@ -610,7 +628,7 @@ def _read_blocks(
         if source_kind.endswith("_rule"):
             content, conditional_paths = _parse_rule_content(content)
             # Conditional rules enter context only after a touched path matches.
-            if conditional_paths:
+            if conditional_paths and not include_conditional_rules:
                 continue
         if not content:
             continue
@@ -634,17 +652,6 @@ def _read_blocks(
                 content=content,
             )
         )
-        with _GUIDELINE_CACHE_LOCK:
-            include_parent = _INCLUDE_PARENT_PATHS.get(
-                os.path.normcase(str(path.resolve())), ""
-            )
-        _schedule_instructions_loaded_hook(
-            path,
-            source_kind,
-            load_reason="" if include_parent else load_reason,
-            parent_file_path=include_parent,
-            hook_manager=hook_manager,
-        )
     return tuple(blocks)
 
 
@@ -656,14 +663,14 @@ def _schedule_instructions_loaded_hook(
     trigger_file_path: str = "",
     parent_file_path: str = "",
     hook_manager: Any | None = None,
-) -> None:
+) -> bool:
     try:
         hook_mgr = hook_manager
         if not hook_mgr:
-            return
+            return False
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        return
+        return False
 
     memory_type = {
         "project_instruction": "Project",
@@ -695,6 +702,27 @@ def _schedule_instructions_loaded_hook(
     from backend.hooks.models import HookEvent
 
     hook_mgr._track_async_task(loop.create_task(_run()), HookEvent.INSTRUCTIONS_LOADED)
+    return True
+
+
+def _notify_guideline_bundle(bundle: GuidelineBundle, hook_manager: Any, load_reason: str) -> None:
+    if hook_manager is None:
+        return
+    owners = bundle.notified_hook_owners
+    owners[:] = [owner for owner in owners if owner() is not None]
+    if any(owner() is hook_manager for owner in owners):
+        return
+    scheduled = False
+    for block in bundle.blocks:
+        with _GUIDELINE_CACHE_LOCK:
+            parent = _INCLUDE_PARENT_PATHS.get(os.path.normcase(str(block.path.resolve())), "")
+        scheduled = _schedule_instructions_loaded_hook(
+            block.path, block.source_kind,
+            load_reason="" if parent else load_reason,
+            parent_file_path=parent, hook_manager=hook_manager,
+        ) or scheduled
+    if scheduled:
+        owners.append(ref(hook_manager))
 
 
 def load_project_guideline_bundle(
@@ -731,13 +759,15 @@ def load_project_guideline_bundle(
             project_doc_fallback_filenames=fallback_filenames,
         ),
         project_root_markers=root_markers,
+        workspace_dir=workspace_path,
     )
     signature = _build_signature(specs)
 
     with _GUIDELINE_CACHE_LOCK:
         cached = _GUIDELINE_CACHE.get(cache_key)
-        if cached is not None and cached.cache_signature == signature:
-            return cached
+    if cached is not None and cached.cache_signature == signature:
+        _notify_guideline_bundle(cached, hook_manager, load_reason)
+        return cached
 
     blocks = _read_blocks(
         specs,
@@ -761,6 +791,7 @@ def load_project_guideline_bundle(
 
     with _GUIDELINE_CACHE_LOCK:
         _GUIDELINE_CACHE[cache_key] = bundle
+    _notify_guideline_bundle(bundle, hook_manager, load_reason)
     return bundle
 
 
@@ -783,6 +814,27 @@ def load_project_guidelines(
         project_doc_max_bytes=project_doc_max_bytes,
         hook_manager=hook_manager,
     ).rendered_markdown
+
+
+def _matching_rule_target(
+    path: Path, source_kind: str, patterns: tuple[str, ...],
+    workspace_path: Path, targets: list[Path],
+) -> str:
+    base_dir = workspace_path
+    if source_kind == "project_rule":
+        for parent in path.parents:
+            if parent.name == ".minicode":
+                base_dir = parent.parent
+                break
+    matcher = GitIgnoreSpec.from_lines(patterns)
+    for target in targets:
+        try:
+            relative = target.relative_to(base_dir).as_posix()
+        except ValueError:
+            continue
+        if relative and matcher.match_file(relative):
+            return str(target)
+    return ""
 
 
 def load_matching_project_rules(
@@ -830,45 +882,27 @@ def load_matching_project_rules(
         content, patterns = _parse_rule_content(raw_content)
         if not content or not patterns:
             continue
-        base_dir = workspace_path
-        if source_kind == "project_rule":
-            for parent in path.parents:
-                if parent.name == ".minicode":
-                    base_dir = parent.parent
-                    break
-        matcher = GitIgnoreSpec.from_lines(patterns)
-        matched = False
-        matched_target = ""
-        for target in resolved_targets:
-            try:
-                relative = target.relative_to(base_dir).as_posix()
-            except ValueError:
-                continue
-            if relative and matcher.match_file(relative):
-                matched = True
-                matched_target = str(target)
-                break
+        matched_target = _matching_rule_target(path, source_kind, patterns, workspace_path, resolved_targets)
         key = os.path.normcase(str(path.resolve()))
-        if not matched or key in seen:
+        if not matched_target or key in seen:
             continue
-        seen.add(key)
-        blocks.append(
-            GuidelineBlock(
-                path=path.resolve(),
-                scope=scope,
-                source_kind=source_kind,
-                label=f"{label} (path match)",
-                priority=priority,
-                content=content,
+        expanded = _expand_guideline_imports(
+            [(path, source_kind, f"{label} (path match)", priority, scope)],
+            project_root_markers=_normalize_project_root_markers(project_root_markers),
+            workspace_dir=workspace_path, matched_targets=resolved_targets,
+        )
+        for block in _read_blocks(expanded, include_conditional_rules=True):
+            block_key = os.path.normcase(str(block.path))
+            if block_key in seen:
+                continue
+            seen.add(block_key)
+            blocks.append(block)
+            with _GUIDELINE_CACHE_LOCK:
+                parent = _INCLUDE_PARENT_PATHS.get(block_key, "")
+            _schedule_instructions_loaded_hook(
+                block.path, block.source_kind, load_reason="" if parent else "path_glob_match",
+                trigger_file_path=matched_target, parent_file_path=parent, hook_manager=hook_manager,
             )
-        )
-        _schedule_instructions_loaded_hook(
-            path,
-            source_kind,
-            load_reason="path_glob_match",
-            trigger_file_path=matched_target,
-            hook_manager=hook_manager,
-        )
     if not blocks:
         return ""
     return "\n\n".join(block.to_markdown() for block in blocks)

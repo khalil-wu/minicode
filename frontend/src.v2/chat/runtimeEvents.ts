@@ -32,6 +32,7 @@ import { normalizeContextLedger } from "./contextLedger";
 import { hydrateMessages, type BackendTranscriptMessage } from "./transcriptHydration";
 import { LS, writeLS } from "../stores/shared-helpers";
 import { eventMessageId } from "../lib/identity";
+import { adoptGeneratedConversation } from "./conversationAdoption";
 
 const userVisibleSubagentProgress = (value?: string, explicitVisible?: boolean): string => {
   const text = String(value ?? "").trim();
@@ -110,6 +111,27 @@ const transcriptSnapshotPatch = (
     transcriptSeq: seq,
     transcriptMessages: hydrateMessages(rawMessages as BackendTranscriptMessage[]),
   };
+};
+
+const transcriptDeltaPatch = (event: SubagentProgressEvent, existing?: SubagentState) => {
+  const delta = event.transcript_delta;
+  if (!delta || delta.seq <= (existing?.transcriptSeq ?? -1)) return {};
+  const messages = existing?.transcriptMessages ?? [];
+  const index = messages.findIndex(message => message.id === delta.message_id);
+  // Reconnection obtains an authoritative snapshot; a delta cannot invent a
+  // missing user/assistant turn or advance past a snapshot we have not received.
+  if (index < 0) return {};
+  const message = messages[index];
+  const blocks = message.blocks ?? [];
+  const blockIndex = blocks.findIndex(block => block.type === "text" && block.itemId === delta.item_id);
+  if (blockIndex < 0) return {};
+  const block = blocks[blockIndex];
+  if (block.type !== "text") return {};
+  if (Array.from(block.content).length !== delta.offset) return {};
+  const content = block.content + delta.delta;
+  const updated = [...messages];
+  updated[index] = { ...message, content, blocks: blocks.map((value, at) => at === blockIndex ? { ...block, content } : value) };
+  return { transcriptMessages: updated, transcriptSeq: delta.seq };
 };
 
 const subagentProgressSummary = (ev: {
@@ -559,8 +581,11 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
   conversationId = typeof eventOwner === "string" && eventOwner.trim()
     ? eventOwner.trim()
     : conversationId?.trim() || undefined;
-  const s = useAppStore.getState();
   const messageId = eventMessageId(e);
+  if (e.type === "agent.run.started" && (e as AgentRunStartedEvent).role === "main") {
+    adoptGeneratedConversation(conversationId, messageId);
+  }
+  const s = useAppStore.getState();
   if (e.type === "agent.run.started" && conversationId && messageId) {
     const target = assistantForMessage(conversationId, messageId);
     const turnId = eventTurnIdentity(e);
@@ -1163,6 +1188,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         lastProgressAt: lastProgressAt ?? now,
         messages: mergeSubagentMessages(existing?.messages, snapshotMessages(e)),
         ...transcriptSnapshotPatch(ev, existing),
+        ...transcriptDeltaPatch(ev, existing),
       };
       if (existing) {
         s.updateSubagent(subagentId, patch, conversationId);

@@ -152,13 +152,24 @@ class PreviewLaunchConfigError(RuntimeError):
         super().__init__(f"{source} is invalid: {reason}")
 
 
+def _preview_shell_command(argv: list[str]) -> str:
+    if os.name == "nt":
+        return "& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in argv)
+    return shlex.join(argv)
+
+
 def _coerce_config(raw: dict[str, Any], workspace_root: Path, source: str) -> PreviewLaunchConfig | None:
     command = raw.get("command") or raw.get("runtimeExecutable")
     if not isinstance(command, str) or not command.strip():
         return None
     args = raw.get("args") or raw.get("runtimeArgs")
-    if isinstance(args, list) and args:
-        command = " ".join([command, *[str(arg) for arg in args]])
+    if args is not None and not isinstance(args, list):
+        raise PreviewLaunchConfigError(source, '"args" or "runtimeArgs" must be a list')
+    if not raw.get("command"):
+        command = _preview_shell_command([command, *[str(arg) for arg in (args or [])]])
+    elif args:
+        quoted_args = _preview_shell_command([str(arg) for arg in args])
+        command += " " + (quoted_args[2:] if os.name == "nt" else quoted_args)
     cwd_value = raw.get("cwd") if isinstance(raw.get("cwd"), str) else "."
     cwd = (workspace_root / cwd_value).resolve()
     try:
@@ -719,7 +730,7 @@ async def start_static_preview(
         "--token",
         access_token,
     ]
-    command = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+    command = _preview_shell_command(argv)
     identity = hashlib.sha256(str(target).encode("utf-8")).hexdigest()
     config = PreviewLaunchConfig(
         name=f"static-{identity}",

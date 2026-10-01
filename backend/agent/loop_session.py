@@ -195,8 +195,7 @@ def populate_prompt_context(
         }.items()
         if str(os.environ.get(env_name) or "").strip()
     }
-    if user_directories:
-        environment["user_directories"] = user_directories
+    environment["user_directories"] = user_directories
 
     permission = environment.get("permission")
     if not isinstance(permission, dict):

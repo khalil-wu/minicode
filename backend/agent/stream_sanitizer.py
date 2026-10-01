@@ -6,11 +6,11 @@ import re
 
 
 _THINKING_BLOCK_RE = re.compile(
-    r"<(?:thinking|reasoning|internal|think)(?=[\s/>])[^>]*>.*?</(?:thinking|reasoning|internal|think)\s*>",
+    r"<\s*(?:thinking|reasoning|internal|think)(?=[\s/>])[^>]*>.*?<\s*/\s*(?:thinking|reasoning|internal|think)\s*>",
     re.DOTALL | re.IGNORECASE,
 )
 _THINKING_MARKER_RE = re.compile(
-    r"</?(?:thinking|reasoning|internal|think)(?=[\s/>])[^>]*>",
+    r"<\s*/?\s*(?:thinking|reasoning|internal|think)(?=[\s/>])[^>]*>",
     re.IGNORECASE,
 )
 _SPECIAL_TOKEN_RE = re.compile(r"<\|[^|]*\|>")
@@ -19,7 +19,7 @@ _REASONING_TAG_AT_START_RE = re.compile(
     re.IGNORECASE,
 )
 _REASONING_CLOSE_RE = re.compile(
-    r"</\s*(?:thinking|reasoning|internal|think)(?=[\s>])\s*>",
+    r"<\s*/\s*(?:thinking|reasoning|internal|think)(?=[\s>])[^>]*>",
     re.IGNORECASE,
 )
 _SPECIAL_TOKEN_AT_START_RE = re.compile(r"^<\|[^|>]*\|>")
@@ -35,9 +35,6 @@ _REASONING_CONTROL_PREFIXES = (
     "<|",
     "<minicode-memory-citation>",
 )
-# Longest control opener a chunk boundary can legitimately split. ``<|`` is
-# not counted: special tokens are bounded by ``|>`` and prose never uses it.
-_MAX_HELD_PREFIX = len("<minicode-memory-citation>") + 8
 _MEMORY_CITATION_OPEN = "<minicode-memory-citation>"
 _MEMORY_CITATION_CLOSE = "</minicode-memory-citation>"
 
@@ -55,7 +52,14 @@ class ThinkingStreamSanitizer:
     @staticmethod
     def _looks_like_control_prefix(value: str) -> bool:
         lowered = value.lower()
+        if _MEMORY_CITATION_OPEN.startswith(lowered):
+            return True
+        if re.fullmatch(r"<\|[^|>]*\|?", value):
+            return True
+        lowered = re.sub(r"^<\s*(/?)\s*", r"<\1", lowered)
         for prefix in _REASONING_CONTROL_PREFIXES:
+            if prefix in {"<|", _MEMORY_CITATION_OPEN}:
+                continue
             if prefix.startswith(lowered):
                 return True
             if not lowered.startswith(prefix):
@@ -71,13 +75,17 @@ class ThinkingStreamSanitizer:
 
     @staticmethod
     def _closing_prefix_length(value: str) -> int:
-        lowered = value.lower()
+        marker = value.rfind("<")
+        if marker < 0:
+            return 0
+        suffix = value[marker:]
+        lowered = re.sub(r"^<\s*/?\s*", "</", suffix.lower())
         closing_prefixes = ("</think", "</thinking", "</reasoning", "</internal")
-        max_length = min(len(lowered), max(len(prefix) for prefix in closing_prefixes))
-        for length in range(max_length, 0, -1):
-            suffix = lowered[-length:]
-            if any(prefix.startswith(suffix) for prefix in closing_prefixes):
-                return length
+        for prefix in closing_prefixes:
+            if prefix.startswith(lowered):
+                return len(suffix)
+            if lowered.startswith(prefix) and lowered[len(prefix):len(prefix)+1] in {" ", "\t", "\r", "\n", "/"}:
+                return len(suffix)
         return 0
 
     def feed(self, chunk: str) -> str:
@@ -148,13 +156,10 @@ class ThinkingStreamSanitizer:
                 self._memory_citation_body = ""
                 continue
 
-            if (
-                self._looks_like_control_prefix(self._pending)
-                and len(self._pending) <= _MAX_HELD_PREFIX
-            ):
+            if self._looks_like_control_prefix(self._pending):
                 # The chunk may end inside a control tag; wait for more text.
-                # Anything longer than a real tag is prose such as ``<| x``
-                # or ``<think it``, and must not be withheld from the answer.
+                # Known tag attributes may be long. A character-count cutoff
+                # would leak a valid opener split before its closing angle.
                 break
 
             visible.append("<")

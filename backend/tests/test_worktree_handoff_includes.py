@@ -41,23 +41,23 @@ def test_handoff_preflight_allows_explicit_stash_for_dirty_source(tmp_path, monk
 
     monkeypatch.setattr(
         "backend.services.conversation_worktree_handoff_service._status",
-        lambda _path: " M changed.py",
+        lambda _path, **kwargs: " M changed.py",
     )
     monkeypatch.setattr(
         "backend.services.conversation_worktree_handoff_service._head",
-        lambda _path: "abc123",
+        lambda _path, **kwargs: "abc123",
     )
     monkeypatch.setattr(
         "backend.services.conversation_worktree_handoff_service._branch",
-        lambda _path: "main",
+        lambda _path, **kwargs: "main",
     )
     monkeypatch.setattr(
         "backend.services.conversation_worktree_handoff_service._ignored_sample",
-        lambda _path: [],
+        lambda _path, **kwargs: [],
     )
     monkeypatch.setattr(
-        "backend.services.conversation_worktree_handoff_service._git",
-        lambda *_args: (False, ""),
+        "backend.services.conversation_worktree_handoff_service._git_snapshot",
+        lambda *_args, **kwargs: (False, ""),
     )
     repository = SimpleNamespace(list_conversations=lambda: [conversation])
 

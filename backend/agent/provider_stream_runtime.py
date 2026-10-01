@@ -46,6 +46,7 @@ from backend.agent.provider_stream_settlement import (
 from backend.agent.provider_stream_failures import (
     ProviderStreamExceptionResult,
     close_provider_stream,
+    finish_provider_stream,
     handle_provider_stream_exception,
 )
 from backend.agent.provider_attempt import provider_progress_id
@@ -427,9 +428,8 @@ async def stream_provider_response(
             raise
         retry_budget_boundary = exception_result.retry_budget_boundary
     finally:
-        # Consumer closure raises GeneratorExit; it still owns usage and cleanup.
         settle_attempt_usage()
-        await _close_stream()
+        await finish_provider_stream(_close_stream, turn_kernel, provider_attempt)
 
     if stream_state.committed_tool_ids and not state.stopped_reason and (
         not stream_state.provider_done or is_max_output_finish_reason(finish_reason)

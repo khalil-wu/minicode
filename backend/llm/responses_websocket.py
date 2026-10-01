@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
 import httpx
@@ -19,6 +21,20 @@ from websockets.protocol import State
 WEBSOCKET_BETA = "responses_websockets=2026-02-06"
 TURN_STATE_HEADER = "x-codex-turn-state"
 Owner = tuple[str, str, str, str]
+
+
+def responses_turn_state_from_headers(headers: Any) -> str:
+    """Read Codex's case-insensitive string/first-array-value header contract."""
+    if isinstance(headers, SimpleNamespace):
+        headers = vars(headers)
+    if not isinstance(headers, Mapping):
+        return ""
+    for name, value in headers.items():
+        if name.lower() == TURN_STATE_HEADER:
+            while isinstance(value, list):
+                value = value[0] if value else None
+            return value.strip() if isinstance(value, str) else ""
+    return ""
 
 
 def _replay_item(item: Any) -> Any:
@@ -136,7 +152,7 @@ class ResponsesWebSocketRequest:
         # The token received from the previous handshake belongs on this
         # request. A token learned from the current handshake starts with the
         # next request, matching the upstream turn-state contract.
-        request_turn_state = connection.turn_state
+        request_turn_state = connection.turn_state or responses_turn_state_from_headers(headers)
         self.connection = connection
         handshake_headers = (
             {TURN_STATE_HEADER: connection.turn_state}
@@ -144,7 +160,7 @@ class ResponsesWebSocketRequest:
             else {} if self.info["connection_reused"]
             else dict(connection.socket.response.headers)
         )
-        turn_state = str(handshake_headers.get(TURN_STATE_HEADER) or "").strip()
+        turn_state = request_turn_state or responses_turn_state_from_headers(handshake_headers)
         if turn_state:
             connection.turn_state = turn_state
             self.info["turn_state_present"] = True
@@ -185,9 +201,15 @@ class ResponsesWebSocketRequest:
                 if not isinstance(event, dict):
                     raise ValueError("provider_error_type=protocol: Responses WebSocket event must be an object")
                 event_type = event.get("type", "")
+                if event_type == "response.metadata" and not connection.turn_state:
+                    turn_state = responses_turn_state_from_headers(event.get("headers"))
+                    if turn_state:
+                        connection.turn_state = turn_state
+                        self.info["turn_state_present"] = True
                 response = event.get("response")
                 error = event.get("error") or (response.get("error") if isinstance(response, dict) else None) or event
-                if incremental and error.get("code") == "previous_response_id_not_found":
+                if (incremental and event_type in {"error", "response.error", "response.failed"}
+                        and error.get("code") in {"previous_response_not_found", "previous_response_id_not_found"}):
                     # The server rejected this continuation. Clearing this
                     # lease lets the harness's existing retry use full input.
                     raise httpx.ReadError("Responses WebSocket connection lost continuation state; retry with full context")

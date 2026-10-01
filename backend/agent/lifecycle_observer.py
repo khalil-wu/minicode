@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from backend.agent.message import AgentEvent
@@ -47,14 +47,21 @@ class LifecycleObserverOwner:
 
     observer: LifecycleObserver | None = None
     finished: bool = False
+    run_context: RunContext = field(default_factory=RunContext)
+    llm: Any = None
+    _finish_task: asyncio.Task | None = field(default=None, init=False)
 
     @classmethod
     def create(
         cls,
         factory: LifecycleObserverFactory | None,
+        llm: Any = None,
         **kwargs: Any,
     ) -> "LifecycleObserverOwner":
-        return cls(factory(**kwargs) if factory is not None else None)
+        return cls(
+            factory(**kwargs) if factory is not None else None,
+            run_context=kwargs["run_context"], llm=llm,
+        )
 
     async def start(self) -> AgentEvent | None:
         if self.observer is None:
@@ -89,14 +96,34 @@ class LifecycleObserverOwner:
         return None
 
     async def finish(self, *, status: str, reason: str) -> AgentEvent | None:
-        if self.observer is None or self.finished:
+        if self.observer is None or self._finish_task is not None:
             return None
-        self.finished = True
+        borrowers = {task for task in self.run_context.lifecycle_cleanup_tasks if not task.done()}
+
+        async def finish_after_callbacks() -> None:
+            while pending := {task for task in borrowers if not task.done()}:
+                try:
+                    await asyncio.wait(pending)
+                except asyncio.CancelledError:
+                    # End hooks cannot overtake a callback that still owns the observer.
+                    continue
+            await self.observer.finish(status=status, reason=reason)
+
+        task = self._finish_task = asyncio.create_task(finish_after_callbacks())
+        task.add_done_callback(lambda _done: setattr(self, "finished", True))
         try:
-            await asyncio.wait_for(
-                self.observer.finish(status=status, reason=reason),
-                timeout=_OBSERVER_FINISH_TIMEOUT_SECONDS,
+            done, _ = await asyncio.wait({task}, timeout=_OBSERVER_FINISH_TIMEOUT_SECONDS)
+            if not done:
+                await self.run_context.drain_lifecycle_task(
+                    task, timeout=0, label="lifecycle observer finish", llm=self.llm,
+                )
+                return self._projection_error("Lifecycle observer finish deadline reached.", phase="finish")
+            task.result()
+        except asyncio.CancelledError:
+            await self.run_context.drain_lifecycle_task(
+                task, timeout=0, label="lifecycle observer finish", llm=self.llm,
             )
+            return self._projection_error("Lifecycle observer finish interrupted after canonical terminal.", phase="finish")
         except Exception as exc:
             logger.warning(
                 "Lifecycle observer finish failed after canonical terminal",

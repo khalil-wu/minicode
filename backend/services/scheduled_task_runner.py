@@ -16,6 +16,7 @@ from backend.agent.conversation_query_guard import (
     ConversationQueryClaim,
     conversation_query_guards,
 )
+from backend.agent.run_context import RunContext
 from backend.conversations.repository import ConversationRepository
 from backend.services.chat_api_service import run_owned_rest_chat
 from backend.services.workspace_service import git_branch_for, main_worktree_root
@@ -93,6 +94,8 @@ async def run_scheduled_task(
             "conversation_id": conversation.id,
             "error": "The heartbeat conversation already has an active turn.",
         }
+    run_context = RunContext()
+    cleanup_waiters: set[asyncio.Task] = set()
     try:
         return await _run_scheduled_task_owned(
             task,
@@ -103,9 +106,12 @@ async def run_scheduled_task(
             workspace_root=workspace_root,
             permission_mode=permission_mode,
             query_claim=query_claim,
+            run_context=run_context,
         )
     finally:
-        query_guards.end(query_claim)
+        query_guards.end_after_cleanup(
+            query_claim, tasks=run_context.lifecycle_cleanup_tasks, waiters=cleanup_waiters,
+        )
 
 
 async def _run_scheduled_task_owned(
@@ -118,6 +124,7 @@ async def _run_scheduled_task_owned(
     workspace_root: Path,
     permission_mode: str,
     query_claim: ConversationQueryClaim,
+    run_context: RunContext,
 ) -> dict[str, Any]:
     execution_root = workspace_root.resolve()
     isolation = str(getattr(task, "isolation", "worktree") or "worktree").strip().lower()
@@ -204,6 +211,7 @@ async def _run_scheduled_task_owned(
         conversation_id=conversation.id,
         run_id=str(getattr(run, "id", "")),
         query_claim=query_claim,
+        run_context=run_context,
         conversation_snapshot=snapshot,
     )
     if not conversation_query_guards().owns(query_claim):
@@ -251,6 +259,7 @@ async def _run_scheduled_task_owned(
             "run_id": str(getattr(run, "id", "")),
             "status": status,
             "stopped_reason": stopped_reason,
+            **run_context.lifecycle_cleanup_evidence(),
         }
     }
     committed = repository.commit_turn_projection(
@@ -269,5 +278,6 @@ async def _run_scheduled_task_owned(
         "workspace_root": str(workspace_root.resolve()),
         "execution_workspace_root": str(execution_root),
         "summary": reply,
+        **run_context.lifecycle_cleanup_evidence(),
         "error": stopped_reason if status in {"failed", "cancelled"} else "",
     }

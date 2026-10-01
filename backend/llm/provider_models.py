@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -89,39 +90,39 @@ class ProviderModelsStorage:
         clean_id = _provider_id(provider_id)
         return await asyncio.to_thread(self._read, clean_id)
 
-    def _write(self, provider_id: str, entry: dict[str, Any]) -> None:
+    def _write(self, provider_id: str, entry: dict[str, Any], *, assert_current: Callable[[], None] | None = None, mutation_lock: Any = None) -> None:
         with file_mutation_locks([self._path]):
-            payload = self._read_all_unlocked()
-            payload[provider_id] = entry
-            rendered = json.dumps(
-                payload,
-                ensure_ascii=False,
-                allow_nan=False,
-                indent=2,
-            )
-            if len(rendered.encode("utf-8")) > _MAX_MODELS_STORE_BYTES:
-                raise ValueError("provider models store exceeds the 64 MiB limit")
-            atomic_write_text(self._path, rendered)
+            # Generation changes use this same runtime lock. Check after the
+            # file-lock wait and retain authority through the actual commit.
+            with mutation_lock if mutation_lock is not None else nullcontext():
+                if assert_current is not None:
+                    assert_current()
+                payload = self._read_all_unlocked()
+                payload[provider_id] = entry
+                rendered = json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2)
+                if len(rendered.encode("utf-8")) > _MAX_MODELS_STORE_BYTES:
+                    raise ValueError("provider models store exceeds the 64 MiB limit")
+                atomic_write_text(self._path, rendered)
 
-    async def write(self, provider_id: str, entry: Any) -> None:
+    async def write(self, provider_id: str, entry: Any, *, assert_current: Callable[[], None] | None = None, mutation_lock: Any = None) -> None:
         clean_id = _provider_id(provider_id)
         cloned = _clone_entry(entry)
-        await asyncio.to_thread(self._write, clean_id, cloned)
+        await asyncio.to_thread(self._write, clean_id, cloned, assert_current=assert_current, mutation_lock=mutation_lock)
 
-    def _delete(self, provider_id: str) -> None:
+    def _delete(self, provider_id: str, *, assert_current: Callable[[], None] | None = None, mutation_lock: Any = None) -> None:
         with file_mutation_locks([self._path]):
-            payload = self._read_all_unlocked()
-            if provider_id not in payload:
-                return
-            payload.pop(provider_id, None)
-            atomic_write_text(
-                self._path,
-                json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2),
-            )
+            with mutation_lock if mutation_lock is not None else nullcontext():
+                if assert_current is not None:
+                    assert_current()
+                payload = self._read_all_unlocked()
+                if provider_id not in payload:
+                    return
+                payload.pop(provider_id, None)
+                atomic_write_text(self._path, json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2))
 
-    async def delete(self, provider_id: str) -> None:
+    async def delete(self, provider_id: str, *, assert_current: Callable[[], None] | None = None, mutation_lock: Any = None) -> None:
         clean_id = _provider_id(provider_id)
-        await asyncio.to_thread(self._delete, clean_id)
+        await asyncio.to_thread(self._delete, clean_id, assert_current=assert_current, mutation_lock=mutation_lock)
 
 
 __all__ = ["PROVIDER_MODELS_FILE", "ProviderModelsStorage"]

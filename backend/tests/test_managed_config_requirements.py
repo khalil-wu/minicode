@@ -26,6 +26,19 @@ from backend.services.feature_flag_settings_service import (
 )
 
 
+@pytest.mark.parametrize("field,value", [
+    ("allowed_domains", "example.com"),
+    ("denied_domains", {"internal.example": True}),
+    ("allow_unix_sockets", "/tmp/socket"),
+])
+def test_malformed_legacy_network_policy_is_rejected(field: str, value: object) -> None:
+    source = RequirementSource("legacy_managed_config", location="managed.json")
+    with pytest.raises(ConfigRequirementsError, match=f"network.{field}"):
+        compose_requirements([
+            RequirementsLayerEntry(source, {"network": {field: value}}),
+        ])
+
+
 def test_requirements_compose_tables_and_union_deny_read_high_precedence_first() -> None:
     system_source = RequirementSource("system_requirements_toml", location="system.toml")
     enterprise_source = RequirementSource(

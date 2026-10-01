@@ -68,6 +68,7 @@ async def emit_session_usage_snapshot(session: "WebSocketSession") -> Any:
     tool_schemas = session.tool_registry.get_schemas(
         permission_checker=session.permission_checker,
         permission_context=session.permission_context,
+        toolset_policy=session.runtime_toolset_policy(session.tool_registry),
     )
     budget_snapshot = session.context_builder.get_budget_snapshot(
         state=state,

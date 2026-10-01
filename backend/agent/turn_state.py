@@ -712,8 +712,13 @@ class AgentTurnState:
                 next_block['status'] = 'failed' if failed else 'partial' if interrupted else 'completed'
             elif next_block.get('type') == 'text' and next_block.get('isStreaming') is True:
                 content = str(next_block.get('content') or '')
-                next_block['source'] = 'partial' if content.strip() else 'cancelled'
-                next_block['status'] = 'partial' if content.strip() else 'cancelled'
+                source = str(next_block.get('source') or 'pending')
+                if source in FINAL_TEXT_SOURCES or next_block.get('phase') == 'final_answer':
+                    next_block['source'] = 'partial' if content.strip() else 'cancelled'
+                    next_block['status'] = 'partial' if content.strip() else 'cancelled'
+                else:
+                    next_block['source'] = source
+                    next_block['status'] = 'failed' if failed else 'cancelled' if cancelled else 'partial'
                 next_block['isStreaming'] = False
             elif next_block.get('type') == 'tool_call' and isinstance(next_block.get('record'), dict):
                 record = dict(next_block['record'])

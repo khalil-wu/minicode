@@ -75,22 +75,24 @@ def workspace_bound_tool_names(tool_registry: ToolRegistry) -> set[str]:
 
 
 def requested_tool_mode(*, default_code_mode_only: bool, model_execution: Any | None, llm: Any) -> str:
+    configured_mode = getattr(llm, "configured_tool_mode", None)
+    adapter_mode = configured_mode() if callable(configured_mode) else ""
     model_info = getattr(model_execution, "model_info", None)
     if model_info is not None:
         declared = str(
             getattr(model_info, "tool_mode", "")
             or getattr(model_execution.config.llm, "tool_mode", "")
-            or llm.configured_tool_mode()
+            or adapter_mode
             or ""
         )
     elif model_execution is not None:
         declared = str(
             getattr(model_execution.config.llm, "tool_mode", "")
-            or llm.configured_tool_mode()
+            or adapter_mode
             or ""
         )
     else:
-        declared = str(llm.configured_tool_mode() or "")
+        declared = str(adapter_mode or "")
     return normalize_tool_mode(declared) or ("code_mode_only" if default_code_mode_only else "code_mode")
 
 

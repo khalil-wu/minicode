@@ -309,14 +309,9 @@ function buildDiagnosticsPayload() {
     },
     release: {
       channel: "windows_private_beta",
-      safetyDefaults: {
-        defaultPermissionMode: "confirm",
-        backendPermissionMode: "confirm",
-        networkAccess: "tool_layer_approval_required",
-        windowsSandbox: "docker_workspace_container_fail_closed",
-        windowsWorkspaceIsolation: "container_required",
-        hostEscalation: "explicit_permission_only",
-      },
+      // Permission decisions and enforced filesystem/network capabilities
+      // come from the live harness/execution plane, not desktop constants.
+      capabilitySource: "runtime.capabilities.inspect",
     },
     runtime: {
       platform: process.platform,
@@ -841,6 +836,7 @@ backendSidecar.init({
     get resolvedFrontendUrl() { return resolvedFrontendUrl; },
     runtimeToken: RUNTIME_TOKEN,
     stateRoot: app.getPath("userData"),
+    appResourcesDir: app.isPackaged ? process.resourcesPath : getAppRoot(),
     desktopDir: app.getPath("desktop"),
     documentsDir: app.getPath("documents"),
     downloadsDir: app.getPath("downloads"),
@@ -883,7 +879,6 @@ windowManager.init({
       updater.invalidateActivity("activity.renderer_closed");
     });
   },
-  getPendingDeepLink: () => pendingDeepLink,
   onDiagnosticIncident: recordDiagnosticIncident,
 });
 
@@ -905,6 +900,7 @@ ipcHandlers.init({
   showDesktopNotification,
   dispatchDeepLink,
   acknowledgeDeepLink,
+  getPendingDeepLink: () => pendingDeepLink,
   attemptAppStartup,
   get startupFailureState() { return startupFailureState; },
   getDesktopLogPath: utils.getDesktopLogPath,

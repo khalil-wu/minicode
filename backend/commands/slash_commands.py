@@ -6,6 +6,7 @@ import shlex
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from backend.commands.catalog import get_composer_command_catalog
+from backend.commands.registry import slash_conversation_id
 
 if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
@@ -97,12 +98,15 @@ async def _handle_conversation_export(
 
     await handle_conversation_export(
         ws,
-        {"conversation_id": ws.active_conversation_id},
+        {"conversation_id": slash_conversation_id() or ws.active_conversation_id},
     )
     return True, ""
 
 
 def _active_conversation_id(ws: "WebSocketSession") -> str | None:
+    target = slash_conversation_id()
+    if target:
+        return target
     if ws.active_conversation_id:
         return ws.active_conversation_id
     ws._ensure_active_conversation()
@@ -112,6 +116,9 @@ def _active_conversation_id(ws: "WebSocketSession") -> str | None:
 async def _dispatch_command(
     ws: "WebSocketSession", command_type: str, payload: dict[str, Any]
 ) -> bool:
+    conversation_id = slash_conversation_id()
+    if conversation_id and command_type != "conversation.create":
+        payload["conversation_id"] = conversation_id
     return await ws.command_registry.dispatch(command_type, payload)
 
 
@@ -134,17 +141,22 @@ async def _apply_permission_mode(
     mode: str,
     source: str,
 ) -> bool:
+    conversation_id = slash_conversation_id() or ws.active_conversation_id or ""
     handled = await _dispatch_command(
         ws,
         "conversation.permission_mode.set",
         {
             "mode": mode,
             "source": source,
+            "conversation_id": conversation_id,
         },
     )
     if not handled:
         await _emit_command_unavailable(ws, command)
         return False
+    if conversation_id and conversation_id != ws.active_conversation_id:
+        conversation = ws.conversation_repo.get_conversation(conversation_id)
+        return conversation is not None and conversation.permission_mode == mode
     return ws.permission_context.mode == mode
 
 
@@ -180,7 +192,7 @@ async def _handle_clear(
         ws,
         "conversation.clear",
         {
-            "conversation_id": getattr(ws, "active_conversation_id", ""),
+            "conversation_id": slash_conversation_id() or ws.active_conversation_id or "",
             "source": "slash:/clear",
         },
     )
@@ -382,7 +394,7 @@ async def _handle_archive(
 ) -> tuple[bool, str]:
     _ = arg
     _ = attachments
-    conversation_id = ws.active_conversation_id
+    conversation_id = slash_conversation_id() or ws.active_conversation_id
     if not conversation_id:
         await _emit_command_unavailable(ws, "archive")
         return True, ""
@@ -405,7 +417,7 @@ async def _handle_unarchive(
 ) -> tuple[bool, str]:
     _ = arg
     _ = attachments
-    conversation_id = ws.active_conversation_id
+    conversation_id = slash_conversation_id() or ws.active_conversation_id
     if not conversation_id:
         await _emit_command_unavailable(ws, "unarchive")
         return True, ""
@@ -461,26 +473,8 @@ async def _handle_effort(
     if effort is None:
         await _emit_usage_warning(ws, "effort", "Usage: /effort [none|minimal|low|medium|high|xhigh|max|ultra]")
         return True, ""
-    from backend.config import active_provider_reasoning_effort_levels
-
-    declared_levels = active_provider_reasoning_effort_levels()
-    if effort not in declared_levels:
-        await _dispatch_command(
-            ws,
-            "llm.config.set",
-            {
-                "reasoning_effort": effort,
-                "source": "slash:/effort",
-            },
-        )
-        await ws.emit_command_result(
-            "effort",
-            "Reasoning effort was not applied because the active model "
-            f"did not declare the '{effort}' level.",
-            level="warning",
-            data={"reasoning_effort": effort, "applied": False},
-        )
-        return True, ""
+    # The canonical handler resolves the target conversation's selected model,
+    # validates its declared effort levels and emits the actual outcome.
     handled = await _dispatch_command(
         ws,
         "llm.config.set",
@@ -655,7 +649,8 @@ async def _handle_compact(
 
     await handle_context_compact(
         ws,
-        {"focus": str(arg or "").strip(), "source": "slash:/compact"},
+        {"focus": str(arg or "").strip(), "source": "slash:/compact",
+         "conversation_id": slash_conversation_id() or ws.active_conversation_id},
     )
     return True, ""
 
@@ -699,50 +694,9 @@ async def _handle_goal(
 async def _handle_resume(
     ws: "WebSocketSession", arg: str, attachments: Any
 ) -> tuple[bool, str]:
-    """Resume from the latest checkpoint (if any)."""
+    """Use the same admission and checkpoint projection as the command API."""
     _ = arg, attachments
-    from backend.services.checkpoint_service import (
-        CheckpointServiceError,
-        prepare_run_checkpoint_resume,
-    )
-
-    try:
-        resume = prepare_run_checkpoint_resume(
-            session_id=str(ws.session_id or ""),
-            requested_conversation_id=_active_conversation_id(ws),
-            active_conversation_id=_active_conversation_id(ws),
-        )
-    except (CheckpointServiceError, ValueError) as exc:
-        await ws.emit_command_result(
-            "resume",
-            str(exc),
-            level="error",
-        )
-        return True, ""
-
-    if resume is None:
-        await ws.emit_command_result(
-            "resume",
-            "No incomplete checkpoint found for this conversation. The last task completed successfully or no checkpoint exists yet.",
-            level="info",
-        )
-        return True, ""
-
-    await ws.emit_command_result(
-        "resume",
-        f"Resuming from iteration {resume.iteration}. Previous stop: {resume.stopped_reason}",
-        level="success",
-    )
-
-    await ws.start_agent_run(
-        resume.user_message,
-        conversation_id=resume.conversation_id,
-        metadata={
-            "resume_from_checkpoint": True,
-            "resume_checkpoint_run_id": resume.run_id,
-            "conversation_id": resume.conversation_id,
-        },
-    )
+    await _dispatch_command(ws, "agent.resume", {"source": "slash:/resume"})
     return True, ""
 
 

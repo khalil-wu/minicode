@@ -285,6 +285,8 @@ ASYNC_AGENT_ALLOWED_TOOLS = frozenset(
         "read_artifact",
         "read_file",
         "run_command",
+        "tool_exec",
+        "tool_wait",
         "tool_search",
         "web_fetch",
         "web_search",

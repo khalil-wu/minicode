@@ -136,16 +136,41 @@ def _is_compound(root: Any) -> bool:
     return False
 
 
+def posix_shell_payload_index(argv: list[str]) -> int | None:
+    """Locate the command string after shell invocation options, including clusters."""
+    command_string = False
+    index = 1
+    while index < len(argv):
+        option = argv[index]
+        if option == "--":
+            return index + 1 if command_string else None
+        if option in {"--rcfile", "--init-file"}:
+            index += 2
+            continue
+        if len(option) < 2 or option[0] not in "-+":
+            return index if command_string else None
+        if not option.startswith("--"):
+            command_string = command_string or "c" in option[1:]
+            if (
+                option[-1] in "oO"
+                and index + 1 < len(argv)
+                and not argv[index + 1].startswith(("-", "+"))
+            ):
+                index += 1
+        index += 1
+    return len(argv) if command_string else None
+
+
 def _unwrap(argv: list[str], depth: int) -> LiteralShell | None:
     """Return the commands hidden behind a wrapper argv, if any."""
     if not argv:
         return None
-    name = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    name = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
     if name in _POSIX_SHELLS:
-        for index, flag in enumerate(argv[1:], start=1):
-            if flag in {"-c", "-lc", "-ic", "-ec", "-xc"} and index + 1 < len(argv):
-                payload = argv[index + 1]
-                return None if payload == DYNAMIC_WORD else _nested(payload, depth)
+        index = posix_shell_payload_index(argv)
+        if index is not None and index < len(argv):
+            payload = argv[index]
+            return None if payload == DYNAMIC_WORD else _nested(payload, depth)
         return None
     if name == "sudo":
         return _nested_argv(_strip_sudo(argv[1:]), depth)

@@ -193,7 +193,7 @@ def runtime_span_from_tool_context(
         event,
         span_id=span_id,
         run_id=str(metadata.get("run_id") or metadata.get("task_id") or ""),
-        turn_id=str(metadata.get("run_id") or metadata.get("turn_id") or ""),
+        turn_id=str(metadata.get("turn_id") or metadata.get("run_id") or ""),
         iteration_id=iteration_id,
         phase=phase,
         status=status,

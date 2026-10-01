@@ -19,6 +19,7 @@ from backend.services.chat_api_service import (
     generated_artifact_native_payload,
 )
 from backend.services import llm_provider_service
+from backend.tools.toolsets import ToolsetPolicy
 from backend.workspace import recent_projects
 from backend.ws.handlers import conversation as conversation_handlers
 from backend.ws.handlers import session as session_handlers
@@ -722,6 +723,7 @@ def test_usage_snapshot_emits_budget_and_context_without_visible_silent_result(
         last_agent_state=None,
         refresh_tool_registry_if_mcp_changed=Mock(),
         tool_registry=SimpleNamespace(get_schemas=Mock(return_value=[])),
+        runtime_toolset_policy=Mock(return_value=ToolsetPolicy.default()),
         config=SimpleNamespace(token_budget=SimpleNamespace(tool_schemas=6_000)),
         permission_checker=SimpleNamespace(),
         permission_context=SimpleNamespace(),

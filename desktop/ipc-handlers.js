@@ -831,6 +831,8 @@ function registerIpcHandlers() {
     return ptyManager.clearSession(sessionId, conversationId);
   }));
 
+  ipcMain.handle("minicode:deepLink:pending", withMainSender("minicode:deepLink:pending", () => ctx.getPendingDeepLink()));
+
   ipcMain.handle("minicode:deepLink:ack", withMainSender("minicode:deepLink:ack", (_event, id) => {
     return typeof ctx.acknowledgeDeepLink === "function" ? ctx.acknowledgeDeepLink(id) : false;
   }));

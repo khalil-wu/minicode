@@ -150,7 +150,7 @@ def test_context_and_control_typed_dicts_match_wire_requiredness() -> None:
     )
     assert required_and_optional(ControlCanUseToolRequestData) == (
         {"subtype", "tool_name", "input", "tool_use_id"},
-        {"diff", "source_agent", "source_thread", "source_tool"},
+        {"diff", "source_agent", "source_thread", "source_tool", "network_unisolated"},
     )
     assert required_and_optional(ControlElicitationRequestData) == (
         {"subtype", "tool_use_id", "prompt", "question"},

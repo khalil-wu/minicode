@@ -61,10 +61,11 @@ def create_workspace_router() -> APIRouter:
             raise HTTPException(status_code=403, detail="Workspace folder is not trusted.")
         return WorkspaceService(get_workspace_root=lambda: root)
 
-    def _resolve_git_root(path: str, workspace_root: str) -> Path:
+    def _resolve_git_root(path: str, workspace_root: str) -> tuple[Path, Path]:
         """git 端点优先使用调用方显式传入的目录，避免全局工作区切换的竞态。"""
         service = _service(workspace_root)
-        return resolve_workspace_git_root(path, service.workspace_root_path())
+        owner_root = service.workspace_root_path()
+        return resolve_workspace_git_root(path, owner_root), owner_root
 
     @router.get("/tree", response_model=WorkspaceTreeResponse)
     async def workspace_tree_api(
@@ -205,8 +206,8 @@ def create_workspace_router() -> APIRouter:
         """返回 git 状态：分支、已修改/暂存/未跟踪文件列表"""
         # git subprocesses are blocking calls with multi-second timeouts; keep
         # them off the event loop so streaming is never stalled by status polls.
-        root = await asyncio.to_thread(_resolve_git_root, path, workspace_root)
-        return await asyncio.to_thread(workspace_git_status_payload, root)
+        root, owner_root = await asyncio.to_thread(_resolve_git_root, path, workspace_root)
+        return await asyncio.to_thread(workspace_git_status_payload, root, workspace_root=owner_root)
 
     @router.get("/git/diff")
     async def git_diff_api(
@@ -215,10 +216,10 @@ def create_workspace_router() -> APIRouter:
         workspace_root: str = Query(..., min_length=1),
     ) -> dict:
         """返回指定文件的 git diff"""
-        root = await asyncio.to_thread(_resolve_git_root, path, workspace_root)
+        root, owner_root = await asyncio.to_thread(_resolve_git_root, path, workspace_root)
         if file and not is_path_within((root / file).resolve(), root):
             raise HTTPException(status_code=400, detail="Git file is outside workspace root.")
-        return await asyncio.to_thread(workspace_git_diff_payload, root, file)
+        return await asyncio.to_thread(workspace_git_diff_payload, root, file, workspace_root=owner_root)
 
     @router.get("/git/worktree", response_model=WorkspaceGitWorktreeResponse)
     async def git_worktree_api(
@@ -226,8 +227,8 @@ def create_workspace_router() -> APIRouter:
         workspace_root: str = Query(..., min_length=1),
     ) -> WorkspaceGitWorktreeResponse:
         """Return linked worktree metadata for the active workspace."""
-        root = await asyncio.to_thread(_resolve_git_root, path, workspace_root)
-        return WorkspaceGitWorktreeResponse(**(await asyncio.to_thread(workspace_git_worktree_payload, root)))
+        root, owner_root = await asyncio.to_thread(_resolve_git_root, path, workspace_root)
+        return WorkspaceGitWorktreeResponse(**(await asyncio.to_thread(workspace_git_worktree_payload, root, workspace_root=owner_root)))
 
     @router.post("/git/worktree/switch", response_model=ProjectImportResponse)
     async def git_worktree_switch_api(

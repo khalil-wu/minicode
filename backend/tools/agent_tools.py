@@ -19,6 +19,7 @@ from typing import Any
 from uuid import uuid4
 
 from backend.agent.context import ContextBuilder
+from backend.async_cleanup import to_thread_cancel_safe
 from backend.agent.loop import AgentLoopSessionContext
 from backend.agent.message import AgentEvent
 from backend.agent.public_projection import project_public_subagent_result
@@ -341,6 +342,17 @@ class TaskTool(BaseTool):
             "explore",
             "plan",
         }
+
+    def is_read_only(self, args: dict[str, Any] | None = None) -> bool:
+        # The batch scheduler and execution gate must agree. Previously an
+        # explore call entered a parallel batch and then held the writer gate,
+        # serializing sibling investigations and blocking parent reads.
+        call_args = args or {}
+        tasks = call_args.get("parallel_tasks") or [call_args]
+        return all(
+            bool(task.get("read_only")) or task.get("agent_type") in {"explore", "plan"}
+            for task in tasks
+        )
 
     def model_schema(self) -> ToolSchema:
         agent_types = _available_agent_types()
@@ -1893,6 +1905,7 @@ class TaskTool(BaseTool):
             *,
             require_running: bool = True,
             transcript_snapshot: dict[str, Any] | None = None,
+            include_transcript: bool = True,
         ) -> bool:
             nonlocal emitted_transcript_seq
             if emit_event is None or not _accepts_current_incarnation(
@@ -1900,7 +1913,7 @@ class TaskTool(BaseTool):
             ):
                 return False
             payload = {**data, **subagent_fence}
-            if transcript_snapshot is None:
+            if transcript_snapshot is None and include_transcript:
                 transcript_snapshot = _current_transcript_snapshot()
             if transcript_snapshot is not None:
                 transcript_seq = int(transcript_snapshot.get("seq") or 0)
@@ -2800,12 +2813,22 @@ class TaskTool(BaseTool):
                         _commit_child_turn_admission
                     )
 
-                async def _emit_live_transcript_snapshot(source_event_type: str) -> None:
-                    transcript_snapshot = _current_transcript_snapshot()
-                    if transcript_snapshot is None:
-                        return
-                    if int(transcript_snapshot.get("seq") or 0) <= emitted_transcript_seq:
-                        return
+                streaming_item_id = ""
+                streaming_text_length = 0
+
+                async def _emit_live_transcript_snapshot(source_event_type: str, delta: dict[str, Any] | None = None) -> None:
+                    nonlocal streaming_item_id, streaming_text_length, emitted_transcript_seq
+                    item_id = str((delta or {}).get("item_id") or "")
+                    incremental = bool(delta is not None and journal is not None and item_id == streaming_item_id)
+                    transcript_snapshot = None if incremental else _current_transcript_snapshot()
+                    if not incremental:
+                        if transcript_snapshot is None:
+                            return
+                        if int(transcript_snapshot.get("seq") or 0) <= emitted_transcript_seq:
+                            return
+                        streaming_item_id = item_id
+                        if delta is not None:
+                            streaming_text_length = len(cached_transcript_messages[-1]["content"])
                     progress_event = AgentEvent.subagent_progress(
                         subagent_id=subagent_id,
                         iteration=turn_state.iterations,
@@ -2821,10 +2844,24 @@ class TaskTool(BaseTool):
                         **subagent_fence,
                     )
                     progress_event.data["source_event_type"] = source_event_type
+                    if incremental:
+                        # The first fragment establishes the assistant identity.
+                        # Subsequent fragments carry only text and the durable
+                        # cursor; resending all prior tools per token was quadratic.
+                        progress_event.data["transcript_delta"] = {
+                            "seq": journal.sequence,
+                            "message_id": cached_transcript_messages[-1]["id"],
+                            "item_id": item_id,
+                            "delta": delta["delta"],
+                            "offset": streaming_text_length,
+                        }
+                        streaming_text_length += len(delta["delta"])
+                        emitted_transcript_seq = journal.sequence
                     await _emit_incarnation_event(
                         "subagent.progress",
                         progress_event.data,
                         transcript_snapshot=transcript_snapshot,
+                        include_transcript=not incremental,
                     )
                 # Keep one owner advancing the canonical child query stream;
                 # per-event tasks can otherwise reorder durable projections.
@@ -2920,7 +2957,7 @@ class TaskTool(BaseTool):
                                     turn_state.reply = content
                                 await _emit_live_transcript_snapshot("item.completed")
                         elif event.type == "agent_message.delta":
-                            await _emit_live_transcript_snapshot("agent_message.delta")
+                            await _emit_live_transcript_snapshot("agent_message.delta", event.data)
                         elif event.type == "approval_request":
                             if (
                                 can_forward_approval
@@ -2943,6 +2980,12 @@ class TaskTool(BaseTool):
                                 }
                                 await emit_event("approval_request", bridged_data)
                                 approval_ready[local_tool_call_id].set()
+                        elif event.type == "subagent.event":
+                            # Code-mode tools publish coordination facts into
+                            # this query stream, rather than the direct callback.
+                            # Project them through the same child incarnation
+                            # fence; otherwise a persisted send has no UI event.
+                            await _emit_incarnation_event(event.type, event.data)
                         elif event.type == "tool_call":
                             tool_name = str(
                                 event.data.get("tool_name")
@@ -3094,7 +3137,7 @@ class TaskTool(BaseTool):
                                     sub_context_builder.export_snapshot()
                                 )
                                 checkpoint_receipt: dict[str, Any] = {}
-                                save_run_checkpoint(
+                                await to_thread_cancel_safe(save_run_checkpoint,
                                     receipt=checkpoint_receipt,
                                     session_id=subagent_id,
                                     user_message=turn_prompt,

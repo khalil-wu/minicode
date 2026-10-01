@@ -7,7 +7,7 @@
  * pure helpers; this hook only bridges them to Monaco and the store. Blocks a
  * user keeps or undoes drop out of the set, so nothing is reverted twice.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   agentEditUndoEdit,
   reviewAgentEdits,
@@ -84,7 +84,6 @@ export function useAgentEditReview({
 }: UseAgentEditReviewArgs) {
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
   const [cursorLine, setCursorLine] = useState(1);
-  const collectionRef = useRef<{ set: (d: unknown[]) => void; clear: () => void } | null>(null);
 
   const patch = useMemo(
     () => patchForActiveFile(turnDiff, path, workingDirectory),
@@ -106,7 +105,6 @@ export function useAgentEditReview({
     const editor = editorRef.current;
     const create = editor?.createDecorationsCollection?.bind(editor);
     if (!editor || !create) return;
-    if (!collectionRef.current) collectionRef.current = create([]);
     const decorations = buildAgentEditDecorations(blocks).map((decoration) => ({
       range: {
         startLineNumber: decoration.startLine,
@@ -121,9 +119,9 @@ export function useAgentEditReview({
         overviewRuler: { color: "var(--accent-primary)", position: 4 },
       },
     }));
-    collectionRef.current.set(decorations);
+    const collection = create(decorations);
     return () => {
-      collectionRef.current?.clear();
+      collection.clear();
     };
   }, [editorRef, blocks, editorEpoch]);
 

@@ -43,11 +43,11 @@ def manager(monkeypatch):
         async def _send_request(self, method: str, params: dict):
             return {"contents": "fixture hover"} if method == "textDocument/hover" else []
 
-    def is_available(file_path: str, workspace_root: str) -> bool:
+    def is_available(file_path: str, workspace_root: str, *, sandbox_policy=None) -> bool:
         captured.availability.append((file_path, workspace_root))
         return True
 
-    async def get_client(file_path: str, workspace_root: str) -> RecordingClient:
+    async def get_client(file_path: str, workspace_root: str, *, sandbox_policy=None) -> RecordingClient:
         client = RecordingClient(workspace_root)
         captured.clients.append(client)
         return client
@@ -150,7 +150,7 @@ def test_lsp_availability_uses_the_same_workspace_as_server_start(tmp_path: Path
         executable_roots.append(workspace_root)
         return "trusted-language-server"
 
-    def sandbox_runner(workspace_root: str):
+    def sandbox_runner(workspace_root: str, sandbox_policy=None):
         sandbox_roots.append(workspace_root)
         return SimpleNamespace(capability=lambda: SimpleNamespace(available=True))
 

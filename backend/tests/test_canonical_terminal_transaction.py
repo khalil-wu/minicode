@@ -452,3 +452,86 @@ def test_query_engine_cas_failure_keeps_resumable_checkpoint(tmp_path: Path, mon
         assert checkpoint.stopped_reason == "timeout"
     finally:
         runtime.close(release_lease=True)
+
+
+@pytest.mark.parametrize("receipt_version", ["new", "legacy", "old"])
+@pytest.mark.parametrize("old_pair", [False, True])
+def test_crash_recovery_uses_receipt_linkage_not_superseded_completed_intent(
+    tmp_path, receipt_version, old_pair,
+):
+    from backend.agent.query_journal import QueryJournalRecorder
+    from backend.agent.state import AgentState
+    from backend.agent.context import ContextBuilder
+
+    journal = ExecutionJournal("replaced-intent", base_dir=tmp_path / "journals")
+    state = AgentState(user_message="inspect", reply="old answer")
+    context = ContextBuilder()
+    context.append_user("inspect")
+    recorder = QueryJournalRecorder(
+        journal=journal, state=state, context_builder=context, turn_kernel=None,
+        metadata={"run_id": "receipt-run", "assistant_message_id": "receipt-message"},
+        conversation_id="receipt-conversation",
+    )
+    recorder.record_terminal_intent(AgentEvent.done(status="completed"))
+    old = recorder.terminal_intent_event
+    if old_pair:
+        journal.append("assistant", {
+            "message_id": "receipt-message", "content": "old answer",
+            "context_snapshot": context.export_snapshot(),
+        })
+        journal.append_terminal(status="completed", extra={
+            "run_id": "receipt-run", "message_id": "receipt-message",
+            "terminal_intent_event_id": old.event_id,
+        })
+    state.reply = "new partial evidence"
+    context.append_assistant("new partial evidence")
+    recorder.record_terminal_intent(AgentEvent.done(status="failed", reason="startup_failed"))
+    new = recorder.terminal_intent_event
+    assert new.payload["supersedes_terminal_intent_event_id"] == old.event_id
+    committed = old if receipt_version == "old" else new
+    journal.append_lifecycle("runtime_terminal_committed", {
+        "run_id": "receipt-run", "status": committed.payload["status"],
+        "terminal_intent_event_id": committed.event_id if receipt_version != "legacy" else "",
+    })
+    projections = journal.unprojected_terminal_projections()
+    assert len(projections) == 1
+    answer = projections[0]["assistant_message"]
+    assert answer["terminal_status"] == committed.payload["status"]
+    assert answer["termination_reason"] == committed.payload["reason"]
+    if receipt_version != "old" or not old_pair:
+        assert projections[0]["source_event_id"] == committed.event_id
+        assert projections[0]["context_snapshot"] == committed.payload["context_snapshot"]
+    journal.append_lifecycle("runtime_terminal_commit_failed", {"run_id": "receipt-run"})
+    assert journal.unprojected_terminal_projections() == []
+
+
+@pytest.mark.parametrize("retry_safe", [False, True])
+def test_synthetic_pair_repair_preserves_unknown_execution_and_manual_policy(tmp_path, retry_safe):
+    from backend.agent.query_journal import QueryJournalRecorder
+    from backend.agent.state import AgentState
+    from backend.agent.context import ContextBuilder
+
+    journal = ExecutionJournal("uncertain-tool", base_dir=tmp_path / "journals")
+    recorder = QueryJournalRecorder(
+        journal=journal, state=AgentState(user_message="execute"), context_builder=ContextBuilder(),
+        turn_kernel=None, metadata={"run_id": "uncertain-run", "assistant_message_id": "answer"},
+        conversation_id="uncertain-conversation",
+    )
+    recorder.record_event(AgentEvent.tool_call(
+        "unknown-call", "custom_side_effect", {}, side_effect_kind="external",
+        idempotent=retry_safe, idempotency_key="exact-key" if retry_safe else "",
+    ))
+    recorder.record_terminal_intent(AgentEvent.done(status="cancelled", reason="consumer_closed"))
+    recorder.record_event(AgentEvent(type="agent.run.completed", data={
+        "run_id": "uncertain-run", "status": "cancelled",
+    }))
+    recorder.record_terminal(AgentEvent.done(status="cancelled", reason="consumer_closed"))
+    terminal = next(event.payload for event in journal.read_events() if event.event_type == "terminal")
+    assert journal.unresolved_tool_uses() == []
+    assert terminal["unresolved_tool_uses"] == []
+    assert terminal["tool_pairs_complete"] is True
+    assert terminal["uncertain_tool_uses"][0]["tool_call_id"] == "unknown-call"
+    assert terminal["manual_recovery_required"] is (not retry_safe)
+    synthetic = next(event.payload for event in journal.read_events() if event.event_type == "tool_result")
+    assert synthetic["synthetic"] is True
+    assert synthetic["status"] == "cancelled"

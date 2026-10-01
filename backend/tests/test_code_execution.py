@@ -287,7 +287,12 @@ def test_yield_wait_and_timer_output_are_incremental_without_restarting_code(tmp
     asyncio.run(scenario())
 
 
-def test_busy_javascript_is_cancelled_without_blocking_the_event_loop(tmp_path):
+def test_busy_javascript_is_cancelled_without_blocking_the_event_loop(tmp_path, monkeypatch):
+    async def no_repository_probe(_root, *, context=None):
+        return ""
+
+    monkeypatch.setattr("backend.agent.context.build_git_status_context_async", no_repository_probe)
+
     async def scenario():
         model = ScriptModel('while (true) {}', yield_time_ms=0, terminate=True)
         started = time.monotonic()

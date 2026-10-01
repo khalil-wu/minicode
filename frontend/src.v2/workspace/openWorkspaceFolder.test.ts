@@ -3,12 +3,15 @@ import { sendChatMessage, resetSendDeduplication } from "../chat/sendChatMessage
 import { sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
 import { openWorkspaceFolder } from "./openWorkspaceFolder";
+import { pushToast } from "../overlays/ToastContainer";
 import { handlePeripheralEvent } from "../chat/peripheralEvents";
 
 const sent: unknown[] = [];
 
 const runtimeMocks = vi.hoisted(() => ({
   pickWorkspaceDirectory: vi.fn(),
+  isDesktop: vi.fn(() => true),
+  showPrompt: vi.fn(),
 }));
 
 vi.mock("../desktop/runtime", () => ({
@@ -16,7 +19,10 @@ vi.mock("../desktop/runtime", () => ({
     pickWorkspaceDirectory: runtimeMocks.pickWorkspaceDirectory,
   }),
   pickWorkspaceDirectory: runtimeMocks.pickWorkspaceDirectory,
+  isDesktop: runtimeMocks.isDesktop,
 }));
+
+vi.mock("../overlays/DialogService", () => ({ showPrompt: runtimeMocks.showPrompt }));
 
 vi.mock("../hooks/useWebSocket", () => ({
   getWebSocket: () => ({
@@ -36,7 +42,7 @@ vi.mock("../protocol/ws-outbox", () => ({
   createClientCommandId: vi.fn(() => "test-client-command-id"),
   sendClientCommand: vi.fn(() => true),
   sendClientCommandAwaitResult: vi.fn(async () => ({ command: "workspace.set", level: "success", message: "Workspace activated.", data: {} })),
-  commandResultSucceeded: vi.fn(() => true),
+  commandResultSucceeded: vi.fn((event: { level?: string }) => event.level !== "error" && event.level !== "failed"),
 }));
 
 describe("openWorkspaceFolder", () => {
@@ -44,6 +50,7 @@ describe("openWorkspaceFolder", () => {
     sent.length = 0;
     resetSendDeduplication();
     vi.clearAllMocks();
+    runtimeMocks.isDesktop.mockReturnValue(true);
     runtimeMocks.pickWorkspaceDirectory.mockResolvedValue("C:\\Desktop\\MiniCode");
     useAppStore.setState({
       appMode: "chat",
@@ -152,4 +159,40 @@ describe("openWorkspaceFolder", () => {
     expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
     expect(useAppStore.getState().conversationId).toBe("conv-project");
   });
+  it("lets browser users select a backend workspace explicitly", async () => {
+    runtimeMocks.isDesktop.mockReturnValue(false);
+    runtimeMocks.showPrompt.mockResolvedValue("  C:/browser-project  ");
+    expect(await openWorkspaceFolder()).toBe("C:/browser-project");
+    expect(runtimeMocks.pickWorkspaceDirectory).not.toHaveBeenCalled();
+    expect(runtimeMocks.showPrompt).toHaveBeenCalledWith(expect.objectContaining({ title: "打开项目" }));
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "workspace.set", path: "C:/browser-project" }), "workspace.set",
+    );
+  });
+
+  it("surfaces a native picker failure instead of treating it as cancellation", async () => {
+    runtimeMocks.pickWorkspaceDirectory.mockRejectedValueOnce(new Error("Picker disconnected"));
+    expect(await openWorkspaceFolder()).toBeNull();
+    expect(pushToast).toHaveBeenCalledWith("Picker disconnected", "error", 5000);
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+  });
+
+  it("does not activate a cancelled or empty browser path", async () => {
+    runtimeMocks.isDesktop.mockReturnValue(false);
+    runtimeMocks.showPrompt.mockResolvedValueOnce(null).mockResolvedValueOnce("   ");
+    expect(await openWorkspaceFolder()).toBeNull();
+    expect(await openWorkspaceFolder()).toBeNull();
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+  });
+
+  it("explains the authoritative desktop trust boundary without bypassing it", async () => {
+    runtimeMocks.isDesktop.mockReturnValue(false);
+    runtimeMocks.showPrompt.mockResolvedValueOnce("C:/untrusted");
+    vi.mocked(sendClientCommandAwaitResult).mockResolvedValueOnce({ command: "workspace.set", level: "error",
+      message: "Workspace is not trusted", data: { error_code: "workspace_untrusted" } } as never);
+    expect(await openWorkspaceFolder()).toBeNull();
+    expect(pushToast).toHaveBeenCalledWith(expect.stringContaining("请先在桌面端打开并信任"), "error", 5000);
+    expect(useAppStore.getState().workingDirectory).toBe("");
+  });
+
 });

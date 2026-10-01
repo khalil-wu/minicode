@@ -34,17 +34,7 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
 
   return (
     <div
-      role="button"
-      tabIndex={0}
       title={attachmentTitle(a)}
-      aria-label={`预览 ${a.name}`}
-      onClick={openPreview}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          openPreview();
-        }
-      }}
       style={{
         position: "relative",
         width: 88,
@@ -57,11 +47,18 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
       }}
       className="shrink-0"
     >
-      <img
-        src={a.dataUrl}
-        alt={a.name}
-        style={{ width: "100%", height: "100%", objectFit: "contain" }}
-      />
+      <button
+        type="button"
+        aria-label={`预览 ${a.name}`}
+        onClick={openPreview}
+        style={{ width: "100%", height: "100%", padding: 0, border: 0, background: "transparent", cursor: "zoom-in" }}
+      >
+        <img
+          src={a.dataUrl}
+          alt={a.name}
+          style={{ width: "100%", height: "100%", objectFit: "contain" }}
+        />
+      </button>
       {a.status === "uploading" && (
         <div
           role="status"
@@ -192,18 +189,6 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
 
   return (
     <div
-      role={canPreview ? "button" : undefined}
-      tabIndex={canPreview ? 0 : undefined}
-      aria-label={canPreview ? `预览 ${a.name}` : undefined}
-      onClick={() => {
-        if (canPreview) openComposerAttachment(a);
-      }}
-      onKeyDown={(event) => {
-        if ((event.key === "Enter" || event.key === " ") && canPreview) {
-          event.preventDefault();
-          event.currentTarget.click();
-        }
-      }}
       title={attachmentTitle(a)}
       style={{
         position: "relative",
@@ -221,6 +206,13 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
         cursor: canPreview ? "pointer" : "default",
       }}
     >
+      <button
+        type="button"
+        disabled={!canPreview}
+        aria-label={`预览 ${a.name}`}
+        onClick={() => openComposerAttachment(a)}
+        style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, padding: 0, border: 0, background: "transparent", color: "inherit", font: "inherit", cursor: canPreview ? "pointer" : "default" }}
+      >
       {a.status === "uploading" ? (
         <LoaderCircle size={14} className="animate-spin shrink-0" aria-hidden="true" />
       ) : problem ? (
@@ -248,6 +240,7 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
           {problem}
         </span>
       )}
+      </button>
       {a.status === "error" && a.localFile ? (
         <button
           type="button"

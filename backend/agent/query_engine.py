@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 from uuid import uuid4
 
-from backend.agent.context import ContextBuilder
+from backend.agent.context import ContextBuilder, clone_context_builder
 from backend.agent.event_envelope import EventEnvelope
 from backend.agent.loop import AgentLoopSessionContext, run_agent_loop
 from backend.agent.message import AgentEvent
@@ -26,6 +26,7 @@ from backend.agent.code_execution_store import CodeExecutionStore
 from backend.agent.runtime import (
     AgentRuntime,
     TerminalCommitError,
+    default_runtime,
 )
 from backend.agent.run_context import RunContext
 from backend.agent.query_recovery import prepare_query_recovery
@@ -36,7 +37,7 @@ from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.turn_input import TurnInputQueue
 from backend.agent.turn_kernel import TurnKernel
 from backend.artifact.store import ArtifactStore
-from backend.async_cleanup import to_thread_cancel_safe
+from backend.async_cleanup import retain_cleanup_task, to_thread_cancel_safe
 from backend.config import AgentSettings, TokenBudget
 from backend.agent.lifecycle_observer import (
     LifecycleObserverOwner,
@@ -68,10 +69,12 @@ class AgentSession:
     lifecycle_observer_factory: LifecycleObserverFactory | None = None
     lifecycle_runtime: Any | None = None
     active_turn: bool = False
+    lifecycle_cleanup_tasks: set[asyncio.Task] = field(default_factory=set)
     active_tool_names: tuple[str, ...] | None = None
     code_store: CodeExecutionStore = field(default_factory=CodeExecutionStore)
     command_session_id: str = field(default_factory=lambda: f"agent-{uuid4().hex}", init=False)
     _owned_commands: BackgroundCommandManager | None = field(default=None, init=False, repr=False)
+    _command_shutdown_task: asyncio.Task | None = field(default=None, init=False, repr=False)
 
     def command_manager(self, session_id: str) -> BackgroundCommandManager:
         if self._owned_commands is None:
@@ -80,8 +83,29 @@ class AgentSession:
 
     async def aclose(self) -> None:
         """Release commands created by this session; injected host services are borrowed."""
+        if self._command_shutdown_task is not None:
+            if self._command_shutdown_task.done():
+                self._command_shutdown_task.result()
+            return
         if self._owned_commands is not None:
-            await self._owned_commands.shutdown()
+            borrowers = {task for task in self.lifecycle_cleanup_tasks if not task.done()}
+            if not borrowers:
+                await self._owned_commands.shutdown()
+                return
+
+            async def shutdown_after_cleanup() -> None:
+                while pending := {
+                    task for task in self.lifecycle_cleanup_tasks
+                    if task is not asyncio.current_task() and not task.done()
+                }:
+                    try:
+                        await asyncio.wait(pending)
+                    except asyncio.CancelledError:
+                        continue
+                await self._owned_commands.shutdown()
+
+            self._command_shutdown_task = asyncio.create_task(shutdown_after_cleanup())
+            retain_cleanup_task(self._command_shutdown_task, self.lifecycle_cleanup_tasks)
 
 
 @dataclass(slots=True)
@@ -245,6 +269,18 @@ class QueryEngine:
                 "Agent session is already processing a prompt. Queue the message "
                 "as steering/follow-up input or wait for the active turn to finish."
             )
+        run_context = submission.runtime.run_context
+        if any(not task.done() for task in session.lifecycle_cleanup_tasks) or (
+            run_context is not None
+            and any(not task.done() for task in run_context.lifecycle_cleanup_tasks)
+        ):
+            raise RuntimeError("Agent session still owns pending lifecycle cleanup. Wait before reusing it.")
+        if run_context is None:
+            run_context = RunContext(lifecycle_cleanup_tasks=session.lifecycle_cleanup_tasks)
+            submission.runtime.run_context = run_context
+        else:
+            session.lifecycle_cleanup_tasks = run_context.lifecycle_cleanup_tasks
+        run_context.lifecycle_cleanup_receipts.clear()
         session.active_turn = True
         active_stream = self._submit_active(submission)
         try:
@@ -295,24 +331,17 @@ class QueryEngine:
             conversation_id=conversation_id,
         )
         terminal = QueryTerminalTransaction(turn_ctx=turn_ctx, journal=journal)
-        lifecycle = LifecycleObserverOwner()
+        lifecycle = LifecycleObserverOwner(run_context=turn_ctx.run_context, llm=session.llm)
         runner_scope = AsyncExitStack()
         terminal_event: AgentEvent | None = None
-        nested_events = None
-        if (session.tool_registry.get_tool("tool_exec") is not None
+        from backend.agent.nested_tool_events import NestedToolEvents
+        nested_events = NestedToolEvents(journal, run_context=turn_ctx.run_context, llm=session.llm)
+        use_nested_stream = (session.tool_registry.get_tool("tool_exec") is not None
                 or turn_ctx.run_context.extension_actions is not None
-                or turn_ctx.skill_manager is not None):
-            from backend.agent.nested_tool_events import NestedToolEvents
-            nested_events = NestedToolEvents(journal)
-            turn_ctx.run_context.publish_nested_event = nested_events.publish
+                or turn_ctx.skill_manager is not None)
+        turn_ctx.run_context.publish_nested_event = nested_events.publish
         async def observe_with_events(operation):
             from backend.agent.nested_tool_events import CallbackCompleted
-            if nested_events is None:
-                error = await operation
-                if error is not None:
-                    await to_thread_cancel_safe(journal.record_event, error)
-                    yield error
-                return
             async with aclosing(nested_events.run_callback(operation)) as updates:
                 async for update in updates:
                     if isinstance(update, CallbackCompleted):
@@ -335,6 +364,8 @@ class QueryEngine:
                     self._publish_system_prompt(turn_ctx),
                     deadline=deadline,
                     cancel_event=turn_ctx.cancel_event,
+                    run_context=turn_ctx.run_context,
+                    llm=session.llm,
                 )
                 lifecycle = LifecycleObserverOwner.create(
                     turn_ctx.lifecycle_observer_factory
@@ -343,11 +374,13 @@ class QueryEngine:
                     user_message=turn_ctx.user_message,
                     metadata=turn_ctx.metadata,
                     run_context=turn_ctx.run_context,
+                    llm=session.llm,
                     images=turn_ctx.state.attachments or None,
                 )
                 await to_thread_cancel_safe(journal.record_turn_started)
                 async with aclosing(observe_with_events(await_preflight(
                     lifecycle.start(), deadline=deadline, cancel_event=turn_ctx.cancel_event,
+                    run_context=turn_ctx.run_context, llm=session.llm,
                 ))) as startup_observer_events:
                     async for observer_event in startup_observer_events:
                         envelope.stamp(observer_event)
@@ -408,12 +441,15 @@ class QueryEngine:
                 # is suspended at a tool event. Close that execution scope
                 # before the exception path commits its terminal state.
                 async with runner_scope:
-                    if nested_events is not None:
+                    if use_nested_stream:
+                        # Transfer the generator close to its producer task. A
+                        # pending anext must never race aclose in this caller.
+                        runner_scope.pop_all()
                         event_stream = await runner_scope.enter_async_context(aclosing(nested_events.stream(runner)))
                     else:
                         event_stream = runner
                     async for event in event_stream:
-                        if nested_events is None:
+                        if not use_nested_stream:
                             await to_thread_cancel_safe(journal.record_event, event)
                         terminal.observe_runner_event(event)
                         if event.type in {
@@ -481,6 +517,7 @@ class QueryEngine:
                 # The stack is empty once the iteration scope has closed it.
                 await runner_scope.aclose()
             finally:
+                nested_events.close()
                 if not terminal.finalized:
                     closed = await terminal.commit(
                         AgentEvent.done(
@@ -495,6 +532,9 @@ class QueryEngine:
                     )
                     if observer_error is not None:
                         await to_thread_cancel_safe(terminal.record_post_commit_event, observer_error)
+                    cleanup = terminal.lifecycle_cleanup_event(closed.terminal_event)
+                    if cleanup is not None:
+                        await to_thread_cancel_safe(terminal.record_post_commit_event, cleanup)
                 if submission.runtime.metadata is not None:
                     submission.runtime.metadata.update(turn_ctx.metadata)
                 if turn_ctx.run_context.extension_actions is not None:
@@ -553,8 +593,13 @@ class QueryEngine:
     async def _publish_system_prompt(turn_ctx: QueryTurnContext) -> None:
         if str(turn_ctx.metadata.get("system_prompt") or "").strip():
             return
+        # The observer starts before canonical tool/hook binding. A preview
+        # may read instructions, but must not execute old InstructionsLoaded
+        # callbacks or consume the real builder's load/compaction reason.
+        preview = clone_context_builder(turn_ctx.context_builder)
+        preview.bind_hook_manager(None)
         rendered_prompt = str(
-            await turn_ctx.context_builder.prepare_system_prompt(turn_ctx.state) or ""
+            preview.base_system_prompt(turn_ctx.state) or ""
         ).strip()
         if rendered_prompt:
             turn_ctx.metadata["system_prompt"] = rendered_prompt
@@ -618,6 +663,11 @@ class QueryEngine:
             journal_error = await to_thread_cancel_safe(terminal.record_post_commit_event, observer_error)
             if journal_error is not None:
                 events.append(journal_error)
+        cleanup = terminal.lifecycle_cleanup_event(result.terminal_event)
+        if cleanup is not None:
+            journal_error = await to_thread_cancel_safe(terminal.record_post_commit_event, cleanup)
+            if journal_error is not None:
+                events.append(journal_error)
         if result.completion_event is not None:
             events.append(result.completion_event)
         events.append(result.terminal_event)
@@ -668,7 +718,7 @@ class QueryEngine:
         run_context.code_store = session.code_store
         runtime_value = run_context.agent_runtime
         if runtime_value is None:
-            runtime_value = AgentRuntime()
+            runtime_value = default_runtime()
         elif not isinstance(runtime_value, AgentRuntime):
             raise TypeError("RunContext agent_runtime must be an AgentRuntime")
         run_context.agent_runtime = runtime_value
@@ -730,6 +780,10 @@ class QueryEngine:
             agent_settings=settings,
             llm=session.llm,
         )
+        # Startup observers need a projection, not repository execution under
+        # the previous turn. The canonical bootstrap binds the new authority
+        # before start_turn/build performs its Git snapshot.
+        ctx.bind_tool_context(None)
         ctx.bind_llm_turn_context(run_context.llm_turn_context)
         session.context_builder = ctx
 
@@ -897,11 +951,22 @@ class QueryEngine:
             completion_event: AgentEvent | None = None
             try:
                 completion_event = turn_kernel.abort_startup(reason="startup_failed")
-            except Exception:
+            except Exception as abort_error:
                 logger.warning(
                     "Unable to commit startup failure after query setup error",
                     exc_info=True,
                 )
+                completion_event = AgentEvent.error(
+                    "MiniCode could not durably commit the startup failure.",
+                    recoverable=False,
+                    error_type="terminal_commit_failed",
+                    error_code="runtime.startup_abort_failed",
+                )
+                completion_event.data.update({
+                    "run_id": turn_kernel.run_record.run_id,
+                    "terminal_commit_failed": True,
+                    "failure_kind": type(abort_error).__name__,
+                })
             raise QuerySetupError(
                 exc,
                 completion_event=completion_event,

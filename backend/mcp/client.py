@@ -8,6 +8,7 @@ ownership and product projections.
 from __future__ import annotations
 
 import asyncio
+import copy
 import itertools
 import json
 import logging
@@ -63,6 +64,35 @@ _MAX_MCP_RESPONSE_BYTES = 8 * 1024 * 1024
 # MiniCode's own contract with a user-configured `headers_helper`: the helper is
 # told which server it is being asked to authenticate.
 _HEADERS_HELPER_ENV = ("MINICODE_MCP_SERVER_NAME", "MINICODE_MCP_SERVER_URL")
+
+
+def _sanitize_tool_schema_descriptions(schema: Any) -> None:
+    """Project prose only; schema constraints and data literals are wire values."""
+    if isinstance(schema, list):
+        for child in schema:
+            _sanitize_tool_schema_descriptions(child)
+        return
+    if not isinstance(schema, dict):
+        return
+    for key, value in schema.items():
+        if sanitize_untrusted_unicode(key) != key:
+            raise UnsafeUnicodeMetadataKey("schema key contains unsafe Unicode")
+        if key in {"title", "description", "$comment"} and isinstance(value, str):
+            schema[key] = sanitize_untrusted_unicode(value)
+        elif key in {
+            "properties", "patternProperties", "$defs", "definitions",
+            "dependentSchemas", "dependencies",
+        } and isinstance(value, dict):
+            for name, child in value.items():
+                if sanitize_untrusted_unicode(name) != name:
+                    raise UnsafeUnicodeMetadataKey("schema identifier contains unsafe Unicode")
+                _sanitize_tool_schema_descriptions(child)
+        elif key in {
+            "items", "prefixItems", "additionalItems", "additionalProperties",
+            "unevaluatedItems", "unevaluatedProperties", "contains", "propertyNames",
+            "allOf", "anyOf", "oneOf", "not", "if", "then", "else", "contentSchema",
+        }:
+            _sanitize_tool_schema_descriptions(value)
 
 
 class _LifecycleClientSession(ClientSession):
@@ -839,10 +869,8 @@ class MCPClient:
                     f"MCP server '{self.server_name}' returned a non-object schema for tool '{name}'"
                 )
             try:
-                input_schema = sanitize_untrusted_metadata(
-                    raw_schema,
-                    reject_unsafe_keys=True,
-                )
+                input_schema = copy.deepcopy(raw_schema)
+                _sanitize_tool_schema_descriptions(input_schema)
             except UnsafeUnicodeMetadataKey as exc:
                 raise ConnectionError(
                     f"MCP server '{self.server_name}' returned unsafe schema metadata for tool '{name}'"

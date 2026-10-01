@@ -314,7 +314,7 @@ class ToolSearchTool(BaseTool):
     description = (
         "Search deferred tools that are not directly listed in the current tool set. "
         "When to use: the directly listed tools do not cover a needed capability such as browser/desktop control, document work, connector actions, optional MCP tools, or specialized workflows. "
-        "Use 'select:tool_name' for exact tools. Matching tools are activated for the next iteration; in code_mode_only, call them through tool_exec."
+        "Use 'select:tool_name' for exact tools. Matching tools are activated for the next iteration; in code-only mode, call them through tool_exec."
     )
 
     def model_description(self) -> str:
@@ -323,7 +323,7 @@ class ToolSearchTool(BaseTool):
             "<available-deferred-tools>. Until fetched, only each tool's name is "
             "known and it cannot be invoked. Use 'select:ToolName' for an exact "
             "tool. Selected tools become available on the next iteration; "
-            "in code_mode_only, call them through tool_exec."
+            "in code-only mode, call them through tool_exec."
         )
 
     def model_schema(self) -> ToolSchema:

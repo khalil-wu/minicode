@@ -15,6 +15,7 @@ from backend.async_cleanup import (
     await_with_deadline,
     cancel_and_drain_receipt,
     cancel_and_retire,
+    to_thread_cancel_safe,
 )
 from backend.permissions.profiles import sandbox_capability_for_context
 from backend.terminal.manager import BackgroundCommand
@@ -42,6 +43,7 @@ class SessionLifecycle:
         self._sandbox_capability_task: asyncio.Task[Any] | None = None
         self._sandbox_capability_generation = 0
         self._task_runtime_update_task: asyncio.Task[Any] | None = None
+        self.is_shutting_down = False
 
     @property
     def workspace_context(self) -> Any | None:
@@ -462,11 +464,27 @@ class SessionLifecycle:
         from backend.services.conversation_payload_service import create_isolated_worktree_binding
 
         source_workspace_root = self.workspace_root_for_conversation(conversation)
-        result = create_isolated_worktree_binding(
-            conversation,
-            current_workspace_root=source_workspace_root,
-            main_worktree_root=self._session.main_worktree_root,
-        )
+
+        def create_and_bind() -> tuple[Any, Any]:
+            result = create_isolated_worktree_binding(
+                conversation,
+                current_workspace_root=source_workspace_root,
+                main_worktree_root=self._session.main_worktree_root,
+            )
+            updated = conversation
+            if result.created:
+                updated = self._session.conversation_repo.update_workspace_binding(
+                    conversation.id,
+                    workspace_root=result.workspace_root,
+                    git_branch=result.git_branch,
+                    worktree_path=result.worktree_path,
+                    git_isolated=True,
+                )
+            return result, updated
+
+        # Cancellation cannot leave a created checkout without its durable
+        # conversation owner, or release the lifecycle lock while it is written.
+        result, updated = await to_thread_cancel_safe(create_and_bind)
         if result.error_event is not None:
             from backend.ws.command_results import emit_command_error
             await emit_command_error(self._session, "conversation.create", result.error_event)
@@ -488,13 +506,6 @@ class SessionLifecycle:
         if not result.created:
             return conversation
 
-        updated = self._session.conversation_repo.update_workspace_binding(
-            conversation.id,
-            workspace_root=result.workspace_root,
-            git_branch=result.git_branch,
-            worktree_path=result.worktree_path,
-            git_isolated=True,
-        )
         if result.notice_event is not None:
             result.notice_event.data.setdefault(
                 "conversation_id",
@@ -1112,9 +1123,13 @@ class SessionLifecycle:
 
     async def shutdown(self, *, reason: str = "session_shutdown") -> None:
         """Cancel and drain every resource owned by this websocket session."""
+        self.is_shutting_down = True
         self._session.mark_disconnected()
         self._session.run_manager.stop_notification_wake_intake()
-        self._session.run_manager.clear_all_user_message_queues()
+        # Retirement stops execution, not admitted user work. Follow-ups,
+        # inflight dispatches and unacknowledged steers are already durable;
+        # cancellation cleanup restores the latter and closing the owner lease
+        # below lets the next session recover them.
         self._workspace_generation += 1
         self._sandbox_capability_generation += 1
         try:

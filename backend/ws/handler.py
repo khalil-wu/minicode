@@ -25,7 +25,7 @@ from backend.async_cleanup import (
 from backend.attachments.store import AttachmentStore
 from backend.artifact.store import ArtifactStore
 from backend.checkpoint import CheckpointManager
-from backend.commands.registry import CommandRegistry
+from backend.commands.registry import CommandRegistry, slash_conversation_id
 from backend.config import (
     AppConfig,
     get_available_models,
@@ -53,6 +53,7 @@ from backend.tools.registry import ToolRegistry
 from backend.ws.agent_runner import (
     SessionAgentRunnerMixin,
     _TURN_MESSAGE_SCOPED_EVENT_TYPES,
+    _client_assistant_message_id,
     _llm_adapter_cache_key,
 )
 from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
@@ -627,6 +628,33 @@ class WebSocketSession(
             "sandbox_status": sandbox_status,
         }
 
+    def runtime_toolset_policy(self, registry: ToolRegistry):
+        """Project the admitted tool surface, or derive the next idle surface."""
+        from backend.agent.tool_schema_derivation import effective_toolset_policy, requested_tool_mode
+        from backend.tools.toolsets import ToolsetPolicy
+
+        context = self.run_manager.context_for(self.active_conversation_id or "")
+        if context is not None and context.toolset_policy is not None:
+            return context.toolset_policy
+        generation = self._extension_runtime_states.get(self.active_conversation_id, {})
+        selection = generation.get("active_tool_names")
+        base = ToolsetPolicy.default()
+        if selection is not None:
+            base = base.with_active_tool_selection(selection)
+        return effective_toolset_policy(
+            base_policy=base,
+            tool_registry=registry,
+            disabled_tools=set(),
+            requires_explicit_workspace=True,
+            workspace_root=self.session_lifecycle.current_workspace_root(),
+            permission_mode=self.permission_context.mode,
+            tool_mode="code_mode" if selection is not None else requested_tool_mode(
+                default_code_mode_only=self.config.agent.code_mode_only,
+                model_execution=None,
+                llm=self.llm,
+            ),
+        )
+
     def runtime_capability_summary(
         self,
         *,
@@ -648,6 +676,7 @@ class WebSocketSession(
             summary = registry.build_capability_summary(
                 permission_checker=self.permission_checker,
                 permission_context=self.permission_context,
+                toolset_policy=self.runtime_toolset_policy(registry),
             )
         except Exception as exc:
             logger.debug("session %s capability summary failed: %s", self.session_id, exc)
@@ -706,6 +735,7 @@ class WebSocketSession(
             snapshot = registry.build_snapshot(
                 permission_checker=self.permission_checker,
                 permission_context=self.permission_context,
+                toolset_policy=self.runtime_toolset_policy(registry),
                 mcp_registry_version=self._mcp_registry_version_snapshot,
             )
         except Exception as exc:
@@ -903,6 +933,11 @@ class WebSocketSession(
         run_cancel_event = asyncio.Event()
         run_metadata = dict(metadata or {})
         run_metadata.setdefault("user_message_id", f"user_{uuid.uuid4().hex}")
+        assistant_message_id = (
+            _client_assistant_message_id(run_metadata)
+            or f"assistant_{uuid.uuid4().hex[:8]}"
+        )
+        run_metadata["assistant_message_id"] = assistant_message_id
         admission_restored = bool(run_metadata.get("_turn_admission_restored"))
         admission_required = not bool(run_metadata.get("_parent_notification_only"))
         admission_future: asyncio.Future[None] | None = None
@@ -1012,6 +1047,7 @@ class WebSocketSession(
                     )
                     commit_error.data.update({
                         "conversation_id": target_conversation_id,
+                        "message_id": assistant_message_id,
                         "run_id": run_id,
                         "terminal_commit_failed": True,
                     })
@@ -1035,6 +1071,7 @@ class WebSocketSession(
                     error_type="runtime",
                 )
                 error_event.data["conversation_id"] = target_conversation_id
+                error_event.data["message_id"] = assistant_message_id
                 await self.send_event(error_event)
             finally:
                 # Terminal delivery for a durably admitted run belongs to
@@ -1100,33 +1137,29 @@ class WebSocketSession(
                             reason=terminal_reason or terminal_status,
                         )
                         done_event.data["conversation_id"] = target_conversation_id
-                        stream_state = getattr(self, "_conversation_streams", {}).get(
-                            target_conversation_id
-                        )
-                        message_id = str(
-                            (stream_state or {}).get("message_id")
-                            or run_metadata.get("assistant_message_id")
-                            or ""
-                        ).strip()
-                        if message_id:
-                            done_event.data["message_id"] = message_id
+                        done_event.data["message_id"] = assistant_message_id
                         await self.send_event(done_event)
                         done_delivered = True
 
                         mark_terminal = getattr(self.run_manager, "mark_terminal_status", None)
-                        if callable(mark_terminal):
+                        owns_current_run = (
+                            self.run_manager.run_task_ids.get(target_conversation_id)
+                            == str(managed_run.id)
+                        )
+                        if owns_current_run and callable(mark_terminal):
                             mark_terminal(target_conversation_id, terminal_status)
                         mark_delivery = getattr(self.run_manager, "mark_delivery_complete", None)
                         if callable(mark_delivery):
                             mark_delivery(target_conversation_id, str(managed_run.id))
 
-                        await self.send_event(
-                            AgentEvent.session_state_changed(
-                                state="idle",
-                                conversation_id=target_conversation_id,
-                                reason=terminal_reason or terminal_status,
+                        if owns_current_run:
+                            await self.send_event(
+                                AgentEvent.session_state_changed(
+                                    state="idle",
+                                    conversation_id=target_conversation_id,
+                                    reason=terminal_reason or terminal_status,
+                                )
                             )
-                        )
                     except Exception:
                         logging.exception(
                             "Failed to emit fallback terminal events for conversation %s",
@@ -1169,8 +1202,10 @@ class WebSocketSession(
     def schedule_next_queued_user_message(self, conversation_id: str) -> None:
         if (
             not conversation_id
+            or self.session_lifecycle.is_shutting_down
             or self.running_agent_task_for(conversation_id)
             or self.run_manager.is_queue_steering(conversation_id)
+            or self.run_manager.has_pending_lifecycle_cleanup(conversation_id)
         ):
             return
         if not self.run_manager.begin_queue_dispatch(conversation_id):
@@ -1458,7 +1493,7 @@ class WebSocketSession(
         if event.type == "system_notice" and not str(
             event.data.get("conversation_id") or ""
         ).strip():
-            active_conversation_id = str(self.active_conversation_id or "").strip()
+            active_conversation_id = str(slash_conversation_id() or self.active_conversation_id or "").strip()
             if active_conversation_id:
                 event.data["conversation_id"] = active_conversation_id
         if event.type == "command.result":
@@ -1470,6 +1505,7 @@ class WebSocketSession(
             conversation_id = str(
                 event.data.get("conversation_id")
                 or result_data.get("conversation_id")
+                or slash_conversation_id()
                 or self.active_conversation_id
                 or ""
             ).strip()

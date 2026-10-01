@@ -485,8 +485,8 @@ describe("SubagentsTab", () => {
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
     fireEvent.click(screen.getByRole("button", { name: "读取了文件并搜索了内容并运行了命令并编辑了文件" }));
 
-    const readCell = screen.getAllByText("Read", { selector: ".activity-cell-name" })[0]?.closest(".activity-cell");
-    const searchCell = screen.getAllByText("Search", { selector: ".activity-cell-name" })[0]?.closest(".activity-cell");
+    const readCell = screen.getAllByText("读取文件", { selector: ".activity-cell-name" })[0]?.closest(".activity-cell");
+    const searchCell = screen.getAllByText("搜索文件", { selector: ".activity-cell-name" })[0]?.closest(".activity-cell");
     expect(readCell).toBeTruthy();
     expect(searchCell).toBeTruthy();
     fireEvent.click(within(readCell as HTMLElement).getByRole("button", { name: "展开活动详情" }));

@@ -570,12 +570,13 @@ class ConversationRepository:
             # longer recover the record, so a crash cannot expose a partially
             # unlinked conversation or resurrect a legacy fallback.
             try:
-                self._advance_store_revision_unlocked()
-                self._safe_write_text(
-                    manifest_path,
-                    json.dumps(tombstone, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+                with self._store_lock():
+                    self._advance_store_revision_unlocked()
+                    self._safe_write_text(
+                        manifest_path,
+                        json.dumps(tombstone, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
             except Exception:
                 published = self._read_manifest(conversation_id, log_errors=False)
                 if not (
@@ -1296,11 +1297,12 @@ class ConversationRepository:
             payload.pop("partial_projection", None)
             payload["projection_log"] = {"generation": generation, "bytes": position, "revision": revision}
             payload["projection_revision"] = revision
-        self._advance_store_revision_unlocked()
-        self._safe_write_text(
-            self._manifest_path_for(record.id),
-            json.dumps(payload, ensure_ascii=False, indent=2),
-        )
+        with self._store_lock():
+            self._advance_store_revision_unlocked()
+            self._safe_write_text(
+                self._manifest_path_for(record.id),
+                json.dumps(payload, ensure_ascii=False, indent=2),
+            )
         record.revision = revision
         record.content_revision = metadata["content_revision"]
         record.content_updated_at = metadata["content_updated_at"]
@@ -1498,17 +1500,20 @@ class ConversationRepository:
         # instead of treating the fallback as a stale detached writer.  Any
         # other revision mismatch remains a real write conflict.
         readable_generations: list[int] = []
-        generation_errors: list[tuple[int, ConversationStorageCorruptError]] = []
+        generation_errors: list[tuple[int, Exception]] = []
         cached = self._record_cache.get(record.id)
         cache_is_current = (
             cached is not None and cached.revision == current_revision
             and self._record_cache_stamps.get(record.id) == self._record_disk_stamp(record.id)
         )
-        for generation in known_generations:
+        readable_record = None
+        for index, generation in enumerate(known_generations):
             try:
-                if not (generation == current_generation and cache_is_current):
-                    self._read_generation(record.id, generation, log_errors=False)
-            except ConversationStorageCorruptError as exc:
+                readable_record = (
+                    cached if index == 0 and cache_is_current else
+                    self._read_committed_generation(record.id, manifest, index, log_errors=False)
+                )
+            except (ConversationStorageCorruptError, ValueError, TypeError, KeyError) as exc:
                 generation_errors.append((generation, exc))
                 logger.warning(
                     "Conversation %s generation %s is unreadable while committing: %s",
@@ -1533,12 +1538,7 @@ class ConversationRepository:
         current_generation_corrupt = bool(
             current_generation and current_generation not in readable_generations
         )
-        previous_metadata = (manifest or {}).get("previous_metadata")
-        recovered_revision = (
-            int(previous_metadata["revision"])
-            if isinstance(previous_metadata, dict)
-            else readable_generations[0] if readable_generations else 0
-        )
+        recovered_revision = readable_record.revision if readable_record is not None else 0
         if expected_revision != current_revision and not (
             current_generation_corrupt and expected_revision == recovered_revision
         ):
@@ -1580,7 +1580,8 @@ class ConversationRepository:
         record.revision = next_generation
         # Advance before publishing the record. A crash can leave a harmless
         # gap in the global inventory sequence, but can never publish a record
-        # whose authoritative list revision moved backwards.
+        # whose authoritative list revision moved backwards. Inventory readers
+        # share the store lock across the revision and manifest publication.
         manifest_payload = {
             "schema": _STORAGE_MANIFEST_SCHEMA,
             "version": _STORAGE_MANIFEST_VERSION,
@@ -1608,13 +1609,14 @@ class ConversationRepository:
                 manifest_payload["previous_projection_log"] = previous_log
         manifest_path = self._manifest_path_for(record.id)
         try:
-            self._advance_store_revision_unlocked()
             self._write_generation(record, next_generation)
-            self._safe_write_text(
-                manifest_path,
-                json.dumps(manifest_payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            with self._store_lock():
+                self._advance_store_revision_unlocked()
+                self._safe_write_text(
+                    manifest_path,
+                    json.dumps(manifest_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
         except Exception:
             # Keep detached callers retryable after a pre-commit failure. If
             # the atomic manifest replacement actually became authoritative
@@ -1843,6 +1845,33 @@ class ConversationRepository:
             return self._load_committed_record(conversation_id)
         return self._load_legacy_record(conversation_id)
 
+    def _read_committed_generation(
+        self, conversation_id: str, manifest: dict[str, Any], index: int,
+        *, log_errors: bool = True,
+    ) -> ConversationRecord:
+        """Read the exact checkpoint and overlays used by both recovery and CAS."""
+        generation = self._manifest_generations(manifest)[index]
+        record = self._read_generation(conversation_id, generation, log_errors=log_errors)
+        metadata = manifest.get("metadata" if index == 0 else "previous_metadata")
+        if isinstance(metadata, dict):
+            record = ConversationRecord.from_dict({
+                **metadata,
+                "transcript": record.transcript,
+                "context_snapshot": record.context_snapshot,
+            })
+        projection = self._load_partial_projection(conversation_id, manifest, previous=index > 0)
+        if projection:
+            record.context_snapshot = apply_context_snapshot_delta(record.context_snapshot, projection["context_delta"])
+            if projection.get("assistant_message") is not None:
+                message = project_public_transcript_message(projection["assistant_message"])
+                found = next((i for i, item in enumerate(record.transcript) if item.get("id") == message.get("id")), None)
+                if found is None:
+                    record.transcript.append(message)
+                else:
+                    record.transcript[found] = message
+                record.message_count = len(record.transcript)
+        return record
+
     def _load_committed_record(self, conversation_id: str) -> ConversationRecord | None:
         # A reader can race two rapid commits without taking the writer lock.
         # Re-reading the atomic manifest once lets it move to the newly
@@ -1856,29 +1885,9 @@ class ConversationRepository:
                 return None
             for index, generation in enumerate(self._manifest_generations(manifest)):
                 try:
-                    record = self._read_generation(
-                        conversation_id,
-                        generation,
-                        log_errors=attempt > 0,
+                    record = self._read_committed_generation(
+                        conversation_id, manifest, index, log_errors=attempt > 0,
                     )
-                    metadata = manifest.get("metadata" if index == 0 else "previous_metadata")
-                    if isinstance(metadata, dict):
-                        record = ConversationRecord.from_dict({
-                            **metadata,
-                            "transcript": record.transcript,
-                            "context_snapshot": record.context_snapshot,
-                        })
-                    projection = self._load_partial_projection(conversation_id, manifest, previous=index > 0)
-                    if projection:
-                        record.context_snapshot = apply_context_snapshot_delta(record.context_snapshot, projection["context_delta"])
-                        if projection.get("assistant_message") is not None:
-                            message = project_public_transcript_message(projection["assistant_message"])
-                            found = next((i for i, item in enumerate(record.transcript) if item.get("id") == message.get("id")), None)
-                            if found is None:
-                                record.transcript.append(message)
-                            else:
-                                record.transcript[found] = message
-                            record.message_count = len(record.transcript)
                 except (ConversationStorageCorruptError, ValueError, TypeError, KeyError) as exc:
                     generation_errors.append(str(exc))
                     continue

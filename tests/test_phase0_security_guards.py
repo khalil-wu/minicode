@@ -13,7 +13,7 @@ from backend.attachments.store import AttachmentStore
 from backend.config import PermissionSettings
 from backend.config import _parse_env_assignment
 from backend.permissions.checker import PermissionChecker, check_denial_reason, check_permission_level
-from backend.runtime_env import sanitized_subprocess_env
+from backend.runtime_env import sanitized_subprocess_env, shell_subprocess_env
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.ws.manager import SESSION_ID_PATTERN
 
@@ -226,6 +226,18 @@ def test_sanitized_subprocess_env_drops_provider_secrets(monkeypatch) -> None:
     assert "OPENAI_API_KEY" not in env
     assert "ANTHROPIC_API_KEY" not in env
     assert "CUSTOM_ACCESS_TOKEN" not in env
+
+
+def test_evaluation_credentials_do_not_reach_model_shell(monkeypatch) -> None:
+    monkeypatch.setenv("MINICODE_EVAL_API_KEY", "eval-secret")
+    monkeypatch.setenv("MINICODE_AUDIT_API_KEY", "audit-secret")
+    monkeypatch.setenv("MINICODE_EVAL_MODEL", "glm-5.3")
+
+    env = shell_subprocess_env()
+
+    assert "MINICODE_EVAL_API_KEY" not in env
+    assert "MINICODE_AUDIT_API_KEY" not in env
+    assert env["MINICODE_EVAL_MODEL"] == "glm-5.3"
 
 
 def test_artifact_ids_cannot_escape_storage_directory(tmp_path: Path) -> None:
@@ -580,3 +592,52 @@ def test_backend_entrypoint_disables_protocol_websocket_ping_by_default(monkeypa
     assert "MINICODE_WS_PING_INTERVAL_SECONDS" in source
     assert "ws_ping_interval=ws_ping_interval" in source
     assert "ws_ping_interval" in inspect.signature(uvicorn.run).parameters
+
+
+@pytest.mark.parametrize("channel", ["text", "image"])
+@pytest.mark.parametrize("failure_at", [1, 2])
+def test_vault_failure_propagates_before_runtime_environment_publication(monkeypatch, channel, failure_at):
+    import os
+    import backend.config_providers as providers
+    from backend.config_helpers import _scoped_vault_names, _image_scoped_vault_names
+    url = "https://fixture-save.invalid/v1"
+    names = _scoped_vault_names("custom", url) if channel == "text" else _image_scoped_vault_names("custom", url)
+    if channel == "text":
+        names = ("CUSTOM_API_KEY", *names)
+    for name in names:
+        monkeypatch.setenv(name, "original")
+    scopes = providers._RUNTIME_API_KEY_SCOPES if channel == "text" else providers._RUNTIME_IMAGE_API_KEY_SCOPES
+    monkeypatch.setitem(scopes, "custom", "original-scope")
+    calls = []
+    class Vault:
+        def set(self, *args, **kwargs):
+            calls.append(args)
+            assert all(os.getenv(name) == "original" for name in names)
+            if len(calls) == failure_at:
+                raise OSError("fixture vault persistence failure")
+    monkeypatch.setattr("backend.vault.EnvVault", Vault)
+    setter = providers._set_runtime_api_key if channel == "text" else providers._set_runtime_image_api_key
+    with pytest.raises(OSError, match="persistence failure"):
+        setter("custom", "replacement", url)
+    assert all(os.getenv(name) == "original" for name in names)
+    assert scopes["custom"] == "original-scope"
+
+
+def test_settings_save_does_not_report_success_after_vault_failure(monkeypatch, tmp_path):
+    from backend.config import save_llm_settings
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("backend.config_helpers.SETTINGS_FILE", settings)
+    class Vault:
+        def get(self, name):
+            return None
+        def list_names(self):
+            return []
+        def set(self, *args, **kwargs):
+            raise OSError("fixture vault unavailable")
+    monkeypatch.setattr("backend.vault.EnvVault", Vault)
+    with pytest.raises(OSError, match="vault unavailable"):
+        save_llm_settings({"provider": "custom", "custom": {
+            "api_key": "fixture", "base_url": "https://fixture-save.invalid/v1", "model": "fixture",
+        }})
+    assert settings.read_text(encoding="utf-8") == "{}"

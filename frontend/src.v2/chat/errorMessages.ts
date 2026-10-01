@@ -113,7 +113,7 @@ export function normalizeAgentErrorMessage(raw: string, options: NormalizeAgentE
   if (/provider_error_type=model|model_not_found|invalid_model|model does not exist|model\s+[A-Za-z0-9._:/-]+\s+does not exist|model .*not found|invalid model|unknown model|no such model/i.test(text)) {
     return modelConfigMessage(text, options);
   }
-  if (/provider_error_type=protocol|provider_error_code=convert_request_failed|convert_request_failed/i.test(text)) {
+  if (/provider_error_type=protocol|provider_error_code=convert_request_failed|convert_request_failed|tool_schema_invalid/i.test(text)) {
     return PROTOCOL_MESSAGE + suffix;
   }
   if (/timeout|timed out|connection reset|connection refused|connection error|bad gateway|service unavailable|gateway timeout|provider_error_type=network|500|503|502|504/i.test(text)) {

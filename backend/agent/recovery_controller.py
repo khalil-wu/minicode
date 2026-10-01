@@ -25,6 +25,7 @@ class RecoveryProfile:
     recoverable: bool
     provider_error_type: str = ""
     allow_partial_text_commit: bool = True
+    error_code: str = ""
 
     @classmethod
     def stream_interrupted(
@@ -36,6 +37,7 @@ class RecoveryProfile:
         recoverable: bool,
         provider_error_type: str = "",
         saw_partial_tool_call: bool = False,
+        error_code: str = "",
     ) -> "RecoveryProfile":
         return cls(
             partial_stopped_reason="partial_stream_error",
@@ -45,6 +47,7 @@ class RecoveryProfile:
             recoverable=recoverable,
             provider_error_type=provider_error_type,
             allow_partial_text_commit=not saw_partial_tool_call,
+            error_code=error_code,
         )
 
     @classmethod
@@ -130,6 +133,14 @@ class RecoveryController:
             last_assistant_message=full_text,
         )
 
+        yield AgentEvent.error(
+            message=profile.error_message,
+            recoverable=profile.recoverable,
+            error_type=profile.error_type,
+            error_code=profile.error_code,
+            provider_error_type=profile.provider_error_type,
+        )
+
         if (
             profile.allow_partial_text_commit
             and full_text.strip()
@@ -156,11 +167,5 @@ class RecoveryController:
             )
             return
 
-        yield AgentEvent.error(
-            message=profile.error_message,
-            recoverable=profile.recoverable,
-            error_type=profile.error_type,
-            provider_error_type=profile.provider_error_type,
-        )
         state.stopped_reason = profile.failed_stopped_reason
         state.terminal_status = "failed"

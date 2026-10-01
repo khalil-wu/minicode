@@ -8,7 +8,10 @@ from dataclasses import asdict, dataclass
 
 from backend.agent.message import AgentEvent
 from backend.agent.query_journal import QueryJournalRecorder
+from backend.agent.run_context import RunContext
 from backend.async_cleanup import to_thread_cancel_safe
+
+_CALLBACK_DRAIN_TIMEOUT_SECONDS = 2.5
 
 
 async def publish_tool_event(run_context, event, source):
@@ -34,8 +37,10 @@ class CallbackCompleted:
 
 
 class NestedToolEvents:
-    def __init__(self, journal: QueryJournalRecorder):
+    def __init__(self, journal: QueryJournalRecorder, *, run_context: RunContext, llm=None):
         self.journal = journal
+        self.run_context = run_context
+        self.llm = llm
         self._queue: asyncio.Queue[_QueuedEvent | BaseException | None] = asyncio.Queue()
         self._closed = False
 
@@ -83,8 +88,19 @@ class NestedToolEvents:
                     await asyncio.gather(next_event, return_exceptions=True)
             yield CallbackCompleted(task.result())
         finally:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            if not task.done():
+                self.close()
+                await self.run_context.drain_lifecycle_task(
+                    task, timeout=_CALLBACK_DRAIN_TIMEOUT_SECONDS,
+                    label="query lifecycle callback", llm=self.llm,
+                )
+
+    def close(self) -> None:
+        self._closed = True
+        while not self._queue.empty():
+            queued = self._queue.get_nowait()
+            if isinstance(queued, _QueuedEvent) and not queued.acknowledged.done():
+                queued.acknowledged.cancel()
 
     async def stream(self, runner: AsyncIterator[AgentEvent]) -> AsyncIterator[AgentEvent]:
         async def produce():
@@ -113,10 +129,8 @@ class NestedToolEvents:
                     if not queued.acknowledged.done():
                         queued.acknowledged.set_result(None)
         finally:
-            self._closed = True
-            producer.cancel()
-            while not self._queue.empty():
-                queued = self._queue.get_nowait()
-                if isinstance(queued, _QueuedEvent):
-                    queued.acknowledged.cancel()
-            await asyncio.gather(producer, return_exceptions=True)
+            self.close()
+            await self.run_context.drain_lifecycle_task(
+                producer, timeout=_CALLBACK_DRAIN_TIMEOUT_SECONDS,
+                label="query tool event producer", llm=self.llm,
+            )

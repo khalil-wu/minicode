@@ -179,6 +179,7 @@ class QueryTerminalTransaction:
         )
 
         journal_errors: list[BaseException] = []
+        terminal_event.data.update(self.turn_ctx.run_context.lifecycle_cleanup_evidence())
         try:
             await to_thread_cancel_safe(self.journal.record_terminal_intent, terminal_event)
         except Exception as exc:
@@ -234,6 +235,18 @@ class QueryTerminalTransaction:
             evidence_events=tuple(evidence_events),
         )
         return self._result
+
+    def lifecycle_cleanup_event(self, terminal_event: AgentEvent) -> AgentEvent | None:
+        owner = self.turn_ctx.run_context
+        evidence = owner.lifecycle_cleanup_evidence()
+        terminal_event.data.update(evidence)
+        if not evidence["lifecycle_cleanup_receipts"] and not evidence["lifecycle_cleanup_pending_count"]:
+            return None
+        return AgentEvent(type="agent.lifecycle.cleanup", data={
+            "run_id": str(self.turn_ctx.metadata.get("run_id") or ""),
+            "conversation_id": self.journal.conversation_id,
+            **evidence,
+        })
 
     def record_post_commit_event(self, event: AgentEvent) -> AgentEvent | None:
         try:

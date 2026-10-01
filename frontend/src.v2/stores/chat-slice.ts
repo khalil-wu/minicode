@@ -1259,8 +1259,9 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   finishStreaming: (conversationId, usage, terminalStatus = "completed", messageId, failureMessage, failureRecoverable, durationMs, terminationReason) => {
     set((s) => {
       const finishedAt = Date.now();
-      const normalizedFailureMessage = terminalStatus === "failed" ? String(failureMessage || "").trim() : "";
-      const normalizedFailureRecoverable = terminalStatus === "failed" && typeof failureRecoverable === "boolean"
+      const retainFailure = terminalStatus === "failed" || terminalStatus === "partial";
+      const normalizedFailureMessage = retainFailure ? String(failureMessage || "").trim() : "";
+      const normalizedFailureRecoverable = retainFailure && typeof failureRecoverable === "boolean"
         ? failureRecoverable
         : undefined;
       const targetId = conversationId || s.conversationId || undefined;
@@ -1276,8 +1277,8 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
                 terminalStatus,
                 terminationReason: terminationReason || message.terminationReason,
                 durationMs: durationMs ?? message.durationMs,
-                failureMessage: terminalStatus === "failed" ? normalizedFailureMessage || message.failureMessage : undefined,
-                failureRecoverable: terminalStatus === "failed" ? normalizedFailureRecoverable ?? message.failureRecoverable : undefined,
+                failureMessage: retainFailure ? normalizedFailureMessage || message.failureMessage : undefined,
+                failureRecoverable: retainFailure ? normalizedFailureRecoverable ?? message.failureRecoverable : undefined,
               }
             : message));
         }
@@ -1362,8 +1363,8 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
               isThinkingStreaming: false,
               terminalStatus,
               terminationReason: String(terminationReason || "").trim() || undefined,
-              failureMessage: normalizedFailureMessage || undefined,
-              failureRecoverable: normalizedFailureRecoverable,
+              failureMessage: normalizedFailureMessage || (retainFailure ? m.failureMessage : undefined),
+              failureRecoverable: normalizedFailureRecoverable ?? (retainFailure ? m.failureRecoverable : undefined),
               usage,
               completedAt: finishedAt,
               durationMs: Number.isFinite(durationMs) ? Math.max(0, Number(durationMs)) : undefined,

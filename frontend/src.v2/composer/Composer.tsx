@@ -28,7 +28,7 @@ import {
   syncRuntimeSlashPanelForDraft,
 } from "../lib/runtime-commands";
 import { buildInterruptCommand, hasInterruptFence } from "../lib/interrupt-command";
-import { workspaceFilePathsEqual } from "../lib/workspace-path";
+import { workspaceFilePathsEqual, workspaceRootsEqual } from "../lib/workspace-path";
 
 let initialCatalogRequested = false;
 
@@ -74,6 +74,15 @@ const buildOutgoingContext = async (requestedConversationId: string) => {
       "error",
       4500,
     );
+    return null;
+  }
+  const currentState = useAppStore.getState();
+  if (
+    !targetConversationId
+    && (currentState.conversationId !== stateAtSend.conversationId
+      || !workspaceRootsEqual(currentState.workingDirectory, stateAtSend.workingDirectory))
+  ) {
+    pushToast("会话或工作区已切换，本次发送已取消；请回到原输入后重试。", "warning", 4500);
     return null;
   }
   if (nativeContext.notes) {
@@ -784,7 +793,7 @@ const normalizeMentionFilter = (value: string): string => {
 };
 
 const getMentionMatch = (line: string): RegExpMatchArray | null => {
-  const match = line.match(/(?:^|\s)(@[A-Za-z0-9_./\\:#-]*)$/);
+  const match = line.match(/(?:^|\s)(@[^\s@]*)$/u);
   if (!match) return null;
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(match[1].slice(1))) return null;
   return match;

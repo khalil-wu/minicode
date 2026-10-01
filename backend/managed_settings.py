@@ -146,6 +146,10 @@ def load_minicode_managed_file_settings(directory: Path) -> ManagedSettingsResul
     root = Path(directory)
     paths = [root / "managed-settings.json"]
     drop_in_dir = root / "managed-settings.d"
+    merged: dict[str, Any] = {}
+    sources: list[str] = []
+    errors: list[str] = []
+    present = False
     try:
         paths.extend(
             sorted(
@@ -163,11 +167,9 @@ def load_minicode_managed_file_settings(directory: Path) -> ManagedSettingsResul
         pass
     except OSError as exc:
         logger.error("Failed to enumerate MiniCode managed settings %s: %s", drop_in_dir, exc)
-
-    merged: dict[str, Any] = {}
-    sources: list[str] = []
-    errors: list[str] = []
-    present = False
+        errors.append(f"{drop_in_dir}: failed to enumerate managed settings: {exc}")
+        sources.append(str(drop_in_dir))
+        present = True
     for path in paths:
         if path.exists() or path.is_symlink():
             present = True
@@ -382,15 +384,6 @@ def _validated_settings_mapping(
     errors: list[str],
 ) -> dict[str, Any] | None:
     result = copy.deepcopy(dict(payload))
-    strict = result.get("strict_plugin_only_customization")
-    if isinstance(strict, list):
-        result["strict_plugin_only_customization"] = [
-            item for item in strict
-            if isinstance(item, str) and item in _CUSTOMIZATION_SURFACES
-        ]
-    elif strict is not None and not isinstance(strict, bool):
-        result.pop("strict_plugin_only_customization", None)
-
     error = _managed_settings_validation_error(result)
     if error:
         logger.error("Invalid MiniCode managed settings %s: %s", source, error)
@@ -440,6 +433,14 @@ def _managed_settings_validation_error(payload: Mapping[str, Any]) -> str:
             or any(not isinstance(item, str) for item in value)
         ):
             return f"{field_name} must be a string array"
+
+    strict = payload.get("strict_plugin_only_customization")
+    if "strict_plugin_only_customization" in payload and not isinstance(strict, bool):
+        if not isinstance(strict, list) or any(
+            not isinstance(item, str) or item not in _CUSTOMIZATION_SURFACES
+            for item in strict
+        ):
+            return "strict_plugin_only_customization must be a boolean or an array of agents, hooks, mcp, skills"
 
     enabled_plugins = payload.get("enabled_plugins")
     if enabled_plugins is not None:

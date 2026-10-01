@@ -61,6 +61,7 @@ class _WebFetchCacheEntry:
 
 
 from backend.tools.web_support import (
+    public_http_transport,
     _actual_peer_network_error,
     _assert_response_length_within_limit,
     _decoded_response_headers,
@@ -115,6 +116,7 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
     def __init__(self, artifact_store: ArtifactStore) -> None:
         self._artifact_store = artifact_store
         self._client = None
+        self._unrestricted_client = None
         self._proxy_url: str | None = None
         self._url_cache: OrderedDict[str, _WebFetchCacheEntry] = OrderedDict()
         self._url_cache_size_bytes = 0
@@ -196,9 +198,10 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
             _, evicted = self._url_cache.popitem(last=False)
             self._url_cache_size_bytes -= evicted.size_bytes
 
-    def _get_client(self):
-        if self._client is not None:
-            return self._client
+    def _get_client(self, *, enforce_network: bool = True):
+        client = self._client if enforce_network else self._unrestricted_client
+        if client is not None:
+            return client
 
         try:
             import httpx
@@ -207,19 +210,24 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
 
         # Detect system proxy and configure explicitly to avoid httpx auto-detection issues
         proxy_url = _detect_proxy()
-        self._proxy_url = proxy_url
 
-        self._client = httpx.AsyncClient(
+        client = httpx.AsyncClient(
             timeout=WEB_REQUEST_TIMEOUT_SECONDS,
             follow_redirects=False,
             proxy=proxy_url,
             trust_env=False,
+            transport=public_http_transport() if enforce_network and proxy_url is None else None,
             headers={
                 "User-Agent": "MiniCode/0.2 (AI Agent; +https://github.com/minicode)",
                 "Accept": "text/html,text/plain,application/json,*/*",
             },
         )
-        return self._client
+        if enforce_network:
+            self._client = client
+            self._proxy_url = proxy_url
+        else:
+            self._unrestricted_client = client
+        return client
 
     async def _get_with_permitted_redirects(
         self,
@@ -233,7 +241,7 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
         Returns (response, redirect_url). When a cross-host redirect is hit,
         response is None and redirect_url is the target for the model to re-fetch.
         """
-        client = self._get_client()
+        client = self._get_client(enforce_network=enforce_network)
         current = url
         for _ in range(max_redirects + 1):
             if enforce_network:
@@ -612,6 +620,7 @@ class WebSearchTool(BaseTool):
             follow_redirects=False,
             proxy=self._proxy_url,
             trust_env=False,
+            transport=public_http_transport() if self._proxy_url is None else None,
             headers={
                 "User-Agent": "MiniCode/0.2 (AI Agent; +https://github.com/minicode)",
                 "Accept": "application/rss+xml, application/xml, text/xml, */*;q=0.5",

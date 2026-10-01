@@ -45,6 +45,7 @@ class CodeCell:
     status: str = "running"
     error: str = ""
     discarded_calls: int = 0
+    pending_tools: dict[str, str] = field(default_factory=dict)
 
 
 class CodeExecutionRuntime:
@@ -132,6 +133,8 @@ class CodeExecutionRuntime:
                               **({"discarded_unawaited_tool_calls": cell.discarded_calls} if cell.discarded_calls else {})}
         if contexts:
             report["hook_context"] = contexts
+        if live_cell is not None and cell.status == "running":
+            report["pending_tools"] = list(live_cell.pending_tools.values())
         return ToolResult(json.dumps(report, ensure_ascii=False), images=images, audios=audios, is_error=cell.status in {"failed", "cancelled"},
                           status="cancelled" if cell.status == "cancelled" else "failed" if cell.status == "failed" else "success",
                           display_summary="Script yielded" if cell.status == "running" else f"Script {cell.status}", runtime_metadata={"code_cell": report})
@@ -151,6 +154,7 @@ class CodeExecutionRuntime:
             for request in batch:
                 call_id = "code_" + uuid4().hex
                 calls.append(ToolCallEvent(id=call_id, name=request["name"], arguments=request["args"]))
+                cell.pending_tools[call_id] = request["name"]
                 request_ids[call_id] = request["id"]
                 sources[call_id] = ToolCallSource("code_mode", cell.parent.tool_call_id, cell.id, request["id"])
             results: dict[str, ToolResult] = {}
@@ -176,6 +180,7 @@ class CodeExecutionRuntime:
                     source = sources.get(call_id, ToolCallSource("code_mode", cell.parent.tool_call_id, cell.id))
                     await self._emit(cell, event, source)
                     if event.type == "tool_result":
+                        cell.pending_tools.pop(call_id)
                         result = results.pop(call_id)
                         value = {item.name: getattr(result, item.name) for item in fields(result) if item.name != "runtime_metadata"}
                         mcp = result.runtime_metadata.get("mcp")

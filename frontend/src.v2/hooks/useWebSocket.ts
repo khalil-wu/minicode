@@ -13,10 +13,11 @@ import {
   commandWithClientCommandId,
   rejectAllPendingCommandResults,
   rejectClientCommandResult,
+  rejectPendingPromptResponseResults,
   registerWebSocketSender,
 } from "../protocol/ws-outbox";
 export { commandWithClientCommandId } from "../protocol/ws-outbox";
-import { pushToast } from "../overlays/ToastContainer";
+import { dismissToast, pushToast } from "../overlays/ToastContainer";
 import { handleChatStreamEvent } from "../chat/chatStreamEvents";
 import { normalizeAgentErrorMessage } from "../chat/errorMessages";
 import { handleRuntimeEvent } from "../chat/runtimeEvents";
@@ -146,6 +147,7 @@ export const shouldReplayQueuedCommand = (
 export interface WebSocketHandle {
   send: (cmd: ClientCommand) => boolean;
   close: () => void;
+  reconnect: () => void;
   sessionId: string;
   subscribe: (handler: (data: unknown) => void) => () => void;
 }
@@ -632,6 +634,7 @@ export const useWebSocketConnection = () => {
     let resyncCloseSeen = false;
     let reconnectExhausted = false;
     let hasConnectedOnce = false;
+    let connectionFailureToast: string | null = null;
 
     const clearUndeliverableCommands = (reason: string) => {
       rejectAllPendingCommandResults(reason);
@@ -646,6 +649,18 @@ export const useWebSocketConnection = () => {
       recoverySwitchPending = false;
       recoverySwitchWillRefreshCatalog = false;
       bufferedRecoveryEvents = [];
+    };
+
+    const withdrawUnconfirmedPromptResponses = () => {
+      rejectPendingPromptResponseResults("连接已断开，审批或回答尚未确认，请重新连接后重试。");
+      const isControlDecision = (command: ClientCommand) => command.type === "control_response"
+        || command.type === "control_cancel_request";
+      // A result waiter may already have timed out. Its old transport entry
+      // must not silently decide a still-visible prompt after reconnect either.
+      for (const [id, command] of pendingClientCommands) {
+        if (isControlDecision(command)) clearPendingClientCommandAck(id);
+      }
+      queue.current = queue.current.filter((queued) => !isControlDecision(queued.cmd));
     };
 
     const stopReconnecting = (reason: string, message: string) => {
@@ -668,7 +683,7 @@ export const useWebSocketConnection = () => {
         failureMessage: message,
         failureRecoverable: false,
       });
-      pushToast(message, "error", 0);
+      connectionFailureToast = pushToast(message, "error", 0);
     };
 
     const bufferedCommandCount = (): number =>
@@ -891,6 +906,7 @@ export const useWebSocketConnection = () => {
       ws.addEventListener("close", (event) => {
         if (!alive || ref.current !== ws) return;
         clearHeartbeatTimers();
+        withdrawUnconfirmedPromptResponses();
         heartbeatCleanup = () => {};
         ref.current = null;
         recoverySnapshotPending = false;
@@ -927,7 +943,7 @@ export const useWebSocketConnection = () => {
         if (reconnectAttempt.current >= MAX_RECONNECT_ATTEMPTS) {
           stopReconnecting(
             "无法重新连接，操作未完成",
-            `无法重新连接到 MiniCode（已重试 ${reconnectAttempt.current}/${MAX_RECONNECT_ATTEMPTS} 次）。请检查服务状态或网络后刷新重试。`,
+            `无法重新连接到 MiniCode（已重试 ${reconnectAttempt.current}/${MAX_RECONNECT_ATTEMPTS} 次）。请检查服务状态或网络后重新连接。`,
           );
           return;
         }
@@ -936,7 +952,7 @@ export const useWebSocketConnection = () => {
         if (remainingBudget <= 0) {
           stopReconnecting(
             "无法重新连接，操作未完成",
-            "无法重新连接到 MiniCode。请检查服务状态或网络后刷新重试。",
+            "无法重新连接到 MiniCode。请检查服务状态或网络后重新连接。",
           );
           return;
         }
@@ -1122,6 +1138,7 @@ export const useWebSocketConnection = () => {
 
     singleton = {
       send: (cmd) => {
+        if (!alive || reconnectExhausted) return false;
         const ws = ref.current;
         if (ws && ws.readyState === WebSocket.OPEN) {
           // The backend has not restored the active conversation, pending
@@ -1141,6 +1158,25 @@ export const useWebSocketConnection = () => {
       },
       close: () => {
         ref.current?.close();
+      },
+      reconnect: () => {
+        if (timer !== null) window.clearTimeout(timer);
+        timer = null;
+        heartbeatCleanup();
+        withdrawUnconfirmedPromptResponses();
+        const oldSocket = ref.current;
+        ref.current = null;
+        oldSocket?.close();
+        reconnectExhausted = false;
+        reconnectAttempt.current = 0;
+        reconnectStartedAt = null;
+        resyncCloseSeen = false;
+        dismissToast(connectionFailureToast);
+        connectionFailureToast = null;
+        useAppStore.getState().setConnectionState("connecting", {
+          attempt: 0, maxAttempts: null, error: null,
+        });
+        connect();
       },
       sessionId: browserSessionId,
       subscribe: (handler) => {

@@ -64,7 +64,7 @@ describe("AttachmentStrip", () => {
     render(<AttachmentStrip />);
     const thumbnail = screen.getByRole("img", { name: "screen.png" });
     expect(thumbnail.style.objectFit).toBe("contain");
-    expect(screen.getByRole("button", { name: "预览 screen.png" }).style.width).toBe("88px");
+    expect(screen.getByRole("button", { name: "预览 screen.png" }).parentElement!.style.width).toBe("88px");
 
     fireEvent.click(screen.getByRole("button", { name: "预览 screen.png" }));
     expect(uploadMocks.openLocalFilePreview).toHaveBeenCalledWith(expect.objectContaining({

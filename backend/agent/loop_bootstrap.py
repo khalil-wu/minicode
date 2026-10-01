@@ -455,6 +455,7 @@ async def bootstrap_agent_loop(
         metadata=dict(resolved_metadata),
         run_context=run_context,
         cancel_event=cancel_event,
+        pending_cleanup_tasks=run_context.lifecycle_cleanup_tasks,
         emit_event=emit_event,
         approval_handler=request.approval_handler,
         stream_callback=stream_callback,
@@ -475,6 +476,7 @@ async def bootstrap_agent_loop(
         artifact_store=request.artifact_store,
         turn_diff_tracker=TurnDiffTracker(),
     )
+    context.bind_tool_context(tool_context)
 
     def _commit_live_permission_context(
         current: PermissionContext,
@@ -577,6 +579,8 @@ async def bootstrap_agent_loop(
         deadline=deadline_controller.turn_deadline,
         cancel_event=cancel_event,
         hook_manager=hook_manager,
+        run_context=run_context,
+        llm=request.llm,
         input_restored=bool(
             resolved_metadata.get("_query_engine_recovery_restored")
             or resolved_metadata.get("_turn_admission_restored")

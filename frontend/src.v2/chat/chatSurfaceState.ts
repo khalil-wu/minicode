@@ -68,7 +68,7 @@ const activityTitle = (item: TurnActivityItem): string => {
     const target = recordInputTarget(record);
     if (target) return `${operation || "写入"} ${target}`;
   }
-  const normalized = rawTitle.match(/^(?:Completed|Failed|Blocked|Cancelled|Timed out):\s*(.+)$/i)?.[1]?.trim();
+  const normalized = readableToolLabel(rawTitle.match(/^(?:Completed|Failed|Blocked|Cancelled|Timed out):\s*(.+)$/i)?.[1]);
   return normalized && operation && normalized.toLowerCase() === operation.toLowerCase()
     ? operation
     : rawTitle;
@@ -172,7 +172,7 @@ const targetPath = (record: ToolCallRecord): string => {
 };
 
 const diffCell = (items: TurnActivityItem[]): DiffCellState | null => {
-  const records = items.flatMap((item) => item.records ?? []).filter((record) => record.diff);
+  const records = items.flatMap((item) => item.records ?? []).filter((record) => record.diff && record.status === "success");
   if (!records.length) return null;
   const files = records.flatMap((record) => {
     const structuredFiles = record.diff?.files;
@@ -452,9 +452,9 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
       const explicitId = taskResultAgentIds(record)[index];
       const fallback = stringArg(args.description) || stringArg(args.agent_type) || `任务 ${index + 1}`;
       const agentId = explicitId || fallback;
-      return [{ agentId, agentLabel: collaborationAgentLabel(agentId), content }];
+      return [{ agentId, agentLabel: stringArg(args.description) || collaborationAgentLabel(agentId), content }];
     });
-    if (entries.length > 0) cells.push(collaborationCell(record, "sent_message", entries));
+    if (entries.length > 0) cells.push(collaborationCell(record, "delegated", entries));
   }
   return cells;
 };
@@ -467,10 +467,13 @@ const collaborationCell = (
   kind: "collaboration",
   id: `collaboration-${record.id}`,
   action,
+  background: record.args.run_in_background === true,
   status: record.status === "running" || record.status === "pending"
     ? "running"
     : record.status === "success"
       ? "success"
+      : record.status === "partial" || record.status === "cancelled"
+        ? record.status
       : "failed",
   entries,
   collapsed: false,
@@ -481,7 +484,7 @@ const stringArg = (value: unknown): string => typeof value === "string" ? value.
 
 const taskResultAgentIds = (record: ToolCallRecord): string[] => {
   const value = `${record.outputPreview || ""}\n${record.summary || ""}`;
-  return [...value.matchAll(/\bsubagent-[a-z0-9]+\b/gi)].map((match) => match[0]);
+  return [...new Set([...value.matchAll(/\bsubagent-[a-z0-9]+\b/gi)].map((match) => match[0]))];
 };
 
 const collaborationAgentLabel = (value: string): string => {
@@ -620,7 +623,8 @@ function buildTurn(
     workspaceRoot,
   );
   if (
-    assistantMessage.terminalStatus === "failed"
+    (assistantMessage.terminalStatus === "failed"
+      || (assistantMessage.terminalStatus === "partial" && Boolean(assistantMessage.failureMessage)))
     && !imageProgress.some((progress) => progress.status === "failed")
     && !committedCells.some((cell) => cell.kind === "activity" && cell.status === "failed")
     && !committedCells.some((cell) => cell.kind === "exec" && cell.status === "failed")
@@ -628,7 +632,7 @@ function buildTurn(
     const error: ErrorCellState = {
       kind: "error",
       id: `error-${assistantMessage.id}`,
-      title: "请求失败",
+      title: assistantMessage.terminalStatus === "partial" ? "响应未完整结束" : "请求失败",
       message: assistantMessage.failureMessage || assistantMessage.content || "Agent 运行失败。",
       source: "agent",
       recoverable: assistantMessage.failureRecoverable ?? false,

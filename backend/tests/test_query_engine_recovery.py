@@ -219,7 +219,9 @@ def test_query_engine_journals_tool_claim_before_terminal_commit(tmp_path) -> No
     )
     assert synthetic.payload["tool_name"] == "write_file"
     assert synthetic.payload["status"] == "cancelled"
-    assert terminal.payload["manual_recovery_required"] is False
+    assert terminal.payload["manual_recovery_required"] is True
+    assert terminal.payload["tool_pairs_complete"] is True
+    assert terminal.payload["uncertain_tool_uses"][0]["tool_call_id"] == "call-write"
     assert terminal.seq > next(
         event.seq for event in events if event.event_type == "tool_use"
     )

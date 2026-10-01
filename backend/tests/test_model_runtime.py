@@ -2811,3 +2811,71 @@ def test_provider_auth_storage_serializes_modify_and_logout_across_processes(
             if process.is_alive():
                 process.terminate()
             process.join(5)
+
+
+@pytest.mark.parametrize("operation", ["write", "delete"])
+@pytest.mark.parametrize("retire", [False, True])
+def test_scoped_models_store_rechecks_authority_in_the_actual_disk_worker(tmp_path, operation, retire):
+    import threading
+    entered, release = threading.Event(), threading.Event()
+    class PausedStore(ProviderModelsStorage):
+        paused = False
+        def _write(self, *args, **kwargs):
+            if self.paused:
+                entered.set()
+                assert release.wait(5)
+            return super()._write(*args, **kwargs)
+        def _delete(self, *args, **kwargs):
+            if self.paused:
+                entered.set()
+                assert release.wait(5)
+            return super()._delete(*args, **kwargs)
+    async def scenario():
+        captured = []
+        async def resolve(_input):
+            return {"auth": {"api_key": "fixture"}}
+        async def refresh(context):
+            captured.append(context.store)
+            return [{"id": "m", "api": "openai-completions", "base_url": "https://fixture.invalid/v1"}]
+        runtime, _ = _modern_api_key_runtime({"resolve": resolve}, refresh_models=refresh)
+        backend = PausedStore(tmp_path / "models.json")
+        runtime._models_store = backend
+        current = {"models": [{"id": "fresh"}]}
+        await backend.write("modern-auth", current)
+        await runtime.refresh_dynamic_models(allow_network=False)
+        view = captured[0]
+        backend.paused = True
+        pending = asyncio.create_task(view.write({"models": [{"id": "stale"}]})) if operation == "write" else asyncio.create_task(view.delete())
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            if retire:
+                runtime.retire()
+            else:
+                runtime.register_provider("modern-auth", {"name": "replacement"})
+        finally:
+            release.set()
+        with pytest.raises(RuntimeError, match="retired|changed during"):
+            await pending
+        assert await backend.read("modern-auth") == current
+        with pytest.raises(RuntimeError, match="retired|changed during"):
+            await view.write({"models": []})
+        with pytest.raises(RuntimeError, match="retired|changed during"):
+            await view.delete()
+    asyncio.run(scenario())
+
+
+def test_models_json_declared_capacity_and_default_output_provenance():
+    class Runtime(ModelRuntime):
+        def _load_base_providers(self):
+            return {}
+    runtime = Runtime(provider_configs={"capacity": {"api_key": "fixture", "models": [
+        {"id": "auto", "api": "anthropic-messages", "base_url": "https://fixture.invalid/v1", "context_window": 100000, "max_context_window": 1000000},
+        {"id": "explicit", "api": "anthropic-messages", "base_url": "https://fixture.invalid/v1", "context_window": 100000, "max_tokens": 32000},
+    ]}})
+    auto = runtime.get_model("capacity", "auto")
+    explicit = runtime.get_model("capacity", "explicit")
+    assert auto.max_context_window == 1000000
+    assert auto.max_context_window_source == "models_json" and auto.max_context_window_verified
+    assert auto.max_output_tokens_source == "models_json_default" and not auto.max_output_tokens_verified
+    assert explicit.max_output_tokens == 32000 and explicit.max_output_tokens_verified
+    assert explicit.max_output_tokens_source == "models_json"

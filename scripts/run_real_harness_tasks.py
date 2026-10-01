@@ -44,7 +44,8 @@ def run_case(case: str, output: Path, window: int) -> dict:
                    "one for persistence/history ownership, one for timezone/tick behavior. "
                    "Integrate their findings, implement the fixes and verify them yourself.\n")
     (evidence / "prompt.md").write_text(prompt, encoding="utf-8")
-    profile = {"llm": {"provider": "custom", "context_window": window},
+    profile = {"llm": {"provider": "custom", "context_window": window,
+                       "proxy_mode": os.environ.get("CUSTOM_PROXY_MODE", "inherit")},
                "token_budget": {"total": window}}
     if case == "real_compaction":
         profile["agent"] = {"compaction_keep_recent_tokens": 6000}
@@ -56,7 +57,19 @@ def run_case(case: str, output: Path, window: int) -> dict:
                MINICODE_EVAL_MAX_TURN_SECONDS=os.environ.get("MINICODE_EVAL_MAX_TURN_SECONDS", "1800"))
     if os.environ.get("MINICODE_EVAL_CAPTURE_REQUESTS") == "1":
         env["MINICODE_EVAL_REQUEST_OUTPUT_DIR"] = str(evidence / "requests")
-    # Approvals and sandbox enforcement remain owned by the production driver.
+    # An unavailable execution plane made earlier paid model runs spend their
+    # entire allowance reading code without being able to verify a command.
+    # Exercise the same sandbox before the first provider request.
+    with (evidence / "sandbox-preflight.log").open("w", encoding="utf-8") as log:
+        preflight = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/check_execution_boundary.py"),
+             "--out", str(evidence / "sandbox-preflight")],
+            cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT,
+        )
+    if preflight.returncode:
+        raise RuntimeError(
+            f"{case} sandbox preflight failed; see {evidence / 'sandbox-preflight.log'}"
+        )
     started = time.monotonic()
     print(f"{case}: seed fails, reference passes; starting real model", flush=True)
     with (evidence / "trace.jsonl").open("w", encoding="utf-8") as trace, \

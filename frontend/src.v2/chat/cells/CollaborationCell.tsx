@@ -15,7 +15,11 @@ export const CollaborationCell = memo(function CollaborationCell({
   }, [cell.collapsed, cell.id]);
 
   const agentCount = new Set(cell.entries.map((entry) => entry.agentId)).size;
-  const actionLabel = cell.action === "closed"
+  const actionLabel = cell.status === "cancelled" ? "已取消"
+    : cell.status === "partial" ? "部分完成"
+    : cell.action === "delegated"
+      ? cell.status === "running" ? "正在协作" : cell.status === "success" ? cell.background ? "已启动" : "协作已完成" : "协作失败"
+    : cell.action === "closed"
     ? cell.status === "running" ? "正在关闭" : cell.status === "success" ? "已关闭" : "关闭失败"
     : cell.status === "running" ? "正在发送" : cell.status === "success" ? "已发送消息" : "发送失败";
   const summary = `${actionLabel} ${agentCount} 个智能体`;

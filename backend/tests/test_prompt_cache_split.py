@@ -562,9 +562,10 @@ def test_anthropic_tool_schema_cache_keys_by_name_and_input_schema() -> None:
     assert len(result1) == 1
     assert len(result2) == 1
     assert len(result3) == 1
-    # Same name + schema returns the cached first render, despite description drift.
-    assert result2[0]["description"] == "Read file v1"
-    assert result2[0] is result1[0]  # Same object reference
+    # Capability/routing instructions must follow the current description.
+    assert result2[0]["description"] == "Read file v2 CHANGED"
+    assert result2[0] is not result1[0]
+    assert adapter._convert_tools_cached(tools_v2)[0] is result2[0]
     # Same name with a new input contract must not reuse the stale schema.
     assert result3[0]["description"] == "Read file with path"
     assert result3[0]["input_schema"] == tools_v3[0]["function"]["parameters"]

@@ -269,17 +269,6 @@ const resolveDesktopFsPath = (path: string, workingDirectory: string): string =>
   return normalizeWorkspacePath(`${workingDirectory}/${trimmed}`);
 };
 
-const pathsMatch = (a: string, b: string): boolean => {
-  const left = a.replace(/\\/g, "/").replace(/^\/+/, "");
-  const right = b.replace(/\\/g, "/").replace(/^\/+/, "");
-  const caseInsensitive = isWindowsLikeWorkspacePath(a) || isWindowsLikeWorkspacePath(b);
-  const leftKey = caseInsensitive ? left.toLowerCase() : left;
-  const rightKey = caseInsensitive ? right.toLowerCase() : right;
-  return leftKey === rightKey
-    || leftKey.endsWith(`/${rightKey}`)
-    || rightKey.endsWith(`/${leftKey}`);
-};
-
 interface FileSnapshot {
   content: string;
   contentHash?: string;
@@ -501,7 +490,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
   const savingPathsRef = useRef(new Set<string>());
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "error">("idle");
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; path: string; workspaceRoot: string } | null>(null);
   const [mdPreview, setMdPreview] = useState(false);
   const [monacoUnavailable, setMonacoUnavailable] = useState(false);
   const editorRef = useRef<MonacoEditorInstance | null>(null);
@@ -545,8 +534,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       ...gitChanges.workingTree,
       ...gitChanges.staged,
     ];
-    return files.find((file) => pathsMatch(file.path, activeTabPath) && file.patch) ?? null;
-  }, [activeTabPath, gitChanges.workingTree, gitChanges.staged]);
+    return files.find((file) => editorPathsEqual(file.path, activeTabPath, workingDirectory) && file.patch) ?? null;
+  }, [activeTabPath, workingDirectory, gitChanges.workingTree, gitChanges.staged]);
 
   const agentEditReview = useAgentEditReview({
     editorRef,
@@ -562,6 +551,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     setMdPreview(false);
     setSaveStatus("idle");
   }, [activeTabPath, workingDirectory]);
+
+  useEffect(() => setCtxMenu(null), [workingDirectory]);
 
   useEffect(() => {
     if (saveStatus !== "saved") return;
@@ -793,6 +784,14 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
           pushToast(result.message || `保存失败：${basename(currentPath)}`, "error", 3500);
         }
       }
+    } catch (error) {
+      const current = useAppStore.getState();
+      if (workspaceRootsEqual(current.workingDirectory, saveWorkspace)
+        && current.editorTabs.some((tab) => tab.id === saveEpochKey)
+        && editorPathsEqual(current.activeTabPath, savePath, saveWorkspace)) {
+        setSaveStatus("error");
+        pushToast(`保存失败：${errorMessage(error)}`, "error", 3500);
+      }
     } finally {
       savingPathsRef.current.delete(saveEpochKey);
     }
@@ -999,7 +998,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                 className="editor-tab relative inline-flex items-center gap-1.5 h-8 max-w-60 min-w-[124px] flex-none border border-transparent rounded-t-[7px] rounded-b-none cursor-pointer px-2.5 text-xs transition-[background,color,border-color] duration-100"
                 onContextMenu={(e) => {
                   e.preventDefault();
-                  setCtxMenu({ x: e.clientX, y: e.clientY, path: tab.path });
+                  setCtxMenu({ x: e.clientX, y: e.clientY, path: tab.path, workspaceRoot: workingDirectory });
                 }}
                 title={tab.path}
                 style={{
@@ -1289,7 +1288,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         <span>{`第 ${cursor.line} 行，第 ${cursor.column} 列`}</span>
       </div>
 
-      {ctxMenu && (
+      {ctxMenu && workspaceRootsEqual(ctxMenu.workspaceRoot, workingDirectory) && (
         <ContextMenu
           position={{ x: ctxMenu.x, y: ctxMenu.y }}
           onClose={() => setCtxMenu(null)}

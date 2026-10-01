@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from collections.abc import Mapping
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from backend.plugins.identity import (
     has_explicit_marketplace,
@@ -300,21 +300,7 @@ def _source_matches_allowed(
         except re.error:
             return False
     allowed = _canonical_source_descriptor(allowed)
-    if _sources_equal(source, allowed):
-        return True
-    # Treat GitHub shorthand and its normalized Git URL as one allowlist
-    # identity so a raw URL cannot evade an approved repository entry.
-    source_kind = str(source.get("source") or "")
-    allowed_kind = str(allowed.get("source") or "")
-    if {source_kind, allowed_kind} != {"github", "git"}:
-        return False
-    github = source if source_kind == "github" else allowed
-    git = source if source_kind == "git" else allowed
-    if _github_repo_from_git_url(str(git.get("url") or "")) != github.get("repo"):
-        return False
-    return _blocked_constraint_matches(allowed.get("ref"), source.get("ref")) and _blocked_constraint_matches(
-        allowed.get("path"), source.get("path")
-    )
+    return _sources_equal(source, allowed)
 
 def _source_matches_blocked(
     source: Mapping[str, Any], blocked: Mapping[str, Any]
@@ -328,7 +314,12 @@ def _source_matches_blocked(
     if source_kind == blocked_kind:
         if source_kind in {"github", "git"}:
             identity_field = "repo" if source_kind == "github" else "url"
-            if source.get(identity_field) != blocked.get(identity_field):
+            same_repository = (
+                _git_repositories_equal(str(source.get("url") or ""), str(blocked.get("url") or ""))
+                if source_kind == "git"
+                else source.get(identity_field) == blocked.get(identity_field)
+            )
+            if not same_repository:
                 return False
             return _blocked_constraint_matches(blocked.get("ref"), source.get("ref")) and (
                 _blocked_constraint_matches(blocked.get("path"), source.get("path"))
@@ -374,6 +365,9 @@ def _sources_equal(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
         if field_name == "path" and kind in {"file", "directory"}:
             if not _paths_equal(left_value, right_value):
                 return False
+        elif field_name == "url" and kind == "git":
+            if not _git_repositories_equal(str(left_value or ""), str(right_value or "")):
+                return False
         elif (left_value or None) != (right_value or None):
             return False
     return True
@@ -402,12 +396,22 @@ def _marketplace_source_host(source: Mapping[str, Any]) -> str:
         return ""
 
 def _github_repo_from_git_url(value: str) -> str:
-    match = re.match(
-        r"^(?:git@github\.com:|https?://github\.com/)([^/]+/[^/]+?)(?:\.git)?$",
-        value,
-        re.IGNORECASE,
-    )
-    return match.group(1) if match else ""
+    scp = re.fullmatch(r"git@github\.com:(.+)", value, re.IGNORECASE)
+    if scp:
+        path = scp.group(1)
+    else:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https", "ssh"} or (parsed.hostname or "").casefold() != "github.com":
+            return ""
+        path = unquote(parsed.path).lstrip("/")
+    path = path.removesuffix(".git")
+    return path.casefold() if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", path) else ""
+
+def _git_repositories_equal(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    repository = _github_repo_from_git_url(left)
+    return bool(repository) and repository == _github_repo_from_git_url(right)
 
 def _source_allowed_by_marketplace_requirements(
     source: Mapping[str, Any], requirements: Mapping[str, Any]

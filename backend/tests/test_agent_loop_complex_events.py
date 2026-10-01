@@ -21,6 +21,7 @@ from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.contracts import ToolSpec
 from backend.tools.registry import ToolRegistry
 from backend.tools.toolsets import ToolsetPolicy
+from backend.tools.terminal_tools import ReadTerminalTool
 
 
 class _InspectTool(BaseTool):
@@ -324,6 +325,51 @@ def test_unexpected_iteration_failure_commits_failed_terminal_run(
         assert runs[0]["terminal_reason"] == "runtime_error"
     finally:
         runtime.close(release_lease=True)
+
+
+def test_turn_advertises_read_terminal_only_with_a_terminal_manager(tmp_path) -> None:
+    class CaptureToolsLLM(LLMAdapter):
+        def __init__(self) -> None:
+            self.tool_names: list[str] = []
+
+        async def stream_chat(self, messages, tools=None, metadata=None):
+            self.tool_names = [
+                str((schema.get("function") or {}).get("name") or "")
+                for schema in (tools or [])
+            ]
+            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="done")
+            yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop")
+
+        async def simple_chat(self, messages, *, max_tokens=None):
+            return ""
+
+    async def run(terminal_manager):
+        llm = CaptureToolsLLM()
+        registry = ToolRegistry()
+        registry.register(ReadTerminalTool())
+        session = AgentSession(
+            llm=llm,
+            tool_registry=registry,
+            artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
+            permission_checker=PermissionChecker(PermissionSettings(), tmp_path),
+            agent_settings=AgentSettings(max_iterations=1),
+            token_budget=TokenBudget(),
+            active_tool_names=("read_terminal",),
+        )
+        submission = QuerySubmission(
+            user_message="Inspect the terminal",
+            session=session,
+            runtime=AgentLoopSessionContext(
+                permission_context=PermissionContext(mode="bypass"),
+                workspace_root=tmp_path,
+                terminal_manager=terminal_manager,
+            ),
+        )
+        [event async for event in QueryEngine().submit(submission)]
+        return llm.tool_names
+
+    assert "read_terminal" not in asyncio.run(run(None))
+    assert "read_terminal" in asyncio.run(run(object()))
 
 
 def test_agent_session_active_tools_intersect_the_durable_capability_ceiling(

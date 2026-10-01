@@ -101,3 +101,60 @@ def test_destructive_operations_are_explicit_confirmation_boundaries(command: st
     allowed, reason = check_catastrophic_command(command)
     assert allowed is False
     assert reason
+
+
+def test_runtime_review_posix_clusters_bind_exact_payload():
+    import asyncio
+    import shlex
+    from pathlib import Path
+    from unittest.mock import AsyncMock
+    from backend.agent.final_tool_request import canonical_tool_request_digest
+    from backend.config import PermissionSettings
+    from backend.permissions.checker import (
+        PermissionChecker, _shell_wrapper_payload, check_catastrophic_command,
+        evaluate_permission_decision,
+    )
+    from backend.permissions.context import PermissionContext, ToolExecutionContext
+    from backend.permissions.shell_ast import parse_literal_commands, posix_shell_payload_index
+    from backend.tools.base import ToolResult
+    from backend.tools.command_tool import RunCommandTool
+
+    async def verify():
+        tool = RunCommandTool(None)
+        dispatch = AsyncMock(return_value=ToolResult(content="INTERCEPTED_BEFORE_SPAWN"))
+        tool._execute_foreground = dispatch
+        checker = PermissionChecker(PermissionSettings(), workspace_root=Path.cwd())
+        context = ToolExecutionContext(
+            permission=PermissionContext(mode="bypass"), workspace_root=Path.cwd(),
+            permission_checker=checker,
+        )
+        payload = "'r''m' -rf /"
+        for invocation in ("bash -xec", "bash -exc", "bash +c", "bash -c -x",
+                           "bash -ec --", "bash -e -o pipefail -c", "bash -o -c",
+                           "bash --rcfile startup.rc -xec", "bash.exe -xec"):
+            command = f'{invocation} "{payload}"'
+            argv = shlex.split(command)
+            assert argv[posix_shell_payload_index(argv)] == payload
+            assert _shell_wrapper_payload(command) == (payload, "")
+            parsed = parse_literal_commands(command)
+            assert parsed is not None and ["rm", "-rf", "/"] in parsed.commands
+            assert check_catastrophic_command(command)[0] is False
+            args = {"command": command}
+            decision = evaluate_permission_decision(checker, tool.name, args, context=context.permission, tool=tool)
+            assert decision.decision == "ask"
+            context.metadata.clear()
+            result = await tool.execute(args, context)
+            assert result.is_error and "explicit approval" in result.content
+            dispatch.assert_not_awaited()
+            context.metadata["_approved_request_digests"] = {canonical_tool_request_digest(tool.name, args)}
+            result = await tool.execute(args, context)
+            assert result.content == "INTERCEPTED_BEFORE_SPAWN"
+            dispatch.assert_awaited_once()
+            dispatch.reset_mock()
+
+        assert posix_shell_payload_index(["bash", "script.sh", "-c", payload]) is None
+        assert posix_shell_payload_index(["bash", "--rcfile", "-c", "script.sh"]) is None
+        assert _shell_wrapper_payload("bash -xec") == (None, "shell wrapper is missing its command payload")
+        assert check_catastrophic_command("bash -xec 'printf harmless'")[0] is True
+
+    asyncio.run(verify())

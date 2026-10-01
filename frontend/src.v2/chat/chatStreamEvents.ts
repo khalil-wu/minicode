@@ -1,6 +1,7 @@
 import { useAppStore } from "../stores";
 import type {
   CommandOutputChunkEvent,
+  DoneEvent,
   ImageChunkEvent,
   ServerEvent,
   ToolOutputDeltaEvent,
@@ -29,6 +30,7 @@ import { normalizeContentBlocks } from "./transcriptHydration";
 import { projectArtifactPreviewEvent } from "./artifactEvents";
 import { isHiddenProviderReasoning } from "../lib/provider-reasoning";
 import { eventMessageId, stableTextHash } from "../lib/identity";
+import { adoptGeneratedConversation } from "./conversationAdoption";
 
 interface ChatStreamHandlers {
   textStreamBuffer: StreamBuffer;
@@ -38,32 +40,6 @@ interface ChatStreamHandlers {
 const flushLiveBuffers = ({ textStreamBuffer, thinkingStreamBuffer }: ChatStreamHandlers) => {
   thinkingStreamBuffer?.flush();
   textStreamBuffer.flush();
-};
-
-const adoptGeneratedConversation = (conversationId?: string) => {
-  const targetId = conversationId?.trim();
-  if (!targetId) return;
-  useAppStore.setState((state) => {
-    if (state.conversationId || state.sideChats[targetId]) return state;
-    // 只采用当前会话的消息，如果没有conversationId说明是首次，应该使用当前messages
-    const messages = state.messages;
-    const conversations = state.conversations.some((conversation) => conversation.id === targetId)
-      ? state.conversations
-      : [{ id: targetId, title: "新会话", updatedAt: new Date().toISOString() }, ...state.conversations];
-    return {
-      conversationId: targetId,
-      conversations,
-      conversationMessages: {
-        ...state.conversationMessages,
-        [targetId]: messages,
-      },
-      conversationStreaming: {
-        ...state.conversationStreaming,
-        [targetId]: true,
-      },
-      isStreaming: true,
-    };
-  });
 };
 
 const clearMissingWorkspaceBinding = (conversationId?: string) => {
@@ -690,7 +666,7 @@ export const handleChatStreamEvent = (
   const { textStreamBuffer, thinkingStreamBuffer } = handlers;
   const s = useAppStore.getState();
   if (conversationId && e.type !== "done" && e.type !== "error") {
-    adoptGeneratedConversation(conversationId);
+    adoptGeneratedConversation(conversationId, eventMessageId(e));
     activateQueuedTurnFromFirstStreamEvent(conversationId, eventMessageId(e));
     s.bindStreamingTurn(conversationId, eventMessageId(e), eventTurnId(e));
   }
@@ -1270,6 +1246,24 @@ export const handleChatStreamEvent = (
       flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
       const usage = usageFromDoneEvent(e);
       const replayed = isReplayedChatEvent(e);
+      const cleanup = e as DoneEvent;
+      const cleanupPending = cleanup.lifecycle_cleanup_pending_count ?? 0;
+      if (cleanupPending > 0 || Object.keys(cleanup.lifecycle_cleanup_receipts ?? {}).length > 0) {
+        addInspectorPayload("message", terminalMessageId || cleanup.message_id, {
+          event: "done",
+          conversationId,
+          messageId: terminalMessageId || cleanup.message_id,
+          lifecycle_cleanup_pending_count: cleanupPending,
+          lifecycle_cleanup_receipts: cleanup.lifecycle_cleanup_receipts ?? {},
+        });
+        if (cleanupPending > 0 && !replayed && !metadataOnly) {
+          pushToast(
+            `回合已结束，但结束时仍有 ${cleanupPending} 个资源尚未回收。排队任务会在资源释放后继续；详情可在检查器查看。`,
+            "warning",
+            6000,
+          );
+        }
+      }
       if (!replayed && usage && !previousMessage?.usage && (!conversationId || conversationId === useAppStore.getState().conversationId)) {
         s.setLastUsage(usage);
       }
@@ -1299,7 +1293,7 @@ export const handleChatStreamEvent = (
         "completed";
       // Carry the sanitized text of any recoverable error the loop reported
       // earlier in this turn; it only becomes user-visible if the turn in fact
-      // ended as failed.
+      // ended as failed or partial; successful recovery clears the evidence.
       const recoverableFailure = takeRecoverableFailure(conversationId, terminalMessageId || messageId);
       const doneFailureRecoverable = (e as unknown as {
         failure_recoverable?: unknown;
@@ -1308,7 +1302,7 @@ export const handleChatStreamEvent = (
         failure_recoverable?: unknown;
         failureRecoverable?: unknown;
       }).failureRecoverable;
-      const failureRecoverable = terminalStatus === "failed"
+      const failureRecoverable = terminalStatus === "failed" || terminalStatus === "partial"
         ? typeof doneFailureRecoverable === "boolean"
           ? doneFailureRecoverable
           : recoverableFailure?.recoverable
@@ -1376,7 +1370,7 @@ export const handleChatStreamEvent = (
       if (!replayed && typeof document !== "undefined" && (document.hidden || !document.hasFocus())) {
         const conversation = s.conversations.find((item) => item.id === conversationId);
         void import("../desktop/runtime").then(({ desktop }) => desktop()?.notify({
-          title: terminalStatus === "completed" ? "MiniCode 任务已完成" : "MiniCode 任务已停止",
+          title: terminalStatus === "completed" ? "MiniCode 回复已就绪" : "MiniCode 回合已停止",
           body: conversation?.title || "答复已就绪。",
           ...(conversationId ? { target: { kind: "conversation" as const, conversationId } } : {}),
         }));

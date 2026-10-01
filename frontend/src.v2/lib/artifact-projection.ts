@@ -70,12 +70,10 @@ export const recordHasImageArtifact = (
   const artifactId = String(record.artifactId || "").trim();
   if (!artifactId) return false;
   const mediaType = normalizeArtifactMediaType(record.artifactMediaType);
-  const outputImage = record.outputFiles?.some((file) => (
-    file.isImage === true || normalizeArtifactMediaType(file.mimeType).startsWith("image/")
-  ));
+  // outputFiles identify workspace deliverables, not the bytes at artifactId.
+  // A text result artifact can accompany an image file from the same call.
   return normalizedValue(record.artifactKind) === "image"
     || mediaType.startsWith("image/")
-    || outputImage === true
     || isBrowserScreenshotRecord(record);
 };
 

@@ -133,7 +133,11 @@ class TurnIterationRuntime:
         active_policy = effective_toolset_policy(
             base_policy=base_policy,
             tool_registry=self.tool_registry,
-            disabled_tools=self.state.disabled_tools,
+            disabled_tools=(
+                self.state.disabled_tools | {"read_terminal"}
+                if self.tool_context.terminal_manager is None
+                else self.state.disabled_tools
+            ),
             requires_explicit_workspace=bool(
                 self.tool_context.run_context
                 and self.tool_context.run_context.requires_explicit_workspace
@@ -175,6 +179,7 @@ class TurnIterationRuntime:
         # a valid tool_search result render in the next schema while a direct
         # model tool call is still rejected by the runtime guard.
         self.tool_context.metadata[ACTIVE_TOOLSET_POLICY_METADATA_KEY] = active_policy
+        run_context.toolset_policy = active_policy
         schema_key = (
             self.tool_registry.schema_source,
             self.tool_registry.version,

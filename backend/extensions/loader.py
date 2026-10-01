@@ -498,85 +498,93 @@ class ExtensionLoader:
         extensions: list[Extension] = []
         errors: list[dict[str, str]] = []
 
-        for raw_path in paths:
-            path_label = str(raw_path)
-            try:
-                path = Path(raw_path).expanduser()
-                if not path.is_absolute():
-                    path = self.cwd / path
-                path = path.absolute()
-                requested_scope = source_scopes.get(str(raw_path)) or source_scopes.get(
-                    path
-                )
-                decision = self.trust_policy.assert_allowed(
-                    path, source_scope=requested_scope
-                )
-                path = decision.resolved_path or path.resolve(strict=False)
-                raw_metadata = (
-                    source_metadata.get(str(raw_path))
-                    or source_metadata.get(path)
-                    or {}
-                )
-                metadata = (
-                    dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
-                )
-                source = ExtensionSource(
-                    path=path_label,
-                    resolved_path=str(path),
-                    scope=decision.scope,
-                    trusted=decision.trusted,
-                    origin=str(metadata.get("origin") or "local"),
-                    marketplace=(
-                        str(metadata["marketplace"])
-                        if metadata.get("marketplace")
-                        else None
-                    ),
-                    plugin_id=(
-                        str(metadata["plugin_id"])
-                        if metadata.get("plugin_id")
-                        else None
-                    ),
-                    metadata=metadata,
-                )
-                factory, module_name = self._load_factory(path)
-                if factory is None:
-                    raise TypeError(
-                        f"extension module does not export a factory function: {path_label}"
+        try:
+            for raw_path in paths:
+                path_label = str(raw_path)
+                try:
+                    path = Path(raw_path).expanduser()
+                    if not path.is_absolute():
+                        path = self.cwd / path
+                    path = path.absolute()
+                    requested_scope = source_scopes.get(str(raw_path)) or source_scopes.get(
+                        path
                     )
-                extension = await self._load_factory_into_extension(
-                    factory,
-                    path_label,
-                    path,
-                    source,
-                    runner,
-                )
-                extensions.append(extension)
-                # The cache owns module lifetime.  The module name is kept in
-                # the loader cache rather than mutating the frozen provenance
-                # object; callers can inspect ``sys.modules`` only for
-                # diagnostics, never for trust decisions.
-            except Exception as exc:
-                errors.append({"path": path_label, "error": str(exc)})
+                    decision = self.trust_policy.assert_allowed(
+                        path, source_scope=requested_scope
+                    )
+                    path = decision.resolved_path or path.resolve(strict=False)
+                    raw_metadata = (
+                        source_metadata.get(str(raw_path))
+                        or source_metadata.get(path)
+                        or {}
+                    )
+                    metadata = (
+                        dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+                    )
+                    source = ExtensionSource(
+                        path=path_label,
+                        resolved_path=str(path),
+                        scope=decision.scope,
+                        trusted=decision.trusted,
+                        origin=str(metadata.get("origin") or "local"),
+                        marketplace=(
+                            str(metadata["marketplace"])
+                            if metadata.get("marketplace")
+                            else None
+                        ),
+                        plugin_id=(
+                            str(metadata["plugin_id"])
+                            if metadata.get("plugin_id")
+                            else None
+                        ),
+                        metadata=metadata,
+                    )
+                    factory, module_name = self._load_factory(path)
+                    if factory is None:
+                        raise TypeError(
+                            f"extension module does not export a factory function: {path_label}"
+                        )
+                    extension = await self._load_factory_into_extension(
+                        factory,
+                        path_label,
+                        path,
+                        source,
+                        runner,
+                    )
+                    extensions.append(extension)
+                    # The cache owns module lifetime.  The module name is kept in
+                    # the loader cache rather than mutating the frozen provenance
+                    # object; callers can inspect ``sys.modules`` only for
+                    # diagnostics, never for trust decisions.
+                except Exception as exc:
+                    errors.append({"path": path_label, "error": str(exc)})
 
-        runner.extensions = extensions
-        if bind_provider_sink is not None:
-            runner.bind_provider_sink(bind_provider_sink)
-            errors.extend(dict(item) for item in resolved_runtime.provider_diagnostics)
-        if bind_tool_registry is not None:
-            runner.bind_tool_registry(bind_tool_registry)
-        if bind_command_registry is not None:
-            runner.bind_command_registry(bind_command_registry)
+            runner.extensions = extensions
+            if bind_provider_sink is not None:
+                runner.bind_provider_sink(bind_provider_sink)
+                errors.extend(dict(item) for item in resolved_runtime.provider_diagnostics)
+            if bind_tool_registry is not None:
+                runner.bind_tool_registry(bind_tool_registry)
+            if bind_command_registry is not None:
+                runner.bind_command_registry(bind_command_registry)
 
-        result = LoadExtensionsResult(
-            extensions=extensions,
-            errors=errors,
-            runtime=resolved_runtime,
-            generation=self.generation,
-            runner=runner,
-        )
-        runner._last_result = result  # type: ignore[attr-defined]
-        self._last_result = result
-        return result
+            result = LoadExtensionsResult(
+                extensions=extensions,
+                errors=errors,
+                runtime=resolved_runtime,
+                generation=self.generation,
+                runner=runner,
+            )
+            runner._last_result = result  # type: ignore[attr-defined]
+            self._last_result = result
+            return result
+        except BaseException:
+            runner.extensions = extensions
+            runner.invalidate(
+                "Extension load did not complete.",
+                invalidate_runtime=resolved_runtime is not runtime,
+            )
+            raise
 
     async def load_factory(
         self,
@@ -633,6 +641,12 @@ class ExtensionLoader:
                 self.generation,
                 runner,
             )
+        except BaseException:
+            runner.invalidate(
+                "Extension factory load did not complete.",
+                invalidate_runtime=resolved_runtime is not runtime,
+            )
+            raise
         runner._last_result = result  # type: ignore[attr-defined]
         self._last_result = result
         return result
@@ -658,7 +672,7 @@ class ExtensionLoader:
             else:
                 raise TypeError(f"extension factory is not callable: {path_label}")
         except BaseException:
-            runner.runtime.unregister_owner(extension.path)
+            runner.runtime.unregister_owner(extension.path, owner=(runner._resource_owner, extension.path))
             for name in extension.flags.keys() - existing_flags:
                 runner.runtime.flag_values.pop(name, None)
             raise

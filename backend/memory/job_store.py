@@ -551,6 +551,9 @@ class MemoryJobStore:
             if str(job["status"]) == "running" and int(job["lease_until"] or 0) > timestamp:
                 connection.commit()
                 return None
+            if str(job["status"]) == "error" and int(job["retry_remaining"] or 0) <= 0:
+                connection.commit()
+                return None
             if int(job["retry_at"] or 0) > timestamp:
                 connection.commit()
                 return None

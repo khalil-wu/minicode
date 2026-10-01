@@ -488,6 +488,7 @@ export interface ControlCanUseToolRequest {
   source_agent?: string;
   source_thread?: string;
   source_tool?: string;
+  network_unisolated?: boolean;
 }
 
 export interface ControlElicitationRequest {

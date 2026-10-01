@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
-import { fsListTreeResult, fsSearchFiles, openPath, ptyClear, ptyList, ptyRestart, ptySnapshot, ptySpawn, revealPath } from "./runtime";
+import { pickWorkspaceDirectory, fsListTreeResult, fsSearchFiles, openPath, ptyClear, ptyList, ptyRestart, ptySnapshot, ptySpawn, revealPath } from "./runtime";
 import { pushToast } from "../overlays/ToastContainer";
 
 const spawn = vi.fn();
@@ -147,5 +147,17 @@ describe("desktop shell actions in browser mode", () => {
     expect(openPathBridge).toHaveBeenCalledWith("C:/repo/report.pdf");
     expect(revealPathBridge).toHaveBeenCalledWith("C:/repo/report.pdf");
     expect(pushToast).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("workspace picker failure semantics", () => {
+  afterEach(() => { delete window.__MINICODE_RUNTIME__; });
+  it("distinguishes picker failure from user cancellation", async () => {
+    const failure = new Error("Picker failed");
+    const pick = vi.fn().mockRejectedValueOnce(failure).mockResolvedValueOnce(null);
+    window.__MINICODE_RUNTIME__ = { desktop: { pickWorkspaceDirectory: pick } as never };
+    await expect(pickWorkspaceDirectory()).rejects.toBe(failure);
+    await expect(pickWorkspaceDirectory()).resolves.toBeNull();
   });
 });

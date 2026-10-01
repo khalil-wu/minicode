@@ -660,6 +660,15 @@ def _normalize_network_requirements(
     domains = normalized.get("domains")
     legacy_allowed = normalized.get("allowed_domains")
     legacy_denied = normalized.get("denied_domains")
+    for field_name in ("allowed_domains", "denied_domains", "allow_unix_sockets"):
+        entries = normalized.get(field_name)
+        if entries is not None and (
+            not isinstance(entries, list)
+            or any(not isinstance(entry, str) for entry in entries)
+        ):
+            raise ConfigRequirementsError(
+                f"network.{field_name} in {source} must be a list of strings"
+            )
     if domains is not None and (legacy_allowed is not None or legacy_denied is not None):
         raise ConfigRequirementsError(
             f"network.domains in {source} cannot be combined with allowed_domains or denied_domains"

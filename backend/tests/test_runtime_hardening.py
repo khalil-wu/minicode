@@ -15,6 +15,7 @@ from backend.async_cleanup import (
     cancel_and_drain_to_completion,
 )
 from backend.agent.runtime_spans import runtime_span
+from backend.agent.message import AgentEvent
 from backend.agent.context import ContextBuilder
 from backend.agent.state import AgentState
 from backend.agent.tool_batch_execution import execute_tool_batch
@@ -720,14 +721,10 @@ def test_control_approval_payload_preserves_policy_scope() -> None:
         return diff
 
     runtime._sanitize_approval_diff_for_client = sanitize
-    event = SimpleNamespace(
-        data={
-            "tool_call_id": "call-1",
-            "tool_name": "run_command",
-            "args": {"command": "echo ok"},
-            "conversation_id": "conversation-a",
-        }
+    event = AgentEvent.approval_request(
+        "call-1", "run_command", {"command": "echo ok"}, network_unisolated=True,
     )
+    event.data["conversation_id"] = "conversation-a"
 
     payload = runtime.build_approval_request_payload(event)
 
@@ -737,6 +734,7 @@ def test_control_approval_payload_preserves_policy_scope() -> None:
     assert payload["workspace_root"] == "C:/workspace/worktree"
     assert payload["permission_mode"] == "confirm"
     assert payload["workspace_scope"] == "worktree"
+    assert payload["request"]["network_unisolated"] is True
     assert captured_scope == {
         "conversation_id": "conversation-a",
         "turn_id": "",

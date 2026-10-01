@@ -13,8 +13,10 @@ from backend.agent.message import AgentEvent
 from backend.memory.pollution import pollution_sources_from_transcript
 from backend.async_cleanup import (
     CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+    _consume_task_result,
     await_with_deadline,
     retain_cleanup_task,
+    to_thread_cancel_safe,
 )
 from backend.ws.conversation_errors import emit_conversation_not_found
 if TYPE_CHECKING:
@@ -1911,8 +1913,8 @@ async def handle_conversation_worktree_handoff_execute(session: "WebSocketSessio
             data={**preflight, "stale": True, "reason": "run_active"},
         )
         return True
-    try:
-        return await _handle_conversation_worktree_handoff_claimed(
+    handoff = asyncio.create_task(
+        _handle_conversation_worktree_handoff_claimed(
             session,
             conversation=conversation,
             conversation_id=conversation_id,
@@ -1920,6 +1922,22 @@ async def handle_conversation_worktree_handoff_execute(session: "WebSocketSessio
             dirty_action=dirty_action,
             preflight=preflight,
         )
+    )
+    try:
+        return await asyncio.shield(handoff)
+    except asyncio.CancelledError:
+        # Stash/create/remove/switch and durable binding form one admitted
+        # mutation. Keep the claim until that transaction commits or rolls back;
+        # cancelling only the waiter must not orphan a still-mutating worker.
+        while not handoff.done():
+            try:
+                await asyncio.shield(handoff)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        _consume_task_result(handoff)
+        raise
     finally:
         _release_conversation_mutation(mutation_claim)
 
@@ -1962,7 +1980,7 @@ async def _handle_conversation_worktree_handoff_claimed(
             return True
 
     if target_kind == "worktree":
-        base_root = session.main_worktree_root(source_path)
+        base_root = await to_thread_cancel_safe(session.main_worktree_root, source_path)
         creation = await asyncio.to_thread(
             create_isolated_worktree_binding,
             conversation,
@@ -2083,7 +2101,7 @@ async def _handle_conversation_worktree_handoff_claimed(
                     "workspace_root": creation.workspace_root,
                 }
     else:
-        base_root = session.main_worktree_root(source_path)
+        base_root = await to_thread_cancel_safe(session.main_worktree_root, source_path)
         branch = str(getattr(conversation, "git_branch", "") or "").strip()
         main_checkout = dict(preflight.get("main_checkout") or {})
         previous_main_branch = str(main_checkout.get("branch") or "").strip()
@@ -2382,7 +2400,7 @@ async def _restore_removed_conversation_worktree(
         base_root = (
             Path(raw_base_root).resolve()
             if raw_base_root
-            else session.main_worktree_root(worktree_path)
+            else await to_thread_cancel_safe(session.main_worktree_root, worktree_path)
         )
         manager = WorktreeManager(base_root)
         restored = await asyncio.to_thread(
@@ -3443,7 +3461,7 @@ async def handle_permissions_content_rule_add(session: "WebSocketSession", data:
 
 async def handle_context_compact(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     """Manually trigger context compaction with an optional focus string."""
-    from backend.agent.context import CompactionNoopError
+    from backend.agent.context import CompactionNoopError, ContextBuilder
     from backend.agent.message import AgentEvent
     from backend.services.context_budget import (
         build_context_budget_snapshot,
@@ -3453,7 +3471,7 @@ async def handle_context_compact(session: "WebSocketSession", data: dict[str, An
 
     focus = str(data.get("focus") or "").strip()
     ctx = session.context_builder
-    conversation_id = str(session.active_conversation_id or "").strip()
+    conversation_id = str(data.get("conversation_id") or session.active_conversation_id or "").strip()
     if not conversation_id:
         await session.send_event(
             AgentEvent.error(
@@ -3464,27 +3482,28 @@ async def handle_context_compact(session: "WebSocketSession", data: dict[str, An
             )
         )
         return True
-    state = getattr(session, "last_agent_state", None)
+    shared_context = conversation_id == session.active_conversation_id
+    state = getattr(session, "last_agent_state", None) if shared_context else None
     current = session.conversation_repo.get_conversation(conversation_id)
     if current is None:
-        await session.send_event(
-            AgentEvent.error(
-                "Conversation not found",
-                recoverable=True,
-                error_type="context",
-                error_code="conversation.not_found",
-            )
+        error_event = AgentEvent.error(
+            "Conversation not found",
+            recoverable=True,
+            error_type="context",
+            error_code="conversation.not_found",
         )
+        error_event.data["conversation_id"] = conversation_id
+        await session.send_event(error_event)
         return True
     if _conversation_has_active_run(session, conversation_id):
-        await session.send_event(
-            AgentEvent.error(
-                "This conversation has an active turn. Stop it before compacting context.",
-                recoverable=True,
-                error_type="conversation_busy",
-                error_code="conversation.active_run",
-            )
+        error_event = AgentEvent.error(
+            "This conversation has an active turn. Stop it before compacting context.",
+            recoverable=True,
+            error_type="conversation_busy",
+            error_code="conversation.active_run",
         )
+        error_event.data["conversation_id"] = conversation_id
+        await session.send_event(error_event)
         return True
     from backend.ws.compaction_coordinator import (
         CompactionCommittedProjectionError,
@@ -3492,19 +3511,66 @@ async def handle_context_compact(session: "WebSocketSession", data: dict[str, An
     )
 
     projection_error: CompactionCommittedProjectionError | None = None
+    target_adapter = None
+    provider_operation = None
     try:
-        await session.conversation_runtime.wait_for_hydration(conversation_id)
-        if session.active_conversation_id != conversation_id:
-            raise RuntimeError("The active conversation changed while its context was loading")
+        if shared_context:
+            await session.conversation_runtime.wait_for_hydration(conversation_id)
+            if session.active_conversation_id != conversation_id:
+                raise RuntimeError("The active conversation changed while its context was loading")
+        else:
+            from dataclasses import replace
+            from backend.agent.model_execution import ModelExecutionSnapshot
+            from backend.agent.state import AgentState
+            from backend.config import load_config
+            from backend.llm.model_registry import create_session_llm
+            from backend.llm.model_selection import config_with_model_budget
+            from backend.permissions.checker import PermissionChecker
+            from backend.tools.toolsets import ToolsetPolicy
+            from backend.ws.agent_runner import _lease_session_llm_for_task, _schedule_session_llm_close
+
+            workspace_root = session.session_lifecycle.workspace_root_for_conversation(current)
+            config = load_config(cwd=workspace_root)
+            selection = current.model_selection
+            provider = selection.get("provider") or config.llm.provider
+            model = selection.get("model") or config.llm.model
+            config = replace(config, llm=replace(config.llm, provider=provider, model=model,
+                reasoning_effort=selection.get("reasoning_effort", config.llm.reasoning_effort)))
+            model_runtime = session._model_runtime_for_conversation(conversation_id)
+            config = config_with_model_budget(config, model_runtime=model_runtime, provider=provider, model=model)
+            adapter = create_session_llm(config, provider_override=provider, model_override=model,
+                                         model_runtime=model_runtime)
+            target_adapter = adapter
+            execution = ModelExecutionSnapshot(config=config, llm=adapter, provider=provider, model=model)
+            ctx = ContextBuilder(token_budget=execution.config.token_budget, agent_settings=execution.config.agent,
+                                 llm=execution.llm, conversation_id=conversation_id, workspace_root=workspace_root)
+            ctx.load_snapshot(dict(current.context_snapshot or {}))
+            registry = session._conversation_tool_registry(conversation_id)
+            policy = ToolsetPolicy.default()
+            active_tools = session._extension_runtime_states.get(conversation_id, {}).get("active_tool_names")
+            if active_tools is not None:
+                policy = policy.with_active_tool_selection(active_tools)
+            target_schemas = registry.get_schemas(permission_checker=PermissionChecker(execution.config.permissions),
+                permission_context=session.permission_context_for_conversation(current, source="context.compact"),
+                toolset_policy=policy)
+            budget_state = AgentState(user_message="")
         before_ledger = context_ledger_snapshot(ctx)
-        before_budget = build_context_budget_snapshot(session, ctx)
-        committed = await compact_conversation(
+        before_budget = (build_context_budget_snapshot(session, ctx) if shared_context else
+                         ctx.get_budget_snapshot(state=budget_state, tool_schemas=target_schemas))
+        compaction = compact_conversation(
             session,
             conversation_id=conversation_id,
             context_builder=ctx,
             focus=focus,
             restore_state=state,
         )
+        if shared_context:
+            committed = await compaction
+        else:
+            provider_operation = asyncio.create_task(compaction)
+            retain_cleanup_task(provider_operation, session.cleanup_tasks)
+            _lease_session_llm_for_task(session, target_adapter, provider_operation)
+            committed = await asyncio.shield(provider_operation)
     except CompactionCommittedProjectionError as exc:
         logger.exception("Manual compaction committed but live context refresh failed for %s", conversation_id)
         committed = exc.committed
@@ -3552,6 +3618,25 @@ async def handle_context_compact(session: "WebSocketSession", data: dict[str, An
         await session.send_event(error_event)
         return True
 
+    finally:
+        if target_adapter is not None:
+            if provider_operation is not None and not provider_operation.done():
+                # Cancelling only this waiter cannot close an adapter still
+                # borrowed by the real side-query/commit operation. Retain its
+                # existing lease, and close at this operation's completion, not
+                # the receive task's end or a session-wide retired-model sweep.
+                provider_operation.add_done_callback(
+                    lambda _done: _schedule_session_llm_close(session, target_adapter)
+                )
+            else:
+                previous_close_tasks = set(session._llm_close_tasks)
+                _schedule_session_llm_close(session, target_adapter)
+                # Scheduling is synchronous: this difference is precisely our
+                # operation's close task, not a wait on unrelated model owners.
+                await asyncio.shield(asyncio.gather(
+                    *(session._llm_close_tasks - previous_close_tasks)
+                ))
+
     summary_text = committed.summary
     await session.send_event(AgentEvent(
         type="conversation.compaction.updated",
@@ -3574,7 +3659,8 @@ async def handle_context_compact(session: "WebSocketSession", data: dict[str, An
 
     try:
         after_ledger = context_ledger_snapshot(ctx)
-        after_budget = build_context_budget_snapshot(session, ctx)
+        after_budget = (build_context_budget_snapshot(session, ctx) if shared_context else
+                        ctx.get_budget_snapshot(state=budget_state, tool_schemas=target_schemas))
         compacted_event = build_context_compacted_event(
             summary_text,
             before_ledger,

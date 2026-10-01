@@ -225,6 +225,8 @@ class ReadMcpResourceTool(_McpBridgeTool):
         if not found_content and not resource_artifacts:
             return self._success_result(f"Resource {server_name}/{uri} is empty.")
 
+        artifact_id = None
+        preview = None
         if self._artifact_store and len(found_content) > 2000:
             artifact_id = self._artifact_store.save(
                 content=found_content,
@@ -247,7 +249,7 @@ class ReadMcpResourceTool(_McpBridgeTool):
                               artifact_media_type=first_artifact["media_type"],
                               artifact_bytes=first_artifact["bytes"], status="success",
                               runtime_metadata={"mcp_resource_artifacts": resource_artifacts})
-        return self._success_result(found_content)
+        return self._success_result(found_content, artifact_id=artifact_id, artifact_preview=preview)
 
 
 class ListMcpResourceTemplatesTool(_McpBridgeTool):

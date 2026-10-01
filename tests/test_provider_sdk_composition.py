@@ -341,7 +341,8 @@ def test_sdk_session_keeps_commands_across_turns_and_closes_them(tmp_path, monke
 
     async def scenario():
         async with sdk_module.SDKSession(
-            session_id="sdk-command-owner", llm=FixtureLLM(), config=_config(), workspace_root=tmp_path,
+            session_id="sdk-command-owner", llm=FixtureLLM(),
+            config=_config(agent=AgentSettings(code_mode_only=False)), workspace_root=tmp_path,
             artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
             permission_context=PermissionContext(mode="bypass"),
         ) as session:

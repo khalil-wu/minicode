@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+import os
 import shutil
+import stat
 from typing import Any
 
 from backend.agent.message import AgentEvent
@@ -77,6 +79,14 @@ class IsolatedWorktreeCreationResult:
     notice_event: AgentEvent | None = None
 
 
+def _worktree_include_is_link(path: Path) -> bool:
+    metadata = path.lstat()
+    return (
+        stat.S_ISLNK(metadata.st_mode)
+        or os.name == "nt" and metadata.st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+    )
+
+
 def copy_worktree_includes(source_root: Path, worktree_root: Path) -> tuple[list[str], list[str]]:
     """Copy explicitly allowlisted ignored runtime files into a new worktree.
 
@@ -105,21 +115,38 @@ def copy_worktree_includes(source_root: Path, worktree_root: Path) -> tuple[list
         if relative.is_absolute() or ".." in relative.parts:
             skipped.append(value)
             continue
-        source = (source_root / relative).resolve()
+        source = source_root / relative
         destination = (worktree_root / relative).resolve()
-        try:
-            source.relative_to(source_root.resolve())
-            destination.relative_to(worktree_root.resolve())
-        except ValueError:
-            skipped.append(value)
-            continue
-        if not source.exists() or source.is_symlink() or destination.exists():
+        if destination.exists():
             skipped.append(value)
             continue
         try:
+            if _worktree_include_is_link(source):
+                skipped.append(value)
+                continue
+            try:
+                source.resolve().relative_to(source_root.resolve())
+                destination.relative_to(worktree_root.resolve())
+            except ValueError:
+                skipped.append(value)
+                continue
             if source.is_dir():
-                shutil.copytree(source, destination, symlinks=True, ignore_dangling_symlinks=True)
-                if any(path.is_symlink() for path in destination.rglob("*")):
+                linked_entry = False
+
+                def omit_links(directory: str, names: list[str]) -> list[str]:
+                    nonlocal linked_entry
+                    links = [
+                        name for name in names
+                        if _worktree_include_is_link(Path(directory) / name)
+                    ]
+                    linked_entry = linked_entry or bool(links)
+                    return links
+
+                # copytree invokes this before descending: a Windows junction
+                # must never be followed and only noticed after its target has
+                # already been copied. Preserve the prior whole-entry refusal.
+                shutil.copytree(source, destination, symlinks=True, ignore=omit_links)
+                if linked_entry:
                     shutil.rmtree(destination)
                     skipped.append(value)
                     continue

@@ -24,7 +24,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, BinaryIO, Callable
 
 from backend.config import DATA_ROOT
-from backend.runtime_env import shell_subprocess_env
+from backend.runtime_env import powershell_script, shell_subprocess_env
 from backend.sandbox.policy import (
     FileSystemAccessMode,
     FileSystemPath,
@@ -35,7 +35,9 @@ from backend.sandbox.policy import (
 )
 from backend.sandbox.result import SandboxResult
 from backend.subprocesses import (
+    SubprocessOutputLimitError,
     communicate,
+    communicate_bounded,
     record_unproven_cleanup,
     spawn_exec,
     spawn_shell,
@@ -434,8 +436,9 @@ class SandboxRunner:
     Isolation strategy by platform:
       - Linux: Bubblewrap filesystem namespace plus optional network namespace
       - macOS: sandbox-exec with a generated Seatbelt profile
-      - Windows: MiniCode-owned container capability when available; otherwise
-        fail closed before process creation
+      - Windows: MiniCode-owned container isolation; unsupported policies fail
+        before process creation. Same-user low integrity is not a workspace
+        sandbox: every previously Low-labelled workspace remains writable.
 
     Full-access policies still use process groups for reliable tree cleanup,
     but process grouping is never reported as a security boundary.
@@ -451,6 +454,10 @@ class SandboxRunner:
         self._synthetic_mount_overrides: dict[str, Path] = {}
         self._sandbox_ready_file: Path | None = None
         self._low_integrity_temp_dir: Path | None = None
+        self._windows_private_desktop: Any | None = None
+        self._windows_native_temp_dir: Path | None = None
+        self._windows_native_cwd: Path | None = None
+        self._windows_cleanup_pending = False
 
     def capability(self, *, cwd: str | Path | None = None) -> SandboxCapability:
         """Report the isolation that will actually be enforced.
@@ -502,6 +509,27 @@ class SandboxRunner:
                 deny_read_isolated=True,
                 protected_paths_isolated=_protected_paths_fully_isolated(resolved),
             )
+        windows_native_reason = ""
+        if (
+            sys.platform == "win32"
+            and not policy_preflight_error
+            and not _has_filesystem_root_write(resolved)
+            and resolved.root_read_baseline
+        ):
+            from backend.sandbox.windows_native import discover_runtime
+
+            native_runtime, windows_native_reason = discover_runtime()
+            if native_runtime is not None:
+                return SandboxCapability(
+                    available=True,
+                    backend="windows-elevated-wfp",
+                    filesystem_isolated=True,
+                    network_isolated=not resolved.allow_network,
+                    deny_read_isolated=True,
+                    protected_paths_isolated=_protected_paths_fully_isolated(resolved),
+                )
+        elif sys.platform == "win32" and not resolved.root_read_baseline:
+            windows_native_reason = "elevated Windows sandbox requires effective :root read access"
         container_engine, container_image, container_reason = _container_runtime()
         container_can_represent = not _has_filesystem_root_write(resolved) and (
             not resolved.root_read_baseline or sys.platform == "win32"
@@ -523,22 +551,12 @@ class SandboxRunner:
         low_integrity_reason = ""
         if sys.platform == "win32" and not policy_preflight_error:
             low_integrity_reason = _low_integrity_unavailable_reason(resolved)
-            if not low_integrity_reason:
-                return SandboxCapability(
-                    available=True,
-                    backend="low-integrity",
-                    filesystem_isolated=True,
-                    # Network denial is an environment rewrite (dead proxy,
-                    # offline flags, ssh stubs), not a packet filter.
-                    network_isolated=False,
-                    deny_read_isolated=False,
-                    protected_paths_isolated=_protected_paths_fully_isolated(resolved),
-                )
         if sys.platform == "win32":
             reason = "; ".join(
                 part
                 for part in (
                     policy_preflight_error,
+                    windows_native_reason,
                     container_reason,
                     low_integrity_reason,
                 )
@@ -565,6 +583,8 @@ class SandboxRunner:
     ) -> tuple[str | list[str], SandboxCapability]:
         """Return an enforceable command wrapper or fail before process creation."""
         self._cleanup_sandbox_setup_state()
+        if self._windows_cleanup_pending:
+            raise SandboxUnavailableError("Native Windows sandbox TEMP cleanup is still pending")
         capability = self.capability(cwd=cwd)
         if not capability.available:
             raise SandboxUnavailableError(capability.reason)
@@ -638,7 +658,7 @@ class SandboxRunner:
             else:
                 process = await spawn_shell(wrapped, **spawn_kwargs)
             self.process = process
-            await self._await_sandbox_ready(process)
+            await self._await_sandbox_ready(process, capture_startup_output=True)
             return process
         except BaseException as exc:
             if process is None:
@@ -677,7 +697,7 @@ class SandboxRunner:
             else:
                 process = await spawn_shell(wrapped, **spawn_kwargs)
             self.process = process
-            await self._await_sandbox_ready(process)
+            await self._await_sandbox_ready(process, capture_startup_output=True)
             return process
         except BaseException as exc:
             if process is None:
@@ -695,7 +715,7 @@ class SandboxRunner:
         return await self._kill_tree(process)
 
     def map_path_to_sandbox(self, path: str | Path) -> str:
-        """Map a workspace path to the path visible to the selected backend."""
+        """Map a declared host path using the selected backend's actual mounts."""
         resolved = Path(path).expanduser().resolve()
         workspace = self._policy.workspace_root
         capability = self.capability(cwd=workspace)
@@ -703,14 +723,15 @@ class SandboxRunner:
             return str(resolved)
         if workspace is None:
             raise SandboxUnavailableError("Container sandbox requires a workspace root")
-        try:
-            relative = resolved.relative_to(workspace.expanduser().resolve())
-        except ValueError as exc:
-            raise SandboxUnavailableError("Path is outside the sandbox workspace") from exc
-        return str(PurePosixPath("/workspace", *relative.parts))
+        targets = _container_targets_for_path(
+            resolved, self._policy.resolve(cwd=workspace), workspace.expanduser().resolve(),
+        )
+        if not targets:
+            raise SandboxUnavailableError("Path is outside the sandbox's declared mounts")
+        return targets[0]
 
     def map_path_from_sandbox(self, path: str) -> str:
-        """Map a backend-visible workspace path back to its host location."""
+        """Map a backend-visible declared path back to its host location."""
         workspace = self._policy.workspace_root
         capability = self.capability(cwd=workspace)
         if capability.backend not in {"docker", "podman"}:
@@ -719,13 +740,19 @@ class SandboxRunner:
             return path
         normalized = posixpath.normpath(str(path or "").replace("\\", "/"))
         candidate = PurePosixPath(normalized)
-        try:
-            relative = candidate.relative_to(PurePosixPath("/workspace"))
-        except ValueError:
-            return path
-        if any(part in {"", ".", ".."} for part in relative.parts):
-            return path
-        return str(workspace.expanduser().resolve().joinpath(*relative.parts))
+        workspace = workspace.expanduser().resolve()
+        policy = self._policy.resolve(cwd=workspace)
+        roots = [workspace, *(item.root for item in policy.writable_roots), *policy.readable_roots]
+        if policy.root_read_baseline and sys.platform == "win32":
+            roots.extend(_windows_filesystem_roots())
+        for root in roots:
+            for target in _container_targets_for_path(root, policy, workspace):
+                try:
+                    relative = candidate.relative_to(PurePosixPath(target))
+                except ValueError:
+                    continue
+                return str(root.joinpath(*relative.parts))
+        return path
 
     async def run(self, command: str, **kwargs: Any) -> SandboxResult:
         """Run one command and retain any resource whose cleanup is pending."""
@@ -736,7 +763,7 @@ class SandboxRunner:
                 await self._cleanup_container(force=True)
                 if self.process is None else False
             )
-            if self.process is not None or not container_removed:
+            if self.process is not None or not container_removed or self._windows_cleanup_pending:
                 exc.cleanup_pending = True
                 exc.cleanup_reason = "command_resource_cleanup_pending"
             raise
@@ -745,6 +772,10 @@ class SandboxRunner:
         container_removed = await self._cleanup_container(force=True)
         if not container_removed:
             result = replace(result, cleanup_pending=True, cleanup_reason="container_cleanup_pending")
+        else:
+            self._cleanup_sandbox_setup_state()
+        if self._windows_cleanup_pending and not result.cleanup_pending:
+            result = replace(result, cleanup_pending=True, cleanup_reason="native_temp_cleanup_pending")
         if not result.cleanup_pending:
             self.process = None
         return result
@@ -753,7 +784,8 @@ class SandboxRunner:
         """Retry termination of resources retained by this runner."""
         if self.process is not None:
             return await self._kill_tree(self.process)
-        return await self._cleanup_container(force=True)
+        self._cleanup_sandbox_setup_state()
+        return not self._windows_cleanup_pending and await self._cleanup_container(force=True)
 
     @property
     def container_ownership(self) -> dict[str, str]:
@@ -839,8 +871,6 @@ class SandboxRunner:
                 started_result = process_started_callback(proc.pid)
                 if inspect.isawaitable(started_result):
                     await started_result
-            await self._await_sandbox_ready(proc)
-
             if cancel_event:
                 async def _wait_cancel() -> None:
                     nonlocal cancel_tree_reaped
@@ -936,6 +966,10 @@ class SandboxRunner:
                     stderr_task,
                     wait_task,
                 )
+                # Setup diagnostics belong to the same output stream as the
+                # command. Drain before waiting for the namespace handshake:
+                # an early launcher exit otherwise loses its stderr entirely.
+                await self._await_sandbox_ready(proc)
                 if self._policy.timeout is not None and self._policy.timeout > 0:
                     _, stdout_total, stderr_total, _ = await asyncio.wait_for(
                         asyncio.shield(completion_task),
@@ -993,6 +1027,22 @@ class SandboxRunner:
 
             stderr_text = stderr_capture.snapshot()
 
+            if (
+                capability.backend == "windows-elevated-wfp"
+                and proc.returncode
+                and stderr_text.lstrip().startswith("windows sandbox failed:")
+            ):
+                return SandboxResult(
+                    stdout=stdout_capture.snapshot(),
+                    stderr=stderr_text,
+                    exit_code=126,
+                    sandbox_unavailable=True,
+                    stdout_path=stdout_capture.path,
+                    stderr_path=stderr_capture.path,
+                    stdout_total_bytes=stdout_total,
+                    stderr_total_bytes=stderr_total,
+                )
+
             return SandboxResult(
                 stdout=stdout_capture.snapshot(),
                 stderr=stderr_text,
@@ -1037,11 +1087,25 @@ class SandboxRunner:
                 ),
             )
         except SandboxUnavailableError as exc:
+            if completion_task is not None:
+                try:
+                    await asyncio.wait_for(asyncio.shield(completion_task), timeout=3.0)
+                except asyncio.TimeoutError:
+                    completion_task.cancel()
+                    await asyncio.gather(completion_task, return_exceptions=True)
+            stdout_capture.finish()
+            stderr_capture.finish()
             return SandboxResult(
-                stdout="",
-                stderr=f"Sandbox unavailable: {exc}",
+                stdout=stdout_capture.snapshot(),
+                stderr="\n".join(filter(None, (
+                    stderr_capture.snapshot(), f"Sandbox unavailable: {exc}",
+                ))),
                 exit_code=126,
                 sandbox_unavailable=True,
+                stdout_path=stdout_capture.path,
+                stderr_path=stderr_capture.path,
+                stdout_total_bytes=stream_totals["stdout"],
+                stderr_total_bytes=stream_totals["stderr"],
                 cleanup_pending=self.process is not None,
                 cleanup_reason="sandbox_setup_cleanup_pending" if self.process is not None else "",
             )
@@ -1099,7 +1163,10 @@ class SandboxRunner:
                 if transport is not None:
                     with suppress(Exception):
                         transport.close()
-            self._cleanup_sandbox_setup_state()
+            # A failed tree/container termination retains its setup resources
+            # for cleanup(), rather than dropping their only owner here.
+            if proc is None:
+                self._cleanup_sandbox_setup_state()
 
     def _build_env(self) -> dict[str, str]:
         # Per-launch command overrides are applied after the configured policy,
@@ -1154,6 +1221,41 @@ class SandboxRunner:
                 cwd=cwd,
                 resolved=resolved,
             )
+
+        if capability.backend == "windows-elevated-wfp":
+            from backend.sandbox.windows_native import prepare_command
+
+            effective_cwd = (
+                Path(cwd).expanduser().resolve()
+                if cwd
+                else (self._policy.workspace_root or Path.cwd()).expanduser().resolve()
+            )
+            events = _resolved_path_events(resolved)
+            deny_read = [
+                path for path, access in events if access is FileSystemAccessMode.DENY
+            ]
+            deny_write = [
+                path
+                for path, access in events
+                if access is not FileSystemAccessMode.WRITE
+                and any(
+                    _policy_path_is_writable(resolved, candidate)
+                    for candidate in (path, *path.parents)
+                )
+            ]
+            wrapped, desktop, private_temp = prepare_command(
+                command,
+                cwd=effective_cwd,
+                resolved=resolved,
+                env=self._build_env(),
+                workspace_roots=(self._policy.workspace_roots or (effective_cwd,)),
+                deny_read_paths=deny_read,
+                deny_write_paths=deny_write,
+            )
+            self._windows_private_desktop = desktop
+            self._windows_native_temp_dir = private_temp
+            self._windows_native_cwd = effective_cwd
+            return wrapped
 
         if capability.backend == "low-integrity":
             from backend.sandbox import win_low_integrity
@@ -1279,7 +1381,9 @@ class SandboxRunner:
         self._sandbox_ready_file = Path(handle.name)
         return self._sandbox_ready_file
 
-    async def _await_sandbox_ready(self, process: asyncio.subprocess.Process) -> None:
+    async def _await_sandbox_ready(
+        self, process: asyncio.subprocess.Process, *, capture_startup_output: bool = False,
+    ) -> None:
         ready_file = self._sandbox_ready_file
         if ready_file is None:
             return
@@ -1294,11 +1398,27 @@ class SandboxRunner:
             if process.returncode is not None:
                 break
             await asyncio.sleep(0.01)
-        self._cleanup_sandbox_setup_state()
-        if process.returncode is None:
-            await self._kill_tree(process)
+        # Even an already-exited launcher still owns the container/setup
+        # receipt. The same cleanup path must close it and clear self.process.
+        await self._kill_tree(process)
+        diagnostic = ""
+        if capture_startup_output:
+            # Interactive callers own their protocol streams after readiness.
+            # Read them only on failed startup, once that child was stopped.
+            try:
+                stdout, stderr = await communicate_bounded(
+                    process, timeout=3.0,
+                    stdout_limit_bytes=MAX_TOOL_RESULT_BYTES,
+                    stderr_limit_bytes=MAX_TOOL_RESULT_BYTES,
+                )
+                diagnostic = _decode_command_bytes(stderr or stdout).strip()
+            except SubprocessOutputLimitError as exc:
+                diagnostic = f"{_decode_command_bytes(exc.captured).strip()}\n{exc}"
         raise SandboxUnavailableError(
-            "Sandbox namespace did not confirm protected-path setup before command execution"
+            "\n".join(filter(None, (
+                "Sandbox namespace did not confirm protected-path setup before command execution",
+                diagnostic,
+            )))
         )
 
     def _cleanup_sandbox_setup_state(self) -> None:
@@ -1316,14 +1436,41 @@ class SandboxRunner:
         self._low_integrity_temp_dir = None
         if low_integrity_temp is not None:
             shutil.rmtree(low_integrity_temp, ignore_errors=True)
+        native_temp = self._windows_native_temp_dir
+        private_desktop = self._windows_private_desktop
+        if native_temp is not None and native_temp.exists():
+            try:
+                shutil.rmtree(native_temp)
+            except OSError:
+                from backend.sandbox.windows_native import cleanup_private_temp
+
+                try:
+                    if not cleanup_private_temp(
+                        native_temp,
+                        cwd=self._windows_native_cwd or self._policy.workspace_root or Path.cwd(),
+                        desktop=private_desktop,
+                    ):
+                        raise RuntimeError("native TEMP cleanup helper failed")
+                    shutil.rmtree(native_temp)
+                except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                    self._windows_cleanup_pending = True
+                    logger.warning("Native Windows sandbox TEMP cleanup pending: %s", exc)
+                    return
+        self._windows_native_temp_dir = None
+        self._windows_native_cwd = None
+        self._windows_cleanup_pending = False
+        self._windows_private_desktop = None
+        if private_desktop is not None:
+            private_desktop.close()
 
     async def _kill_tree(self, proc: asyncio.subprocess.Process) -> bool:
         # The sandbox owns container cleanup, while the host child still uses
         # the shared process-group lifecycle used by every other execution path.
         reaped = await terminate_process_tree(proc)
         container_removed = await self._cleanup_container(force=True)
-        self._cleanup_sandbox_setup_state()
-        completed = reaped and container_removed
+        if reaped and container_removed:
+            self._cleanup_sandbox_setup_state()
+        completed = reaped and container_removed and not self._windows_cleanup_pending
         if completed and self.process is proc:
             self.process = None
         return completed
@@ -1430,7 +1577,15 @@ class SandboxRunner:
             set(path_mappings), key=lambda item: len(item[0]), reverse=True
         ):
             if host_path:
-                container_command = container_command.replace(host_path, container_path)
+                suffix = r"[^'\"\r\n;|<>()]*" if host_path.endswith(("\\", "/")) else r"(?:[\\/][^'\"\r\n;|<>()]*)?"
+                boundary = "" if host_path.endswith(("\\", "/")) else r"(?=$|[\\/\s'\";)<>|])"
+                pattern = re.escape(host_path) + boundary + "(" + suffix + ")"
+                container_command = re.sub(
+                    pattern,
+                    lambda match, target=container_path: target + match.group(1).replace("\\", "/"),
+                    container_command,
+                    flags=re.IGNORECASE if sys.platform == "win32" else 0,
+                )
         ready_file = self._sandbox_ready_file
         if ready_file is not None:
             if sys.platform == "win32":
@@ -1463,7 +1618,10 @@ class SandboxRunner:
                 if _policy_path_is_writable(resolved, Path(tempfile.gettempdir()))
                 else "--tmpfs=/tmp:ro,nosuid,nodev,mode=0555,size=4k"
             ),
-            f"--volume={workspace_root}:/workspace:{'rw' if workspace_is_writable else 'ro'}",
+            *(
+                [f"--volume={workspace_root}:/workspace:{'rw' if workspace_is_writable else 'ro'}"]
+                if resolved.resolve_access(workspace_root).can_read else []
+            ),
             f"--workdir={container_cwd}",
             "--env=HOME=/tmp",
             "--env=PYTHONUTF8=1",
@@ -1523,7 +1681,7 @@ class SandboxRunner:
                     "-NoProfile",
                     "-NonInteractive",
                     "-Command",
-                    container_command,
+                    powershell_script(container_command),
                 )
             )
         else:
@@ -1575,6 +1733,16 @@ def _container_policy_masks(
 
     args: list[str] = []
     events = _resolved_path_events(resolved)
+    # workspace_root selects cwd; it is not itself a filesystem grant. With
+    # no workspace read grant the base host bind is absent. Keep the implicit
+    # deny in the mount graph so precise child READ/WRITE grants still reopen
+    # only those child mounts, rather than exposing the rest of the checkout.
+    workspace_readable = resolved.resolve_access(workspace_root).can_read
+    if not workspace_readable and not any(path == workspace_root for path, _ in events):
+        events = sorted(
+            [*events, (workspace_root, FileSystemAccessMode.DENY)],
+            key=lambda item: (len(item[0].parts), str(item[0])),
+        )
     for path, access in events:
         ancestors = [
             ancestor_access
@@ -1587,7 +1755,7 @@ def _container_policy_masks(
         ):
             continue
         if access is FileSystemAccessMode.READ and not any(
-            ancestor_access is FileSystemAccessMode.WRITE
+            ancestor_access is not FileSystemAccessMode.READ
             for ancestor_access in ancestors
         ):
             continue
@@ -1596,6 +1764,8 @@ def _container_policy_masks(
         # Paths outside every declared bind are already absent from the
         # container namespace; adding a host mount would broaden access.
         for target in targets:
+            if path == workspace_root and target == "/workspace" and not workspace_readable:
+                continue  # The base image directory replaces the absent host bind.
             if access is FileSystemAccessMode.WRITE:
                 if source.exists():
                     args.append(f"--volume={source}:{target}:rw")
@@ -1937,9 +2107,9 @@ def _resolved_path_events(
             add(writable.root / name, FileSystemAccessMode.READ)
     for path in resolved.unreadable_roots:
         add(path, FileSystemAccessMode.DENY)
-    # Glob rules remain available to the direct permission checker. At the OS
-    # boundary, masking the static prefix is intentionally broader and prevents
-    # a post-start file creation from escaping a startup-only glob expansion.
+    # Expansion describes existing matches only. It is not a runtime glob
+    # guard: mount/ACL backends reject these policies in preflight instead of
+    # claiming that this snapshot covers later-created or renamed files.
     for pattern in resolved.unreadable_globs:
         for path in _expand_unreadable_glob(pattern, resolved.glob_scan_max_depth):
             add(path, FileSystemAccessMode.DENY)
@@ -1987,20 +2157,13 @@ def _low_integrity_supported() -> bool:
 
 def _low_integrity_unavailable_reason(resolved: ResolvedSandboxPolicy) -> str:
     """Why the Windows low-integrity backend cannot represent this policy."""
-    if not _low_integrity_supported():
-        return "pywin32 is required for the Windows low-integrity sandbox"
-    if _has_filesystem_root_write(resolved):
-        return "low-integrity sandbox cannot grant write access to a whole drive"
-    if resolved.has_denied_read_restrictions:
-        return "low-integrity sandbox cannot enforce deny-read paths"
-    if not resolved.writable_roots:
-        return "low-integrity sandbox requires at least one writable root"
-    from backend.sandbox import win_low_integrity
-
-    for root in resolved.writable_roots:
-        if not win_low_integrity.volume_supports_labels(root.root):
-            return f"low-integrity sandbox needs an NTFS volume for {root.root}"
-    return ""
+    reason = (
+        "same-user low-integrity tokens cannot isolate workspaces: "
+        "a command can write to another Low-labelled workspace"
+    )
+    if not resolved.allow_network:
+        reason += "; proxy environment variables cannot enforce network isolation against direct sockets"
+    return reason
 
 
 def _has_filesystem_root_write(resolved: ResolvedSandboxPolicy) -> bool:
@@ -2013,6 +2176,8 @@ def _has_filesystem_root_write(resolved: ResolvedSandboxPolicy) -> bool:
 def _protected_paths_fully_isolated(resolved: ResolvedSandboxPolicy) -> bool:
     for writable in resolved.writable_roots:
         for readonly in writable.read_only_subpaths:
+            if readonly.parent == writable.root and readonly.name in writable.protected_metadata_names:
+                continue
             if resolved.resolve_access(readonly) is FileSystemAccessMode.WRITE:
                 return False
     return True
@@ -2023,6 +2188,12 @@ def _protected_metadata_target_is_directory(name: str) -> bool:
 
 
 def _sandbox_policy_preflight_error(resolved: ResolvedSandboxPolicy) -> str:
+    if resolved.unreadable_globs:
+        return (
+            "This sandbox backend cannot enforce deny-read globs for files created "
+            "or renamed after startup. Use concrete denied paths, or a backend "
+            "with runtime pathname matching; no command was started."
+        )
     try:
         events = _resolved_path_events(resolved)
     except SandboxUnavailableError as exc:

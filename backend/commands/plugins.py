@@ -116,7 +116,8 @@ def _read_active_version(plugin_dir: Path) -> str | None:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     version = payload.get("version") if isinstance(payload, dict) else None
-    return str(version).strip() if isinstance(version, str) and version.strip() else None
+    selected = version.strip() if isinstance(version, str) else ""
+    return selected if _is_version_segment(selected) else None
 
 
 def _is_version_segment(value: str) -> bool:

@@ -52,6 +52,24 @@ async def close_provider_stream(stream: Any | None, *, read_context: Context | N
             logger.debug("Provider stream close failed", exc_info=True)
 
 
+async def finish_provider_stream(
+    close_stream: Callable[[], Awaitable[None]],
+    turn_kernel: Any,
+    provider_attempt: Any,
+) -> None:
+    """Settle the active attempt when its consumer closes before completion."""
+    try:
+        await close_stream()
+    finally:
+        if provider_attempt is not None and not provider_attempt.closed:
+            await turn_kernel.close_provider_attempt(
+                provider_attempt,
+                status="cancelled",
+                summary="Provider stream closed before completion",
+                project_progress=False,
+            )
+
+
 async def handle_provider_stream_exception(
     exc: BaseException,
     *,

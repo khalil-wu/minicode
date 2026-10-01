@@ -143,7 +143,10 @@ def build_attachment_input_plan(
                     f"the provider maximum of {NATIVE_MEDIA_COUNT_LIMIT} media items (images/PDFs)."
                 )
             elif _fits_limit(size_bytes, NATIVE_IMAGE_LIMIT_BYTES):
-                images.append({"media_type": media_type or "image/png", "data": data})
+                images.append({
+                    "media_type": media_type or "image/png", "data": data,
+                    **({"artifact_id": artifact_id} if retain_native_media and payload is not None else {}),
+                })
                 used_native = True
             else:
                 hints.append(
@@ -167,6 +170,7 @@ def build_attachment_input_plan(
                         "media_type": PDF_MEDIA_TYPE,
                         "data": data,
                         "file_name": file_name,
+                        **({"artifact_id": artifact_id} if retain_native_media and payload is not None else {}),
                     }
                 )
                 used_native = True

@@ -77,6 +77,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
   const availableSkills = useAppStore((s) => s.availableSkills);
   const selectedSkills = useAppStore((s) => s.selectedSkills);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const fileTreeVersion = useAppStore((s) => s.fileTreeVersion);
   const slashFilter = filter ?? "";
   const skillKey = (path: string | undefined, name: string): string => path
     ? `path:${workspaceFilePathComparisonKey(path, workingDirectory)}`
@@ -230,7 +231,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
     const searchId = ++searchSequenceRef.current;
     const desktopMode = isDesktop();
     const root = workingDirectory || "";
-    const cacheScope = `${desktopMode ? "desktop" : "web"}:${root}`;
+    const cacheScope = `${desktopMode ? "desktop" : "web"}:${root}:revision:${fileTreeVersion}`;
     setFileSearchError("");
     setFileResults([]);
 
@@ -357,7 +358,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
     }, MENTION_SEARCH_DEBOUNCE_MS);
 
     return () => window.clearTimeout(timer);
-  }, [open, kind, mentionSearchQuery, workingDirectory]);
+  }, [open, kind, mentionSearchQuery, workingDirectory, fileTreeVersion]);
 
   const items: MenuItem[] =
     kind === "slash"

@@ -6,11 +6,14 @@ from types import SimpleNamespace
 import pytest
 
 import backend.sdk as sdk_module
+from backend.agent.attachment_policy import AttachmentInputPlan
 from backend.agent.context import ContextBuilder
 from backend.agent.history_store import estimate_message_tokens
+from backend.agent.loop_session import populate_prompt_context
 from backend.agent.message import AgentEvent
 from backend.agent.state import AgentState
 from backend.config import TokenBudget
+from backend.permissions.context import PermissionContext
 from backend.sdk import SDKSession
 from backend.agent.conversation_query_guard import conversation_query_guards
 from backend.ws.agent_runner import (
@@ -110,6 +113,52 @@ def test_context_builder_binds_replacement_llm_for_side_calls() -> None:
 
     assert builder._llm is llm
     assert builder._budget is budget
+
+
+def test_noop_turn_preserves_media_recovery_until_a_real_turn() -> None:
+    builder = ContextBuilder()
+    state = AgentState(user_message="")
+    builder._withheld_media_timestamps.add(123)
+
+    asyncio.run(builder.start_turn("", state))
+    assert builder._withheld_media_timestamps == {123}
+
+    asyncio.run(builder.start_turn("continue", state))
+    assert builder._withheld_media_timestamps == set()
+
+
+def test_attachments_only_turn_gets_an_inspection_request() -> None:
+    content = ContextBuilder._with_attachment_text_fallback(
+        "", AttachmentInputPlan(images=[{"media_type": "image/png", "data": "image-data"}])
+    )
+    assert "Inspect their actual contents" in content
+
+
+def test_snapshot_restore_keeps_history_when_tool_arguments_are_malformed() -> None:
+    messages = ContextBuilder.deserialize_snapshot_history([{
+        "role": "assistant",
+        "content": "calling",
+        "tool_calls": [{"id": "call-1", "name": "read_file", "arguments": "not-an-object"}],
+    }])
+    assert messages[0].tool_calls[0].arguments == {}
+
+
+def test_cleared_user_directory_does_not_leak_into_next_turn(monkeypatch) -> None:
+    monkeypatch.setenv("MINICODE_DESKTOP_DIR", r"C:\Desktop")
+    state = AgentState(user_message="continue")
+    metadata: dict[str, str] = {}
+    populate_prompt_context(
+        state=state, metadata=metadata, workspace_root=None,
+        permission_context=PermissionContext(), run_context=None,
+    )
+    assert state.prompt_context["environment"]["user_directories"]["desktop"] == r"C:\Desktop"
+
+    monkeypatch.delenv("MINICODE_DESKTOP_DIR")
+    populate_prompt_context(
+        state=state, metadata=metadata, workspace_root=None,
+        permission_context=PermissionContext(), run_context=None,
+    )
+    assert state.prompt_context["environment"]["user_directories"] == {}
 
 
 def test_git_snapshot_is_session_owned_and_round_trips(monkeypatch, tmp_path) -> None:

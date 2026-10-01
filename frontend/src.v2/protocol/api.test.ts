@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
 
 const loadApi = async (env: Record<string, string | boolean | undefined> = {}) => {
   vi.resetModules();
@@ -140,5 +141,62 @@ describe("api base URLs", () => {
       const source = fs.readFileSync(file, "utf8");
       expect(source).not.toContain("withRuntimeToken(");
     }
+  });
+});
+
+describe("HTTP operation lifetime", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it.each(["deadline", "caller abort"])("owns a stalled body until %s closes the actual connection", async (mode) => {
+    let closed!: () => void;
+    const disconnected = new Promise<void>((resolve) => { closed = resolve; });
+    const server = createServer((request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      if (request.url === "/warm") { response.end("{}"); return; }
+      response.flushHeaders();
+      response.write('{"pending":');
+      response.on("close", closed);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address() as { port: number };
+    const url = `http://127.0.0.1:${address.port}`;
+    const caller = new AbortController();
+    try {
+      const api = await loadApi();
+      await (await api.fetchWithTimeout(`${url}/warm`)).json();
+      const response = await api.fetchWithTimeout(`${url}/stall`, { signal: caller.signal }, {
+        timeoutMs: mode === "deadline" ? 200 : 5_000,
+        timeoutMessage: "Body deadline expired",
+      });
+      expect(response.url).toBe(`${url}/stall`);
+      const body = response.json();
+      const reason = new Error("User cancelled the body");
+      const failed = mode === "deadline"
+        ? expect(body).rejects.toThrow("Body deadline expired")
+        : expect(body).rejects.toBe(reason);
+      if (mode === "caller abort") caller.abort(reason);
+      await failed;
+      await disconnected;
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("ends the request authority when a body consumer cancels", async () => {
+    const cancelled = vi.fn();
+    const source = new ReadableStream<Uint8Array>({ cancel: cancelled });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(source)));
+    const { fetchWithTimeout } = await loadApi();
+    const caller = new AbortController();
+    const remove = vi.spyOn(caller.signal, "removeEventListener");
+    const response = await fetchWithTimeout("http://example.test", { signal: caller.signal });
+    await response.body!.cancel("consumer cancelled");
+    expect(cancelled).toHaveBeenCalledWith("consumer cancelled");
+    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+    remove.mockRestore();
   });
 });

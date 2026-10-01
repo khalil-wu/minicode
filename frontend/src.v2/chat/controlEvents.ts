@@ -154,6 +154,7 @@ const applyApprovalRequest = (
     sourceAgent?: string;
     sourceThread?: string;
     sourceTool?: string;
+    networkUnisolated?: boolean;
     diff?: unknown;
     expiresAt?: number;
   },
@@ -171,6 +172,7 @@ const applyApprovalRequest = (
       sourceAgent: request.sourceAgent,
       sourceThread: request.sourceThread,
       sourceTool: request.sourceTool,
+      networkUnisolated: request.networkUnisolated,
       expiresAt: request.expiresAt,
     });
     return;
@@ -274,6 +276,7 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
           sourceAgent: request.source_agent,
           sourceThread: request.source_thread,
           sourceTool: request.source_tool,
+          networkUnisolated: request.network_unisolated,
           expiresAt: ev.expires_at,
           diff: request.diff,
         });

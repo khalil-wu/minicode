@@ -1,10 +1,15 @@
 import { _electron as electron, expect, test } from "@playwright/test";
+import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const apiKey = process.env.MINICODE_REAL_E2E_API_KEY?.trim() ?? "";
 const baseUrl = process.env.MINICODE_REAL_E2E_BASE_URL?.trim() ?? "";
@@ -26,7 +31,9 @@ const desktopEntry = path.join(repoRoot, "desktop");
 const desktopMain = path.join(desktopEntry, "main.js");
 const electronExecutable = createRequire(path.join(desktopEntry, "package.json"))("electron") as string;
 const frontendPort = Number(process.env.MINICODE_E2E_PORT ?? "43173");
-const evidenceRoot = path.join(repoRoot, "artifacts", "real-provider-e2e");
+const evidenceRoot = process.env.MINICODE_REAL_E2E_EVIDENCE_ROOT
+  ? path.resolve(process.env.MINICODE_REAL_E2E_EVIDENCE_ROOT)
+  : path.join(repoRoot, "artifacts", "real-provider-e2e");
 
 function realProviderEnv({
   userDataDir,
@@ -37,7 +44,11 @@ function realProviderEnv({
   backendPort: number;
   frontendPort: number;
 }) {
-  const { ELECTRON_RUN_AS_NODE: _electronRunAsNode, ...cleanEnv } = process.env;
+  const {
+    ELECTRON_RUN_AS_NODE: _electronRunAsNode,
+    MINICODE_REAL_E2E_API_KEY: _testApiKey,
+    ...cleanEnv
+  } = process.env;
   return {
     ...cleanEnv,
     MINICODE_FRONTEND_URL: `http://127.0.0.1:${frontendPort}/`,
@@ -144,18 +155,15 @@ async function approveExpectedRealTaskRequests(
 ): Promise<number> {
   let approved = 0;
   for (let attempt = 0; attempt < 1_200; attempt += 1) {
-    const fileChange = window.getByRole("button", { name: "允许文件更改" }).first();
-    if (await fileChange.isVisible().catch(() => false)) {
-      await fileChange.click();
-      approved += 1;
-      continue;
-    }
-    const toolUse = window.getByRole("button", { name: "允许使用工具" }).first();
-    if (await toolUse.isVisible().catch(() => false)) {
-      await toolUse.click();
-      approved += 1;
-      continue;
-    }
+    const submitted = await window.evaluate(() => {
+      const button = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+        .find((element) => ["允许文件更改", "允许使用工具"].includes(element.getAttribute("aria-label") ?? "")
+          && !element.disabled && element.getClientRects().length > 0);
+      if (!button) return false;
+      button.click();
+      return true;
+    });
+    if (submitted) { approved += 1; continue; }
     if (await window.evaluate(() => !Boolean((window as any).__zustandStore?.getState().isStreaming))) {
       break;
     }
@@ -178,10 +186,12 @@ test.describe("real provider desktop multi-agent path", () => {
     const workspace = path.join(testRoot, "workspace");
     await mkdir(dataDir, { recursive: true });
     await mkdir(workspace, { recursive: true });
+    const expectedFacts = Array.from({ length: requestedSubagents }, (_, offset) =>
+      `FACT_${offset + 1}=value-${randomBytes(8).toString("hex")}`);
     for (let index = 1; index <= requestedSubagents; index += 1) {
       await writeFile(
         path.join(workspace, `fact-${index}.txt`),
-        `FACT_${index}=value-${index * 17}\n`,
+        `${expectedFacts[index - 1]}\n`,
         "utf8",
       );
     }
@@ -411,10 +421,15 @@ test.describe("real provider desktop multi-agent path", () => {
       for (let index = 0, count = await collapsedCollaborationToggles.count(); index < count; index += 1) {
         await collapsedCollaborationToggles.nth(index).evaluate((button: HTMLButtonElement) => button.click());
       }
-      const completedCollaboration = window.locator('.collaboration-cell[data-status="success"]').first();
+      const messageDetailPanel = window.locator(".subagents-detail");
+      const childWorkGroup = messageDetailPanel.locator('button.agent-loop-timeline-group-title[data-group-kind="work"]');
+      if (await childWorkGroup.count() > 0 && await childWorkGroup.first().getAttribute("aria-expanded") === "false") {
+        await childWorkGroup.first().click();
+      }
+      const completedCollaboration = messageDetailPanel.locator('.collaboration-cell[data-action="sent_message"][data-status="success"]').first();
       await expect(completedCollaboration).toBeVisible();
       await expect(completedCollaboration.locator(".collaboration-cell-summary"))
-        .toContainText(`已发送消息 ${requestedSubagents} 个智能体`);
+        .toContainText("已发送消息 1 个智能体");
 
       const evidence = await window.evaluate(() => {
         const state = (window as any).__zustandStore.getState();
@@ -545,11 +560,11 @@ test.describe("real provider desktop multi-agent path", () => {
       const sentMessageCells = evidence.collaborationCells.filter((cell: any) =>
         cell.action === "sent_message" && cell.status === "success");
       expect(sentMessageCells).toHaveLength(1);
-      expect(sentMessageCells[0].summary).toContain(`已发送消息 ${requestedSubagents} 个智能体`);
-      expect(sentMessageCells[0].details).toHaveLength(requestedSubagents);
+      expect(sentMessageCells[0].summary).toContain("已发送消息 1 个智能体");
+      expect(sentMessageCells[0].details).toHaveLength(1);
       expect(sentMessageCells[0].fitsViewport).toBe(true);
       for (let index = 1; index <= requestedSubagents; index += 1) {
-        expect(sentMessageCells[0].details.join("\n")).toContain(`fact-${index}.txt`);
+        expect(evidence.collaborationCells.filter((cell: any) => cell.action === "delegated").flatMap((cell: any) => cell.details).join("\n")).toContain(`fact-${index}.txt`);
       }
       expect(evidence.errorToasts).toEqual([]);
       expect(childReplayEvidence.chatTurnCount).toBeGreaterThan(0);
@@ -559,14 +574,16 @@ test.describe("real provider desktop multi-agent path", () => {
       expect(childReplayEvidence.fitsViewport).toBe(true);
       expect(childReplayEvidence.bodyFitsViewport).toBe(true);
       for (let index = 1; index <= requestedSubagents; index += 1) {
-        expect(evidence.assistantText).toContain(`FACT_${index}=value-${index * 17}`);
+        expect(evidence.assistantText).toContain(expectedFacts[index - 1]);
+        expect(await readFile(path.join(workspace, `fact-${index}.txt`), "utf8"))
+          .toBe(`${expectedFacts[index - 1]}\n`);
       }
       expect(evidence.assistantText).toContain("REAL_PROVIDER_E2E_OK");
       for (let index = 1; index <= requestedSubagents; index += 1) {
-        const fact = `FACT_${index}=value-${index * 17}`;
+        const fact = expectedFacts[index - 1];
         const reports = successfulSubagents.flatMap((child: any) => (child.messages ?? [])
-          .filter((message: any) => message.senderId === child.id && message.recipientId === "parent"
-            && message.content.includes(fact)));
+          .filter((message: any) => { console.log('real-mailbox-identity-witness', JSON.stringify({ keys:Object.keys(message), senderId:message.senderId, recipientId:message.recipientId, sender_id:message.sender_id, recipient_id:message.recipient_id, childId:child.id, fact })); return message.senderId === child.id && message.recipientId === "parent"
+            && message.content.includes(fact); }));
         expect(new Set(reports.map((message: any) => message.messageId)).size).toBe(1);
       }
 
@@ -606,6 +623,24 @@ test.describe("real provider desktop multi-agent path", () => {
       expect(JSON.stringify(mailbox)).not.toContain(apiKey);
       await writeFile(path.join(evidenceRoot, "mailbox-resume.json"), JSON.stringify(mailbox, null, 2), "utf8");
     } finally {
+      await mkdir(evidenceRoot, { recursive: true });
+      if (existsSync(path.join(userDataDir, "desktop.log"))) {
+        await copyFile(path.join(userDataDir, "desktop.log"), path.join(evidenceRoot, "multi-agent-backend.log"));
+      }
+      if (existsSync(path.join(userDataDir, "data", "ws-event-log"))) {
+        await cp(path.join(userDataDir, "data", "ws-event-log"), path.join(evidenceRoot, "multi-agent-wire-events"), { recursive: true });
+      }
+      const diagnosticWindow = app.windows()[0];
+      if (diagnosticWindow && !diagnosticWindow.isClosed()) {
+        const diagnostic = await diagnosticWindow.evaluate(() => {
+          const state = (window as any).__zustandStore?.getState();
+          return { conversationId: state?.conversationId, subagents: state?.subagents,
+            isStreaming: state?.isStreaming, sidebarTabs: state?.sidebarTabs,
+            bodyText: document.body.innerText };
+        });
+        expect(JSON.stringify(diagnostic)).not.toContain(apiKey);
+        await writeFile(path.join(evidenceRoot, "multi-agent-diagnostic.json"), JSON.stringify(diagnostic, null, 2), "utf8");
+      }
       await app.close().catch(() => undefined);
       await rm(testRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
@@ -616,6 +651,7 @@ test.describe("real provider desktop multi-agent path", () => {
     const testRoot = await mkdtemp(path.join(tmpdir(), "minicode-real-coding-e2e-"));
     const { userDataDir, workspace } = await prepareRealWorkspace(testRoot, "workspace");
     const sourcePath = path.join(workspace, "src", "calculator.mjs");
+    const diagnosticFrames: unknown[] = [];
     const testPath = path.join(workspace, "test", "calculator.test.mjs");
     await mkdir(path.dirname(sourcePath), { recursive: true });
     await mkdir(path.dirname(testPath), { recursive: true });
@@ -646,6 +682,12 @@ test.describe("real provider desktop multi-agent path", () => {
       ].join("\n"),
       "utf8",
     );
+    await execFileAsync("git", ["init", "--quiet"], { cwd: workspace });
+    await execFileAsync("git", ["add", "src/calculator.mjs", "test/calculator.test.mjs"], { cwd: workspace });
+    await execFileAsync("git", [
+      "-c", "user.name=MiniCode Acceptance", "-c", "user.email=acceptance@minicode.invalid",
+      "commit", "--quiet", "-m", "Coding acceptance baseline",
+    ], { cwd: workspace });
     const app = await launchRealProvider(userDataDir, await availablePort());
 
     try {
@@ -659,6 +701,7 @@ test.describe("real provider desktop multi-agent path", () => {
         "Fix the total() implementation so it sums values correctly.",
         "Replace the TODO placeholder in test/calculator.test.mjs with a real regression test for an empty list.",
         "You must modify both src/calculator.mjs and test/calculator.test.mjs, and no other files.",
+        "After editing, inspect git diff -- src/calculator.mjs test/calculator.test.mjs.",
         "Run exactly: node --test test/calculator.test.mjs",
         "Do not stop after explaining; make the edits and verify the test passes. Report the command and its result in the final answer.",
       ].join("\n"));
@@ -679,6 +722,13 @@ test.describe("real provider desktop multi-agent path", () => {
 
       const source = await readFile(sourcePath, "utf8");
       const testSource = await readFile(testPath, "utf8");
+      // This process is outside the model/tool-result path. A model's final
+      // claim or a tool status alone cannot make the coding task pass.
+      const independentVerification = await execFileAsync(
+        process.execPath, ["--test-reporter=tap", "--test", "test/calculator.test.mjs"], { cwd: workspace },
+      );
+      const independentDiff = await execFileAsync("git", ["diff", "--name-only"], { cwd: workspace });
+      const independentStatus = await execFileAsync("git", ["status", "--porcelain"], { cwd: workspace });
       const workArea = window.locator('[data-zone="work"]');
       if (await workArea.getAttribute("data-collapsed") === "true") {
         await workArea.getByRole("button", { name: "展开处理步骤" }).click();
@@ -720,9 +770,21 @@ test.describe("real provider desktop multi-agent path", () => {
             .filter(Boolean),
         };
       });
+      // Default transcript projection and user-expanded evidence are separate views.
+      while (await window.locator('.agent-loop-timeline-group-title[data-group-kind="work"][aria-expanded="false"]').count()) {
+        await window.locator('.agent-loop-timeline-group-title[data-group-kind="work"][aria-expanded="false"]').first().click();
+      }
+      while (await window.locator('.activity-cell[data-activity-kind="fileRead"] .activity-cell-main-button[aria-expanded="false"]').count()) {
+        await window.locator('.activity-cell[data-activity-kind="fileRead"] .activity-cell-main-button[aria-expanded="false"]').first().click();
+      }
+      const expandedReadActivityTexts = await window.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('[data-zone="work"] [data-activity-kind="fileRead"]')).map((element) => element.innerText));
+      console.log('real-coding-disclosure-witness', JSON.stringify({ defaultEditActivities: commandResult.processEditActivityCount, defaultReadActivities: commandResult.readActivityTexts.length, expandedReadActivityTexts }));
+
 
       const commandRecords = commandResult.records.filter((record: any) => record?.name === "run_command");
-      const successfulCommand = commandRecords.find((record: any) => record?.status === "success");
+      const successfulCommand = commandRecords.findLast((record: any) =>
+        record.status === "success" && record.transition === "completed"
+        && String(record.arguments?.command ?? record.args?.command ?? "").includes("node --test test/calculator.test.mjs"));
       const evidence = {
         capturedAt: new Date().toISOString(),
         baseHost: new URL(baseUrl).host,
@@ -738,6 +800,9 @@ test.describe("real provider desktop multi-agent path", () => {
         command: successfulCommand,
         assistantText: commandResult.assistantText,
         records: commandResult.records,
+        independentVerification: { exitCode: 0, ...independentVerification },
+        independentDiff: independentDiff.stdout,
+        independentStatus: independentStatus.stdout,
         isStreaming: commandResult.isStreaming,
         zones: commandResult.zones,
         processCount: commandResult.processCount,
@@ -758,10 +823,17 @@ test.describe("real provider desktop multi-agent path", () => {
       await expect(window.getByLabel("文件修改").locator(".diff-cell")).toHaveCount(1);
       expect(source).toMatch(/reduce\(\(sum, value\) => sum \+ value/);
       expect(testSource).toMatch(/empty list|empty array|\[\], 0/i);
+      expect(independentDiff.stdout.trim().split(/\r?\n/).sort())
+        .toEqual(["src/calculator.mjs", "test/calculator.test.mjs"]);
+      expect(independentStatus.stdout.trim().split(/\r?\n/)).toHaveLength(2);
+      expect(independentVerification.stdout).toMatch(/# fail 0/);
+      expect(commandRecords.some((record: any) => String(record?.arguments?.command ?? record?.args?.command ?? "").includes("git diff")))
+        .toBe(true);
       expect(successfulCommand).toBeTruthy();
       expect(successfulCommand?.waitingOn).toBeUndefined();
       expect(successfulCommand?.blockingReason).toBeUndefined();
       expect(successfulCommand?.transition).toBe("completed");
+      expect(successfulCommand?.args?.with_escalated_permissions ?? successfulCommand?.arguments?.with_escalated_permissions).not.toBe(true);
       expect(String(successfulCommand?.arguments?.command ?? successfulCommand?.args?.command ?? ""))
         .toContain("node --test test/calculator.test.mjs");
       expect(commandResult.isStreaming).toBe(false);
@@ -772,11 +844,35 @@ test.describe("real provider desktop multi-agent path", () => {
       expect(commandResult.processDiffCount).toBe(0);
       expect(commandResult.replyDiffCount).toBe(1);
       expect(commandResult.processEditActivityCount).toBe(0);
-      expect(commandResult.readActivityTexts.join("\n")).toContain("src/calculator.mjs");
-      expect(commandResult.readActivityTexts.join("\n")).toContain("test/calculator.test.mjs");
+      expect(expandedReadActivityTexts.join("\n")).toContain("src/calculator.mjs");
+      expect(expandedReadActivityTexts.join("\n")).toContain("test/calculator.test.mjs");
       expect(commandResult.errorToasts).toEqual([]);
       expect(commandResult.assistantText).toMatch(/pass|修复|test/i);
     } finally {
+      await mkdir(evidenceRoot, { recursive: true });
+      if (existsSync(path.join(userDataDir, "desktop.log"))) {
+        await copyFile(path.join(userDataDir, "desktop.log"), path.join(evidenceRoot, "coding-backend.log"));
+      }
+      if (existsSync(path.join(userDataDir, "data", "ws-event-log"))) {
+        await cp(path.join(userDataDir, "data", "ws-event-log"), path.join(evidenceRoot, "coding-wire-events"), { recursive: true });
+      }
+      const diagnosticWindow = app.windows()[0];
+      if (diagnosticWindow && !diagnosticWindow.isClosed()) {
+        const diagnostic = await diagnosticWindow.evaluate(() => {
+          const state = (window as any).__zustandStore?.getState();
+          return {
+            model: state?.currentModel,
+            isStreaming: state?.isStreaming,
+            messages: (state?.messages ?? []).map((m: any) => ({
+              id: m.id, role: m.role, terminalStatus: m.terminalStatus, failureMessage: m.failureMessage,
+              tools: (m.blocks ?? []).filter((b: any) => b.type === "tool_call")
+                .map((b: any) => ({ name: b.record?.name, status: b.record?.status, developerDetail: b.record?.developerDetail })),
+            })),
+          };
+        });
+        expect(JSON.stringify(diagnostic)).not.toContain(apiKey);
+        await writeFile(path.join(evidenceRoot, "coding-diagnostic.json"), JSON.stringify({ diagnostic, frames: diagnosticFrames }, null, 2), "utf8");
+      }
       await app.close().catch(() => undefined);
       await rm(testRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }

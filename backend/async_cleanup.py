@@ -24,6 +24,10 @@ async def to_thread_cancel_safe(func: Any, /, *args: Any, **kwargs: Any) -> Any:
                 await asyncio.shield(inner)
             except asyncio.CancelledError:
                 continue
+            except Exception:
+                # Awaiting a failed worker means it has settled. Consume that
+                # result below and keep the original cancellation outcome.
+                break
         try:
             inner.result()
         except BaseException:

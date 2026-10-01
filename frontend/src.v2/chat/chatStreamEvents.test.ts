@@ -1622,4 +1622,44 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     expect(sendClientCommand).not.toHaveBeenCalled();
     expect(resetSendDeduplication).not.toHaveBeenCalled();
   });
+  it("keeps one error visible when partial output precedes a provider failure", () => {
+    useAppStore.getState().appendAgentMessageDelta("reply-part", "I will inspect the files.", "conv-stream", "assistant-stream");
+    handle({ type: "error", conversation_id: "conv-stream", message_id: "assistant-stream",
+      message: "network unavailable", error_type: "network", recoverable: true } as ServerEvent);
+    handle({ type: "done", status: "partial", reason: "partial_stream_error", conversation_id: "conv-stream",
+      message_id: "assistant-stream", usage: { input_tokens: 10, output_tokens: 2 } } as unknown as ServerEvent);
+    const message = useAppStore.getState().messages[0];
+    expect(message?.terminalStatus).toBe("partial");
+    expect(message?.failureMessage).toBe("network unavailable");
+    const errors = projectMessagesToTurns(useAppStore.getState().messages, false)[0]?.committedCells.filter(cell => cell.kind === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors?.[0]).toMatchObject({ title: "响应未完整结束", recoverable: true });
+    useAppStore.getState().finishStreaming("conv-stream", { input_tokens: 10, output_tokens: 2 }, "completed", "assistant-stream");
+    expect(useAppStore.getState().messages[0]?.failureMessage).toBeUndefined();
+  });
+
+  it.each([false, true])("projects unfinished resource evidence without repeating replay alerts (%s)", (replayed) => {
+    const receipt = {
+      resource_kind: "lifecycle", resource_id: "observer:1", reason: "cancelled",
+      requested: true, acknowledged: false, completed: false, timed_out: true, pending: 1,
+    };
+    handle({
+      type: "done", status: "cancelled", conversation_id: "conv-stream",
+      message_id: "assistant-stream", replayed,
+      usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0, input_includes_cache_read: false },
+      lifecycle_cleanup_pending_count: 1,
+      lifecycle_cleanup_receipts: { "observer:1": receipt },
+    } as ServerEvent);
+    expect(useAppStore.getState().inspectorEntries).toContainEqual(expect.objectContaining({
+      targetKind: "message", targetId: "assistant-stream",
+      payload: expect.objectContaining({
+        lifecycle_cleanup_pending_count: 1,
+        lifecycle_cleanup_receipts: { "observer:1": receipt },
+      }),
+    }));
+    if (replayed) expect(pushToast).not.toHaveBeenCalled();
+    else expect(pushToast).toHaveBeenCalledWith(expect.stringContaining("1 个资源尚未回收"), "warning", 6000);
+  });
+
 });

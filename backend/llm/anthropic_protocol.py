@@ -8,6 +8,7 @@ class that streams them.
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ from backend.llm.base import (
     sanitize_llm_request_metadata,
 )
 from backend.llm.errors import (
+    _safe_provider_diagnostic_text,
     classify_llm_error,
     llm_error_raw,
     llm_error_status_code,
@@ -54,6 +56,51 @@ import hashlib
 import json
 import os
 import re
+
+
+def anthropic_tool_input_schema(parameters: dict[str, Any]) -> dict[str, Any]:
+    """Project an object envelope for Messages; runtime keeps the exact schema.
+
+    Messages rejects composition keywords at the input_schema root. Keep the
+    argument shape (no wrapper or renamed fields), expose every branch's fields,
+    and describe the exact alternatives. ToolRegistry still validates the
+    original schema before executing a call, including its cross-field rules.
+    Nested unions are supported and are deliberately left intact.
+    """
+    schema = deepcopy(parameters)
+    compositions = {
+        key: schema.pop(key)
+        for key in ("anyOf", "oneOf", "allOf") if key in schema
+    }
+    if not compositions:
+        return schema
+
+    properties = schema.setdefault("properties", {})
+    required = set(schema.get("required", []))
+    for keyword, branches in compositions.items():
+        branch_schemas = [anthropic_tool_input_schema(branch) for branch in branches]
+        branch_required = [set(branch.get("required", [])) for branch in branch_schemas]
+        if keyword == "allOf":
+            required.update(set().union(*branch_required))
+        elif branch_required:
+            required.update(set.intersection(*branch_required))
+        fields = {name for branch in branch_schemas for name in branch.get("properties", {})}
+        for name in sorted(fields):
+            candidates = [branch["properties"][name] for branch in branch_schemas
+                          if name in branch.get("properties", {})]
+            combined = candidates[0] if len(candidates) == 1 else {
+                "allOf" if keyword == "allOf" else "anyOf": candidates,
+            }
+            properties[name] = {"allOf": [properties[name], combined]} if name in properties else combined
+    schema["type"] = "object"
+    if required:
+        schema["required"] = sorted(required)
+    constraints = json.dumps(compositions, ensure_ascii=False, separators=(",", ":"))
+    description = str(schema.get("description") or "")
+    schema["description"] = (
+        f"{description}\nAdditional argument constraints validated by the harness: {constraints}"
+    ).strip()
+    return schema
 
 
 def _is_adaptive_thinking_model(model_id: str) -> bool:
@@ -313,6 +360,7 @@ def _anthropic_stream_protocol_error(
         "unknown_content_block": "the provider returned an unknown content block type",
         "missing_tool_call_id": "a tool-use block had no stable identifier",
         "missing_tool_name": "a tool-use block had no tool name",
+        "invalid_tool_input": "a tool-use block had a non-object initial input",
         "duplicate_tool_call_id": "a tool-use identifier was reused in the response",
         "content_delta_without_start": "a content delta arrived without an open content block",
         "unknown_content_delta": "the provider returned an unknown content delta type",
@@ -379,7 +427,10 @@ def _anthropic_error_fields(value: Any) -> tuple[str, str]:
         payload = error
     code = str(payload.get("code") or "").strip()
     schema_type = str(payload.get("type") or "").strip()
-    return code[:80], schema_type[:80]
+    return (
+        _safe_provider_diagnostic_text(code, limit=80),
+        _safe_provider_diagnostic_text(schema_type, limit=80),
+    )
 
 
 def _anthropic_error_message(value: Any) -> str:

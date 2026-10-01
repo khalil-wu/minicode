@@ -141,10 +141,17 @@ class SDKSession:
             configured_workspace if configured_workspace is not None else Path.cwd()
         ).expanduser().resolve()
         self._active_query = False
+        self.lifecycle_cleanup_tasks: set[asyncio.Task] = set()
+        self._lifecycle_cleanup_waiters: set[asyncio.Task] = set()
         self._code_stores: dict[str, CodeExecutionStore] = {}
         self._commands = BackgroundCommandManager(session_id=session_id)
 
     async def aclose(self) -> None:
+        while pending := {
+            task for task in self.lifecycle_cleanup_tasks | self._lifecycle_cleanup_waiters
+            if not task.done()
+        }:
+            await asyncio.wait(pending)
         await self._commands.shutdown()
         self._code_stores.clear()
 
@@ -155,7 +162,7 @@ class SDKSession:
         await self.aclose()
 
     async def query(self, message: str, **overrides: Any) -> AsyncIterator[AgentEvent]:
-        if self._active_query:
+        if self._active_query or any(not task.done() for task in self.lifecycle_cleanup_tasks):
             raise RuntimeError(
                 "SDK session is already processing a prompt. Wait for the active "
                 "query to finish before submitting another one."
@@ -168,6 +175,13 @@ class SDKSession:
         session_id = str(run_kwargs.pop("session_id", self.session_id))
         context_builder = run_kwargs.pop("context_builder", self.context_builder)
         run_kwargs.setdefault("background_manager", self._commands)
+        run_context = run_kwargs.pop("run_context", None)
+        if run_context is None:
+            run_context = RunContext(lifecycle_cleanup_tasks=self.lifecycle_cleanup_tasks)
+        else:
+            self.lifecycle_cleanup_tasks = run_context.lifecycle_cleanup_tasks
+        run_kwargs["run_context"] = run_context
+        run_kwargs["lifecycle_cleanup_waiters"] = self._lifecycle_cleanup_waiters
         code_owner = str(metadata.get("conversation_id") or session_id)
         run_kwargs.setdefault("code_store", self._code_stores.setdefault(code_owner, CodeExecutionStore()))
         stream = query(
@@ -196,6 +210,8 @@ class SDKSession:
         system_note: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> "SDKSession":
+        if self._active_query or any(not task.done() for task in self.lifecycle_cleanup_tasks):
+            raise RuntimeError("SDK session still owns an active query or pending lifecycle cleanup.")
         child_metadata = dict(self.metadata)
         child_metadata.update(metadata or {})
         child = SDKSession(
@@ -267,6 +283,8 @@ async def query(
     session_id: str = "sdk",
     background_manager: BackgroundCommandManager | None = None,
     code_store: CodeExecutionStore | None = None,
+    run_context: RunContext | None = None,
+    lifecycle_cleanup_waiters: set[asyncio.Task] | None = None,
     workspace_root: str | Path | None = None,
     max_iterations: int | None = None,
     metadata: dict[str, Any] | None = None,
@@ -310,6 +328,8 @@ async def query(
             done.data["active_generation"] = active.generation
         yield done
         return
+    run_context = run_context if run_context is not None else RunContext()
+    waiters = lifecycle_cleanup_waiters if lifecycle_cleanup_waiters is not None else set()
     try:
         async with aclosing(_query_unclaimed(
             message,
@@ -327,6 +347,7 @@ async def query(
             session_id=session_id,
             background_manager=background_manager,
             code_store=code_store,
+            run_context=run_context,
             workspace_root=workspace_root,
             max_iterations=max_iterations,
             metadata=effective_metadata,
@@ -339,7 +360,9 @@ async def query(
                     return
                 yield event
     finally:
-        conversation_query_guards().end(claim)
+        conversation_query_guards().end_after_cleanup(
+            claim, tasks=run_context.lifecycle_cleanup_tasks, waiters=waiters,
+        )
 
 
 async def _query_unclaimed(
@@ -359,6 +382,7 @@ async def _query_unclaimed(
     session_id: str = "sdk",
     background_manager: BackgroundCommandManager | None = None,
     code_store: CodeExecutionStore | None = None,
+    run_context: RunContext,
     workspace_root: str | Path | None = None,
     max_iterations: int | None = None,
     metadata: dict[str, Any] | None = None,
@@ -446,6 +470,9 @@ async def _query_unclaimed(
     # Route through the same QueryEngine the WS path uses so both entry points
     # share one lifecycle: workspace-root rebinding on the permission checker
     # and adapter-only event filtering (tool_call_start/delta stay internal).
+    run_context.model_execution = ModelExecutionSnapshot.capture(
+        replace(config, agent=agent_settings, token_budget=token_budget), llm,
+    )
     submission = QuerySubmission(
         user_message=message,
         session=AgentSession(
@@ -457,6 +484,7 @@ async def _query_unclaimed(
             token_budget=token_budget,
             context_builder=context_builder,
             code_store=code_store or CodeExecutionStore(),
+            lifecycle_cleanup_tasks=run_context.lifecycle_cleanup_tasks,
         ),
         state=state,
         runtime=AgentLoopSessionContext(
@@ -465,9 +493,7 @@ async def _query_unclaimed(
             session_id=session_id,
             background_manager=background_manager,
             metadata=effective_metadata,
-            run_context=RunContext(model_execution=ModelExecutionSnapshot.capture(
-                replace(config, agent=agent_settings, token_budget=token_budget), llm,
-            )),
+            run_context=run_context,
         ),
     )
     async with aclosing(submission.session), aclosing(QueryEngine().submit(submission)) as stream:

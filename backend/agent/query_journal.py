@@ -104,6 +104,9 @@ class QueryJournalRecorder:
         if self.journal is None:
             return
         data = dict(event.data or {})
+        if event.type == "agent.lifecycle.cleanup":
+            self.lifecycle("lifecycle_cleanup", data)
+            return
         if event.type == "artifact.preview":
             self.lifecycle("artifact_preview", data)
             return
@@ -236,6 +239,7 @@ class QueryJournalRecorder:
                 "context_snapshot": terminal_context_snapshot,
             },
         )
+        uncertain = self.journal.unresolved_tool_uses()
         self.journal.close_unresolved_tool_uses(
             reason=reason or status,
             content="[Tool result missing because the turn reached terminal state]",
@@ -267,8 +271,10 @@ class QueryJournalRecorder:
                 "conversation_id": self.conversation_id,
                 "message_id": str(self.metadata.get("assistant_message_id") or ""),
                 "unresolved_tool_uses": unresolved,
+                "uncertain_tool_uses": uncertain,
+                "tool_pairs_complete": not unresolved,
                 "manual_recovery_required": any(
-                    item.get("recovery_policy") == "manual" for item in unresolved
+                    item.get("recovery_policy") == "manual" for item in uncertain
                 )
                 or any(
                     bool(receipt.get("manual_recovery_required"))
@@ -276,6 +282,11 @@ class QueryJournalRecorder:
                 ),
                 "cleanup_receipts": cleanup_receipts,
                 "cleanup_pending_count": cleanup_pending_count,
+                **{
+                    key: event.data[key]
+                    for key in ("lifecycle_cleanup_receipts", "lifecycle_cleanup_pending_count")
+                    if key in event.data
+                },
                 "checkpoint": self._checkpoint_evidence(),
             },
         )
@@ -382,6 +393,7 @@ def record_setup_failure(
                 "terminal_intent_event_id": "",
             },
         )
+    uncertain = journal.unresolved_tool_uses()
     journal.close_unresolved_tool_uses(
         reason=str(terminal_event.data.get("reason") or "startup_failed"),
         content="[Tool result missing because startup failed]",
@@ -389,7 +401,11 @@ def record_setup_failure(
     journal.append_terminal(
         status="failed",
         reason=str(terminal_event.data.get("reason") or "startup_failed"),
-        extra={"unresolved_tool_uses": journal.unresolved_tool_uses()},
+        extra={
+            "unresolved_tool_uses": journal.unresolved_tool_uses(),
+            "uncertain_tool_uses": uncertain,
+            "manual_recovery_required": any(item["recovery_policy"] == "manual" for item in uncertain),
+        },
     )
 
 

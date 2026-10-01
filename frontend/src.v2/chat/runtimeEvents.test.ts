@@ -7,6 +7,7 @@ import type { ServerEvent } from "../protocol/events";
 import type { StreamBuffer } from "../lib/stream-buffer";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
+import { buildInterruptCommand } from "../lib/interrupt-command";
 
 vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommand: vi.fn(() => true),
@@ -64,6 +65,42 @@ describe("runtime compaction events", () => {
       message_id: "new-assistant", turn_id: "new-run", run_id: "new-run", status: "running",
     } as ServerEvent, "conv-runtime");
     expect(useAppStore.getState().messages[0]).toMatchObject({ terminalStatus: "completed", isStreaming: false });
+  });
+
+  it("binds a first turn before any text or tool event so failure and stop target the real run", () => {
+    useAppStore.setState({
+      conversationId: null,
+      conversations: [],
+      sideChats: {},
+      conversationMessages: {},
+      conversationStreaming: {},
+      isStreaming: true,
+      messages: [
+        { id: "first-user", role: "user", content: "Reply", timestamp: 1 },
+        { id: "first-assistant", role: "assistant", content: "", timestamp: 2, isStreaming: true },
+      ],
+    });
+
+    handleRuntimeEvent({
+      type: "agent.run.started", role: "main", conversation_id: "conv-generated",
+      message_id: "first-assistant", run_id: "run-generated", status: "running",
+    } as ServerEvent, "conv-generated");
+
+    const active = useAppStore.getState();
+    expect(active.conversationId).toBe("conv-generated");
+    expect(active.messages[1].turnId).toBe("run-generated");
+    expect(buildInterruptCommand(active)).toMatchObject({
+      conversation_id: "conv-generated", turn_id: "run-generated", message_id: "first-assistant",
+    });
+
+    handleRuntimeEvent({
+      type: "agent.run.completed", role: "main", conversation_id: "conv-generated",
+      message_id: "first-assistant", run_id: "run-generated", status: "failed",
+      error: "Provider request failed",
+    } as ServerEvent, "conv-generated");
+
+    expect(useAppStore.getState().messages[1]).toMatchObject({ isStreaming: false, terminalStatus: "failed" });
+    expect(useAppStore.getState().isStreaming).toBe(false);
   });
 
   it("combines conversation compaction state and runtime compacted notice without duplicate transcript entries", () => {
@@ -1685,6 +1722,25 @@ describe("runtime subagent events", () => {
     } as unknown as ServerEvent)).toBe(true);
 
     expect(useAppStore.getState().subagents).toEqual([]);
+  });
+
+  it("applies ordered Unicode child text deltas without replaying the tool transcript", () => {
+    handleRuntimeEvent({ type: "subagent.progress", subagent_id: "delta-child", transcript_snapshot: {
+      seq: 2, messages: [{ id: "child-assistant", role: "assistant", content: "读😀", timestamp: 1, is_streaming: true,
+        blocks: [{ type: "text", item_id: "item-1", content: "读😀", source: "pending", is_streaming: true }] }],
+    } } as unknown as ServerEvent);
+    const delta = { type: "subagent.progress", subagent_id: "delta-child", transcript_delta: {
+      seq: 3, message_id: "child-assistant", item_id: "item-1", delta: "完成", offset: 2,
+    } } as const;
+    handleRuntimeEvent(delta as unknown as ServerEvent);
+    handleRuntimeEvent(delta as unknown as ServerEvent);
+    let child = useAppStore.getState().subagents.find(agent => agent.id === "delta-child")!;
+    expect(child.transcriptSeq).toBe(3);
+    expect(child.transcriptMessages?.[0].content).toBe("读😀完成");
+    handleRuntimeEvent({ ...delta, transcript_delta: { ...delta.transcript_delta, seq: 5, offset: 99, delta: "gap" } } as unknown as ServerEvent);
+    child = useAppStore.getState().subagents.find(agent => agent.id === "delta-child")!;
+    expect(child.transcriptSeq).toBe(3);
+    expect(child.transcriptMessages?.[0].content).toBe("读😀完成");
   });
 
   it("accepts only increasing child transcript snapshots and keeps the terminal replay", () => {

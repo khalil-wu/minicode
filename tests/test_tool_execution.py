@@ -28,12 +28,13 @@ from backend.agent.tool_stream_tracker import (
 )
 from backend.agent.context import ContextBuilder
 from backend.agent.state import AgentState
+from backend.agent.turn_diff_tracker import TurnDiffTracker
 from backend.artifact.store import ArtifactStore
 from backend.config import PermissionSettings, TokenBudget
 from backend.llm.base import ToolCallEvent
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext, ToolExecutionContext
-from backend.tools.base import BaseTool, ToolResult, ToolSchema
+from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.file_tools import ReadFileTool
 from backend.tools.agent_tools import TaskTool
 from backend.tools.registry import ToolRegistry
@@ -95,6 +96,156 @@ def test_tool_origin_timeout_preserves_the_error_without_fabricating_watchdog_cl
     assert not result.cleanup_receipt
     assert not context.pending_cleanup_tasks
     assert context.cleanup_tasks_by_call == {}
+
+
+@pytest.mark.parametrize("stop", ["timeout", "cancel", "cancel_event", "timeout_default"])
+def test_nested_tool_cleanup_waits_for_the_actual_child_and_preserves_evidence(tmp_path, monkeypatch, stop):
+    from backend.agent.final_tool_request import canonical_tool_request_digest
+    from backend.agent.tool_execution import toolset_policy_guard_reason
+
+    if stop != "timeout_default":
+        monkeypatch.setattr("backend.agent.tool_execution.CANCELLATION_DRAIN_TIMEOUT_SECONDS", .03)
+        monkeypatch.setattr("backend.tools.registry.CANCELLATION_DRAIN_TIMEOUT_SECONDS", .03)
+
+    async def scenario():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        class Stubborn(_BatchTool):
+            timeout_seconds = .2 if stop in {"timeout", "timeout_default"} else None
+
+            async def execute(self, args, context=None):
+                self.child = asyncio.current_task()
+                started.set()
+                while not release.is_set():
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        # Model a real adapter whose already-started work must
+                        # finish before it can acknowledge cancellation.
+                        continue
+                return ToolResult(content="child settled")
+
+        tool = Stubborn("nested_cleanup", read_only=True)
+        registry = ToolRegistry()
+        registry.register(tool)
+        cancel = asyncio.Event()
+        context = ToolExecutionContext(permission=PermissionContext(), workspace_root=tmp_path,
+            cancel_event=cancel)
+        call = ToolCallEvent(id="nested", name=tool.name, arguments={})
+        digest = canonical_tool_request_digest(call.name, call.arguments)
+        assert toolset_policy_guard_reason(call, registry, context) == ""
+        outer = asyncio.create_task(run_tool_with_timeout(call, registry, context))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=3)
+            if stop == "cancel":
+                outer.cancel()
+            elif stop == "cancel_event":
+                cancel.set()
+            if stop in {"timeout", "timeout_default"}:
+                result = await outer
+                assert result.status == "timeout"
+                assert result.cleanup_receipt is context.cleanup_receipts[call.id]
+            else:
+                with pytest.raises(asyncio.CancelledError):
+                    await outer
+            await asyncio.sleep(0)
+            receipt = context.cleanup_receipts[call.id]
+            assert outer.done() and not tool.child.done()
+            assert tool.child in context.pending_cleanup_tasks
+            assert context.cleanup_tasks_by_call[call.id] is tool.child
+            assert receipt["pending"] == 1 and receipt["completed"] is False
+            assert receipt["request_digest"] == digest
+            assert receipt["retry_safe"] is False and receipt["manual_recovery_required"] is True
+        finally:
+            release.set()
+            await asyncio.gather(outer, tool.child, return_exceptions=True)
+        await asyncio.sleep(0)
+        assert receipt["pending"] == 0 and receipt["completed"] is True
+        assert receipt["cleanup_completed_after_deadline"] is True
+        assert receipt["request_digest"] == digest
+        assert context.cleanup_receipts[call.id] is receipt
+        assert context.cleanup_tasks_by_call == {} and not context.pending_cleanup_tasks
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("call_id", ["loan", ""])
+def test_registry_pending_child_keeps_its_captured_adapter_loan_after_main_exits(monkeypatch, call_id):
+    from types import SimpleNamespace
+    from backend.agent.model_execution import ModelExecutionSnapshot
+    from backend.agent.run_context import RunContext
+    from backend.config import AppConfig, LLMSettings
+    from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType
+    from backend.ws.agent_runner import _lease_session_llm_for_task
+
+    monkeypatch.setattr("backend.tools.registry.CANCELLATION_DRAIN_TIMEOUT_SECONDS", .03)
+
+    class Adapter(LLMAdapter):
+        closed = False
+
+        async def stream_chat(self, messages, tools=None, metadata=None):
+            yield StreamEvent(StreamEventType.DONE)
+
+        async def simple_chat(self, messages, *, max_tokens=None):
+            return "unused"
+
+        async def aclose(self):
+            self.closed = True
+
+    async def scenario():
+        old, new = Adapter(), Adapter()
+        config = AppConfig(llm=LLMSettings(api_key="fixture"))
+        old_snapshot = ModelExecutionSnapshot(config, old, "fixture", "old")
+        new_snapshot = ModelExecutionSnapshot(config, new, "fixture", "new")
+        host = SimpleNamespace(_llm_adapter_leases={}, _retired_llm_adapters={}, _llm_close_tasks=set())
+        run_context = RunContext(model_execution=old_snapshot, active_model_execution=old_snapshot,
+            retain_model=lambda adapter, task: _lease_session_llm_for_task(host, adapter, task))
+        started, release, cancel = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        class Stubborn(_BatchTool):
+            async def execute(self, args, context=None):
+                self.child = asyncio.current_task()
+                started.set()
+                while not release.is_set():
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        continue
+                return ToolResult(content="child settled")
+
+        tool = Stubborn("registry_loan", read_only=True)
+        registry = ToolRegistry()
+        registry.register(tool)
+        context = ToolExecutionContext(permission=PermissionContext(), run_context=run_context,
+            model_execution=old_snapshot, llm=old, cancel_event=cancel, tool_call_id=call_id,
+            pending_cleanup_tasks=run_context.lifecycle_cleanup_tasks)
+        main = asyncio.create_task(registry.execute(tool.name, {}, context=context))
+        _lease_session_llm_for_task(host, old, main)
+        try:
+            await started.wait()
+            run_context.model_execution = run_context.active_model_execution = new_snapshot
+            host._retired_llm_adapters[id(old)] = old
+            cancel.set()
+            with pytest.raises(asyncio.CancelledError):
+                await main
+            await asyncio.sleep(0)
+            assert main.done() and not tool.child.done()
+            assert context.pending_cleanup_tasks is run_context.lifecycle_cleanup_tasks
+            assert tool.child in run_context.lifecycle_cleanup_tasks
+            assert context.cleanup_tasks_by_call == ({call_id: tool.child} if call_id else {})
+            assert host._llm_adapter_leases[id(old)] == {tool.child}
+            assert id(new) not in host._llm_adapter_leases
+            assert not old.closed and not new.closed
+        finally:
+            release.set()
+            await asyncio.gather(main, tool.child, return_exceptions=True)
+        await asyncio.sleep(0)
+        await asyncio.gather(*host._llm_close_tasks)
+        assert old.closed and not new.closed
+        assert id(old) not in host._llm_adapter_leases
+        assert not run_context.lifecycle_cleanup_tasks
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("error", [ValueError("missing required option: project_id"), TimeoutError("remote tool request timed out")])
@@ -188,6 +339,108 @@ class _MutatingBatchTool(_BatchTool):
     async def execute(self, args, context=None) -> ToolResult:
         self.executions += 1
         return ToolResult(content=f"executed {self.executions}")
+
+
+@pytest.mark.parametrize("status", ["failed", "timeout", "blocked"])
+def test_partial_mutation_failure_invalidates_the_live_turn_diff(tmp_path, status):
+    async def scenario():
+        path = tmp_path / "tracked.txt"
+        path.write_text("edited\n", encoding="utf-8")
+        tracker = TurnDiffTracker()
+        tracker.track_change(old_path=str(path), new_path=str(path),
+            old_content="old\n", new_content="edited\n")
+        original = tracker.snapshot()
+        emitted = []
+
+        class PartialMutation(_MutatingBatchTool):
+            async def execute(self, args, context=None):
+                if status != "blocked":
+                    path.write_text("partial\n", encoding="utf-8")
+                return ToolResult(content="mutation did not complete", is_error=True, status=status)
+
+        async def emit(kind, payload):
+            emitted.append((kind, payload))
+
+        registry = ToolRegistry()
+        tool = PartialMutation()
+        registry.register(tool)
+        permission = PermissionContext(mode="bypass")
+        context = ToolExecutionContext(permission=permission, workspace_root=tmp_path,
+            turn_diff_tracker=tracker, emit_event=emit)
+        call = ToolCallEvent(id="partial", name=tool.name, arguments={})
+        builder = ContextBuilder()
+        builder.append_assistant_tool_calls([call])
+        events = [event async for event in execute_tool_batch([call], ctx=builder,
+            state=AgentState(user_message="mutate"), tool_registry=registry,
+            permission_checker=PermissionChecker(PermissionSettings(), tmp_path),
+            approval_handler=None, skill_manager=None, permission_context=permission,
+            tool_ctx=context)]
+        assert next(event for event in events if event.type == "tool_result").data["is_error"]
+        updates = [payload for kind, payload in emitted if kind == "turn.diff.updated"]
+        if status == "blocked":
+            assert path.read_text(encoding="utf-8") == "edited\n"
+            assert tracker.snapshot() == original
+            assert updates == []
+        else:
+            assert path.read_text(encoding="utf-8") == "partial\n"
+            assert tracker.get_unified_diff() is None
+            assert tracker.revision == original.revision + 1
+            assert len(updates) == 1 and updates[0]["diff"] is None
+            # A later exact edit must not revive an aggregate with a stale base.
+            tracker.track_change(old_path=str(path), new_path=str(path),
+                old_content="partial\n", new_content="later\n")
+            assert tracker.get_unified_diff() is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("approval,executed", [
+    ({"action": "reject"}, False),
+    ({"action": "partial", "decisions": {"a.txt": "approved", "b.txt": "rejected"}}, False),
+    ({"action": "approve", "updated_input": {"value": 2}}, False),
+    ({"action": "approve", "updatedInput": {"value": 2}}, False),
+    ({"action": "approve", "request_digest": "mismatched"}, False),
+    ({"action": "invalid"}, False),
+    ({"action": "approve"}, True),
+    ({"action": "partial", "decisions": {"a.txt": "approved"}}, True),
+])
+def test_approval_digest_belongs_only_to_a_fully_approved_request(tmp_path, approval, executed):
+    from backend.agent.final_tool_request import canonical_tool_request_digest
+
+    async def scenario():
+        class ApprovalTool(_BatchTool):
+            permission = PermissionLevel.CONFIRM
+
+            async def execute(self, args, context=None):
+                self.received_digests = set(context.metadata["_approved_request_digests"])
+                return ToolResult(content="approved execution")
+
+        tool = ApprovalTool("approval_evidence", read_only=False)
+        tool.received_digests = None
+        registry = ToolRegistry()
+        registry.register(tool)
+        call = ToolCallEvent(id="approval", name=tool.name, arguments={"value": 1})
+        digest = canonical_tool_request_digest(call.name, call.arguments)
+        permission = PermissionContext(mode="confirm")
+        context = ToolExecutionContext(permission=permission, workspace_root=tmp_path)
+        builder = ContextBuilder()
+        builder.append_assistant_tool_calls([call])
+
+        async def respond(call_id):
+            assert call_id == call.id
+            return dict(approval)
+
+        events = [event async for event in execute_tool_batch([call], ctx=builder,
+            state=AgentState(user_message="approve"), tool_registry=registry,
+            permission_checker=PermissionChecker(PermissionSettings(), tmp_path),
+            approval_handler=respond, skill_manager=None, permission_context=permission,
+            tool_ctx=context)]
+        result = next(event for event in events if event.type == "tool_result")
+        assert result.data["is_error"] is not executed
+        assert context.metadata.get("_approved_request_digests", set()) == ({digest} if executed else set())
+        assert tool.received_digests == ({digest} if executed else None)
+
+    asyncio.run(scenario())
 
 
 def test_created_then_removed_helper_supersedes_original_file_edit(tmp_path) -> None:

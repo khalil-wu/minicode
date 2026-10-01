@@ -94,13 +94,16 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState("");
   const [searchVersion, setSearchVersion] = useState(0);
-  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-  const [workspaceMenu, setWorkspaceMenu] = useState<{ x: number; y: number } | null>(null);
+  const [contextMenu, setContextMenu] = useState<(ContextMenuState & { workspaceRoot: string }) | null>(null);
+  const [workspaceMenu, setWorkspaceMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const [toolbarMenuOpen, setToolbarMenuOpen] = useState(false);
   const toolbarTriggerRef = useRef<HTMLButtonElement | null>(null);
   const toolbarMenuRef = useRef<HTMLDivElement | null>(null);
   const density = "compact" as const;
   const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const openContextMenu = useCallback((menu: ContextMenuState) => {
+    setContextMenu({ ...menu, workspaceRoot: workingDirectory });
+  }, [workingDirectory]);
   const fileTreeVersion = useAppStore((s) => s.fileTreeVersion);
   const fileTreeRevealRequests = useAppStore((s) => s.fileTreeRevealRequests);
   const consumeFileTreeRevealRequest = useAppStore((s) => s.consumeFileTreeRevealRequest);
@@ -287,6 +290,9 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
 
   useEffect(() => { refresh(); }, [refresh, workingDirectory, fileTreeVersion]);
   useEffect(() => {
+    setContextMenu(null);
+    setWorkspaceMenu(null);
+    setToolbarMenuOpen(false);
     setTree(null);
     setError("");
     setQuery("");
@@ -601,13 +607,13 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       <div style={fileTreeHeaderStyle} onContextMenu={(event) => {
         if (!workingDirectory) return;
         event.preventDefault();
-        setWorkspaceMenu({ x: event.clientX, y: event.clientY });
+        setWorkspaceMenu({ x: event.clientX, y: event.clientY, path: workingDirectory });
       }}>
         <div title={workingDirectory || tree.path} style={fileTreeRootLabelStyle}>
           {workspaceLabel(workingDirectory || tree.path)}
         </div>
       </div>
-      {workspaceMenu && <WorkspaceContextMenu path={workingDirectory || tree.path} position={workspaceMenu} onClose={() => setWorkspaceMenu(null)} />}
+      {workspaceMenu && workspaceRootsEqual(workspaceMenu.path, workingDirectory) && <WorkspaceContextMenu path={workspaceMenu.path} position={workspaceMenu} onClose={() => setWorkspaceMenu(null)} />}
       <div style={fileTreeToolbarStyle}>
         <div style={fileTreeSearchStyle}>
           <Search size={14} aria-hidden="true" />
@@ -664,7 +670,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
               gitMap={gitMap}
               activeEditorPath={activeEditorPath}
               workingDirectory={workingDirectory}
-              onContextMenu={setContextMenu}
+              onContextMenu={openContextMenu}
               onNavigate={onNavigate}
             />
           ))
@@ -685,7 +691,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
             activeEditorPath={activeEditorPath}
             density={density}
             onToggleExpanded={toggleExpanded}
-            onContextMenu={setContextMenu}
+            onContextMenu={openContextMenu}
             onNavigate={onNavigate}
           />
         ))
@@ -697,10 +703,10 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
           )}
         </div>
       ) : null}
-      {contextMenu && (
+      {contextMenu && workspaceRootsEqual(contextMenu.workspaceRoot, workingDirectory) && (
         <FileContextMenu
           menu={contextMenu}
-          workingDirectory={workingDirectory}
+          workingDirectory={contextMenu.workspaceRoot}
           onRefresh={() => void refresh()}
           onClose={() => setContextMenu(null)}
         />

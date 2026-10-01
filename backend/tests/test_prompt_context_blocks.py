@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime as RealDateTime, timezone
 from pathlib import Path
+import pytest
 
 from backend.agent.context import ContextBuilder
 from backend.agent.loop import AgentLoopSessionContext, run_agent_loop
@@ -622,3 +623,87 @@ def test_session_timezone_is_an_iana_name_or_offset_never_localized_text() -> No
     # of "China Standard Time" is neither an IANA zone nor an offset.
     assert re.fullmatch(r"[A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)*|UTC[+-]\d{2}:\d{2}|UTC", name), name
     assert name.isascii()
+
+
+@pytest.mark.parametrize("body", [
+    "< think>PRIVATE_MARKER</ think>",
+    "<think>PRIVATE_MARKER< / think>",
+    "<thinking note='" + "x" * 80 + "'>PRIVATE_MARKER</thinking>",
+    "<|im_start|><think>PRIVATE_MARKER</think><|im_end|>",
+])
+def test_stream_control_tags_are_independent_of_chunk_partition(body):
+    from backend.agent.stream_sanitizer import ThinkingStreamSanitizer, scrub_thinking_tags
+
+    text = "before " + body + " after"
+    assert scrub_thinking_tags(text) == "before  after"
+    for split in range(len(text) + 1):
+        sanitizer = ThinkingStreamSanitizer()
+        result = sanitizer.feed(text[:split]) + sanitizer.feed(text[split:]) + sanitizer.finish()
+        assert result == "before  after", split
+
+
+def test_stream_sanitizer_preserves_non_control_prose_and_memory_citation_chunks():
+    from backend.agent.stream_sanitizer import ThinkingStreamSanitizer
+
+    prose = "<internal-api> and <think-tank> and <reasoning-engine>"
+    citation = "<minicode-memory-citation>source-1</minicode-memory-citation>"
+    for split in range(len(citation) + 1):
+        sanitizer = ThinkingStreamSanitizer()
+        result = sanitizer.feed(prose + citation[:split]) + sanitizer.feed(citation[split:]) + sanitizer.finish()
+        assert result == prose
+        assert sanitizer.citations == ["source-1"]
+
+
+@pytest.mark.parametrize("api", ["chat", "responses"])
+def test_native_media_identity_is_not_sent_as_an_openai_wire_key(api):
+    import httpx
+    import json
+    from backend.config import LLMSettings
+    from backend.llm.openai_adapter import OpenAIAdapter
+
+    async def scenario():
+        requests = []
+
+        def reply(request):
+            requests.append(json.loads(request.content))
+            event = {"choices": [{"delta": {"content": "Done"}, "finish_reason": "stop"}]} if api == "chat" else {
+                "type": "response.completed", "response": {"status": "completed", "output_text": "Done", "output": []},
+            }
+            return httpx.Response(200, text="data: " + json.dumps(event) + "\n\ndata: [DONE]\n\n")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+            adapter = OpenAIAdapter(LLMSettings(api_key="fixture", model="fixture", wire_api=api), http_client=client)
+            message = LLMMessage(role="user", content="Inspect", images=[
+                {"media_type": "image/png", "data": "aW1hZ2U=", "artifact_id": "private-image-id"},
+            ], documents=[{"media_type": "application/pdf", "data": "JVBERg==", "file_name": "input.pdf", "artifact_id": "private-pdf-id"}])
+            try:
+                events = [event async for event in adapter.stream_chat([message])]
+                assert events[-1].type == StreamEventType.DONE
+            finally:
+                await adapter.aclose()
+        assert "artifact_id" not in json.dumps(requests[0])
+        assert "private-image-id" not in json.dumps(requests[0])
+        parts = (requests[0]["messages"] if api == "chat" else requests[0]["input"])[0]["content"]
+        assert any(part["type"] in {"image_url", "input_image"} for part in parts)
+        if api == "responses":
+            assert any(part["type"] == "input_file" for part in parts)
+
+    asyncio.run(scenario())
+
+
+def test_anthropic_native_media_and_tool_result_pick_only_native_form_fields():
+    import json
+    from backend.llm.anthropic_adapter import AnthropicAdapter
+
+    image = {"media_type": "image/png", "data": "aW1hZ2U=", "artifact_id": "private-image-id"}
+    document = {"media_type": "application/pdf", "data": "JVBERg==", "file_name": "input.pdf", "artifact_id": "private-pdf-id"}
+    system, messages = AnthropicAdapter._convert_messages([
+        LLMMessage(role="user", content="Inspect", images=[image], documents=[document]),
+        LLMMessage(role="assistant", tool_calls=[ToolCallEvent(id="call", name="inspect", arguments={})]),
+        LLMMessage(role="tool", tool_call_id="call", content="Result", images=[image]),
+    ])
+    assert "artifact_id" not in json.dumps(messages)
+    assert "private-image-id" not in json.dumps(messages)
+    native = [part for part in messages[0]["content"] if part["type"] in {"image", "document"}]
+    assert len(native) == 2
+    assert all(set(part["source"]) == {"type", "media_type", "data"} for part in native)

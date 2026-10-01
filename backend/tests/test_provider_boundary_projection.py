@@ -101,6 +101,25 @@ def test_anthropic_messages_declared_error_has_the_same_projection_contract() ->
     assert event.raw["provider_error_message"] == "invalid message block"
 
 
+@pytest.mark.parametrize("http_error", [False, True])
+def test_anthropic_error_code_and_schema_type_do_not_reintroduce_secrets(http_error):
+    import json
+    secret = "sk-" + "AuditSyntheticSecretValue01234567890"
+    body = {"error": {"code": secret, "type": "Bearer " + secret, "message": "failed"}}
+    if http_error:
+        request = httpx.Request("POST", "https://fixture.invalid/v1/messages")
+        response = httpx.Response(400, request=request, json=body)
+        event = _anthropic_exception_error_event(
+            httpx.HTTPStatusError("failure", request=request, response=response), provider="fixture",
+        )
+    else:
+        event = _anthropic_declared_error_event(body, provider="fixture")
+    assert secret not in event.content
+    assert secret not in json.dumps(event.raw)
+    _, _, projected = provider_error_details(event)
+    assert secret not in json.dumps(projected)
+
+
 @pytest.mark.asyncio
 async def test_web_fetch_keeps_fetched_artifact_when_model_extraction_fails(tmp_path) -> None:
     tool = WebFetchTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))

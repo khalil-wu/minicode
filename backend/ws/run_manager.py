@@ -15,6 +15,10 @@ from backend.agent.parent_notification_outbox import (
 )
 from backend.agent.message import UserCommand
 from backend.agent.run_context import RunContext
+from backend.agent.conversation_query_guard import (
+    ConversationQueryClaim,
+    conversation_query_guards,
+)
 from backend.agent.model_execution import ModelExecutionSnapshot
 from backend.agent.turn_input import TurnInput, TurnInputQueue
 from backend.async_cleanup import (
@@ -23,6 +27,7 @@ from backend.async_cleanup import (
     cancel_and_drain,
     cancel_and_drain_receipt,
     cancel_and_drain_to_completion,
+    retain_cleanup_task,
 )
 from backend.conversations.repository import CONVERSATION_DATA_DIR
 from backend.ws.durable_user_queue import DurableUserMessageQueue
@@ -44,6 +49,8 @@ class SessionRunManager:
         wait_state = TurnWaitState.for_session(session)
         self._run_tasks: dict[str, asyncio.Task[Any]] = {}
         self._run_contexts: dict[str, RunContext] = {}
+        self._lifecycle_cleanup_tasks: dict[str, set[asyncio.Task[Any]]] = {}
+        self._lifecycle_release_tasks: set[asyncio.Task[Any]] = set()
         self._run_task_ids: dict[str, str] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._active_run_task: asyncio.Task[Any] | None = None
@@ -152,20 +159,18 @@ class SessionRunManager:
         conversation_id, run_id = self._delivery_key(conversation_id, run_id)
         if not conversation_id:
             return False
+        run_id = run_id or self.run_task_ids.get(conversation_id, "")
         if run_id:
             # New runners fence terminal delivery to the concrete managed-task
             # id.  Legacy/integration runners can only publish the
-            # conversation-scoped marker; registration clears every older
-            # marker for the conversation, so that marker can only belong to
-            # the currently registered run and is safe to accept here.
+            # conversation-scoped marker; registration clears that legacy
+            # marker, so it can only belong to the currently registered run.
             return (
                 (conversation_id, run_id) in self._delivery_complete
                 or (conversation_id, "") in self._delivery_complete
             )
-        # Conversation-level callers are asking whether the current/most
-        # recent run crossed its terminal delivery fence.  A run-scoped marker
-        # must therefore be visible to them as well; otherwise cleanup and
-        # reconnect code incorrectly keep the conversation busy after DONE.
+        # With no registered run, reconnect can still inspect the last
+        # terminal delivery. Old run-scoped markers never release a new run.
         return any(
             owner == conversation_id
             for owner, _owned_run_id in self._delivery_complete
@@ -648,7 +653,16 @@ class SessionRunManager:
         return self._active_run_cancel_event
 
     def has_active_run(self) -> bool:
-        return bool(self.run_tasks)
+        return bool(self.run_tasks) or any(
+            self.has_pending_lifecycle_cleanup(conversation_id)
+            for conversation_id in self._lifecycle_cleanup_tasks
+        )
+
+    def has_pending_lifecycle_cleanup(self, conversation_id: str) -> bool:
+        return any(
+            not task.done()
+            for task in self._lifecycle_cleanup_tasks.get(conversation_id, ())
+        )
 
     def running_task_for(self, conversation_id: str) -> asyncio.Task[Any] | None:
         if self.is_delivery_complete(conversation_id) and not self._user_message_queues.get(
@@ -690,9 +704,8 @@ class SessionRunManager:
             # A new concrete run starts a fresh delivery fence. Retain the
             # previous marker after cleanup for reconnect diagnostics, but do
             # not let it satisfy this conversation's new run.
-            self._delivery_complete = {
-                key for key in self._delivery_complete if key[0] != conversation_id
-            }
+            self._delivery_complete.discard((conversation_id, ""))
+            self._delivery_complete.discard((conversation_id, task_id))
             self.run_tasks[conversation_id] = task
             if run_context is not None:
                 self._run_contexts[conversation_id] = run_context
@@ -705,6 +718,63 @@ class SessionRunManager:
             self._active_task_id = task_id
             self._active_run_cancel_event = cancel_event
         self._session.session_lifecycle.schedule_task_runtime_update()
+
+    def context_for(self, conversation_id: str) -> RunContext | None:
+        return self._run_contexts.get(conversation_id)
+
+    def lifecycle_cleanup_tasks_for(self, conversation_id: str) -> set[asyncio.Task[Any]]:
+        """Share callback ownership across per-turn AgentSession instances."""
+
+        return self._lifecycle_cleanup_tasks.setdefault(conversation_id, set())
+
+    def lifecycle_release_fence(
+        self,
+        conversation_id: str,
+        *,
+        after: asyncio.Task[Any] | None = None,
+    ) -> asyncio.Task[None] | None:
+        owner = self.lifecycle_cleanup_tasks_for(conversation_id)
+        if (after is None or after.done()) and not any(not task.done() for task in owner):
+            return None
+
+        async def wait_for_release() -> None:
+            # asyncio.wait never cancels a borrowed callback. Cancelling the
+            # session teardown cannot turn an unfinished callback into a
+            # released generation or allow a second conversation writer.
+            pending = {after} if after is not None and not after.done() else set()
+            while pending:
+                try:
+                    await asyncio.wait(pending)
+                except asyncio.CancelledError:
+                    continue
+                pending = {task for task in pending if not task.done()}
+            while pending := {task for task in owner if not task.done()}:
+                try:
+                    await asyncio.wait(pending)
+                except asyncio.CancelledError:
+                    continue
+
+        fence = asyncio.create_task(
+            wait_for_release(), name=f"lifecycle-release:{conversation_id}"
+        )
+        retain_cleanup_task(fence, self._lifecycle_release_tasks)
+        return fence
+
+    def release_query_claim(self, claim: ConversationQueryClaim) -> None:
+        def resume_owned_queue() -> None:
+            self._session.schedule_next_queued_user_message(claim.conversation_id)
+            self._session.session_lifecycle.schedule_task_runtime_update()
+
+        conversation_query_guards().end_after_cleanup(
+            claim,
+            tasks=self.lifecycle_cleanup_tasks_for(claim.conversation_id),
+            waiters=self._lifecycle_release_tasks,
+            on_released=(
+                resume_owned_queue
+                if self.has_pending_lifecycle_cleanup(claim.conversation_id)
+                else None
+            ),
+        )
 
     def publish_model_execution(self, conversation_id: str, snapshot: ModelExecutionSnapshot) -> asyncio.Task[Any] | None:
         task = self.running_task_for(conversation_id)
@@ -1019,6 +1089,8 @@ class SessionRunManager:
             )
         registered_task = self.run_tasks.get(conversation_id) if conversation_id else None
         newer_run_registered = registered_task is not None and registered_task is not task
+        if newer_run_registered:
+            self._delivery_complete.discard((conversation_id, task_id))
         if conversation_id and registered_task is task:
             self.run_tasks.pop(conversation_id, None)
             self._run_contexts.pop(conversation_id, None)

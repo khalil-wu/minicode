@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+from contextvars import ContextVar
 from collections.abc import Awaitable, Callable
 from typing import Any, Mapping, TYPE_CHECKING
 
@@ -11,6 +12,14 @@ if TYPE_CHECKING:
 CommandHandler = Callable[[dict[str, Any]], Awaitable[bool | None]]
 SlashCommandHandler = Callable[['WebSocketSession', str, Any], Awaitable[bool | tuple[bool, str] | None]]
 logger = logging.getLogger(__name__)
+_SLASH_CONVERSATION_ID: ContextVar[str | None] = ContextVar(
+    "slash_conversation_id", default=None,
+)
+
+
+def slash_conversation_id() -> str | None:
+    """The existing slash request's target, not the renderer's active selection."""
+    return _SLASH_CONVERSATION_ID.get()
 
 
 class CommandRegistry:
@@ -132,7 +141,11 @@ class CommandRegistry:
         handler = self.get_slash(name, scope_id=scope_id)
         if handler is None:
             return False, arg
-        result = await handler(handler_obj, arg, attachments)
+        token = _SLASH_CONVERSATION_ID.set(scope_id)
+        try:
+            result = await handler(handler_obj, arg, attachments)
+        finally:
+            _SLASH_CONVERSATION_ID.reset(token)
 
         if isinstance(result, tuple):
             return result[0], result[1]

@@ -222,6 +222,7 @@ def classify_llm_error(message: str | BaseException | None) -> LLMErrorClassific
         "provider_error_type=protocol" in text
         or "provider_error_code=convert_request_failed" in text
         or "convert_request_failed" in text
+        or "tool_schema_invalid" in text
     ):
         return LLMErrorClassification(
             fatal=True,
@@ -612,7 +613,7 @@ def _structured_provider_error_signal(
         code = str(details.get("code") or "").strip().casefold()
         schema_type = str(details.get("type") or "").strip().casefold()
         signal = f"{code} {schema_type}"
-        if "convert_request_failed" in signal:
+        if any(token in signal for token in ("convert_request_failed", "tool_schema_invalid")):
             return LLMErrorClassification(True, False, "provider_protocol", "protocol")
         if any(token in signal for token in ("invalid_api_key", "authentication_error", "unauthorized")):
             return LLMErrorClassification(True, False, "auth", "auth")

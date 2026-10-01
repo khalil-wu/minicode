@@ -424,13 +424,17 @@ def _shell_wrapper_payload(command: str) -> tuple[str | None, str]:
         return None, ""
     if not argv:
         return None, ""
-    executable = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    executable = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
     option_index = -1
     if executable in _POSIX_SHELL_WRAPPERS:
-        option_index = next(
-            (index for index, value in enumerate(argv[1:], start=1) if value == "-c"),
-            -1,
-        )
+        from backend.permissions.shell_ast import posix_shell_payload_index
+
+        payload_index = posix_shell_payload_index(argv)
+        if payload_index is None:
+            return None, ""
+        if payload_index >= len(argv):
+            return None, "shell wrapper is missing its command payload"
+        return argv[payload_index], ""
     elif executable in _POWERSHELL_WRAPPERS:
         option_index = next(
             (
@@ -1244,6 +1248,24 @@ class PermissionChecker:
             if injection_reason:
                 static_auto = None
                 raise_floor(PermissionLevel.CONFIRM, "injection_risk", injection_reason)
+
+        if (
+            tool_name == "run_command"
+            and args is not None
+            and str(args.get("command") or "").strip()
+            and context is not None
+            and context.mode != "bypass"
+        ):
+            from backend.sandbox.policy import SandboxEnforcement, sandbox_policy_for_permission_context
+            from backend.sandbox.runner import SandboxRunner
+
+            workspace = Path(context.workspace_root or self._workspace_root or Path.cwd()).resolve()
+            policy = sandbox_policy_for_permission_context(workspace, context)
+            resolved = policy.resolve(cwd=workspace)
+            if resolved.enforcement is SandboxEnforcement.MANAGED and not resolved.allow_network:
+                capability = SandboxRunner(policy).capability(cwd=workspace)
+                if capability.available and not capability.network_isolated:
+                    raise_floor(PermissionLevel.CONFIRM, "sandbox_capability", "network_not_isolated")
 
         if context is not None and context.mode == "plan":
             if tool is None or tool_level is None:

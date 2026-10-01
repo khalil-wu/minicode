@@ -100,6 +100,7 @@ _NON_TOOL_DOC_TOKENS = frozenset(
         # position as runtime_metadata["end_cursor"].
         "is_error",
         "structured_content",
+        "pending_tools",
         "end_cursor",
         # Names in the code-execution JavaScript surface, not tool arguments:
         # the image()/audio() helpers take an image_block/audio_block (with a

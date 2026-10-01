@@ -25,6 +25,7 @@ from typing import Any
 
 from backend.lsp.client import LSPLocation, get_lsp_manager
 from backend.permissions.context import ToolExecutionContext
+from backend.sandbox.policy import SandboxPolicy, sandbox_policy_for_permission_context
 from backend.tools.base import (
     BaseTool,
     PermissionLevel,
@@ -123,7 +124,8 @@ class LSPGoToDefinitionTool(BaseTool):
             return self._error_result(str(exc))
 
         manager = get_lsp_manager()
-        if not manager.is_available(file_path, workspace_root):
+        sandbox_policy = _lsp_request_policy(workspace_root, context)
+        if not manager.is_available(file_path, workspace_root, sandbox_policy=sandbox_policy):
             return ToolResult(
                 content=f"No language server available for {Path(file_path).suffix} files. "
                         f"Install pyright (pip install pyright), typescript-language-server (npm i -g typescript-language-server), "
@@ -132,7 +134,7 @@ class LSPGoToDefinitionTool(BaseTool):
                 display_summary="LSP not available",
             )
 
-        client = await manager.get_client(file_path, workspace_root)
+        client = await manager.get_client(file_path, workspace_root, sandbox_policy=sandbox_policy)
         if client is None:
             return ToolResult(
                 content="Failed to start language server.",
@@ -226,14 +228,15 @@ class LSPFindReferencesTool(BaseTool):
             return self._error_result(str(exc))
 
         manager = get_lsp_manager()
-        if not manager.is_available(file_path, workspace_root):
+        sandbox_policy = _lsp_request_policy(workspace_root, context)
+        if not manager.is_available(file_path, workspace_root, sandbox_policy=sandbox_policy):
             return ToolResult(
                 content=f"No language server available for {Path(file_path).suffix} files.",
                 is_error=True,
                 display_summary="LSP not available",
             )
 
-        client = await manager.get_client(file_path, workspace_root)
+        client = await manager.get_client(file_path, workspace_root, sandbox_policy=sandbox_policy)
         if client is None:
             return ToolResult(
                 content="Failed to start language server.",
@@ -326,14 +329,15 @@ class LSPHoverTool(BaseTool):
             return self._error_result(str(exc))
 
         manager = get_lsp_manager()
-        if not manager.is_available(file_path, workspace_root):
+        sandbox_policy = _lsp_request_policy(workspace_root, context)
+        if not manager.is_available(file_path, workspace_root, sandbox_policy=sandbox_policy):
             return ToolResult(
                 content=f"No language server available for {Path(file_path).suffix} files.",
                 is_error=True,
                 display_summary="LSP not available",
             )
 
-        client = await manager.get_client(file_path, workspace_root)
+        client = await manager.get_client(file_path, workspace_root, sandbox_policy=sandbox_policy)
         if client is None:
             return ToolResult(
                 content="Failed to start language server.",
@@ -422,14 +426,15 @@ class LSPDocumentSymbolsTool(BaseTool):
             return self._error_result(str(exc))
 
         manager = get_lsp_manager()
-        if not manager.is_available(file_path, workspace_root):
+        sandbox_policy = _lsp_request_policy(workspace_root, context)
+        if not manager.is_available(file_path, workspace_root, sandbox_policy=sandbox_policy):
             return ToolResult(
                 content=f"No language server available for {Path(file_path).suffix} files.",
                 is_error=True,
                 display_summary="LSP not available",
             )
 
-        client = await manager.get_client(file_path, workspace_root)
+        client = await manager.get_client(file_path, workspace_root, sandbox_policy=sandbox_policy)
         if client is None:
             return ToolResult(
                 content="Failed to start language server.",
@@ -470,6 +475,17 @@ class LSPDocumentSymbolsTool(BaseTool):
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
+
+def _lsp_request_policy(
+    workspace_root: str,
+    context: ToolExecutionContext | None,
+) -> SandboxPolicy | None:
+    if context is None:
+        return None
+    if context.sandbox_policy is not None:
+        return context.sandbox_policy
+    return sandbox_policy_for_permission_context(Path(workspace_root), context.permission)
+
 
 _SYMBOL_KINDS = {
     1: "File", 2: "Module", 3: "Namespace", 4: "Package", 5: "Class",

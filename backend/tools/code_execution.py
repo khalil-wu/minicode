@@ -8,7 +8,7 @@ from dataclasses import replace
 from backend.agent.message import AgentEvent
 from backend.async_cleanup import to_thread_cancel_safe
 from backend.permissions.context import ToolExecutionContext
-from backend.tools.base import BaseTool, ToolResult, ToolSchema, artifact_owner_workspace_root, truncate_tool_result, validate_tool_input
+from backend.tools.base import BaseTool, ToolResult, ToolSchema, artifact_owner_workspace_root, validate_tool_input
 
 
 async def _present_result(result: ToolResult, context: ToolExecutionContext, max_chars: int) -> ToolResult:
@@ -16,13 +16,27 @@ async def _present_result(result: ToolResult, context: ToolExecutionContext, max
         artifact_id = await to_thread_cancel_safe(context.artifact_store.save, result.content, source="tool_exec.output",
             conversation_id=context.conversation_id, workspace_root=artifact_owner_workspace_root(context))
         report = result.runtime_metadata["code_cell"]
+        # The wire report is one JSON line even when text() emitted source code.
+        # Truncate the selected output, not that envelope: line truncation of the
+        # envelope otherwise discards every useful byte of a long tool result.
+        output = "\n".join([*([report["error"]] if report.get("error") else []), *report.get("output", [])])
         preview = {"cell_id": report["cell_id"], "status": report["status"], "artifact_id": artifact_id,
-                   "output_preview": truncate_tool_result(result.content, max_chars)}
+                   "output_preview": ""}
+        marker = "\n... [truncated; full output in artifact] ...\n"
+        preview["output_preview"] = marker
         encoded = json.dumps(preview, ensure_ascii=False)
-        excess = max(0, len(encoded) - max_chars)
-        if excess:
-            preview["output_preview"] = preview["output_preview"][:max(0, len(preview["output_preview"]) - excess)]
-            encoded = json.dumps(preview, ensure_ascii=False)
+        # JSON escaping also consumes the caller's budget (quotes, newlines,
+        # control characters). Fit both ends without cutting the wire envelope.
+        low, high = 0, min(len(output), max_chars)
+        while low < high:
+            keep = (low + high + 1) // 2
+            head, tail = keep - keep // 3, keep // 3
+            preview["output_preview"] = output[:head] + marker + (output[-tail:] if tail else "")
+            candidate = json.dumps(preview, ensure_ascii=False)
+            if len(candidate) <= max_chars:
+                low, encoded = keep, candidate
+            else:
+                high = keep - 1
         result = replace(result, content=encoded, artifact_id=artifact_id)
     for image in result.images:
         image_bytes = len(base64.b64decode(image["data"], validate=True))
@@ -50,7 +64,9 @@ class ToolExecTool(BaseTool):
         "Tool results expose content, status, is_error, images, audios and MCP structured_content. ALL_TOOLS lists names, descriptions and parameter schemas. "
         "Every nested call still requires the normal tool permission and budget. No filesystem, network, process or imports are available in JavaScript. "
         "store/load retain JSON values for later cells in this session; cells have fresh globals. "
-        "Use tool_wait when status is running. Await every tool promise; unawaited calls are discarded. "
+        "Use tool_wait when status is running; pending_tools names the unfinished operations. A yielded cell is still executing, not unavailable. "
+        "For independent long tasks, emit each result as it finishes: await Promise.all(jobs.map(async job => text(await job))). "
+        "Await every tool promise; unawaited calls are discarded. "
         "Supports setTimeout, clearTimeout, notify, yield_control and exit. Limits: 10 seconds of JavaScript execution, 128 MiB heap, 8 MiB stored values. "
         "An optional first line // @exec: {\"yield_time_ms\":10000,\"max_chars\":8000} sets polling/output options for raw-code calls."
     )

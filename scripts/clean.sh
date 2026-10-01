@@ -20,7 +20,7 @@ echo ""
 echo "📦 清理 Python 缓存..."
 find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 find . -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete 2>/dev/null || true
-find . -type d -name ".pytest_cache" -exec rm -rf  + 2>/dev/null || true
+find . -type d -name ".pytest_cache" -exec rm -rf {} +
 find . -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
 echo "✅ Python 缓存已清理"
 

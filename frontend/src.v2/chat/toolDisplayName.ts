@@ -20,10 +20,26 @@ const BUILTIN_TOOL_NAME_RE = new RegExp(
   "gi",
 );
 
+const RUNTIME_ACTION_LABELS: Record<string, string> = {
+  Read: "读取文件",
+  List: "列出文件",
+  Search: "搜索文件",
+  Run: "运行命令",
+  "Apply patch": "应用补丁",
+  "Update plan": "更新计划",
+  "Start subagent": "启动子 Agent",
+  "Script completed": "脚本已完成",
+  "Script yielded": "脚本仍在运行",
+  "Script failed": "脚本执行失败",
+  "Script cancelled": "脚本已取消",
+};
+
 /** Render runtime protocol identifiers as user-facing MiniCode labels.
  * Runtime records keep the original name for execution, policy matching,
  * replay export, and diagnostics. */
 export function readableToolLabel(value: string | undefined): string {
+  const runtimeLabel = RUNTIME_ACTION_LABELS[String(value || "").trim()];
+  if (runtimeLabel) return runtimeLabel;
   const separatedProtocolNames = String(value || "").trim()
     .replace(/(webfetch|web_fetch|web_search)(?=webfetch|web_fetch|web_search)/gi, "$1 ");
   const mcpLabel = separatedProtocolNames.replace(

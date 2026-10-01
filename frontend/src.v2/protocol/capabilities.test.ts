@@ -20,6 +20,16 @@ import {
 } from "./capabilities";
 
 describe("capability payload helpers", () => {
+  it("separates callable code-mode tools from unloaded tools", () => {
+    const capabilities = withDerivedCapabilitySummary({ tool_views: [
+      { name: "tool_exec", exposure: "core", direct: true, schema_available: true },
+      { name: "read_file", exposure: "core", direct: false, schema_available: true, code_mode_available: true },
+      { name: "mcp__docs__search", exposure: "deferred", direct: false, schema_available: true },
+      { name: "model_search", exposure: "deferred_model_only", direct: false, schema_available: true },
+    ] });
+    expect(capabilities?.summary).toMatchObject({ direct_tools: 1, deferred_tools: 2, code_mode_tools: 1 });
+    expect(summarizeToolViews(capabilities?.tool_views).codeMode).toEqual(["read_file"]);
+  });
   it("detects inventory details without requiring a summary", () => {
     expect(capabilityHasInventory({ tools: [] })).toBe(true);
     expect(capabilityHasDetails({ tools: [] })).toBe(true);
@@ -90,6 +100,7 @@ describe("capability payload helpers", () => {
       total: 3,
       direct: ["read_file"],
       deferred: ["tool_call"],
+      codeMode: [],
       hidden: ["unsafe_write"],
       core: 2,
       hasViews: true,

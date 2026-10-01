@@ -122,8 +122,9 @@ describe("handleControlEvent", () => {
       conversation_id: "conv-other",
       request: {
         subtype: "can_use_tool",
-        tool_name: "write_file",
-        input: {},
+        tool_name: "run_command",
+        input: { command: "python -V" },
+        network_unisolated: true,
       },
     } as unknown as ServerEvent)).toBe(true);
     expect(handleControlEvent({
@@ -140,7 +141,8 @@ describe("handleControlEvent", () => {
     expect(state.pendingApproval).toMatchObject({
       requestId: "approval-other",
       conversationId: "conv-other",
-      toolName: "write_file",
+      toolName: "run_command",
+      networkUnisolated: true,
     });
     expect(state.pendingAskUser).toMatchObject({
       requestId: "ask-other",

@@ -29,15 +29,15 @@ class _FakeMcpClient:
         self.list_calls = 0
         self.read_calls: list[str] = []
 
-    async def list_resources(self) -> list[SimpleNamespace]:
+    async def list_resources_page(self, _cursor=None) -> tuple[list[SimpleNamespace], None]:
         self.list_calls += 1
-        return self._resources
+        return self._resources, None
 
-    async def read_resource(self, uri: str) -> str:
+    async def read_resource(self, uri: str) -> list[dict[str, str]]:
         self.read_calls.append(uri)
         if uri not in self._content_by_uri:
             raise RuntimeError("resource not found")
-        return self._content_by_uri[uri]
+        return [{"uri": uri, "mimeType": "text/plain", "text": self._content_by_uri[uri]}]
 
 
 def _manager_with_clients(
@@ -128,7 +128,7 @@ def test_list_mcp_resources_lists_only_manager_connected_servers(tmp_path) -> No
     assert disconnected.list_calls == 0
 
 
-def test_read_mcp_resource_reads_first_connected_server_with_uri(tmp_path) -> None:
+def test_read_mcp_resource_requires_an_exact_server(tmp_path) -> None:
     missing = _FakeMcpClient(content_by_uri={})
     docs = _FakeMcpClient(content_by_uri={"mcp://docs/schema": '{"tables": ["users"]}'})
     manager = _manager_with_clients(
@@ -143,10 +143,10 @@ def test_read_mcp_resource_reads_first_connected_server_with_uri(tmp_path) -> No
         ReadMcpResourceTool(manager).execute({"uri": "mcp://docs/schema"})
     )
 
-    assert not result.is_error
-    assert result.content == '{"tables": ["users"]}'
-    assert missing.read_calls == ["mcp://docs/schema"]
-    assert docs.read_calls == ["mcp://docs/schema"]
+    assert result.is_error
+    assert "Missing required argument: server" in result.content
+    assert missing.read_calls == []
+    assert docs.read_calls == []
 
 
 def test_read_mcp_resource_prefers_requested_server_when_uri_collides(tmp_path) -> None:
@@ -202,12 +202,12 @@ def test_read_mcp_resource_stores_large_content_as_artifact(tmp_path) -> None:
     store = ArtifactStore(storage_dir=tmp_path / "artifacts")
 
     result = asyncio.run(
-        ReadMcpResourceTool(manager, store).execute({"uri": "mcp://docs/large"})
+        ReadMcpResourceTool(manager, store).execute({"server": "docs", "uri": "mcp://docs/large"})
     )
 
     assert not result.is_error
     assert result.artifact_id
     assert store.get(result.artifact_id) == content
     assert result.artifact_preview == "\n".join(content.split("\n")[:10])
-    assert "Content saved as Artifact" in result.content
+    assert "saved as Artifact" in result.content
     store.shutdown()

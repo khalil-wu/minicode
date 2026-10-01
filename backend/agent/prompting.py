@@ -9,7 +9,11 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from backend.permissions.context import ToolExecutionContext
+    from backend.sandbox import SandboxPolicy
 
 
 PromptLayer = Literal["stable", "context"]
@@ -537,90 +541,72 @@ _GIT_STATUS_MAX_CHARS = 2000
 _GIT_COMMAND_TIMEOUT_SECONDS = 10 * 60
 
 
-def build_git_status_context(workspace_root: Path | None = None) -> str:
+def build_git_status_context(
+    workspace_root: Path | None = None,
+    *,
+    context: ToolExecutionContext | None = None,
+    sandbox_policy: SandboxPolicy | None = None,
+) -> str:
     """Compute a bounded git snapshot for a session owner to retain."""
     if workspace_root is None:
         return ""
     root = Path(workspace_root)
-    return _compute_git_status_context(root)
+    return _compute_git_status_context(root, context=context, sandbox_policy=sandbox_policy)
 
 
-def _compute_git_status_context(root: Path) -> str:
+def _compute_git_status_context(
+    root: Path,
+    *,
+    context: ToolExecutionContext | None = None,
+    sandbox_policy: SandboxPolicy | None = None,
+) -> str:
     """Compute the session-start git snapshot for ``root`` (uncached)."""
-    import subprocess
-
-    def _git(*args: str) -> str | None:
-        try:
-            result = subprocess.run(
-                ["git", "--no-optional-locks", *args],
-                cwd=str(root),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if result.returncode != 0:
-            return None
-        stdout = getattr(result, "stdout", "")
-        return stdout.strip() if isinstance(stdout, str) else ""
-
-    branch = _git("branch", "--show-current")
-    if branch is None:
-        return ""  # not a git repo / git unavailable
-
-    main_branch = ""
-    head_ref = _git("symbolic-ref", "refs/remotes/origin/HEAD")
-    if head_ref:
-        main_branch = head_ref.rsplit("/", 1)[-1]
-    if not main_branch:
-        main_branch = "main"
-
-    user_name = _git("config", "user.name") or ""
-    status = _git("status", "--short") or ""
-    log = _git("log", "--oneline", "-n", "5") or ""
-
-    return _format_git_status_context(
-        branch=branch,
-        main_branch=main_branch,
-        user_name=user_name,
-        status=status,
-        log=log,
+    return asyncio.run(
+        build_git_status_context_async(root, context=context, sandbox_policy=sandbox_policy)
     )
 
 
 async def build_git_status_context_async(
     workspace_root: Path | None = None,
+    *,
+    context: ToolExecutionContext | None = None,
+    sandbox_policy: SandboxPolicy | None = None,
 ) -> str:
-    """Memoization owner helper using cancellable async subprocesses."""
-    from backend.subprocesses import communicate, spawn_exec
+    """Compute the snapshot under the captured canonical Git execution owner."""
+    from backend.async_cleanup import retain_cleanup_task
+    from backend.tools.git_support import _run_git
 
     if workspace_root is None:
         return ""
     root = Path(workspace_root)
+    # Pin once: permission refresh during the parallel reads must not switch
+    # one of this snapshot's Git processes to a new authority.
+    policy = sandbox_policy if sandbox_policy is not None else (
+        context.sandbox_policy if context is not None else None
+    )
+    run_context = context.run_context if context is not None else None
+    adapter = context.llm if context is not None else None
 
     async def git(*args: str) -> str | None:
         try:
-            process = await spawn_exec(
-                "git",
-                "--no-optional-locks",
-                *args,
-                cwd=str(root),
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            execution = asyncio.create_task(
+                _run_git(
+                    ["git", *args], root=root, context=context,
+                    sandbox_policy=policy, timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
+                )
             )
-            stdout, _ = await communicate(
-                process,
-                timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
-            )
+            if context is not None:
+                # gather may return on the first cancelled/erroring sibling.
+                # Retain the real Git tasks, not the gather result/JSON receipt.
+                retain_cleanup_task(execution, context.pending_cleanup_tasks)
+                if run_context is not None and run_context.retain_model is not None:
+                    run_context.retain_model(adapter, execution)
+            result = await execution
         except (OSError, asyncio.TimeoutError):
             return None
-        if process.returncode != 0:
+        if result.returncode != 0:
             return None
-        return stdout.decode("utf-8", errors="replace").strip()
+        return result.stdout.decode("utf-8", errors="replace").strip()
 
     is_git = await git("rev-parse", "--is-inside-work-tree")
     if is_git != "true":
@@ -633,6 +619,9 @@ async def build_git_status_context_async(
         git("status", "--short"),
         git("log", "--oneline", "-n", "5"),
     )
+    if status is None:
+        # An unavailable/refused status is not evidence of a clean workspace.
+        return ""
     main_branch = head_ref.rsplit("/", 1)[-1] if head_ref else "main"
     return _format_git_status_context(
         branch=branch or "",

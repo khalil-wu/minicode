@@ -22,7 +22,7 @@ const ESTIMATED_TURN_GAP = 8;
 const INITIAL_VIRTUAL_VIEWPORT_HEIGHT = 800;
 const estimateTurnHeight = () => ESTIMATED_TURN_HEIGHT;
 
-export const MessageList = () => {
+export const MessageList = ({ searchActive = false }: { searchActive?: boolean } = {}) => {
   const messages = useAppStore((s) => s.messages);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const conversationId = useAppStore((s) => s.conversationId);
@@ -63,7 +63,7 @@ export const MessageList = () => {
   const projectedTurns = useMemo(
     () => !shouldShowMessages
       ? { turns: [], hiddenTurnCount: 0, totalTurnCount: 0 }
-      : showAllHistory
+      : showAllHistory || searchActive
         ? {
             turns: projectMessagesToTurns(timelineMessages, isStreaming, workingDirectory),
             hiddenTurnCount: 0,
@@ -77,7 +77,7 @@ export const MessageList = () => {
             conversationId ?? "",
             workingDirectory,
           ),
-    [conversationId, isStreaming, showAllHistory, shouldShowMessages, timelineMessages, workingDirectory],
+    [conversationId, isStreaming, showAllHistory, searchActive, shouldShowMessages, timelineMessages, workingDirectory],
   );
   const turns = useMemo(
     () => applyAuthoritativeTurnDiff(projectedTurns.turns, turnDiff),
@@ -90,7 +90,9 @@ export const MessageList = () => {
   const tailTurn = turns.at(-1) ?? null;
   const liveTurn = isStreaming && tailTurn?.status === "streaming" ? tailTurn : null;
   const historicalTurns = tailTurn ? turns.slice(0, -1) : turns;
-  const shouldVirtualize = historicalTurns.length > MAX_TURNS_WITHOUT_VIRTUALIZATION;
+  // DOM Range search needs all loaded turns, not just the current viewport.
+  // Use the existing full-history renderer only while the user searches.
+  const shouldVirtualize = !searchActive && historicalTurns.length > MAX_TURNS_WITHOUT_VIRTUALIZATION;
   const firstHistoricalTurnId = historicalTurns[0]?.id;
   const lastHistoricalTurnId = historicalTurns.at(-1)?.id;
   // TanStack includes getItemKey identity in its measurement cache key. Keep

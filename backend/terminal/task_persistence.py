@@ -186,14 +186,16 @@ def list_persisted_tasks(session_id: str, base_dir: Path | None = None) -> list[
     return tasks
 
 
-def is_process_alive(pid: int | None) -> bool:
-    """Check if process is still running."""
+def is_process_alive(pid: int | None) -> bool | None:
+    """Return liveness, or None when the OS denies observation."""
     if pid is None:
         return False
     try:
         proc = psutil.Process(pid)
         return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+    except psutil.AccessDenied:
+        return None
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
         return False
 
 
@@ -206,14 +208,20 @@ def get_process_start_time(pid: int | None) -> float | None:
         return None
 
 
-def process_identity_matches(pid: int | None, expected_start_time: float | None) -> bool:
+def process_identity_matches(pid: int | None, expected_start_time: float | None) -> bool | None:
+    """Distinguish a fenced match/mismatch from an unobservable identity."""
     if pid is None or expected_start_time is None:
         return False
-    actual = get_process_start_time(pid)
-    return actual is not None and abs(actual - expected_start_time) < 0.01
+    try:
+        actual = float(psutil.Process(pid).create_time())
+    except psutil.AccessDenied:
+        return None
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return False
+    return abs(actual - expected_start_time) < 0.01
 
 
-def child_is_live(task: PersistedTaskState) -> bool:
+def child_is_live(task: PersistedTaskState) -> bool | None:
     """Whether the recorded child still runs, tolerating legacy records.
 
     A record written before process fencing has no ``process_start_time``, so
@@ -229,7 +237,12 @@ def child_is_live(task: PersistedTaskState) -> bool:
 
 def _terminate_owned_process(task: PersistedTaskState) -> bool:
     """Terminate the fenced process tree and report whether it fully exited."""
-    if not process_identity_matches(task.pid, task.process_start_time):
+    identity_matches = process_identity_matches(task.pid, task.process_start_time)
+    if identity_matches is None:
+        return False
+    if not identity_matches:
+        if task.pid is not None and task.process_start_time is None:
+            return is_process_alive(task.pid) is False
         return True
     try:
         process = psutil.Process(int(task.pid))
@@ -242,8 +255,10 @@ def _terminate_owned_process(task: PersistedTaskState) -> bool:
             candidate.kill()
         _, remaining = psutil.wait_procs(alive, timeout=1)
         return not remaining
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-        return not process_identity_matches(task.pid, task.process_start_time)
+    except psutil.AccessDenied:
+        return False
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return process_identity_matches(task.pid, task.process_start_time) is False
 
 
 def cleanup_orphaned_tasks(session_id: str, base_dir: Path | None = None) -> list[PersistedTaskState]:
@@ -267,15 +282,18 @@ def cleanup_orphaned_tasks(session_id: str, base_dir: Path | None = None) -> lis
                 # A legacy record carries no owner fence, so this process cannot
                 # claim it; otherwise the owner or the child must be gone.
                 legacy_record
-                or not owner_alive
-                or (task.pid is not None and not child_alive)
+                or owner_alive is not True
+                or (task.pid is not None and child_alive is not True)
             )
         )
         if orphaned_record:
             cleanup_requested_at = time.time()
             cleanup_completed = True
             cleanup_reason = "background_owner_exited"
-            if legacy_record and child_alive:
+            if owner_alive is None or child_alive is None:
+                cleanup_completed = False
+                cleanup_reason = "process_identity_unavailable"
+            elif legacy_record and child_alive:
                 # The old record has no owner/process start identity, so the
                 # child cannot be killed safely without risking PID reuse. It
                 # is nevertheless no longer an owned running task. Mark the
@@ -370,6 +388,9 @@ def reconcile_owned_tasks(
         legacy_owner = task.owner_pid is None or task.owner_start_time is None
         owner_alive = process_identity_matches(task.owner_pid, task.owner_start_time)
         child_alive = child_is_live(task)
+        if owner_alive is None or child_alive is None:
+            pending.append(task.task_id)
+            continue
         if owner_alive and not owner_terminal:
             pending.append(task.task_id)
             continue

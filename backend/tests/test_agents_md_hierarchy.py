@@ -1,6 +1,7 @@
 """Tests for MiniCode's hierarchical project instruction discovery."""
 import json
 import logging
+import os
 import tempfile
 from pathlib import Path
 
@@ -419,3 +420,32 @@ def test_no_git_project_uses_cwd_only():
         assert "BASE guidance" in md
         assert "SUB guidance" in md
         assert md.index("BASE guidance") < md.index("SUB guidance")
+
+
+@pytest.mark.parametrize("filename", ["../outside.md", "/outside.md", ".", "..", "bad\0name.md"])
+def test_instruction_fallback_rejects_path_syntax_before_probing(tmp_path, monkeypatch, filename):
+    original_exists = Path.exists
+
+    def exists(path):
+        if path.name == "outside.md" or "\0" in str(path):
+            raise AssertionError("unsafe fallback must not reach a filesystem probe")
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", exists)
+    bundle = load_project_guideline_bundle(tmp_path, project_root_markers=[], project_doc_fallback_filenames=[filename])
+    assert not _agent_blocks(bundle)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path syntax is executor-specific")
+@pytest.mark.parametrize("filename", [r"..\outside.md", r"C:\outside.md", r"C:outside.md", r"\\audit-host\share\outside.md"])
+def test_instruction_fallback_rejects_windows_paths_without_unc_probe(tmp_path, monkeypatch, filename):
+    original_exists = Path.exists
+
+    def exists(path):
+        if "outside.md" in str(path) or "audit-host" in str(path):
+            raise AssertionError("Windows fallback must be rejected before ambient credential probes")
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", exists)
+    bundle = load_project_guideline_bundle(tmp_path, project_root_markers=[], project_doc_fallback_filenames=[filename])
+    assert not _agent_blocks(bundle)

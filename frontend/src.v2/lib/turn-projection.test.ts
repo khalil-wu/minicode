@@ -27,6 +27,18 @@ const streamingAssistantMessage = (id: string, blocks: ContentBlock[]): ChatMess
 });
 
 describe("projectTurn explicit event contract", () => {
+  it("shows composed leaf evidence without repeating successful script receipts", () => {
+    const blocks = [
+      toolBlock({ id: "exec", name: "tool_exec" }),
+      toolBlock({ id: "leaf", name: "read_file", callSource: { kind: "code_mode", parent_call_id: "exec", cell_id: "cell-1", runtime_call_id: "1" } }),
+      toolBlock({ id: "wait", name: "tool_wait", args: { cell_id: "cell-1" } }),
+      toolBlock({ id: "standalone", name: "tool_exec" }),
+      toolBlock({ id: "failed", name: "tool_exec", status: "failed" }),
+    ];
+    expect(projectTurn(blocks).activityItems.flatMap(item => item.records?.map(record => record.id) ?? []))
+      .toEqual(["leaf", "standalone", "failed"]);
+    expect(projectTurn(blocks, { includeHiddenActivity: true }).activityItems).toHaveLength(5);
+  });
   it("uses only a completed agent-message item as the final answer", () => {
     const projection = projectTurn([
       {

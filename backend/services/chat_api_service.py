@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import binascii
 import logging
 import mimetypes
-from contextlib import nullcontext, suppress
+from contextlib import aclosing, nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 from uuid import uuid4
@@ -109,6 +110,8 @@ async def run_rest_chat(
             "iterations": 0,
             "tool_calls": [],
         }
+    run_context = RunContext()
+    cleanup_waiters: set[asyncio.Task] = set()
     try:
         return await run_owned_rest_chat(
             message=message,
@@ -120,9 +123,12 @@ async def run_rest_chat(
             conversation_id=conversation_id,
             run_id=run_id,
             query_claim=query_claim,
+            run_context=run_context,
         )
     finally:
-        query_guards.end(query_claim)
+        query_guards.end_after_cleanup(
+            query_claim, tasks=run_context.lifecycle_cleanup_tasks, waiters=cleanup_waiters,
+        )
 
 
 async def run_owned_rest_chat(
@@ -136,6 +142,7 @@ async def run_owned_rest_chat(
     conversation_id: str = "",
     run_id: str = "",
     query_claim: ConversationQueryClaim,
+    run_context: RunContext,
     conversation_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if conversation_id:
@@ -223,6 +230,12 @@ async def run_owned_rest_chat(
     )
     agent_runtime = default_runtime()
     session_id = f"scheduled:{run_id}" if run_id else "rest_api"
+    run_context.execution_journal = agent_runtime.execution_journal(journal_owner)
+    run_context.mcp_manager = mcp_manager
+    run_context.agent_runtime = agent_runtime
+    run_context.cost_session_id = session_id
+    run_context.requires_explicit_workspace = bool(workspace_root)
+    run_context.connected_mcp_servers = tuple(connected_mcp_servers)
     runtime = AgentLoopSessionContext(
         permission_context=PermissionContext(
             mode=normalized_permission_mode,
@@ -236,14 +249,7 @@ async def run_owned_rest_chat(
             "conversation_id": conversation_id,
             "run_id": run_id,
         },
-        run_context=RunContext(
-            execution_journal=agent_runtime.execution_journal(journal_owner),
-            mcp_manager=mcp_manager,
-            agent_runtime=agent_runtime,
-            cost_session_id=session_id,
-            requires_explicit_workspace=bool(workspace_root),
-            connected_mcp_servers=tuple(connected_mcp_servers),
-        ),
+        run_context=run_context,
     )
     state.conversation_id = conversation_id
     context_builder = None
@@ -256,9 +262,7 @@ async def run_owned_rest_chat(
         )
         context_builder.load_snapshot(conversation_snapshot)
     engine = query_engine or QueryEngine()
-    stream = engine.submit(QuerySubmission(
-        user_message=message,
-        session=AgentSession(
+    session = AgentSession(
             llm=llm,
             tool_registry=tool_registry,
             artifact_store=artifact_store,
@@ -266,27 +270,32 @@ async def run_owned_rest_chat(
             agent_settings=agent_settings,
             token_budget=config.token_budget,
             context_builder=context_builder,
-        ),
+            lifecycle_cleanup_tasks=run_context.lifecycle_cleanup_tasks,
+    )
+    stream = engine.submit(QuerySubmission(
+        user_message=message,
+        session=session,
         state=state,
         runtime=runtime,
     ))
-    async for event in _owned_query_events(stream, query_claim):
-        if event.type == "item.completed":
-            item = event.data.get("item") if isinstance(event.data.get("item"), dict) else {}
-            if item.get("type") == "agent_message":
-                reply_parts[:] = [str(item.get("text") or "")]
-        elif event.type == "error":
-            stopped_reason = event.data.get("error_type", "api")
-            message_text = str(event.data.get("message") or "").strip()
-            if message_text:
-                error_messages.append(message_text)
-        elif event.type == "done":
-            status = str(event.data.get("status") or "completed")
-            terminal_status = status if status in {"completed", "partial", "cancelled", "failed"} else "failed"
-            if status == "completed":
-                stopped_reason = "completed"
-            elif stopped_reason == "completed":
-                stopped_reason = str(event.data.get("reason") or status)
+    async with aclosing(session):
+        async for event in _owned_query_events(stream, query_claim):
+            if event.type == "item.completed":
+                item = event.data.get("item") if isinstance(event.data.get("item"), dict) else {}
+                if item.get("type") == "agent_message":
+                    reply_parts[:] = [str(item.get("text") or "")]
+            elif event.type == "error":
+                stopped_reason = event.data.get("error_type", "api")
+                message_text = str(event.data.get("message") or "").strip()
+                if message_text:
+                    error_messages.append(message_text)
+            elif event.type == "done":
+                status = str(event.data.get("status") or "completed")
+                terminal_status = status if status in {"completed", "partial", "cancelled", "failed"} else "failed"
+                if status == "completed":
+                    stopped_reason = "completed"
+                elif stopped_reason == "completed":
+                    stopped_reason = str(event.data.get("reason") or status)
 
     if state.stopped_reason:
         stopped_reason = state.stopped_reason
@@ -309,6 +318,7 @@ async def run_owned_rest_chat(
         "status": terminal_status,
         "errors": error_messages,
         "iterations": state.iterations,
+        **run_context.lifecycle_cleanup_evidence(),
         "tool_calls": [
             ToolCallRecord.from_internal(tool_call).model_dump()
             for tool_call in state.tool_calls

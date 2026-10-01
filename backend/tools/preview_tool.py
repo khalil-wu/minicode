@@ -143,8 +143,8 @@ class PreviewServerTool(BaseTool):
         never start or inspect a preview in whichever workspace happened to
         construct the shared tool registry.
         """
-        if context is not None and getattr(context, "workspace_root", None):
-            return str(context.workspace_root)
+        if context is not None:
+            return str(context.workspace_root) if context.workspace_root else None
         return self._workspace_root
 
     async def _start(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:

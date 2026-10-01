@@ -209,8 +209,9 @@ export interface CollaborationCellEntry {
 export interface CollaborationCellState {
   kind: "collaboration";
   id: string;
-  action: "sent_message" | "closed";
-  status: "running" | "success" | "failed";
+  action: "sent_message" | "closed" | "delegated";
+  status: "running" | "success" | "failed" | "partial" | "cancelled";
+  background?: boolean;
   entries: CollaborationCellEntry[];
   collapsed: boolean;
   createdAt: number;

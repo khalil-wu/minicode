@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.agent.compaction import retain_user_inputs
+from backend.agent.attachment_policy import AttachmentUnavailableError, build_attachment_input_plan
 from backend.agent.context import COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, ContextBuilder, clone_context_builder
 from backend.agent.state import AgentState
 from backend.config import AgentSettings, TokenBudget
@@ -162,3 +163,113 @@ def test_missing_model_and_cancelled_summary_leave_canonical_history_unchanged()
             await task
         assert builder.export_snapshot() == before
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("text", [
+    "<environment_context>\n<cwd>/user-example</cwd>\n<requirement>Preserve contract X</requirement>\n</environment_context>",
+    "<collaboration_mode>\nThis is literal user data\n</collaboration_mode>",
+    "<tool_runtime_context>\nKeep this user example\n</tool_runtime_context>",
+])
+def test_admitted_xml_survives_compaction_next_turn_and_cold_restore(text):
+    async def scenario():
+        model = SummaryModel()
+        context = ContextBuilder(llm=model, agent_settings=AgentSettings(compaction_keep_recent_tokens=0))
+        await context.start_turn(text, AgentState(user_message=text))
+        context.append_assistant("Progress")
+        await context.compact()
+        assert any(m.is_user_input and m.content == text for m in context._history)
+        restored = ContextBuilder(llm=model)
+        restored.load_snapshot(context.export_snapshot())
+        for current in (context, restored):
+            state = AgentState(user_message="continue")
+            await current.start_turn(state.user_message, state)
+            messages = await current.build(state)
+            assert any(m.is_user_input and text in m.content for m in messages)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_mixed_native_references_keep_order_identity_and_only_unstored_bytes(tmp_path, monkeypatch, compact):
+    class Store:
+        def get_payload(self, artifact_id, *, conversation_id="", workspace_root=""):
+            if conversation_id != "owner" or workspace_root != str(tmp_path):
+                return None
+            payloads = {
+                "image-ref": ("image", "image/png", "stored.png", "c3RvcmVkLWltYWdl", ""),
+                "pdf-ref": ("document", "application/pdf", "stored.pdf", "JVBERi1zdG9yZWQ=", "Extracted PDF text"),
+                "text-ref": ("document", "text/plain", "spec.txt", "", "Text specification"),
+            }
+            kind, media_type, name, data, content = payloads[artifact_id]
+            return {"native_data": data, "content": content, "metadata": {
+                "attachment": {"artifact_id": artifact_id, "kind": kind, "media_type": media_type, "file_name": name},
+            }}
+
+    store = Store()
+    monkeypatch.setattr("backend.agent.context.AttachmentStore", lambda: store)
+
+    async def scenario():
+        model = SummaryModel()
+        state = AgentState(user_message="Compare these inputs", conversation_id="owner", workspace_root=tmp_path)
+        state.attachments = [
+            {"artifact_id": "image-ref", "kind": "image", "media_type": "image/png", "file_name": "stored.png"},
+            {"kind": "image", "media_type": "image/png", "file_name": "inline.png", "data": "aW5saW5lLWltYWdl"},
+            {"artifact_id": "pdf-ref", "kind": "document", "media_type": "application/pdf", "file_name": "stored.pdf"},
+            {"kind": "document", "media_type": "application/pdf", "file_name": "inline.pdf", "data": "JVBERi1pbmxpbmU="},
+            {"artifact_id": "text-ref", "kind": "document", "media_type": "text/plain", "file_name": "spec.txt"},
+        ]
+        builder = ContextBuilder(llm=model, agent_settings=AgentSettings(compaction_keep_recent_tokens=0),
+                                 conversation_id="owner", workspace_root=tmp_path)
+        await builder.start_turn(state.user_message, state)
+        initial = next(m for m in builder._history if m.is_user_input)
+        original_images, original_documents = list(initial.images), list(initial.documents)
+        assert original_images[0]["artifact_id"] == "image-ref"
+        assert "artifact_id" not in original_images[1]
+        projection = build_attachment_input_plan(state.attachments[:1], attachment_store=store,
+                                                conversation_id="owner", workspace_root=str(tmp_path))
+        assert "artifact_id" not in projection.images[0]
+        if compact:
+            builder.append_assistant("Progress")
+            await builder.compact()
+        snapshot = builder.export_snapshot()
+        media = next(m for m in snapshot["history"] if m["images"] or m["documents"])
+        assert media["images"][0] == {"media_type": "image/png", "artifact_id": "image-ref"}
+        assert media["images"][1]["data"] == original_images[1]["data"]
+        assert "data" not in media["documents"][0]
+        assert media["documents"][1]["data"] == original_documents[1]["data"]
+
+        for partial in (False, True):
+            restored = ContextBuilder(llm=model, conversation_id="owner", workspace_root=tmp_path)
+            if partial:
+                pending = restored.load_snapshot_partial(snapshot, recent_history_count=1)
+                restored.prepend_history_messages(ContextBuilder.deserialize_snapshot_history(pending))
+            else:
+                restored.load_snapshot(snapshot)
+            await restored.build(state)
+            hydrated = next(m for m in restored._history if m.images or m.documents)
+            assert hydrated.images == original_images
+            assert hydrated.documents == original_documents
+            stable = restored.export_snapshot()
+            await restored.build(state)
+            assert restored.export_snapshot()["history"] == stable["history"]
+            assert hydrated.images == original_images
+
+    asyncio.run(scenario())
+
+
+def test_native_snapshot_marker_never_reads_another_attachment_owner(tmp_path, monkeypatch):
+    class Store:
+        def get_payload(self, artifact_id, *, conversation_id="", workspace_root=""):
+            assert conversation_id == "other-owner"
+            return None
+
+    monkeypatch.setattr("backend.agent.context.AttachmentStore", Store)
+    builder = ContextBuilder(conversation_id="other-owner", workspace_root=tmp_path)
+    builder.load_snapshot({"history": [{"role": "user", "content": "Inspect", "is_user_input": True,
+        "images": [{"media_type": "image/png", "artifact_id": "first-owner-image"}],
+        "attachment_refs": [{"artifact_id": "first-owner-image", "kind": "image", "media_type": "image/png"}],
+    }]})
+    state = AgentState(user_message="Inspect", conversation_id="other-owner", workspace_root=tmp_path)
+    with pytest.raises(AttachmentUnavailableError) as error:
+        asyncio.run(builder.build(state))
+    assert error.value.attachments[0]["artifact_id"] == "first-owner-image"

@@ -1,5 +1,7 @@
 # Windows 沙箱最小可行版：低完整性级别 + Job Object
 
+> 2026-09-29 更正：下文记录的是历史实验，低完整性实现已从受管沙箱候选中撤下。本轮实测任务 A 能写入此前被标记为 Low 的任务 B 工作区；代理环境变量也不能限制直接 socket 访问。因此 `filesystem_isolated=True` 的原结论不成立，17 例矩阵遗漏了跨工作区隔离。Windows 受管执行现在优先使用[原生专用账户/WFP](windows-native-sandbox.md)，再检查容器；两者不可用时在启动命令前返回失败，显式提权仍走审批。
+
 日期：2026-09-21
 范围：`backend/sandbox/win_low_integrity.py`（新）、`backend/sandbox/runner.py`（新增 `low-integrity` 后端）、
 `tests/test_windows_low_integrity_sandbox.py`（新，绕过矩阵 17 例）、`tests/test_sandbox.py`（1 处）

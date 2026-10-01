@@ -56,6 +56,7 @@ async def refresh_request_auth(tool_context, context_builder, budget_runtime) ->
     refreshed = await await_preflight(
         owner.refresh_model_auth(snapshot, True, owner.model_owner_task),
         deadline=budget_runtime.active_phase_deadline(), cancel_event=tool_context.cancel_event,
+        run_context=owner, llm=snapshot.llm,
     )
     if refreshed is snapshot:
         return False

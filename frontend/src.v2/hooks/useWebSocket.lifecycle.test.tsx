@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.hoisted(() => {
@@ -20,11 +20,13 @@ vi.hoisted(() => {
   });
 });
 
-vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
+vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn(), dismissToast: vi.fn() }));
 
 import { useAppStore } from "../stores";
 import { pushToast } from "../overlays/ToastContainer";
 import type { ClientCommand } from "../protocol/events";
+import { sendPromptResponseCommand } from "../protocol/ws-outbox";
+import { InlineAgentPrompt } from "../chat/InlineAgentPrompt";
 import {
   getWebSocket,
   resetPendingClientCommandAcksForTests,
@@ -433,6 +435,95 @@ describe("useWebSocketConnection socket ownership", () => {
     expect(useAppStore.getState().connectionError).toContain("服务拒绝");
     act(() => vi.advanceTimersByTime(600_001));
     expect(MockWebSocket.instances).toHaveLength(1);
+    expect(getWebSocket()?.send({ type: "user_message", content: "not deliverable" })).toBe(false);
+    expect(getWebSocket()?.send({ type: "control_cancel_request", request_id: "unresolved" })).toBe(false);
+    useAppStore.getState().requestConversationSwitch("unreachable");
+    expect(useAppStore.getState().pendingConversationSwitchId).toBeNull();
+  });
+
+  it("does not treat a positive admission ACK as control completion", async () => {
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.emit("open"));
+    const result = sendPromptResponseCommand({ type: "control_response", request_id: "approval-awaiting",
+      client_command_id: "control-awaiting", conversation_id: "conv-inline", response: { subtype: "success", response: { action: "approve" } } });
+    const observed = vi.fn();
+    void result.then(observed);
+    act(() => socket.emitMessage({ type: "client.command.ack", client_command_id: "control-awaiting", command_type: "control_response", accepted: true }));
+    await flushQueuedCommands();
+    expect(observed).not.toHaveBeenCalled();
+    act(() => socket.emitMessage({ type: "command.result", client_command_id: "control-awaiting", command: "control_response", level: "success", message: "" }));
+    await expect(result).resolves.toMatchObject({ command: "control_response", level: "success" });
+  });
+
+  it("keeps the actual approval card retryable after a negative ACK, clearing only on semantic acceptance", async () => {
+    const ApprovalHarness = () => { useWebSocketConnection(); return <InlineAgentPrompt />; };
+    render(<ApprovalHarness />);
+    act(() => vi.advanceTimersByTime(0));
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.emit("open"));
+    act(() => {
+      useAppStore.setState({ conversationId: "conv-inline", pendingApproval: null, approvalQueue: [],
+        pendingDiffReview: null, diffReviewQueue: [], pendingAskUser: null, askUserQueue: [] });
+      useAppStore.getState().setApproval({ requestId: "real-unconfirmed", conversationId: "conv-inline", toolName: "write_file", args: {} });
+    });
+    fireEvent.click(screen.getByRole("button", { name: "允许使用工具" }));
+    const first = sentCommands(socket).find((command) => command.type === "control_response")!;
+    act(() => socket.emitMessage({ type: "client.command.ack", client_command_id: first.client_command_id,
+      command_type: "control_response", accepted: false, reason: "command.persistence" }));
+    await flushQueuedCommands();
+    expect(useAppStore.getState().pendingApproval).toMatchObject({ requestId: "real-unconfirmed", status: "error", error: "command.persistence" });
+    expect((screen.getByRole("button", { name: "允许使用工具" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(sentCommandCount(socket, "control_response")).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "允许使用工具" }));
+    const retry = sentCommands(socket).filter((command) => command.type === "control_response").at(-1)!;
+    expect(retry.client_command_id).not.toBe(first.client_command_id);
+    act(() => socket.emitMessage({ type: "client.command.ack", client_command_id: retry.client_command_id,
+      command_type: "control_response", accepted: true }));
+    await flushQueuedCommands();
+    expect(useAppStore.getState().pendingApproval?.requestId).toBe("real-unconfirmed");
+    act(() => socket.emitMessage({ type: "command.result", command: "control_response", level: "success", message: "",
+      client_command_id: retry.client_command_id, data: { client_command_id: retry.client_command_id } }));
+    await flushQueuedCommands();
+    expect(useAppStore.getState().pendingApproval).toBeNull();
+  });
+
+  it.each([false, true])("withdraws an unconfirmed control decision on disconnect (ACK received: %s)", async (admitted) => {
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.emit("open"));
+    const result = sendPromptResponseCommand({ type: "control_cancel_request", request_id: "approval-unconfirmed", client_command_id: "withdraw-control" });
+    const failure = expect(result).rejects.toThrow("尚未确认");
+    if (admitted) act(() => socket.emitMessage({ type: "client.command.ack", client_command_id: "withdraw-control", command_type: "control_cancel_request", accepted: true }));
+    act(() => socket.emit("close", 1006));
+    await failure;
+    act(() => vi.advanceTimersByTime(2_000));
+    const replacement = MockWebSocket.instances[1];
+    act(() => replacement.emit("open"));
+    act(() => replacement.emitMessage({ type: "session.restored", active_conversation_id: null, conversation_switched_follows: false, session: { active_conversation_id: null } }));
+    await flushQueuedCommands();
+    expect(sentCommands(replacement).filter((command) => command.client_command_id === "withdraw-control")).toEqual([]);
+  });
+
+  it("does not replay a control decision after its result waiter already timed out", async () => {
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.emit("open"));
+    const result = sendPromptResponseCommand({ type: "control_cancel_request", request_id: "timed-out", client_command_id: "control-timed-out" });
+    const expired = expect(result).rejects.toThrow("操作超时");
+    act(() => vi.advanceTimersByTime(60_000));
+    await expired;
+    act(() => socket.emit("close", 1006));
+    act(() => vi.advanceTimersByTime(2_000));
+    const replacement = MockWebSocket.instances[1];
+    act(() => replacement.emit("open"));
+    act(() => replacement.emitMessage({ type: "session.restored", active_conversation_id: null,
+      conversation_switched_follows: false, session: { active_conversation_id: null } }));
+    await flushQueuedCommands();
+    expect(sentCommands(replacement).filter((command) => command.client_command_id === "control-timed-out")).toEqual([]);
   });
 
   it("refreshes the command catalog after session.synced applies the canonical owner", async () => {
@@ -873,4 +964,24 @@ describe("useWebSocketConnection socket ownership", () => {
       command.type === "conversation.switch"
     ))).toEqual([]);
   });
+  it("allows an explicit retry after exhaustion without replacing the session", () => {
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const sessionId = getWebSocket()?.sessionId;
+    let socket = MockWebSocket.instances[0];
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      act(() => socket.emit("close", 1006));
+      act(() => vi.advanceTimersByTime(40_000));
+      socket = MockWebSocket.instances[attempt + 1];
+    }
+    act(() => socket.emit("close", 1006));
+    expect(useAppStore.getState().connectionPhase).toBe("failed");
+    const count = MockWebSocket.instances.length;
+    act(() => getWebSocket()?.reconnect());
+    expect(MockWebSocket.instances).toHaveLength(count + 1);
+    expect(getWebSocket()?.sessionId).toBe(sessionId);
+    expect(useAppStore.getState().reconnectAttempt).toBe(0);
+    expect(useAppStore.getState().connectionPhase).toBe("connecting");
+  });
+
 });

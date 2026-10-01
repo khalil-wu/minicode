@@ -487,6 +487,34 @@ def _subagent_event_from_task_tool(
     return "subagent.done", {"subagent_id": call_id, "status": status}
 
 
+def _resolve_subagent_metrics(
+    public_events: list[tuple[str, dict[str, object]]],
+    observer_events: list[tuple[str, dict[str, object]]],
+    live_records: dict[str, object] | None,
+    task_tool_events: list[tuple[str, dict[str, object]]],
+) -> tuple[dict[str, object] | None, str]:
+    """Prefer child identities over task-tool call ids when measuring parallelism."""
+
+    metrics = _subagent_metrics_from_runtime_events(public_events)
+    source = "public_events"
+    if metrics is None:
+        metrics = _subagent_metrics_from_runtime_events(observer_events)
+        source = "runtime_events"
+    if metrics is None:
+        metrics = live_records
+        source = "runtime_records"
+    elif live_records is not None:
+        metrics["started"] = set(metrics["started"]) | set(live_records["started"])
+        metrics["completed"] = set(metrics["completed"]) | set(live_records["completed"])
+        metrics["peak_parallel"] = max(int(metrics["peak_parallel"]), int(live_records["peak_parallel"]))
+        if not metrics["statuses"]:
+            metrics["statuses"] = live_records["statuses"]
+    if metrics is None:
+        metrics = _subagent_metrics_from_runtime_events(task_tool_events)
+        source = "task_tool_proxy" if metrics is not None else "none"
+    return metrics, source
+
+
 async def _run(prompt: str) -> int:
     workspace = Path(_required("MINICODE_EVAL_WORKSPACE")).resolve()
     initial_test_snapshot = _test_file_snapshot(workspace)
@@ -660,6 +688,7 @@ async def _run(prompt: str) -> int:
     active_subagents: set[str] = set()
     peak_parallel_subagents = 0
     subagent_statuses: Counter[str] = Counter()
+    public_subagent_events: list[tuple[str, dict[str, object]]] = []
     max_iteration = 0
     last_loop_metrics: dict[str, object] = {}
     usage_totals = {
@@ -708,6 +737,7 @@ async def _run(prompt: str) -> int:
                     if projected is not None:
                         task_tool_subagent_events.append(projected)
                 elif event.type == "subagent.start":
+                    public_subagent_events.append((event.type, dict(event_data)))
                     subagent_id = str(event_data.get("subagent_id") or "").strip()
                     if subagent_id:
                         subagents_started.add(subagent_id)
@@ -717,6 +747,7 @@ async def _run(prompt: str) -> int:
                             len(active_subagents),
                         )
                 elif event.type == "subagent.done":
+                    public_subagent_events.append((event.type, dict(event_data)))
                     subagent_id = str(event_data.get("subagent_id") or "").strip()
                     status = str(event_data.get("status") or "unknown").strip() or "unknown"
                     subagent_statuses[status] += 1
@@ -789,27 +820,12 @@ async def _run(prompt: str) -> int:
                         shutil.copyfile(command["output_path"], destination / f"{command['command_id']}.log")
                 (destination / "commands.json").write_text(json.dumps(commands, ensure_ascii=False, indent=2), encoding="utf-8")
     turn_elapsed_ms = round((time.monotonic() - submitted_at) * 1000)
-    runtime_metrics = _subagent_metrics_from_runtime_events(runtime_subagent_events)
-    if runtime_metrics is None:
-        runtime_metrics = _subagent_metrics_from_runtime_events(
-            task_tool_subagent_events
-        )
-    live_runtime_metrics = _runtime_subagent_metrics(runtime)
-    if runtime_metrics is None:
-        runtime_metrics = live_runtime_metrics
-    elif live_runtime_metrics is not None:
-        runtime_metrics["started"] = set(runtime_metrics["started"]) | set(
-            live_runtime_metrics["started"]
-        )
-        runtime_metrics["completed"] = set(runtime_metrics["completed"]) | set(
-            live_runtime_metrics["completed"]
-        )
-        runtime_metrics["peak_parallel"] = max(
-            int(runtime_metrics["peak_parallel"]),
-            int(live_runtime_metrics["peak_parallel"]),
-        )
-        if not runtime_metrics["statuses"]:
-            runtime_metrics["statuses"] = live_runtime_metrics["statuses"]
+    runtime_metrics, subagent_metrics_source = _resolve_subagent_metrics(
+        public_subagent_events,
+        runtime_subagent_events,
+        _runtime_subagent_metrics(runtime),
+        task_tool_subagent_events,
+    )
     if runtime_metrics is not None:
         subagents_started = set(runtime_metrics["started"])
         subagents_completed = set(runtime_metrics["completed"])
@@ -920,6 +936,7 @@ async def _run(prompt: str) -> int:
                     "requested_sandbox_mode": permission.sandbox_mode or "workspace-write",
                     "recovery_count": len(recovery_events),
                     "usage": usage_totals,
+                    "subagent_metrics_source": subagent_metrics_source,
                     "subagents_started": sorted(subagents_started),
                     "subagents_completed": sorted(subagents_completed),
                     "peak_parallel_subagents": peak_parallel_subagents,

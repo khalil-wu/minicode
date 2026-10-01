@@ -8,6 +8,7 @@ mailbox delivery, context rendering, and the model-phase timeline events.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import aclosing
 from collections.abc import AsyncIterator
@@ -96,17 +97,23 @@ class TurnIterationAdmission:
         pending_turn_context: list[str],
     ) -> AsyncIterator[AgentEvent | TurnTerminalProjection | IterationAdmissionResult]:
         """Keep every admission await inside the existing turn lifetime."""
-        async with aclosing(self._admit(
+        updates = self._admit(
             previous_tool_schema_state=previous_tool_schema_state,
             initial_turn_pending=initial_turn_pending,
             pending_turn_context=pending_turn_context,
-        )) as updates:
+        )
+        task = None
+        owner = self.tool_context.run_context
+        try:
             while True:
                 try:
+                    task = asyncio.ensure_future(anext(updates))
                     update = await await_preflight(
-                        anext(updates),
+                        task,
                         deadline=self.budget_runtime.active_phase_deadline(),
                         cancel_event=self.tool_context.cancel_event,
+                        run_context=owner,
+                        llm=self.llm,
                     )
                 except StopAsyncIteration:
                     return
@@ -123,6 +130,23 @@ class TurnIterationAdmission:
                     )
                     return
                 yield update
+        finally:
+            if task is not None and not task.done():
+                async def close_after_admission() -> None:
+                    while not task.done():
+                        try:
+                            await asyncio.wait({task})
+                        except asyncio.CancelledError:
+                            # Python cancellation cannot revoke anext's generator ownership.
+                            continue
+                    await updates.aclose()
+
+                close_task = asyncio.create_task(close_after_admission())
+                owner.retain_lifecycle_task(
+                    close_task, label="agent admission generator close", llm=self.llm,
+                )
+            else:
+                await updates.aclose()
 
     async def _admit(
         self,

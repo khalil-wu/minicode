@@ -231,7 +231,7 @@ export interface RunCheckpointResumeEvent {
   session_id?: string;
   conversation_id: string;
   workspace_root: string;
-  run_id?: string;
+  checkpoint_run_id?: string;
   iteration?: number;
   stopped_reason?: string | null;
   message?: string;

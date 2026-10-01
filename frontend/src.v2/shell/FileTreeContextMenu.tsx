@@ -12,6 +12,8 @@ import {
 import type { WorkspaceTreeNode } from "../protocol/workspace";
 import { useAppStore } from "../stores";
 import { isDesktop, desktop, revealPath } from "../desktop/runtime";
+import { workspaceRootsEqual } from "../lib/workspace-path";
+import { pushToast } from "../overlays/ToastContainer";
 import { openWorkspaceFilePreview } from "../chat/openAttachmentPreview";
 import {
   createWorkspaceDirectory,
@@ -45,6 +47,13 @@ export const FileContextMenu = ({
   onRefresh: () => void;
   onClose: () => void;
 }) => {
+  // Dialogs can outlive the menu. Check the captured scope once at the UI action
+  // boundary, before dispatching a mutation; workspace helpers keep that root.
+  const continueMenuAction = () => {
+    if (workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)) return true;
+    pushToast("工作区已切换，原文件操作已取消；请在当前工作区重新选择。", "warning");
+    return false;
+  };
   const copyPath = () => {
     navigator.clipboard.writeText(menu.path);
   };
@@ -67,6 +76,7 @@ export const FileContextMenu = ({
     const { showPrompt, showAlert } = await import("../overlays/DialogService");
     const name = await showPrompt({ title: "新建文件", message: "文件名：", placeholder: "example.ts" });
     if (!name) return;
+    if (!continueMenuAction()) return;
     const base = menu.path === "." ? "" : menu.path.replace(/[\\/]+$/, "");
     const path = base ? `${base}/${name}` : name;
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
@@ -82,6 +92,7 @@ export const FileContextMenu = ({
     const { showPrompt, showAlert } = await import("../overlays/DialogService");
     const name = await showPrompt({ title: "新建文件夹", message: "文件夹名：", placeholder: "components" });
     if (!name) return;
+    if (!continueMenuAction()) return;
     const base = menu.path === "." ? "" : menu.path.replace(/[\\/]+$/, "");
     const path = base ? `${base}/${name}` : name;
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
@@ -102,9 +113,11 @@ export const FileContextMenu = ({
       danger: true,
     });
     if (!ok) return;
+    if (!continueMenuAction()) return;
     try {
       if (isDesktop()) {
-        let result = await desktop()?.fs.deletePath(menu.path, menu.isDir, false);
+        const targetPath = joinWorkspacePath(workingDirectory, menu.path);
+        let result = await desktop()?.fs.deletePath(targetPath, menu.isDir, false);
         if (result && "needsConfirmation" in result && result.needsConfirmation) {
           const confirmed = await showConfirm({
             title: "确认删除大型目录",
@@ -113,7 +126,8 @@ export const FileContextMenu = ({
             danger: true,
           });
           if (!confirmed) return;
-          result = await desktop()?.fs.deletePath(menu.path, menu.isDir, true);
+          if (!continueMenuAction()) return;
+          result = await desktop()?.fs.deletePath(targetPath, menu.isDir, true);
         }
         if (!result || !("deleted" in result) || !result.deleted) throw new Error(`无法删除：${menu.path}`);
       } else {
@@ -133,6 +147,7 @@ export const FileContextMenu = ({
       defaultValue: menu.path.split(/[/\\]/).pop() ?? "",
     });
     if (!newName) return;
+    if (!continueMenuAction()) return;
     if (/[/\\]/.test(newName) || newName === ".." || newName.startsWith("../") || newName.startsWith("..\\")) {
       await showAlert({ title: "名称无效", message: "文件名不能包含路径分隔符或遍历模式。" });
         return;
