@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlparse
 
 
 MCP_CONFIG_TRANSPORTS = frozenset({"stdio", "sse", "http", "ws"})
@@ -35,3 +36,15 @@ def mcp_transport_from_mapping(
     if "type" in mapping:
         raise ValueError("MCP config field 'type' is not supported; use 'transport'")
     return normalize_mcp_transport(mapping.get("transport"))
+
+
+def normalize_mcp_remote_url(value: Any, transport: str) -> str:
+    """Validate the endpoint contract shared by config writes and runtime admission."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"MCP {transport} transport requires a URL")
+    url = value.strip()
+    scheme = urlparse(url).scheme.lower()
+    allowed_schemes = {"ws", "wss"} if transport == "ws" else {"http", "https"}
+    if scheme not in allowed_schemes:
+        raise ValueError(f"invalid {transport} URL scheme '{scheme or '(missing)'}'")
+    return url

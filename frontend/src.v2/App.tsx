@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { LoaderCircle } from "lucide-react";
 import { WorkbenchShell } from "./shell/WorkbenchShell";
 import { QuickOpen } from "./overlays/QuickOpen";
@@ -13,7 +13,6 @@ import { capabilityFeatureEnabled } from "./protocol/capabilities";
 
 const CommandPalette = lazy(() => import("./overlays/CommandPalette").then((m) => ({ default: m.CommandPalette })));
 const SettingsCenter = lazy(() => import("./overlays/SettingsCenter").then((m) => ({ default: m.SettingsCenter })));
-const AutomationsCenter = lazy(() => import("./overlays/AutomationsCenter").then((m) => ({ default: m.AutomationsCenter })));
 const KeyboardShortcutsHelp = lazy(() => import("./overlays/KeyboardShortcutsHelp").then((m) => ({ default: m.KeyboardShortcutsHelp })));
 const LiveArtifacts = lazy(() => import("./overlays/LiveArtifacts").then((m) => ({ default: m.LiveArtifacts })));
 const AgentEditor = lazy(() => import("./overlays/AgentEditor").then((m) => ({ default: m.AgentEditor })));
@@ -33,12 +32,19 @@ export const App = () => {
   const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);
   const quickOpenVisible = useAppStore((s) => s.quickOpenVisible);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
-  const automationsOpen = useAppStore((s) => s.automationsOpen);
   const shortcutsHelpOpen = useAppStore((s) => s.shortcutsHelpOpen);
   const liveArtifactsOpen = useAppStore((s) => s.liveArtifactsOpen);
   const agentEditorOpen = useAppStore((s) => s.agentEditorOpen);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
   const agentEditorEnabled = capabilityFeatureEnabled(runtimeCapabilities, "agent_editor", true);
+  const [settingsVisited, setSettingsVisited] = useState(settingsOpen);
+  const [agentEditorVisited, setAgentEditorVisited] = useState(agentEditorOpen && agentEditorEnabled);
+  useEffect(() => { if (settingsOpen) setSettingsVisited(true); }, [settingsOpen]);
+  useEffect(() => { if (agentEditorOpen && agentEditorEnabled) setAgentEditorVisited(true); }, [agentEditorOpen, agentEditorEnabled]);
+  const overlayRoute = [
+    commandPaletteOpen, settingsOpen, shortcutsHelpOpen,
+    liveArtifactsOpen, agentEditorOpen && agentEditorEnabled,
+  ].join(":");
 
   return (
     <>
@@ -47,16 +53,27 @@ export const App = () => {
           <WorkbenchShell />
         </div>
       </SafeBoundary>
-      <ChunkErrorBoundary>
+      <ChunkErrorBoundary key={overlayRoute}>
         <Suspense fallback={<RouteLoading />}>
           {commandPaletteOpen && <CommandPalette />}
-          {settingsOpen && <SettingsCenter />}
-          {automationsOpen && <AutomationsCenter />}
           {shortcutsHelpOpen && <KeyboardShortcutsHelp />}
           {liveArtifactsOpen && <LiveArtifacts />}
-          {agentEditorOpen && agentEditorEnabled && <AgentEditor />}
         </Suspense>
       </ChunkErrorBoundary>
+      <div hidden={!settingsOpen} style={{ display: settingsOpen ? "contents" : "none" }}>
+        <ChunkErrorBoundary resetKey={settingsOpen}>
+          <Suspense fallback={<RouteLoading />}>
+            {(settingsVisited || settingsOpen) && <SettingsCenter />}
+          </Suspense>
+        </ChunkErrorBoundary>
+      </div>
+      <div hidden={!agentEditorOpen || !agentEditorEnabled} style={{ display: agentEditorOpen && agentEditorEnabled ? "contents" : "none" }}>
+        <ChunkErrorBoundary resetKey={agentEditorOpen}>
+          <Suspense fallback={<RouteLoading />}>
+            {agentEditorEnabled && (agentEditorVisited || agentEditorOpen) && <AgentEditor />}
+          </Suspense>
+        </ChunkErrorBoundary>
+      </div>
       <QuickOpen />
       <ToastContainer placement={commandPaletteOpen || quickOpenVisible ? "bottom" : "top"} />
     </>

@@ -304,7 +304,7 @@ def cleanup_orphaned_tasks(session_id: str, base_dir: Path | None = None) -> lis
                 cleanup_completed = _terminate_owned_process(task)
                 if not cleanup_completed:
                     cleanup_reason = "owned_process_survived_reaper"
-            if task.container_ref:
+            if task.container_ref and owner_alive is not None and child_alive is not None:
                 from backend.sandbox.runner import cleanup_owned_container
 
                 container_removed = cleanup_owned_container(task.container_engine, task.container_ref, task.container_cidfile)

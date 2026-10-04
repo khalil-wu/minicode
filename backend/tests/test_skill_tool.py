@@ -47,6 +47,10 @@ class _Loader:
     def list_metas(self):
         return [skill.meta for skill in self.skills]
 
+    def get_invocation_meta(self, name: str):
+        matches = self.get_metas(name)
+        return matches[0] if len(matches) == 1 else None
+
 
 def test_model_tool_registry_has_no_private_skill_lifecycle_tools(tmp_path) -> None:
     registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))

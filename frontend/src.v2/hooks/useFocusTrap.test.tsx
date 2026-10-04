@@ -81,4 +81,21 @@ describe("useFocusTrap", () => {
     inner.unmount();
     expect(document.body.style.overflow).toBe("");
   });
+
+  it("restores the remaining dialog when a nested trigger was removed", () => {
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { callback(0); return 0; });
+    const Trap = ({ children }: { children: ReactNode }) => {
+      const ref = useFocusTrap(true);
+      return <div ref={ref} tabIndex={-1}>{children}</div>;
+    };
+    const outer = render(<Trap><button>Remaining control</button><button>Nested trigger</button></Trap>);
+    const trigger = within(outer.container).getByText("Nested trigger");
+    trigger.focus();
+    const inner = render(<Trap><button>Inner control</button></Trap>);
+    outer.rerender(<Trap><button>Remaining control</button></Trap>);
+    inner.unmount();
+    expect(document.activeElement).toBe(within(outer.container).getByText("Remaining control"));
+    expect(document.body.style.overflow).toBe("hidden");
+    outer.unmount();
+  });
 });

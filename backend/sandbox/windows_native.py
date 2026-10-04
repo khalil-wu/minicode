@@ -22,7 +22,7 @@ import sys
 import tempfile
 from typing import Any, Iterable, Mapping
 
-from backend.config import DATA_ROOT, PROJECT_ROOT
+from backend.config import DATA_ROOT, PROJECT_ROOT, STATE_ROOT
 from backend.runtime_env import sanitized_subprocess_env
 from backend.sandbox.policy import ResolvedSandboxPolicy
 
@@ -270,7 +270,6 @@ def _powershell_argv(command: str) -> list[str]:
         "if ($null -ne $minicodeNativeExit) { exit $minicodeNativeExit } "
         "elseif ($minicodeCommandSucceeded) { exit 0 } else { exit 1 }"
     )
-    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     # The dedicated account is guaranteed read access to Windows platform
     # files. A user-installed pwsh can live under an arbitrary ACL and fail at
     # CreateProcessAsUserW before policy execution starts.
@@ -281,7 +280,7 @@ def _powershell_argv(command: str) -> list[str]:
     return [
         executable, "-NoLogo", "-NoProfile", "-NonInteractive",
         "-ExecutionPolicy", "Bypass", "-OutputFormat", "Text",
-        "-EncodedCommand", encoded,
+        "-Command", script,
     ]
 
 
@@ -294,6 +293,7 @@ def prepare_command(
     workspace_roots: Iterable[Path],
     deny_read_paths: Iterable[Path],
     deny_write_paths: Iterable[Path],
+    argv: list[str] | None = None,
 ) -> tuple[list[str], PrivateDesktop, Path]:
     runtime, reason = discover_runtime()
     if runtime is None:
@@ -302,7 +302,7 @@ def prepare_command(
     with ExitStack() as preparation:
         desktop = PrivateDesktop.create(account)
         preparation.callback(desktop.close)
-        private_temp = DATA_ROOT / "sandbox-native-temp" / secrets.token_hex(12)
+        private_temp = STATE_ROOT / "sandbox-native-temp" / secrets.token_hex(12)
         private_temp.mkdir(parents=True)
         preparation.callback(private_temp.rmdir)
         write_roots = [
@@ -340,7 +340,7 @@ def prepare_command(
         if deny_write:
             args.extend(("--deny-write-paths-json", _json(deny_write)))
         args.append("--")
-        args.extend(_powershell_argv(command))
+        args.extend(argv if argv is not None else _powershell_argv(command))
         preparation.pop_all()
         return args, desktop, private_temp
 
@@ -352,7 +352,7 @@ def cleanup_private_temp(
     desktop: PrivateDesktop,
 ) -> bool:
     """Remove owner-only child files as the same dedicated sandbox account."""
-    temp_root = (DATA_ROOT / "sandbox-native-temp").resolve()
+    temp_root = (STATE_ROOT / "sandbox-native-temp").resolve()
     target = private_temp.resolve()
     if not target.is_relative_to(temp_root) or target == temp_root:
         raise ValueError(f"Native sandbox TEMP escaped its owned root: {target}")

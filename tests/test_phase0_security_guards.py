@@ -615,6 +615,10 @@ def test_vault_failure_propagates_before_runtime_environment_publication(monkeyp
             assert all(os.getenv(name) == "original" for name in names)
             if len(calls) == failure_at:
                 raise OSError("fixture vault persistence failure")
+        def set_many(self, changes, *, publish=None):
+            for name, (value, description, scope) in changes.items():
+                self.set(name, value, description=description, scope=scope)
+            return publish() if publish is not None else None
     monkeypatch.setattr("backend.vault.EnvVault", Vault)
     setter = providers._set_runtime_api_key if channel == "text" else providers._set_runtime_image_api_key
     with pytest.raises(OSError, match="persistence failure"):
@@ -634,6 +638,8 @@ def test_settings_save_does_not_report_success_after_vault_failure(monkeypatch, 
         def list_names(self):
             return []
         def set(self, *args, **kwargs):
+            raise OSError("fixture vault unavailable")
+        def set_many(self, changes, *, publish=None):
             raise OSError("fixture vault unavailable")
     monkeypatch.setattr("backend.vault.EnvVault", Vault)
     with pytest.raises(OSError, match="vault unavailable"):

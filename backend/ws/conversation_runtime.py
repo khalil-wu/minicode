@@ -328,15 +328,15 @@ class ConversationRuntime:
             raise
 
         async with self._projection_lock_for(conversation_id):
+            current = await asyncio.to_thread(
+                self._conversation_repo.get_conversation,
+                conversation_id,
+            )
             if (
                 generation != self._hydration_generation
                 or conversation_id != self.active_conversation_id
             ):
                 return
-            current = await asyncio.to_thread(
-                self._conversation_repo.get_conversation,
-                conversation_id,
-            )
             if current is None:
                 return
             current_revision = max(0, int(getattr(current, "revision", 0) or 0))

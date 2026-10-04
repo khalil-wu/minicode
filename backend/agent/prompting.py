@@ -208,7 +208,12 @@ class PromptParts:
             part for part in (self.project_guidelines, self.conditional_rules)
             if part.strip()
         )
-        return f"# Project instructions\n<INSTRUCTIONS>\n{instructions}\n</INSTRUCTIONS>" if instructions else ""
+        return (
+            "# Project instructions\n<INSTRUCTIONS>\n"
+            "The instruction content below has already been loaded by MiniCode for the listed sources and scopes. "
+            "Use it directly; reread its files only when the task requires inspecting, changing, or verifying them.\n\n"
+            f"{instructions}\n</INSTRUCTIONS>"
+        ) if instructions else ""
 
     @classmethod
     def from_sections(cls, sections: list[PromptSection]) -> "PromptParts":
@@ -398,6 +403,13 @@ def _build_tool_runtime_guidance_uncached(
             "Use write_file when available, preserving literal text and newlines."
         )
 
+    if "grep_files" in names:
+        tool_items.append(
+            "- Content search: use grep_files with fixed_strings=true for literal source snippets such as 'fetch(' or 'eval('. "
+            "Regex is for deliberate expressions: escape literal metacharacters, and use escaped alternatives for multiple terms. "
+            "A literal search treats '|' as text, not OR. If a regex is rejected, correct it before retrying; do not repeat the invalid input."
+        )
+
     if mcp_tools:
         tool_items.append(
             "- MCP tool availability is capability evidence, not account-identity evidence. "
@@ -574,6 +586,7 @@ async def build_git_status_context_async(
 ) -> str:
     """Compute the snapshot under the captured canonical Git execution owner."""
     from backend.async_cleanup import retain_cleanup_task
+    from backend.sandbox.runner import SandboxUnavailableError
     from backend.tools.git_support import _run_git
 
     if workspace_root is None:
@@ -608,17 +621,33 @@ async def build_git_status_context_async(
             return None
         return result.stdout.decode("utf-8", errors="replace").strip()
 
-    is_git = await git("rev-parse", "--is-inside-work-tree")
-    if is_git != "true":
-        return ""
+    try:
+        is_git = await git("rev-parse", "--is-inside-work-tree")
+        if is_git != "true":
+            return ""
 
-    branch, head_ref, user_name, status, log = await asyncio.gather(
-        git("branch", "--show-current"),
-        git("symbolic-ref", "refs/remotes/origin/HEAD"),
-        git("config", "user.name"),
-        git("status", "--short"),
-        git("log", "--oneline", "-n", "5"),
-    )
+        branch, head_ref, user_name, status, log = await asyncio.gather(
+            git("branch", "--show-current"),
+            git("symbolic-ref", "refs/remotes/origin/HEAD"),
+            git("config", "user.name"),
+            git("status", "--short"),
+            git("log", "--oneline", "-n", "5"),
+        )
+    except SandboxUnavailableError as exc:
+        # A conversation-start Git snapshot is optional context, not a tool
+        # request or the agent's task. Read-only agents can still use their
+        # admitted file tools without an unavailable command sandbox. Never
+        # retry Git on the host or represent the missing snapshot as clean.
+        import logging
+
+        logging.getLogger(__name__).warning("Git prompt snapshot unavailable under the captured sandbox: %s", exc)
+        return (
+            "The conversation-start Git status snapshot is unavailable because "
+            "the requested command sandbox is unavailable. This does not mean "
+            "the workspace is clean or that it is not a Git repository. "
+            "Continue with admitted file tools where possible; commands remain "
+            "subject to the current sandbox and approval policy."
+        )
     if status is None:
         # An unavailable/refused status is not evidence of a clean workspace.
         return ""
@@ -915,7 +944,13 @@ def _build_compact_stable_prompt(
 
 
 _AGENT_SYSTEM_PROMPT = """\
-You are an agent for MiniCode, a local coding application. Use the tools available when they are needed to satisfy a substantive user request. Complete requested tasks fully - do not gold-plate them, but do not leave them half-done. Follow the project instructions supplied in context; `.minicode/INSTRUCTIONS.md` is where MiniCode keeps them.
+You are an agent for MiniCode, a local coding application. Use the tools available when they are needed to satisfy a substantive user request. Complete requested tasks fully - do not gold-plate them, but do not leave them half-done. Follow the project instructions supplied in context.
+
+Project instructions:
+- MiniCode discovers existing instruction files and includes their contents, source paths, and directory scopes in the context. Treat supplied instruction content as already read. Reread a supplied file only when the task requires inspecting, changing, or verifying it.
+- Instruction files are optional. A workspace does not imply that `.minicode/INSTRUCTIONS.md` exists. Other instruction sources are identified by their actual paths in the supplied context. Do not blindly probe or create an instruction file because its conventional name is mentioned here.
+- Before working outside the supplied instruction scopes, discover any applicable nested instruction files through directory/file listing and read only paths that actually exist. More specific directory instructions take precedence within their scope.
+- If an optional instruction file is absent, continue with the available instructions and the user's task. Its absence alone is not a task blocker.
 
 IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.async_cleanup import to_thread_cancel_safe
+
 import asyncio
 import copy
 import inspect
@@ -16,6 +18,7 @@ import httpx
 from backend.atomic_io import file_mutation_locks
 from backend.agent.markdown_scopes import get_minicode_config_home_dir
 from backend.plugins.materializer import materialize_source
+from backend.skills.frontmatter import parse_skill_frontmatter
 
 USER_SKILLS_DIR = get_minicode_config_home_dir() / "skills"
 
@@ -92,28 +95,6 @@ def _title_from_name(name: str) -> str:
     return " ".join(part.capitalize() for part in re.split(r"[-_]+", name) if part) or name
 
 
-def _parse_skill_frontmatter(content: str, fallback_name: str) -> dict[str, str]:
-    metadata: dict[str, str] = {"name": fallback_name, "description": ""}
-    if not content.startswith("---"):
-        return metadata
-
-    parts = content.split("---", 2)
-    if len(parts) < 3:
-        return metadata
-
-    for raw_line in parts[1].splitlines():
-        if ":" not in raw_line:
-            continue
-        key, value = raw_line.split(":", 1)
-        clean_key = key.strip().lower()
-        clean_value = value.strip().strip('"').strip("'")
-        if clean_key in {"name", "title", "description"} and clean_value:
-            metadata[clean_key] = clean_value
-
-    metadata.setdefault("title", metadata["name"])
-    return metadata
-
-
 def _openai_directory_skill_entry(name: str) -> dict[str, Any]:
     return {
         "name": name,
@@ -151,7 +132,7 @@ async def _fetch_openai_curated_skills(
     async def load_skill(name: str) -> dict[str, Any]:
         async with semaphore:
             content = await _maybe_await(fetch_text(OPENAI_SKILL_RAW_URL.format(name=name)))
-            metadata = _parse_skill_frontmatter(content, name)
+            metadata = parse_skill_frontmatter(content, name)
             return {
                 "name": name,
                 "title": metadata.get("title") or metadata.get("name") or _title_from_name(name),
@@ -386,11 +367,11 @@ async def install_marketplace_skill(
     target_root = skills_dir or USER_SKILLS_DIR
     skill_dir = target_root / normalized_name
     skill_file = skill_dir / "SKILL.md"
-    metadata: dict[str, str] = {}
+    metadata: dict[str, Any] = {}
 
     def validate_bundle(root: Path) -> None:
-        metadata.update(_parse_skill_frontmatter(
-            (root / "SKILL.md").read_text(encoding="utf-8"), normalized_name,
+        metadata.update(parse_skill_frontmatter(
+            (root / "SKILL.md").read_text(encoding="utf-8-sig"), normalized_name,
         ))
 
     def install_bundle() -> None:
@@ -408,7 +389,7 @@ async def install_marketplace_skill(
                 timeout_seconds=90,
             )
 
-    await asyncio.to_thread(install_bundle)
+    await to_thread_cancel_safe(install_bundle)
 
     return {
         "installed": True,
@@ -435,26 +416,21 @@ def import_local_skill(source_path: str | Path, skills_dir: Path | None = None) 
     skill_file = source_dir / "SKILL.md"
     if not skill_file.is_file() or skill_file.is_symlink():
         raise ValueError("本地技能目录必须包含真实的 SKILL.md 文件。")
-    for candidate in source_dir.rglob("*"):
-        if candidate.is_symlink():
-            raise ValueError("本地技能不能包含符号链接。")
-    metadata = _parse_skill_frontmatter(skill_file.read_text(encoding="utf-8"), source_dir.name)
+    metadata = parse_skill_frontmatter(skill_file.read_text(encoding="utf-8-sig"), source_dir.name)
     normalized_name = _safe_skill_name(metadata.get("name") or source_dir.name)
     target_root = (skills_dir or USER_SKILLS_DIR).resolve()
     target_dir = target_root / normalized_name
     if target_root not in target_dir.parents:
         raise ValueError("技能路径不在 MiniCode 技能目录内。")
-    if target_dir.exists():
-        raise FileExistsError(f"Skill '{normalized_name}' is already installed.")
     with file_mutation_locks([target_dir / "SKILL.md"]):
-        if target_dir.exists():
+        if target_dir.exists() or target_dir.is_symlink():
             raise FileExistsError(f"Skill '{normalized_name}' is already installed.")
-        target_dir.mkdir(parents=True, exist_ok=False)
-        try:
-            shutil.copytree(source_dir, target_dir, dirs_exist_ok=True)
-        except Exception:
-            shutil.rmtree(target_dir, ignore_errors=True)
-            raise
+        materialize_source(
+            {"source": "directory", "path": str(source_dir)},
+            target_dir,
+            overwrite=False,
+            copy_local_directory=True,
+        )
     return {
         "installed": True,
         "skill": {

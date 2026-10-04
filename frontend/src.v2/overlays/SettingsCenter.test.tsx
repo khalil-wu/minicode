@@ -39,6 +39,7 @@ vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommand: vi.fn(),
   sendClientCommandAwaitResult: (command: { type: string }) => awaitCommandResultMock(command),
   commandResultSucceeded: (event: { level?: string }) => event.level !== "error" && event.level !== "failed",
+  sendConversationDeleteCommand: vi.fn(),
   LONG_COMMAND_RESULT_TIMEOUT_MS: 300_000,
 }));
 
@@ -427,9 +428,63 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     fireEvent.change(screen.getByRole("textbox", { name: "搜索设置" }), { target: { value: "下载" } });
 
+    expect(screen.getByRole("heading", { name: "常规", level: 2 })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /浏览器 \/ 下载/ }));
+
     expect(screen.getByRole("heading", { name: "浏览器", level: 2 })).toBeTruthy();
     expect(screen.getByRole("button", { name: "浏览器" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "模型" })).toBeNull();
+  });
+
+  it("ends shortcut recording when its page is hidden or settings is closed", () => {
+    render(<SettingsCenter />);
+    fireEvent.click(screen.getByRole("button", { name: "快捷键" }));
+    fireEvent.click(screen.getByRole("button", { name: "编辑 命令面板" }));
+    expect(document.querySelector('[data-shortcut-recording="true"]')).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "外观" }));
+    expect(document.querySelector('[data-shortcut-recording="true"]')).toBeNull();
+    fireEvent.keyDown(window, { key: "K", code: "KeyK", ctrlKey: true, shiftKey: true });
+    expect(useAppStore.getState().shortcutBindings.commandPalette).toBe("Mod+K");
+    fireEvent.click(screen.getByRole("button", { name: "快捷键" }));
+    fireEvent.click(screen.getByRole("button", { name: "编辑 命令面板" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回应用" }));
+    expect(document.querySelector('[data-shortcut-recording="true"]')).toBeNull();
+    fireEvent.keyDown(window, { key: "K", code: "KeyK", ctrlKey: true, shiftKey: true });
+    expect(useAppStore.getState().shortcutBindings.commandPalette).toBe("Mod+K");
+  });
+
+  it("keeps a scoped configuration draft across pages and returning to the app", async () => {
+    useAppStore.setState({ conversationId: "draft-owner", workingDirectory: "C:/draft-project", isConnected: true });
+    render(<SettingsCenter />);
+    fireEvent.click(screen.getByRole("button", { name: "MCP" }));
+    fireEvent.change(screen.getByLabelText("服务名称"), { target: { value: "未保存的服务" } });
+    fireEvent.change(screen.getByLabelText("启动命令"), { target: { value: "npx" } });
+    fireEvent.click(screen.getByRole("button", { name: "外观" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回应用" }));
+    expect(screen.queryByRole("main", { name: "设置" })).toBeNull();
+    act(() => useAppStore.setState({ settingsOpen: true, settingsTab: "connectors" }));
+    expect(screen.getByLabelText("服务名称")).toHaveProperty("value", "未保存的服务");
+    expect(screen.getByLabelText("启动命令")).toHaveProperty("value", "npx");
+  });
+
+  it("preserves a model draft if the reopen refresh fails", async () => {
+    useAppStore.setState({ settingsTab: "provider" });
+    render(<SettingsCenter />);
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 DeepSeek" }));
+    fireEvent.change(screen.getByLabelText("API 密钥"), { target: { value: "unsaved-credential" } });
+    fireEvent.click(screen.getByRole("button", { name: "返回应用" }));
+    fetchLLMSettingsMock.mockRejectedValueOnce(new Error("refresh offline"));
+    act(() => useAppStore.setState({ settingsOpen: true }));
+    expect(await screen.findByText("模型设置刷新失败，编辑草稿已保留")).toBeTruthy();
+    expect(screen.getByLabelText("API 密钥")).toHaveProperty("value", "unsaved-credential");
+  });
+
+  it("finds reduced motion by an animation synonym and focuses the real option", async () => {
+    render(<SettingsCenter />);
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索设置" }), { target: { value: "减少动画" } });
+    fireEvent.click(screen.getByRole("button", { name: /外观 \/ 减少动态效果/ }));
+    expect(screen.getByRole("heading", { name: "外观", level: 2 })).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("switch", { name: "减少动态效果" })));
   });
 
   it("presents model load failures as a recoverable settings state", async () => {
@@ -600,7 +655,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
   });
 
   it("keeps environment variable values when the backend rejects them", async () => {
-    awaitCommandResultMock.mockResolvedValueOnce({ type: "command.result", command: "env.set", level: "error", message: "invalid", data: {} });
+    awaitCommandResultMock.mockImplementation(async (command: { type: string }) => ({ type: "command.result", command: command.type, level: command.type === "env.set" ? "error" : "info", message: command.type === "env.set" ? "invalid" : "", data: {} }));
     useAppStore.setState({ envVars: [] });
     render(<SettingsCenter />);
 
@@ -1522,7 +1577,10 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(onChange).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "返回提供商列表" }));
     fireEvent.click(screen.getByRole("button", { name: "编辑 DeepSeek" }));
-    expect((screen.getByRole("spinbutton", { name: "deepseek-v4-flash 上下文窗口" }) as HTMLInputElement).value).toBe("128000");
+    expect((screen.getByRole("spinbutton", { name: "deepseek-v4-flash 上下文窗口" }) as HTMLInputElement).value).toBe("");
+    expect(payloadRef.current).toEqual(before);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it.each(["接口地址", "API 密钥"])("serializes model checks and clears their result when %s changes", async (field) => {
@@ -1829,11 +1887,11 @@ describe("SettingsCenter reasoning effort visibility", () => {
     fireEvent.click(screen.getByRole("button", { name: "使用 OpenAI" }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    expect(sendClientCommand).toHaveBeenCalledWith({
+    await waitFor(() => expect(awaitCommandResultMock).toHaveBeenCalledWith(expect.objectContaining({
       type: "llm.config.set",
       provider: "openai",
       source: "settings.provider.activate",
-    }, { silent: true });
+    })));
     expect(sendClientCommand).not.toHaveBeenCalledWith({
       type: "runtime.capabilities.inspect",
       source: "settings.provider.save",
@@ -1846,6 +1904,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
       settingsTab: "scheduler",
       scheduledTasks: [],
       conversationId: "conv-memory",
+      workingDirectory: "C:/A",
+      isConnected: true,
       conversations: [{ id: "conv-memory", title: "Memory", updatedAt: "2026-08-02T00:00:00.000Z" }],
     });
     render(<SettingsCenter />);
@@ -1854,11 +1914,11 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     await waitFor(() => expect(screen.getByText("暂无定时任务")).toBeTruthy());
     expect(fetchLLMSettingsMock).not.toHaveBeenCalled();
-    expect(sendClientCommand).toHaveBeenCalledWith({
+    expect(awaitCommandResultMock).toHaveBeenCalledWith({
       type: "scheduler.list",
       owner_conversation_id: "conv-memory",
-      workspace_root: undefined,
-    }, { silent: true });
+      workspace_root: "C:/A",
+    });
   });
 
   it("shows and saves feature flag overrides from the settings center", async () => {
@@ -2046,6 +2106,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /插件/ }));
+    fireEvent.click(screen.getByRole("button", { name: "管理来源与本地导入" }));
     await waitFor(() => expect(screen.getByLabelText("插件文件夹或安装包路径")).toBeTruthy());
 
     fireEvent.change(screen.getByLabelText("插件文件夹或安装包路径"), { target: { value: "C:\\plugins\\demo-plugin" } });
@@ -2091,6 +2152,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /插件/ }));
+    fireEvent.click(screen.getByRole("button", { name: "管理来源与本地导入" }));
     await waitFor(() => expect(screen.getByLabelText("插件文件夹或安装包路径")).toBeTruthy());
 
     fireEvent.change(screen.getByLabelText("插件文件夹或安装包路径"), { target: { value: "C:\\plugins\\zip-plugin.minicode-plugin.zip" } });
@@ -2158,6 +2220,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /插件/ }));
+    fireEvent.click(screen.getByRole("button", { name: "管理来源与本地导入" }));
     await waitFor(() => expect(screen.getByLabelText("插件文件夹或安装包路径")).toBeTruthy());
 
     fireEvent.change(screen.getByLabelText("插件文件夹或安装包路径"), { target: { value: "C:\\plugins\\demo-plugin" } });

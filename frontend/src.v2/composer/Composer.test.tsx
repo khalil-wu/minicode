@@ -145,6 +145,40 @@ describe("Composer goal bar", () => {
     expect(useAppStore.getState().draft).toBe("next draft");
   });
 
+  it("keeps raw display text and quoted metadata separate from references in the assembled input", async () => {
+    const quote = { id: "quoted-A", role: "assistant" as const, content: "exact quote" };
+    const mention = { kind: "file" as const, name: "App.tsx", path: "src/App.tsx" };
+    useAppStore.setState({ conversationId: "display-owner", workingDirectory: "C:/A", draft: "original @literal",
+      currentModel: "gpt-5", isConnected: true, isStreaming: false, attachments: [],
+      selectedMentions: [mention], selectedSkills: [], quotedMessage: quote, slashPanelOpen: false, mentionPanelOpen: false });
+    render(<Composer />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(mocks.sendChatMessage).toHaveBeenCalledWith(expect.objectContaining({
+      displayContent: "original @literal", quotedMessage: quote, contextRefs: [mention],
+      backendContent: expect.stringContaining("Quoted Assistant message:\nexact quote\n\noriginal @literal"),
+    })));
+  });
+
+  it.each(["quote", "annotation"])("preserves a newer %s with the same identity during context preparation", async (changed) => {
+    let finishContext!: (value: string) => void;
+    mocks.buildContextPayload.mockReturnValueOnce(new Promise((resolve) => { finishContext = resolve; }));
+    const quote = { id: "same-quote", role: "assistant" as const, content: "old quote" };
+    const mention = { kind: "browser_annotation" as const, name: "target", path: "https://example.test",
+      url: "https://example.test", note: "old note" };
+    useAppStore.setState({ conversationId: "display-owner", workingDirectory: "C:/A", draft: "unchanged draft",
+      currentModel: "gpt-5", isConnected: true, isStreaming: false, attachments: [],
+      selectedMentions: [mention], selectedSkills: [], quotedMessage: quote, slashPanelOpen: false, mentionPanelOpen: false });
+    render(<Composer />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    act(() => useAppStore.setState(changed === "quote"
+      ? { quotedMessage: { ...quote, content: "new quote" } }
+      : { selectedMentions: [{ ...mention, note: "new note" }] }));
+    await act(async () => finishContext(""));
+    expect(useAppStore.getState().draft).toBe("unchanged draft");
+    expect(changed === "quote" ? useAppStore.getState().quotedMessage?.content : useAppStore.getState().selectedMentions[0]?.kind === "browser_annotation"
+      ? useAppStore.getState().selectedMentions[0].note : "").toBe(changed === "quote" ? "new quote" : "new note");
+  });
+
   it("marks Code mode for the wide composer axis", () => {
     useAppStore.setState({
       appMode: "code",
@@ -708,7 +742,7 @@ describe("Composer goal bar", () => {
 
     const { container } = render(<Composer />);
 
-    expect(container.querySelector(".composer-container")?.textContent).toContain("允许使用 运行命令？");
+    expect(container.querySelector(".composer-container")?.textContent).toContain("允许使用 Run？");
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 

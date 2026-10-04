@@ -161,9 +161,6 @@ class TurnInputQueue:
             if self._activity_seq > cursor:
                 return True
             self._activity_waiters.add(waiter)
-            if self._activity_seq > cursor:
-                self._activity_waiters.discard(waiter)
-                return True
         try:
             await asyncio.wait_for(event.wait(), timeout=max(0.0, float(timeout)))
             with self._lock:

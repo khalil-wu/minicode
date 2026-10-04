@@ -7,8 +7,14 @@ vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn() }));
 vi.mock("../hooks/useWebSocket", () => ({
   getWebSocket: () => ({ sessionId: "session-preview-image" }),
 }));
+vi.hoisted(() => {
+  (globalThis as unknown as { __MINICODE_RUNTIME__: object }).__MINICODE_RUNTIME__ = { runtimeToken: "test-preview-runtime-token" };
+});
+vi.mock("./PdfAttachmentPreview", () => ({ PdfAttachmentPreview: ({ url, name, onRetry }: { url: string; name: string; onRetry?: () => void }) => <div data-testid="pdf-resource" data-url={url} aria-label={`PDF 预览 ${name}`}>
+  {onRetry && <button onClick={onRetry}>重试 PDF 预览</button>}
+</div> }));
 
-const downloadMocks = vi.hoisted(() => ({ original: vi.fn(), artifact: vi.fn(), toast: vi.fn() }));
+const downloadMocks = vi.hoisted(() => ({ original: vi.fn(), artifact: vi.fn(), toast: vi.fn(), clipboard: vi.fn() }));
 vi.mock("../protocol/api", async (importOriginal) => ({
   ...await importOriginal<typeof import("../protocol/api")>(),
   fetchAttachmentOriginal: downloadMocks.original,
@@ -36,6 +42,8 @@ const resetPreviewState = () => {
   downloadMocks.original.mockReset();
   downloadMocks.artifact.mockReset();
   downloadMocks.toast.mockReset();
+  downloadMocks.clipboard.mockReset().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: downloadMocks.clipboard } });
 };
 
 describe("PreviewPanel", () => {
@@ -55,7 +63,7 @@ describe("PreviewPanel", () => {
     expect(document.querySelector("audio")).not.toBeNull();
     fireEvent.error(screen.getByLabelText("voice.wav"));
     expect(screen.getByText("此音频无法播放，请下载后使用本地播放器打开。")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "下载音频" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "下载音频" })).toBeTruthy();
   });
   beforeEach(resetPreviewState);
   afterEach(() => {
@@ -88,7 +96,7 @@ describe("PreviewPanel", () => {
     expect(screen.getByText("Body")).toBeTruthy();
   });
 
-  it("uses the internal PDF viewer for trusted attachment URLs", () => {
+  it("uses the internal PDF viewer for trusted document URLs", async () => {
     useAppStore.setState({
       livePreviewUrl: null,
       previewArtifact: {
@@ -100,7 +108,7 @@ describe("PreviewPanel", () => {
       },
     });
     render(<PreviewPanel />);
-    expect(screen.getByText("正在准备 PDF 预览")).toBeTruthy();
+    expect((await screen.findByTestId("pdf-resource")).getAttribute("data-url")).toBe("https://assets.example/report.pdf");
     expect(document.querySelector('iframe[title="report.pdf"]')).toBeNull();
   });
 
@@ -148,7 +156,7 @@ describe("PreviewPanel", () => {
         mediaType: "image/svg+xml",
         kind: "code",
         source: "workspace",
-        url: "http://127.0.0.1:8000/api/workspace/raw?path=assets%2Fdiagram.svg",
+        url: "http://127.0.0.1:8000/api/workspace/raw?path=assets%2Fdiagram.svg&workspace_root=C%3A%2Fowner",
         content: "<svg viewBox=\"0 0 10 10\"></svg>",
         loadedAt: Date.now(),
       },
@@ -177,6 +185,67 @@ describe("PreviewPanel", () => {
     fireEvent.click(retry);
     const retried = screen.getByRole("img", { name: "screenshot.png" }) as HTMLImageElement;
     expect(retried.src).toContain("preview_retry=1");
+  });
+
+  it.each(["artifact", "attachment"] as const)("rebuilds a restored %s PDF with its actual preview owner after reconnect", async (source) => {
+    useAppStore.setState({ previewOwnerConversationId: "pdf-owner", conversationWorkbenchStates: {
+      "pdf-owner": { previewArtifact: { artifactId: "pdf-one", name: "report.pdf", mediaType: "application/pdf", content: "", source, hasNative: true,
+        url: "http://old-host/api/attachments/raw?session_id=old-session", error: "Old transport failed" } } as never,
+    } });
+    render(<PreviewPanel />);
+    expect(screen.getByText("连接恢复并关联会话后可预览 PDF。")).toBeTruthy();
+    expect(screen.queryByText("Old transport failed")).toBeNull();
+    act(() => useAppStore.setState({ isConnected: true }));
+    const resource = new URL((await screen.findByTestId("pdf-resource")).getAttribute("data-url")!);
+    expect(resource.searchParams.get("session_id")).toBe("session-preview-image");
+    expect(resource.searchParams.get("conversation_id")).toBe("pdf-owner");
+    expect(resource.searchParams.get("artifact_id")).toBe("pdf-one");
+    expect(resource.hostname).not.toBe("old-host");
+  });
+
+  it.each(["image", "pdf"])("signs a new owner-scoped %s token after explicit retry past the actual five-minute expiry", async (kind) => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    useAppStore.setState({ isConnected: true, previewArtifact: { artifactId: "signed", name: `signed.${kind === "pdf" ? "pdf" : "png"}`, mediaType: kind === "pdf" ? "application/pdf" : "image/png", content: "", source: "artifact" } });
+    render(<PreviewPanel />);
+    const resourceUrl = () => kind === "pdf" ? screen.getByTestId("pdf-resource").getAttribute("data-url")! : screen.getByRole("img").getAttribute("src")!;
+    if (kind === "pdf") await screen.findByTestId("pdf-resource");
+    const before = new URL(resourceUrl());
+    expect(before.searchParams.get("asset_token")!.split(".")[0]).toBe("1300");
+    if (kind === "image") fireEvent.error(screen.getByRole("img"));
+    clock.mockReturnValue(1_301_000);
+    fireEvent.click(screen.getByRole("button", { name: `重试${kind === "pdf" ? " PDF " : "图片"}预览` }));
+    const after = new URL(resourceUrl());
+    expect(after.searchParams.get("asset_token")!.split(".")[0]).toBe("1601");
+    expect(after.searchParams.get("preview_retry")).toBe("1");
+    expect(after.searchParams.get("conversation_id")).toBe("conv-preview-a");
+  });
+
+  it.each(["image", "pdf"])("preserves the original workspace when retrying an expired %s resource after the active workspace changes", async (kind) => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    useAppStore.setState({ workingDirectory: "C:/active-other", previewArtifact: { artifactId: "workspace:owner-file", name: `owner.${kind === "pdf" ? "pdf" : "png"}`, mediaType: kind === "pdf" ? "application/pdf" : "image/png", content: "", source: "workspace",
+      url: "http://old-host/api/workspace/raw?path=assets%2Fowner-file&workspace_root=C%3A%2Fowner&raw_token=expired" } });
+    render(<PreviewPanel />);
+    if (kind === "pdf") await screen.findByTestId("pdf-resource");
+    if (kind === "image") fireEvent.error(screen.getByRole("img"));
+    clock.mockReturnValue(1_301_000);
+    fireEvent.click(screen.getByRole("button", { name: `重试${kind === "pdf" ? " PDF " : "图片"}预览` }));
+    const after = new URL(kind === "pdf" ? screen.getByTestId("pdf-resource").getAttribute("data-url")! : screen.getByRole("img").getAttribute("src")!);
+    expect(after.searchParams.get("workspace_root")).toBe("C:/owner");
+    expect(after.searchParams.get("path")).toBe("assets/owner-file");
+    expect(after.searchParams.get("raw_token")!.split(".")[0]).toBe("1601");
+    expect(after.searchParams.get("preview_retry")).toBe("1");
+  });
+
+  it("reports a clipboard refusal and retries the exact unformatted source", async () => {
+    const content = '{"value":1}';
+    downloadMocks.clipboard.mockRejectedValueOnce(new Error("Clipboard access denied"));
+    useAppStore.setState({ previewArtifact: { artifactId: "text", content, mediaType: "application/json" } });
+    render(<PreviewPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "复制文件内容" }));
+    await waitFor(() => expect(downloadMocks.toast).toHaveBeenCalledWith("复制文件内容失败：Clipboard access denied", "error", 3000));
+    fireEvent.click(screen.getByRole("button", { name: "复制文件内容" }));
+    await waitFor(() => expect(downloadMocks.toast).toHaveBeenCalledWith("文件内容已复制。", "success", 1600));
+    expect(downloadMocks.clipboard.mock.calls).toEqual([[content], [content]]);
   });
 
   it("rebuilds an owner-scoped image after reconnect instead of preserving a stale fetch error", () => {

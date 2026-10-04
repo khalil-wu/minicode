@@ -4,14 +4,12 @@ from dataclasses import dataclass
 from typing import Any
 from pathlib import Path
 
-from backend.workspace.state import get_explicit_active_workspace_root
-
 from backend.agents.loader import (
     AgentDefinition,
     EditableAgentSource,
     delete_custom_agent,
     discover_agent_definitions,
-    discover_agents,
+    effective_agents,
     save_custom_agent,
 )
 
@@ -41,7 +39,7 @@ def serialize_agent(
 ) -> dict[str, Any]:
     source_path = agent.source_path.resolve() if agent.source_path else None
     source = agent.source
-    editable = source in {"user", "project"}
+    editable = agent.editable
     return {
         "name": agent.name,
         "description": agent.description,
@@ -74,7 +72,7 @@ def _active_workspace(workspace_root: str | Path | None = None) -> Path | None:
         if not candidate.exists() or not candidate.is_dir():
             raise AgentEditorServiceError("workspace_root must be an existing directory")
         return candidate
-    return get_explicit_active_workspace_root()
+    return None
 
 
 def _editable_source(
@@ -97,7 +95,7 @@ def list_agents(*, workspace_root: str | Path | None = None) -> dict[str, Any]:
         else _active_workspace(workspace_root)
     )
     definitions = discover_agent_definitions(workspace_root)
-    active_agents = discover_agents(workspace_root)
+    active_agents = effective_agents(definitions)
     return {
         "agents": [
             serialize_agent(
@@ -124,7 +122,7 @@ def upsert_agent(
         else _active_workspace(workspace_root)
     )
     source = _editable_source(
-        payload.source if payload.source_path else payload.location,
+        payload.source or payload.location,
     )
     try:
         agent = save_custom_agent(

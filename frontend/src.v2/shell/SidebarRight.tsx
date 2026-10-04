@@ -13,6 +13,9 @@ import {
   PanelRightClose,
   X,
   TerminalSquare,
+  Maximize2,
+  Minimize2,
+  ChevronDown,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../stores";
@@ -94,6 +97,8 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const messages = useAppStore((s) => s.messages);
   const rightStackTab = useAppStore((s) => s.rightStackTab);
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
+  const rightPanelExpanded = useAppStore((s) => s.rightPanelExpanded);
+  const setRightPanelExpanded = useAppStore((s) => s.setRightPanelExpanded);
   const rightSidebarWidth = useAppStore((s) => s.rightSidebarWidth);
   const setRightSidebarWidth = useAppStore((s) => s.setRightSidebarWidth);
   const setRightStackTab = useAppStore((s) => s.setRightStackTab);
@@ -106,16 +111,22 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const [localTab, setLocalTab] = useState<StackTab>(normalizeInitialTab(initialTab));
   const [openTabIds, setOpenTabIds] = useState<StackTab[]>(() => Array.from(new Set([...defaultOpenTabs, normalizeInitialTab(initialTab)])));
   const [launcherPosition, setLauncherPosition] = useState<{ x: number; y: number } | null>(null);
+  const [openedPanelPosition, setOpenedPanelPosition] = useState<{ x: number; y: number } | null>(null);
+  const [tabsOverflow, setTabsOverflow] = useState(false);
   const sidebarRef = useRef<HTMLElement | null>(null);
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => resizeCleanupRef.current?.(), []);
   const tabListRef = useRef<HTMLDivElement | null>(null);
   const launcherButtonRef = useRef<HTMLButtonElement | null>(null);
   const requestedActiveTab = initialTab === undefined ? rightStackTab : localTab;
   const normalizedRequestedTab = requestedActiveTab === "plan" || requestedActiveTab === "terminal" ? "tasks" : requestedActiveTab;
   const activeTab = normalizedRequestedTab;
+  const expanded = initialTab === undefined && rightPanelExpanded;
+  const canExpand = initialTab === undefined && ["browser", "preview", "diff", "artifacts"].includes(activeTab);
   const setActiveTab = initialTab === undefined ? setRightStackTab : setLocalTab;
   const closeLauncher = useCallback(() => setLauncherPosition(null), []);
   useEffect(() => {
-    if (!visible) closeLauncher();
+    if (!visible) { closeLauncher(); setOpenedPanelPosition(null); }
   }, [visible, closeLauncher]);
 
   const subagents = useAppStore((s) => s.subagents);
@@ -183,10 +194,17 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     if (!sideChatOpen && openTabIds.includes("sidechat")) closeOpenTab("sidechat");
   }, [sideChatOpen, openTabIds, closeOpenTab]);
 
-  useEffect(() => {
-    tabListRef.current
-      ?.querySelector<HTMLElement>(`[data-sidebar-tab-frame="${activeTab}"]`)
-      ?.scrollIntoView?.({ inline: "nearest", block: "nearest" });
+  useLayoutEffect(() => {
+    const track = tabListRef.current!;
+    const revealActive = () => {
+      track.querySelector<HTMLElement>(`[data-sidebar-tab-frame="${activeTab}"]`)
+        ?.scrollIntoView?.({ inline: "nearest", block: "nearest" });
+      setTabsOverflow(track.scrollWidth > track.clientWidth);
+    };
+    revealActive();
+    const observer = new ResizeObserver(revealActive);
+    observer.observe(track);
+    return () => observer.disconnect();
   }, [activeTab, openTabIds]);
 
   useEffect(() => {
@@ -203,13 +221,14 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const sidebarWidth = compactPanel
     ? Math.min(420, Math.max(minSidebarWidth, rightSidebarWidth))
     : Math.max(minSidebarWidth, rightSidebarWidth);
-  const sidebarWidthStyle = embedded ? "100%" : rightPanelOpen ? `${sidebarWidth}px` : "0px";
-  const sidebarMinWidth = embedded ? 0 : rightPanelOpen ? minSidebarWidth : 0;
-  const sidebarMaxWidth = embedded ? "none" : rightPanelOpen ? "min(1040px, calc(100vw - 720px))" : "0px";
+  const sidebarWidthStyle = expanded || embedded ? "100%" : rightPanelOpen ? `${sidebarWidth}px` : "0px";
+  const sidebarMinWidth = expanded || embedded ? 0 : rightPanelOpen ? minSidebarWidth : 0;
+  const sidebarMaxWidth = expanded || embedded ? "none" : rightPanelOpen ? "min(1040px, calc(100vw - 720px))" : "0px";
   const activateTab = (tab: StackTab) => {
     addOpenTab(tab);
     setActiveTab(tab);
     closeLauncher();
+    setOpenedPanelPosition(null);
   };
 
   const closeRightPanel = () => {
@@ -258,8 +277,12 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     if (embedded) return;
     event.preventDefault();
+    resizeCleanupRef.current?.();
     const handle = event.currentTarget;
     const pointerId = event.pointerId;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    const previouslyDragging = document.body.classList.contains("layout-dragging");
     const startX = event.clientX;
     const startWidth = sidebarWidth;
     const onMove = (moveEvent: PointerEvent) => {
@@ -272,14 +295,16 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
       window.removeEventListener("pointercancel", onUp);
       handle.removeEventListener("lostpointercapture", cleanup);
       if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      document.body.classList.remove("layout-dragging");
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      if (!previouslyDragging) document.body.classList.remove("layout-dragging");
+      resizeCleanupRef.current = null;
     };
     const onUp = (upEvent: PointerEvent) => {
       if (upEvent.pointerId !== pointerId) return;
       cleanup();
     };
+    resizeCleanupRef.current = cleanup;
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     document.body.classList.add("layout-dragging");
@@ -312,6 +337,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
       ref={sidebarRef}
       className="mc-sidebar-right relative flex flex-col overflow-hidden"
       data-embedded={embedded ? "true" : "false"}
+      data-expanded={expanded ? "true" : "false"}
       data-open={visible && (embedded || rightPanelOpen) ? "true" : "false"}
       aria-hidden={!visible || (!embedded && !rightPanelOpen)}
       style={{
@@ -326,10 +352,10 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         width: sidebarWidthStyle,
         minWidth: sidebarMinWidth,
         maxWidth: sidebarMaxWidth,
-        flex: embedded ? "1 1 auto" : `0 0 ${rightPanelOpen ? sidebarWidth : 0}px`,
+        flex: expanded || embedded ? "1 1 auto" : `0 0 ${rightPanelOpen ? sidebarWidth : 0}px`,
         background: "var(--surface-base)",
         border: 0,
-        borderLeft: embedded || !rightPanelOpen ? 0 : "1px solid var(--border-subtle)",
+        borderLeft: expanded || embedded || !rightPanelOpen ? 0 : "1px solid var(--border-subtle)",
         borderRadius: 0,
         boxShadow: "none",
         opacity: embedded || rightPanelOpen ? 1 : 0,
@@ -339,7 +365,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         transition: `width var(--transition-normal), min-width var(--transition-normal), max-width var(--transition-normal), flex-basis var(--transition-normal), margin var(--transition-normal), opacity var(--transition-fast), transform var(--duration-base) var(--easing-enter), border-color var(--transition-fast), box-shadow var(--transition-normal), visibility 0s linear ${embedded || rightPanelOpen ? "0ms" : "var(--duration-base)"}`,
       } as React.CSSProperties}
     >
-      {!embedded && (
+      {!embedded && !expanded && (
         <div
           className="mc-sidebar-right-resize-handle"
           role="separator"
@@ -402,10 +428,32 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         ))}
         </div>
         <div className="mc-sidebar-right-actions" data-testid="right-sidebar-actions">
+          {tabsOverflow && <button
+            type="button"
+            className="mc-sidebar-right-action mc-icon-button"
+            aria-label="已打开的面板"
+            title="已打开的面板"
+            aria-haspopup="menu"
+            aria-expanded={openedPanelPosition !== null}
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              closeLauncher();
+              setOpenedPanelPosition((position) => position ? null : { x: Math.max(8, rect.right - 240), y: rect.bottom + 6 });
+            }}
+          ><ChevronDown size={15} /></button>}
+          {canExpand && <button
+            type="button"
+            className="mc-sidebar-right-action mc-icon-button"
+            aria-label={expanded ? "还原到侧栏" : "扩大到主工作区"}
+            title={expanded ? "还原到侧栏" : "扩大到主工作区"}
+            aria-pressed={expanded}
+            onClick={() => setRightPanelExpanded(!expanded)}
+          >{expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>}
           <button
             ref={launcherButtonRef}
             type="button"
             onClick={() => {
+              setOpenedPanelPosition(null);
               const rect = launcherButtonRef.current!.getBoundingClientRect();
               setLauncherPosition((position) => position ? null : { x: Math.max(8, rect.right - 260), y: rect.bottom + 6 });
             }}
@@ -431,6 +479,15 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           )}
         </div>
       </div>
+      {openedPanelPosition && <ContextMenu
+        position={openedPanelPosition}
+        onClose={() => setOpenedPanelPosition(null)}
+        items={openedTabs.map((tab) => ({
+          label: `${tab.label}${activeTab === tab.id ? " · 当前" : ""}`,
+          icon: tab.icon,
+          onClick: () => openRightTab(tab.id),
+        }))}
+      />}
       {launcherPosition && <ContextMenu
         position={launcherPosition}
         onClose={closeLauncher}

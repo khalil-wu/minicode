@@ -24,7 +24,6 @@ async def handle_checkpoint_list(session: "WebSocketSession", data: dict[str, An
         result = list_checkpoints(
             session.checkpoint_manager,
             conversation_id=scope.conversation_id,
-            session_id=str(session.session_id or ""),
             workspace_root=scope.workspace_root,
             limit=int(data.get("limit", 50) or 50),
         )
@@ -48,6 +47,10 @@ async def handle_checkpoint_rewind(session: "WebSocketSession", data: dict[str, 
     claim = None
     try:
         scope = resolve_command_scope(session, data)
+        from backend.ws.conversation_activity import live_subagent_count
+
+        if live_subagent_count(scope.conversation_id):
+            raise CheckpointServiceError("Stop the conversation's live subagents before rewinding its files.")
         claim = guards.try_start(scope.conversation_id, owner_id=f"mutation:checkpoint.rewind:{uuid4().hex}")
         if claim is None:
             raise CheckpointServiceError(
@@ -58,7 +61,6 @@ async def handle_checkpoint_rewind(session: "WebSocketSession", data: dict[str, 
             session.checkpoint_manager,
             str(data.get("checkpoint_id") or data.get("id") or ""),
             conversation_id=scope.conversation_id,
-            session_id=session.session_id,
             workspace_root=scope.workspace_root,
         )
     except (CheckpointServiceError, ValueError) as exc:
@@ -240,6 +242,7 @@ async def handle_agent_resume(session: "WebSocketSession", data: dict[str, Any])
             metadata={
                 "resume_from_checkpoint": True,
                 "resume_checkpoint_run_id": resume.run_id,
+                "resume_checkpoint_session_id": resume.checkpoint_session_id,
                 "conversation_id": resume.conversation_id,
             },
         )
@@ -487,6 +490,15 @@ async def handle_approval_file_diff_command(session: "WebSocketSession", data: d
     return True
 
 
+async def _emit_user_queue_state(session: "WebSocketSession", conversation_id: str) -> None:
+    for item in session.run_manager.queued_user_message_snapshot(conversation_id):
+        await session.send_event(AgentEvent.user_message_queue_updated(
+            status="queued", conversation_id=conversation_id,
+            message_id=item["message_id"], user_message_id=item["user_message_id"],
+            position=item["position"], paused=item["paused"],
+        ))
+
+
 async def handle_interrupt_command(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     target_conversation_id = str(data.get("conversation_id") or "").strip()
     target_conversation_id = target_conversation_id or str(session.active_conversation_id or "").strip()
@@ -507,25 +519,30 @@ async def handle_interrupt_command(session: "WebSocketSession", data: dict[str, 
     # after reconnect must become a no-op once that turn has completed or a new
     # turn has taken its place; otherwise an old Stop click can kill new work.
     if not (expected_turn_id or expected_message_id or expected_task_id):
-        # Fence-less interrupts (the frontend could not attach one because no
-        # assistant message exists yet) must still cancel the live run. Only stay
-        # a no-op when there is
-        # nothing running, which is exactly the stale-replay case.
-        if not (current_turn_id or current_message_id or current_task_id):
-            return True
+        return True
     if (
         (expected_turn_id and expected_turn_id != current_turn_id)
         or (expected_message_id and expected_message_id != current_message_id)
         or (expected_task_id and expected_task_id != current_task_id)
     ):
+        if expected_message_id and not (expected_turn_id or expected_task_id):
+            stopped = await session.command_dispatcher.interrupt_user_message_admission(
+                target_conversation_id, expected_message_id,
+            )
+            if stopped:
+                await _emit_user_queue_state(session, target_conversation_id)
+        return True
+    if stream_state.get("terminal_fenced"):
         return True
     # ``_cancel_agent_runs`` is the one cancellation entry: it stops the run
     # task, its child subagents and its pending approvals, then drains them and
     # retains ownership of whatever refused to stop.
+    session.run_manager.set_user_queue_paused(target_conversation_id, current_message_id or expected_turn_id or expected_task_id)
     await session.cancel_agent_runs(
         conversation_id=target_conversation_id or None,
         reason="user_interrupted",
     )
+    await _emit_user_queue_state(session, target_conversation_id)
     # The run owner emits the terminal DONE from its finally block after tool,
     # subprocess, subagent, persistence, and approval cleanup has settled.
     # Emitting DONE here races that cleanup and can claim cancellation while
@@ -746,6 +763,8 @@ async def handle_user_message_queue_steer(session: "WebSocketSession", data: dic
             )
             return True
 
+        session.run_manager.set_user_queue_paused(conversation_id, "")
+
         running = session.running_agent_task_for(conversation_id)
         stream_state = getattr(session, "_conversation_streams", {}).get(conversation_id) or {}
         target_message_id = str(stream_state.get("message_id") or "").strip()
@@ -787,6 +806,7 @@ async def handle_user_message_queue_steer(session: "WebSocketSession", data: dic
                         user_message_id=str(command_data.get("user_message_id") or ""),
                         position=position,
                         reason="queue_reordered",
+                        paused=False,
                     )
                 )
             return True
@@ -819,18 +839,24 @@ async def handle_user_message_queue_steer(session: "WebSocketSession", data: dic
 
 
 async def handle_skills_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.services.skills_api_service import refresh_skill_list
+    from backend.async_cleanup import to_thread_cancel_safe
 
-    skills = refresh_skill_list(session.skill_manager)
-    conversation_id = str(
-        data.get("conversation_id")
-        or data.get("owner_conversation_id")
-        or session.active_conversation_id
-        or ""
-    ).strip()
-    await session.send_payload({"type": "skills.list", "skills": skills, "conversation_id": conversation_id}, log_context="skills.list")
+    try:
+        scope = resolve_command_scope(session, data, require_conversation=False)
+    except ValueError as exc:
+        await emit_command_error(session, "skills.list", exc)
+        return True
+    manager = session.skill_manager
+    skills = (
+        await to_thread_cancel_safe(lambda: manager.snapshot(scope.workspace_root or None).list_all())
+        if manager is not None else []
+    )
+    await session.send_payload({
+        "type": "skills.list", "skills": skills,
+        "conversation_id": scope.conversation_id, "workspace_root": scope.workspace_root,
+    }, log_context="skills.list")
     await session.send_event(
-        AgentEvent.command_result("skills.list", "", data={"count": len(skills)})
+        AgentEvent.command_result("skills.list", "", data=scope.apply({"count": len(skills)}))
     )
     return True
 
@@ -843,7 +869,6 @@ async def handle_subagent_plan_review(session: "WebSocketSession", data: dict[st
     those requests pending instead of approving them itself.
     """
     import json as _json
-    from datetime import UTC, datetime
 
     from backend.agent.runtime import default_runtime
 
@@ -925,60 +950,25 @@ async def handle_subagent_plan_review(session: "WebSocketSession", data: dict[st
             f"No pending plan approval request '{request_id}' from {subagent_id}.",
         )
         return True
-    message, payload = matched
-
     sender_epoch = int(getattr(sender, "mailbox_epoch", 0) or 0)
-    reservation_token = runtime.reserve_lifecycle_response(
-        response_kind="plan_approval_response",
-        participant_id=subagent_id,
-        mailbox_epoch=sender_epoch,
-        request_id=request_id,
-        target_id=parent_run_id,
-        expected_active_plan_request_id=request_id,
-    )
-    if not reservation_token:
-        await emit_command_error(
-            session,
-            "subagent.plan_review",
-            f"Plan request '{request_id}' is no longer active.",
-        )
-        return True
-    reservation = {
-        "response_kind": "plan_approval_response",
-        "participant_id": subagent_id,
-        "mailbox_epoch": sender_epoch,
-        "request_id": request_id,
-        "reservation_token": reservation_token,
-    }
     # Grant stays capped at default execution permissions: user approval
     # authorizes the plan to proceed, it does not transfer the leader's own
     # permission mode to a teammate context.
     granted_mode = "confirm" if approved else ""
-    response = {
-        "type": "plan_approval_response",
-        "request_id": request_id,
-        "approved": approved,
-        "timestamp": datetime.now(UTC).isoformat(),
-        **({"permission_mode": granted_mode} if approved else {}),
-    }
     try:
-        runtime.send_swarm_message(
-            sender_id=parent_run_id,
-            recipient_id=subagent_id,
-            content=_json.dumps(response, ensure_ascii=False),
-            conversation_id=conversation_id,
-            team_name=str(getattr(message, "team_name", "") or ""),
-            recipient_mailbox_epoch=sender_epoch,
+        response = runtime.respond_to_teammate_plan(
+            leader_run_id=parent_run_id, subagent_id=subagent_id,
+            conversation_id=conversation_id, request_id=request_id,
+            mailbox_epoch=sender_epoch, approved=approved,
         )
     except Exception as exc:
-        runtime.release_lifecycle_response(**reservation)
         await emit_command_error(session, "subagent.plan_review", exc)
         return True
-    if not runtime.commit_lifecycle_response(**reservation):
-        logger.error(
-            "plan review response delivered but lifecycle fence commit failed: %s",
-            request_id,
+    if response is None:
+        await emit_command_error(
+            session, "subagent.plan_review", f"Plan request '{request_id}' is no longer active.",
         )
+        return True
     decision = "approved" if approved else "rejected"
     await session.emit_command_result(
         "subagent.plan_review",
@@ -1049,30 +1039,46 @@ def _load_subagent_record(runtime: Any, subagent_id: str) -> Any | None:
 
 
 async def handle_skills_install(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.services.skills_service import install_skill
+    from backend.async_cleanup import to_thread_cancel_safe
+    from backend.services.skills_api_service import install_skill_from_marketplace
 
     try:
-        result = await install_skill(session.skill_manager, str(data.get("name", "")))
+        scope = resolve_command_scope(session, data, require_conversation=False)
     except ValueError as exc:
         await emit_command_error(session, "skills.install", exc)
         return True
-    except Exception as exc:
-        await emit_command_error(session, "skills.install", f"Failed to install skill '{data.get('name', '')}': {exc}")
+    conversation_id = scope.conversation_id
+    manager = session.skill_manager
+    skill_manager = (
+        await to_thread_cancel_safe(manager.snapshot, scope.workspace_root or None)
+        if manager is not None else None
+    )
+    try:
+        result = await install_skill_from_marketplace(
+            str(data.get("name", "")), skill_manager=skill_manager,
+        )
+    except ValueError as exc:
+        await emit_command_error(session, "skills.install", exc, data={"conversation_id": conversation_id})
         return True
-    await session.send_event(AgentEvent(type="system_notice", data={"content": result.notice}))
-    if result.installed:
-        await session.send_payload({
-            "type": "skills.list",
-            "skills": result.skills,
-            "conversation_id": str(session.active_conversation_id or "").strip(),
-        }, log_context="skills.list")
+    except Exception as exc:
+        await emit_command_error(session, "skills.install", f"Failed to install skill '{data.get('name', '')}': {exc}", data={"conversation_id": conversation_id})
+        return True
+    notice = f"Skill '{result['skill']['name']}' installed successfully"
+    await session.send_event(AgentEvent(type="system_notice", data={"content": notice, "conversation_id": conversation_id}))
+    await session.send_payload({
+        "type": "skills.list",
+        "skills": result["skills"],
+        "conversation_id": conversation_id,
+        "workspace_root": scope.workspace_root,
+    }, log_context="skills.list")
     await session.send_event(
         AgentEvent.command_result(
             "skills.install",
-            result.notice,
+            notice,
             data={
-                "name": str(data.get("name") or "").strip(),
-                "installed": bool(result.installed),
+                "conversation_id": conversation_id,
+                "name": result["skill"]["name"],
+                "installed": result["installed"],
             },
         )
     )
@@ -1090,7 +1096,7 @@ async def handle_skills_marketplace_list(session: "WebSocketSession", data: dict
 
 
 async def handle_commands_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.services.skills_service import list_commands
+    from backend.commands.catalog import get_enabled_composer_command_catalog
 
     # Capture the catalog owner before extension materialization yields. A
     # concurrent switch must not relabel the old scope's extension commands as
@@ -1117,7 +1123,7 @@ async def handle_commands_list(session: "WebSocketSession", data: dict[str, Any]
         *session.command_registry.list_extension_slash_commands(
             scope_id=conversation_id or None
         ),
-        *list_commands(
+        *get_enabled_composer_command_catalog(
             workspace_root,
             resolve_active_workspace=False,
         ),
@@ -1140,6 +1146,38 @@ async def handle_commands_list(session: "WebSocketSession", data: dict[str, Any]
 async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     source = str(data.get("source") or "").strip()
     from_slash_command = source.startswith("slash:")
+    if source.startswith("settings.provider."):
+        from backend.config import load_config
+
+        # A settings HTTP save can finish after the renderer selects another
+        # task. Apply the persisted profile through the existing model owner.
+        conversation_id = str(data.get("conversation_id") or "").strip()
+        requested_workspace = str(data.get("workspace_root") or "").strip()
+        conversation = session.conversation_repo.get_conversation_summary(conversation_id) if conversation_id else None
+        try:
+            if conversation_id and (conversation is None or conversation.archived):
+                raise ValueError("The conversation that requested this provider change is unavailable")
+            if not conversation_id and session.active_conversation_id:
+                raise ValueError("The blank conversation that requested this provider change is no longer active")
+            workspace = session.session_lifecycle.workspace_root_for_conversation(conversation)
+            if bool(requested_workspace) != bool(workspace) or (workspace and Path(requested_workspace).resolve() != Path(workspace).resolve()):
+                raise ValueError("The conversation workspace changed while the provider was being saved")
+            owner = _model_execution_owner(session, conversation_id)
+            changed = await owner._set_selected_provider_model(
+                str(data.get("provider") or ""), str(data.get("model") or ""),
+                manual_override=True, conversation_id=conversation_id or None,
+                config_override=load_config(cwd=workspace), emit_unavailable=False,
+            )
+            if not changed:
+                raise ValueError("The saved provider model is unavailable for this conversation")
+        except ValueError as exc:
+            await emit_command_error(session, "llm.config.set", exc)
+            return True
+        if conversation_id == str(session.active_conversation_id or ""):
+            await session.send_llm_state(force=True)
+            await session.session_lifecycle.send_runtime_capabilities(source="llm.config.set")
+        await session.emit_command_result("llm.config.set", "", level="success", data={"conversation_id": conversation_id})
+        return True
     conversation_id = str(data.get("conversation_id") or session.active_conversation_id or "")
     owner = _model_execution_owner(session, conversation_id)
     from backend.services.misc_command_service import is_conversation_effort_command

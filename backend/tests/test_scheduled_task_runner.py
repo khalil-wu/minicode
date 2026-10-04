@@ -17,6 +17,9 @@ class _Repository:
         self.snapshots = []
         self.turn_commits = []
 
+    def store_instance_id(self) -> str:
+        return f"scheduled-test:{id(self)}"
+
     def get_conversation(self, conversation_id: str):
         return self.conversation if self.conversation and self.conversation.id == conversation_id else None
 

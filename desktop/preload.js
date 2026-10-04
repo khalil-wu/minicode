@@ -108,10 +108,6 @@ const runtimeConfig = {
       searchFiles: (rootPath, query, limit) => ipcRenderer.invoke("minicode:fs:searchFiles", rootPath, query, limit),
       searchFilesByKind: (rootPath, query, limit, kind) => ipcRenderer.invoke("minicode:fs:searchFiles", rootPath, query, limit, kind),
       readFile: (path) => ipcRenderer.invoke("minicode:fs:readFile", path),
-      writeFile: (path, content) => ipcRenderer.invoke("minicode:fs:writeFile", path, content),
-      compareWriteFile: (path, expectedHash, content) => ipcRenderer.invoke("minicode:fs:compareWriteFile", path, expectedHash, content),
-      createDirectory: (path) => ipcRenderer.invoke("minicode:fs:createDirectory", path),
-      renamePath: (oldPath, newPath) => ipcRenderer.invoke("minicode:fs:renamePath", oldPath, newPath),
       deletePath: (path, recursive, confirm) => ipcRenderer.invoke("minicode:fs:deletePath", path, recursive, confirm),
     },
     pty: {

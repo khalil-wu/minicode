@@ -10,6 +10,7 @@ needed to find and restore that commit.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -25,6 +26,7 @@ from backend.atomic_io import (
 
 WORKTREE_SNAPSHOT_DATA_DIR = DATA_ROOT / "worktree-snapshots"
 _SNAPSHOT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,8 @@ class WorktreeSnapshotRecord:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "WorktreeSnapshotRecord":
+        if not isinstance(payload, dict):
+            raise ValueError("Worktree snapshot metadata must be an object")
         return cls(
             id=str(payload.get("id", "")),
             conversation_id=str(payload.get("conversation_id", "")),
@@ -88,10 +92,7 @@ class WorktreeSnapshotStore:
         with file_mutation_locks([path]):
             if not path.exists():
                 return None
-            try:
-                return WorktreeSnapshotRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
-            except (OSError, json.JSONDecodeError):
-                return None
+            return WorktreeSnapshotRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     def delete(self, snapshot_id: str) -> bool:
         """Delete one metadata record after its matching git ref is removed."""
@@ -127,7 +128,8 @@ class WorktreeSnapshotStore:
             with file_mutation_locks([path]):
                 try:
                     record = WorktreeSnapshotRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
-                except (OSError, json.JSONDecodeError):
+                except (OSError, ValueError) as exc:
+                    logger.warning("Cannot read worktree snapshot metadata %s: %s", path, exc)
                     continue
             if conversation_id and record.conversation_id != conversation_id:
                 continue

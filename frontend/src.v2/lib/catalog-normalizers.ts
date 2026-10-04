@@ -8,7 +8,7 @@ const stringArray = (value: unknown): string[] | undefined => {
   return items.length > 0 ? items : [];
 };
 
-export const normalizeSkillInfo = (skill: unknown): SkillInfo | null => {
+export const normalizeSkillInfo = (skill: unknown, workspaceRoot?: string): SkillInfo | null => {
   if (!skill || typeof skill !== "object") return null;
   const payload = skill as Record<string, unknown>;
   const name = stringValue(payload.name);
@@ -22,8 +22,8 @@ export const normalizeSkillInfo = (skill: unknown): SkillInfo | null => {
     path: path || undefined,
     display_name: stringValue(payload.display_name) || undefined,
     short_description: stringValue(payload.short_description) || undefined,
-    icon: icon && path ? skillAssetResourceUrlWithToken(path, "small") : undefined,
-    icon_large: iconLarge && path ? skillAssetResourceUrlWithToken(path, "large") : undefined,
+    icon: icon && path ? skillAssetResourceUrlWithToken(path, "small", undefined, workspaceRoot) : undefined,
+    icon_large: iconLarge && path ? skillAssetResourceUrlWithToken(path, "large", undefined, workspaceRoot) : undefined,
     brand_color: stringValue(payload.brand_color) || undefined,
     version: stringValue(payload.version) || undefined,
     mcp_dependencies: stringArray(payload.mcp_dependencies),
@@ -39,9 +39,9 @@ export const normalizeSkillInfo = (skill: unknown): SkillInfo | null => {
   };
 };
 
-export const normalizeSkillList = (skills: unknown): SkillInfo[] => (
+export const normalizeSkillList = (skills: unknown, workspaceRoot?: string): SkillInfo[] => (
   Array.isArray(skills)
-    ? skills.map(normalizeSkillInfo).filter((skill): skill is SkillInfo => Boolean(skill))
+    ? skills.map((skill) => normalizeSkillInfo(skill, workspaceRoot)).filter((skill): skill is SkillInfo => Boolean(skill))
     : []
 );
 

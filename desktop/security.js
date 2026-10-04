@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const writeFileAtomic = require("write-file-atomic");
 
 const { normalizeWithTrailingSeparator, isSamePath } = require("./utils");
 
@@ -149,10 +150,10 @@ function persistApprovedWorkspaceRoots() {
   if (!trustedRootsFile) return;
   const directory = path.dirname(trustedRootsFile);
   fs.mkdirSync(directory, { recursive: true });
-  fs.writeFileSync(
+  writeFileAtomic.sync(
     trustedRootsFile,
     `${JSON.stringify({ version: 1, roots: Array.from(approvedWorkspaceRoots).sort() }, null, 2)}\n`,
-    "utf8",
+    { encoding: "utf8" },
   );
 }
 
@@ -276,9 +277,9 @@ const IPC_CAPABILITIES = new Set([
   "minicode:embeddedBrowser:getSettings", "minicode:embeddedBrowser:inspect",
   "minicode:embeddedBrowser:runAction", "minicode:embeddedBrowser:setBounds", "minicode:embeddedBrowser:setSettings",
   "minicode:deepLink:open", "minicode:diagnostics:export", "minicode:env:detect",
-  "minicode:fs:compareWriteFile", "minicode:fs:createDirectory", "minicode:fs:deletePath",
-  "minicode:fs:listTree", "minicode:fs:readFile", "minicode:fs:renamePath",
-  "minicode:fs:searchFiles", "minicode:fs:writeFile", "minicode:notify",
+  "minicode:fs:listTree", "minicode:fs:readFile",
+  "minicode:fs:deletePath",
+  "minicode:fs:searchFiles", "minicode:notify",
   "minicode:openExternal", "minicode:openPath", "minicode:pickDirectory",
   "minicode:pty:ackExit", "minicode:pty:clear", "minicode:pty:kill", "minicode:pty:killConversation", "minicode:pty:list", "minicode:pty:restart",
   "minicode:pty:resize", "minicode:pty:snapshot", "minicode:pty:spawn",
@@ -321,8 +322,17 @@ function assertReadablePath(targetPath, label = "Path") {
     throw new Error(`${label} is required.`);
   }
   const rawPath = targetPath.trim();
-  const candidates = trustedPathCandidates(rawPath);
   const absoluteCandidate = path.isAbsolute(rawPath) ? tryCanonicalizePath(rawPath) : null;
+  // Restored editor tabs can read before the file tree activates their root.
+  // Recover only that file's already-approved root, using the same ledger as
+  // listTree; canonical paths keep junction escapes outside the approval.
+  if (absoluteCandidate && !isWithinTrustedWorkspace(absoluteCandidate)) {
+    const approvedRoot = Array.from(readApprovedWorkspaceRoots()).find((root) =>
+      isWithinRootSet(absoluteCandidate, [root]),
+    );
+    if (approvedRoot) restoreTrustedWorkspaceRoot(approvedRoot);
+  }
+  const candidates = trustedPathCandidates(rawPath);
   const resolved = candidates.find((candidate) => isReadablePath(candidate) && fs.existsSync(candidate))
     || (absoluteCandidate && isReadablePath(absoluteCandidate) ? absoluteCandidate : null)
     || candidates.find((candidate) => isReadablePath(candidate))
@@ -408,11 +418,11 @@ module.exports = {
   isReadablePath,
   assertTrustedPath,
   assertReadablePath,
-  assertMutableTrustedPath,
-  isProtectedWritePath,
   assertIpcCapability,
   IPC_CAPABILITIES,
   systemProtectedPrefixes,
+  isProtectedWritePath,
+  assertMutableTrustedPath,
   PROTECTED_WRITE_FILE_NAMES,
   PROTECTED_WRITE_PATH_PARTS,
   SAFE_USER_OUTPUT_EXTENSIONS,

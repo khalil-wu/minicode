@@ -17,6 +17,7 @@ dependencies = [
   "pywin32>=306; sys_platform == 'win32'",
   "pathspec>=0.12,<1.0",
   "PyYAML>=6.0,<7.0",
+  "packaging>=24.2,<27.0",
   "tzdata>=2025.2",
   "tzlocal>=5.2,<6.0",
   "defusedxml>=0.7,<1.0",
@@ -38,6 +39,7 @@ exclude = ["frontend*", "desktop*", "node_modules*", "data*", "skills*"]
 
 [tool.setuptools.package-data]
 "backend.agent" = ["*.js"]
+"backend.memory" = ["templates/*.md"]
 
 [project.optional-dependencies]
 dev = [

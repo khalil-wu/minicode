@@ -66,7 +66,7 @@ async def prepare_turn_input(
             and not input_restored
             and hook_manager
             and session_id
-            and hook_manager_has_hooks(hook_manager, HookEvent.SESSION_START)
+            and hook_manager.has_hooks(HookEvent.SESSION_START)
         ):
             session_hook_result = await await_preflight(
                 hook_manager.run_session_start_once(session_id),
@@ -102,7 +102,7 @@ async def prepare_turn_input(
             not deadline_reached
             and not input_restored
             and hook_manager
-            and hook_manager_has_hooks(hook_manager, HookEvent.USER_PROMPT_SUBMIT)
+            and hook_manager.has_hooks(HookEvent.USER_PROMPT_SUBMIT)
         ):
             prompt_hook_result = await await_preflight(
                 hook_manager.run_user_prompt_submit(user_message),
@@ -179,17 +179,6 @@ async def await_preflight(
             )
 
 
-def hook_manager_has_hooks(hook_manager: Any, event: HookEvent) -> bool:
-    has_hooks = getattr(hook_manager, "has_hooks", None)
-    if not callable(has_hooks):
-        return False
-    try:
-        return bool(has_hooks(event))
-    except Exception as exc:
-        logger.debug("hook has_hooks(%s) failed: %s", event, exc)
-        return False
-
-
 async def run_stop_failure_hook(
     error: str,
     *,
@@ -197,7 +186,7 @@ async def run_stop_failure_hook(
     last_assistant_message: str = "",
     hook_manager: Any | None,
 ) -> None:
-    if not hook_manager or not hook_manager_has_hooks(hook_manager, HookEvent.STOP_FAILURE):
+    if not hook_manager or not hook_manager.has_hooks(HookEvent.STOP_FAILURE):
         return
     try:
         await hook_manager.run_stop_failure(

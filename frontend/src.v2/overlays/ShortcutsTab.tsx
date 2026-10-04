@@ -13,10 +13,12 @@ const shortcutIcon = (action: string) => {
   return <Keyboard />;
 };
 
-export const ShortcutsTab = () => {
+export const ShortcutsTab = ({ searchTarget, active = true }: { searchTarget?: string; active?: boolean }) => {
   const [query, setQuery] = useState("");
   const [recording, setRecording] = useState<ShortcutActionId | null>(null);
   const [error, setError] = useState("");
+  useEffect(() => { if (searchTarget) setQuery(searchTarget); }, [searchTarget]);
+  useEffect(() => { if (!active) { setRecording(null); setError(""); } }, [active]);
   const bindings = useAppStore((state) => state.shortcutBindings);
   const setShortcutBinding = useAppStore((state) => state.setShortcutBinding);
   const resetShortcutBindings = useAppStore((state) => state.resetShortcutBindings);
@@ -28,8 +30,9 @@ export const ShortcutsTab = () => {
   ), [bindings, normalizedQuery]);
 
   useEffect(() => {
-    if (!recording) return;
+    if (!recording || !active) return;
     const capture = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
       event.stopPropagation();
       if (event.key === "Escape") {
@@ -37,7 +40,7 @@ export const ShortcutsTab = () => {
         setError("");
         return;
       }
-      if (event.key === "Backspace" || event.key === "Delete") {
+      if ((event.key === "Backspace" || event.key === "Delete") && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
         setShortcutBinding(recording, "");
         setRecording(null);
         setError("");
@@ -45,7 +48,7 @@ export const ShortcutsTab = () => {
       }
       const binding = shortcutFromEvent(event);
       if (!binding) return;
-      if (!binding.includes("Mod") && !binding.includes("Alt") && !binding.startsWith("F")) {
+      if (!binding.includes("Mod") && !binding.includes("Alt") && !/^F\d+$/.test(event.key)) {
         setError("快捷键需要 Ctrl/Cmd、Alt 或功能键。");
         return;
       }
@@ -60,7 +63,7 @@ export const ShortcutsTab = () => {
     };
     window.addEventListener("keydown", capture, true);
     return () => window.removeEventListener("keydown", capture, true);
-  }, [bindings, recording, setShortcutBinding]);
+  }, [active, bindings, recording, setShortcutBinding]);
 
   return (
     <section className="settings-group">
@@ -87,6 +90,7 @@ export const ShortcutsTab = () => {
               type="button"
               className="settings-shortcut-binding"
               data-recording={recording === shortcut.id ? "true" : "false"}
+              data-shortcut-recording={active && recording === shortcut.id ? "true" : undefined}
               onClick={() => { setRecording(shortcut.id); setError(""); }}
               aria-label={`编辑 ${shortcut.label}`}
             >

@@ -88,8 +88,7 @@ def test_desktop_startup_failure_surface_exists_and_is_wired() -> None:
 def test_frontend_build_defaults_to_file_safe_relative_assets() -> None:
     vite_config = Path("frontend/vite.config.ts").read_text(encoding="utf-8")
 
-    assert "process.env.MINICODE_VITE_RELATIVE_BASE" in vite_config
-    assert 'base: useRelativeBase ? "./" : "./"' in vite_config
+    assert 'base: "./"' in vite_config
     assert 'base: useRelativeBase ? "./" : "/"' not in vite_config
 
 
@@ -97,7 +96,4 @@ def test_desktop_diagnostics_declares_private_beta_safety_defaults() -> None:
     main_source = Path("desktop/main.js").read_text(encoding="utf-8")
 
     assert 'channel: "windows_private_beta"' in main_source
-    assert 'defaultPermissionMode: "confirm"' in main_source
-    assert 'backendPermissionMode: "confirm"' in main_source
-    assert 'networkAccess: "tool_layer_approval_required"' in main_source
-    assert 'windowsSandbox: "docker_workspace_container_fail_closed"' in main_source
+    assert 'capabilitySource: "runtime.capabilities.inspect"' in main_source

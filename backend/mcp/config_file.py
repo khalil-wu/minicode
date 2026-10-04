@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from backend.mcp.manager import MCP_CONFIG_FILE
-from backend.mcp.transport import mcp_transport_from_mapping
+from backend.mcp.transport import MCP_REMOTE_TRANSPORTS, mcp_transport_from_mapping, normalize_mcp_remote_url
 from backend.atomic_io import atomic_write_text, file_mutation_locks
 from backend.mcp.value_utils import has_nonempty_value as _has_nonempty_value
+from backend.mcp.value_utils import resolve_env_placeholders
 
 DEFAULT_MCP_CONFIG = {"servers": {}}
 _MCP_CONFIG_WRITE_LOCK = threading.RLock()
@@ -50,6 +51,14 @@ def write_mcp_config(content: str, config_path: Path = MCP_CONFIG_FILE) -> dict[
     with _MCP_CONFIG_WRITE_LOCK:
         with file_mutation_locks([config_path]):
             data = _parse_and_validate_config(content)
+            for name, server in data["servers"].items():
+                if server["transport"] in MCP_REMOTE_TRANSPORTS:
+                    try:
+                        normalize_mcp_remote_url(
+                            resolve_env_placeholders(server["url"]), server["transport"]
+                        )
+                    except ValueError as exc:
+                        raise ValueError(f"MCP server '{name}' has an invalid URL: {exc}.") from exc
             normalized = _format_config(data)
             config_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -63,7 +72,12 @@ def write_mcp_config(content: str, config_path: Path = MCP_CONFIG_FILE) -> dict[
     return {
         "saved": True,
         "backup_path": str(backup_path) if backup_path else None,
-        "config": read_mcp_config(config_path),
+        "config": {
+            "exists": True,
+            "path": str(config_path),
+            "content": normalized,
+            "servers": _summarize_servers(data),
+        },
         "servers": _summarize_servers(data),
     }
 
@@ -342,9 +356,6 @@ def _reject_nonempty_fields(
 
 
 def _summarize_servers(data: dict[str, Any]) -> list[dict[str, Any]]:
-    servers = data.get("servers", {})
-    if not isinstance(servers, dict):
-        raise ValueError("MCP config must contain an object field named 'servers'.")
     return [
         {
             "name": name,
@@ -353,7 +364,7 @@ def _summarize_servers(data: dict[str, Any]) -> list[dict[str, Any]]:
             "has_env": bool(server.get("env")),
             "has_url": bool(server.get("url")),
         }
-        for name, server in servers.items()
+        for name, server in data["servers"].items()
     ]
 
 

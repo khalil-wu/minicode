@@ -30,14 +30,13 @@ def _responses_reasoning_summary(
     if selected_model and wire_model != selected_model:
         return ""
     summary = (
-        str(getattr(settings, "responses_reasoning_summary", "off") or "off")
+        str(getattr(settings, "responses_reasoning_summary", "") or "")
         .strip()
         .lower()
     )
-    # An unset/explicitly-disabled summary falls back to the model catalog's
-    # declared default (e.g. gpt-5.x defaults to "auto"). Mirrors how
-    # _chat_reasoning_effort consults default_reasoning_effort.
-    if summary in {"none", "off", "false", "0", ""}:
+    if summary in {"none", "off", "false", "0"}:
+        return ""
+    if not summary:
         fallback = str(
             getattr(settings, "default_reasoning_summary", "") or ""
         ).strip().lower()

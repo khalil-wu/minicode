@@ -4,7 +4,6 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { findStableSplitPoint, MarkdownRenderer } from "./MarkdownRenderer";
 import { useAppStore } from "../../stores";
-import { __resetOpenWebInPreviewDedupeForTests } from "../openWebInPreview";
 import { registerWebSocketSender } from "../../protocol/ws-outbox";
 import {
   __resetOpenWebInBrowserForTests,
@@ -58,7 +57,6 @@ afterEach(() => {
   sendMock.mockClear();
   openPathMock.mockClear();
   revealPathMock.mockClear();
-  __resetOpenWebInPreviewDedupeForTests();
   __resetOpenWebInBrowserForTests();
   useAppStore.setState({
     conversationId: null,
@@ -1334,7 +1332,7 @@ describe("MarkdownRenderer", () => {
     expect(screen.getByText(/北京天气参考/)).toBeTruthy();
     expect(screen.queryByRole("link", { name: "[1]" })).toBeNull();
     expect(document.body.textContent).not.toContain("[1]");
-    expect(document.body.textContent).not.toContain("[2]");
+    expect(document.body.textContent).toContain("[2]");
     expect(screen.queryByRole("link", { name: "中央气象台" })).toBeNull();
     expect(document.querySelector(".assistant-inline-source-chip")).toBeNull();
   });

@@ -317,37 +317,15 @@ def _is_owned_preview_origin(
             if value:
                 candidates.append(value)
 
-    try:
-        from backend.preview.launcher import preview_url_is_owned
+    from backend.preview.launcher import preview_url_is_owned
 
-        if preview_url_is_owned(
-            url,
-            session_id=session_id,
-            conversation_id=conversation_id,
-            workspace_root=getattr(context, "workspace_root", None),
-            extra_urls=tuple(candidates),
-        ):
-            return True
-    except Exception:
-        # A preview registry failure must not weaken the browser boundary.
-        return False
-
-    requested = _url_origin(url)
-    return bool(requested and any(requested == _url_origin(candidate) for candidate in candidates))
-
-
-def _url_origin(value: str) -> tuple[str, str, int] | None:
-    try:
-        parsed = urlparse(str(value or "").strip())
-    except ValueError:
-        return None
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-        return None
-    try:
-        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
-    except ValueError:
-        return None
-    return parsed.scheme.lower(), parsed.hostname.casefold().rstrip("."), port
+    return preview_url_is_owned(
+        url,
+        session_id=session_id,
+        conversation_id=conversation_id,
+        workspace_root=getattr(context, "workspace_root", None),
+        extra_urls=tuple(candidates),
+    )
 
 
 def _normalize_endpoint(raw: str) -> str:

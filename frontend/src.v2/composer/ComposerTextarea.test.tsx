@@ -9,6 +9,27 @@ import { useState } from "react";
 
 afterEach(cleanup);
 
+it("reports actual caret and IME selection and applies a requested caret without replacing the input", () => {
+  const select = vi.fn();
+  const change = vi.fn();
+  const submit = vi.fn();
+  const view = render(<ComposerTextarea value="prefix @file suffix" onChange={change} onSelectionChange={select} onSubmit={submit} />);
+  const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+  textarea.setSelectionRange(12, 12);
+  fireEvent.select(textarea);
+  expect(select).toHaveBeenLastCalledWith("prefix @file suffix", { start: 12, end: 12, composing: false });
+  fireEvent.compositionStart(textarea);
+  expect(select).toHaveBeenLastCalledWith("prefix @file suffix", { start: 12, end: 12, composing: true });
+  fireEvent.keyDown(textarea, { key: "Enter" });
+  expect(submit).not.toHaveBeenCalled();
+  fireEvent.compositionEnd(textarea);
+  expect(select).toHaveBeenLastCalledWith("prefix @file suffix", { start: 12, end: 12, composing: false });
+  view.rerender(<ComposerTextarea value="prefix  suffix" onChange={change} onSubmit={submit} selectionRequest={{ start: 7, end: 7 }} />);
+  expect(screen.getByRole("textbox")).toBe(textarea);
+  expect(textarea.selectionStart).toBe(7);
+  expect(document.activeElement).toBe(textarea);
+});
+
 it("shows a readable skill name and declared icon while removing by the original identifier", () => {
   const remove = vi.fn();
   render(<ComposerTextarea value="review this" onChange={vi.fn()} onSubmit={vi.fn()}
@@ -60,7 +81,6 @@ const renderTextarea = (overrides?: {
   onDropFiles?: (files: File[]) => void;
   onChange?: (v: string) => void;
   onHistorySearch?: () => void;
-  compact?: boolean;
   onSubmit?: () => void;
 }) => {
   const onDropFiles = overrides?.onDropFiles ?? vi.fn();
@@ -72,7 +92,6 @@ const renderTextarea = (overrides?: {
       onSubmit={overrides?.onSubmit ?? vi.fn()}
       onDropFiles={onDropFiles}
       onHistorySearch={overrides?.onHistorySearch}
-      compact={overrides?.compact}
     />,
   );
   return { onDropFiles, onChange, textarea: screen.getByRole("textbox") as HTMLTextAreaElement };
@@ -126,7 +145,7 @@ describe("ComposerTextarea paste-to-attachment", () => {
   });
 
   it("keeps the Code mode input aligned with the compact desktop composer", () => {
-    const { textarea } = renderTextarea({ compact: true });
+    const { textarea } = renderTextarea();
 
     expect(textarea.style.padding).toBe("0px");
     expect(textarea.parentElement?.className).toBe("composer-textarea-frame");

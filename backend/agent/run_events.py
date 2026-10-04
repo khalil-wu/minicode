@@ -23,13 +23,6 @@ _ADAPTER_ONLY_EVENT_TYPES: frozenset[str] = frozenset({
     "tool_call_delta",
 })
 
-# Events that are SDK-only (raw provider passthrough). These are forwarded
-# to WebSocket consumers but the UI should suppress them.
-_SDK_ONLY_EVENT_TYPES: frozenset[str] = frozenset({
-    "stream_event",
-})
-
-
 def should_emit_event(event: AgentEvent) -> bool:
     """Return True if *event* should be forwarded to the UI layer.
 

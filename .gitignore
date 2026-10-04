@@ -182,3 +182,7 @@ pelican-bike.html
 engineering/
 frontend/.playwright-cli/
 data/sandbox-temp/
+data/sandbox-native-temp/
+/sandbox-native-temp/
+/.*.consolidation-*/
+data/windows-sandbox/

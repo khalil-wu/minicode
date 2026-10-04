@@ -12,7 +12,8 @@ from backend.llm.model_selection import (
     default_model_thinking_level,
     model_thinking_levels,
 )
-from backend.workspace.state import get_explicit_active_workspace_root
+from backend.owner_scope import canonical_workspace_root
+from backend.async_cleanup import to_thread_cancel_safe
 
 from . import _state
 
@@ -33,7 +34,7 @@ def _live_agent_model_catalog(workspace_root_override: str = "") -> list[dict[st
     workspace_root = (
         Path(workspace_root_override).expanduser().resolve()
         if str(workspace_root_override or "").strip()
-        else get_explicit_active_workspace_root()
+        else None
     )
     iter_sessions = getattr(_state.ws_manager, "iter_sessions", None)
     sessions = list(iter_sessions()) if callable(iter_sessions) else []
@@ -42,11 +43,7 @@ def _live_agent_model_catalog(workspace_root_override: str = "") -> list[dict[st
             if not session.is_connected:
                 continue
             session_workspace = session.session_lifecycle.workspace_root_for_conversation()
-            if (
-                workspace_root is not None
-                and session_workspace is not None
-                and session_workspace.resolve() != workspace_root.resolve()
-            ):
+            if canonical_workspace_root(session_workspace) != canonical_workspace_root(workspace_root):
                 continue
             resolver = getattr(session, "_model_runtime_for_conversation", None)
             runtime = (
@@ -118,7 +115,7 @@ async def list_agents_api(
     """List all discovered custom agents."""
     _no_store(response)
     try:
-        payload = list_agents(workspace_root=workspace_root)
+        payload = await to_thread_cancel_safe(list_agents, workspace_root=workspace_root)
         payload["model_catalog"] = _live_agent_model_catalog(workspace_root)
         return payload
     except AgentEditorServiceError as exc:
@@ -130,7 +127,7 @@ async def upsert_agent_api(request: AgentUpsertRequest, response: Response) -> d
     """Create or overwrite a custom agent."""
     _no_store(response)
     try:
-        return upsert_agent(
+        return await to_thread_cancel_safe(upsert_agent,
             AgentUpsertPayload(
                 name=request.name,
                 description=request.description,
@@ -160,7 +157,7 @@ async def delete_agent_api(
     """Delete a user-defined custom agent."""
     _no_store(response)
     try:
-        return delete_agent(
+        return await to_thread_cancel_safe(delete_agent,
             name,
             source=source,
             source_path=source_path,

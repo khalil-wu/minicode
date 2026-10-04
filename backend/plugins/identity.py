@@ -11,12 +11,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-try:  # packaging is bundled with the desktop runtime, but keep a safe fallback
-    from packaging.specifiers import InvalidSpecifier, SpecifierSet
-    from packaging.version import InvalidVersion, Version
-except ImportError:  # pragma: no cover - exercised only in minimal runtimes
-    InvalidSpecifier = InvalidVersion = ValueError  # type: ignore[assignment,misc]
-    SpecifierSet = Version = None  # type: ignore[assignment,misc]
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
 
 PluginId = str
 
@@ -177,8 +173,6 @@ def version_satisfies(version: Any, constraints: Any) -> bool:
             continue
         if _simple_constraint_match(raw_version, text):
             continue
-        if SpecifierSet is None or Version is None:
-            return False
         try:
             candidate = Version(_coerce_version(raw_version))
             spec = SpecifierSet(_coerce_specifier(text))
@@ -209,13 +203,6 @@ def version_constraint_is_valid(value: Any) -> bool:
     if re.fullmatch(r"[vV]?\d+(?:\.[xX*]){1,2}", text):
         return True
     try:
-        if SpecifierSet is None or Version is None:
-            return bool(
-                re.fullmatch(
-                    r"\s*(?:\^|~|[<>!=]=?|v?\d[0-9A-Za-z.+-]*)[^\n]*",
-                    text,
-                )
-            )
         SpecifierSet(_coerce_specifier(text))
         return True
     except (InvalidSpecifier, InvalidVersion, ValueError, TypeError):
@@ -241,33 +228,23 @@ def _coerce_specifier(value: str) -> str:
         text = ",".join(text.split())
     if text.startswith("^"):
         base = _coerce_version(text[1:])
-        try:
-            parsed = Version(base) if Version is not None else None
-            if parsed is None:
-                return text
-            if parsed.major > 0 or len(parsed.release) == 1:
-                upper = f"<{parsed.major + 1}.0.0"
-            elif parsed.minor > 0 or len(parsed.release) == 2:
-                upper = f"<0.{parsed.minor + 1}.0"
-            else:
-                upper = f"<0.0.{parsed.micro + 1}"
-            return f">={parsed},{upper}"
-        except Exception:
-            return text
+        parsed = Version(base)
+        if parsed.major > 0 or len(parsed.release) == 1:
+            upper = f"<{parsed.major + 1}.0.0"
+        elif parsed.minor > 0 or len(parsed.release) == 2:
+            upper = f"<0.{parsed.minor + 1}.0"
+        else:
+            upper = f"<0.0.{parsed.micro + 1}"
+        return f">={parsed},{upper}"
     if text.startswith("~"):
         base = _coerce_version(text[1:])
-        try:
-            parsed = Version(base) if Version is not None else None
-            if parsed is None:
-                return text
-            upper = (
-                f"<{parsed.major + 1}.0.0"
-                if len(parsed.release) == 1
-                else f"<{parsed.major}.{parsed.minor + 1}.0"
-            )
-            return f">={parsed},{upper}"
-        except Exception:
-            return text
+        parsed = Version(base)
+        upper = (
+            f"<{parsed.major + 1}.0.0"
+            if len(parsed.release) == 1
+            else f"<{parsed.major}.{parsed.minor + 1}.0"
+        )
+        return f">={parsed},{upper}"
     # Bare versions are exact matches in plugin settings.
     partial = re.fullmatch(r"[vV]?(\d+)(?:\.(\d+))?(?:\.(\d+))?", text)
     if partial:

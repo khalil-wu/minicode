@@ -7,6 +7,10 @@ import {
 } from "./citationProjection";
 
 describe("citationProjection explicit citation contract", () => {
+  it("does not bind backend metadata to code-only citation markers", () => {
+    expect(resolveCitations([{ source: "https://example.test", range: [0, 0] }], "`[1]`\n\n```md\n[1]\n```"))
+      .toEqual([]);
+  });
   it("accepts only HTTP citation URLs", () => {
     expect(citationUrl({ source: "", url: "https://example.com", range: [0, 0] })).toBe("https://example.com");
     expect(citationUrl({ source: "not-a-url", range: [0, 0] })).toBe("");
@@ -55,7 +59,6 @@ describe("citationProjection explicit citation contract", () => {
   it("binds only backend or provider citations to model-authored indexes", () => {
     const citations = resolveCitations(
       [{ source: "https://backend.example/one", range: [0, 0] }],
-      [],
       "Answer [1] [2]",
       [
         { url: "https://provider.example/one", title: "One" },
@@ -70,17 +73,7 @@ describe("citationProjection explicit citation contract", () => {
   });
 
   it("does not parse tool output to fabricate citation ownership", () => {
-    const citations = resolveCitations(undefined, [{
-      type: "tool_call",
-      record: {
-        id: "search-1",
-        name: "web_search",
-        args: {},
-        status: "success",
-        summary: "[1] Result\nURL: https://tool-output.example",
-        startedAt: 1,
-      },
-    }], "Answer [1]");
+    const citations = resolveCitations(undefined, "Answer [1]");
 
     expect(citations).toEqual([]);
   });
@@ -88,7 +81,6 @@ describe("citationProjection explicit citation contract", () => {
   it("drops citations when the answer has no inline markers", () => {
     expect(resolveCitations(
       [{ source: "https://example.com", range: [0, 0] }],
-      [],
       "No markers",
     )).toEqual([]);
   });
@@ -96,7 +88,6 @@ describe("citationProjection explicit citation contract", () => {
   it("keeps provider-native sources when the provider emits no inline markers", () => {
     expect(resolveCitations(
       undefined,
-      [],
       "Provider-authored answer without numeric markers.",
       [{ url: "https://provider.example/source", title: "Provider source" }],
     )).toEqual([

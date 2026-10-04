@@ -264,7 +264,9 @@ class CostTracker:
         usage_reported: bool = True,
     ) -> str:
         """Price one normalized request and return its trace provenance."""
-        reported_cost = usage.cost_usd
+        from backend.llm.base import _normalize_usage_cost
+
+        reported_cost = _normalize_usage_cost(usage.cost_usd)
         usage.cost_usd = self.record_usage(
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,

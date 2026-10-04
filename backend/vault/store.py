@@ -5,10 +5,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import logging
 import os
 from pathlib import Path
 from typing import Any
+from collections.abc import Callable, Mapping
 
 import keyring
 from keyring.errors import KeyringError, PasswordDeleteError
@@ -16,10 +16,18 @@ from keyring.errors import KeyringError, PasswordDeleteError
 from backend.config import STATE_ROOT
 from backend.atomic_io import atomic_write_text, file_mutation_locks
 
-logger = logging.getLogger(__name__)
+_CREDENTIAL_ERRORS = (KeyringError,)
+if os.name == "nt":
+    import pywintypes
+
+    _CREDENTIAL_ERRORS += (pywintypes.error,)
 
 VAULT_FILE = STATE_ROOT / ".minicode" / "vault.json"
 _KDF_ITERATIONS = 100_000  # legacy v1 migration only
+
+
+class VaultReadError(RuntimeError):
+    """A persisted vault entry or index exists but cannot be read."""
 
 
 def _derive_key(passphrase: bytes, salt: bytes, length: int = 32) -> bytes:
@@ -43,7 +51,6 @@ class EnvVault:
     def __init__(self, vault_path: Path | None = None) -> None:
         self._path = vault_path or VAULT_FILE
         self._entries: dict[str, _VaultEntry] = {}
-        self._load_failed = False
         self._service = f"minicode:{hashlib.sha256(str(self._path.resolve()).encode()).hexdigest()[:20]}"
         self._load()
 
@@ -53,24 +60,23 @@ class EnvVault:
 
     def _load_unlocked(self) -> None:
         self._entries = {}
-        self._load_failed = False
         if not self._path.exists():
             return
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or not isinstance(data.get("entries", {}), dict):
+                raise ValueError("vault index must contain an entries object")
             for name, raw in data.get("entries", {}).items():
+                if not isinstance(raw, dict):
+                    raise ValueError("vault index entry must be an object")
                 self._entries[name] = _VaultEntry(
                     description=raw.get("description", ""),
                     scope=raw.get("scope", "global"),
                     encrypted_value=str(raw.get("value") or ""),
                     salt=str(raw.get("salt") or ""),
                 )
-        except (json.JSONDecodeError, OSError, KeyError, TypeError) as exc:
-            # A failed read must never be turned into an empty index: set()
-            # and delete() re-save after loading, so a swallowed failure here
-            # would permanently orphan every secret in the credential store.
-            logger.warning("vault load failed: %s", exc)
-            self._load_failed = True
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise VaultReadError(f"Vault index at {self._path} is unreadable") from exc
 
     def _save_unlocked(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,36 +94,61 @@ class EnvVault:
         atomic_write_text(self._path, json.dumps(data, indent=2))
 
     def set(self, name: str, value: str, *, description: str = "", scope: str = "global") -> None:
+        self.set_many({name: (value, description, scope)})
+
+    def set_many(
+        self, changes: Mapping[str, tuple[str | None, str, str]], *,
+        publish: Callable[[], Any] | None = None,
+    ) -> Any:
+        """Commit one credential family; None removes a member of the family."""
         with file_mutation_locks([self._path]):
             self._load_unlocked()
-            if self._load_failed:
-                raise RuntimeError(
-                    f"vault index at {self._path} is unreadable; refusing to "
-                    "overwrite it (repair or remove the file first)"
-                )
+            original_index = self._path.read_bytes() if self._path.exists() else None
             try:
-                previous = keyring.get_password(self._service, name)
-                keyring.set_password(self._service, name, value)
-            except KeyringError as exc:
-                raise RuntimeError(f"OS credential store rejected the secret: {exc}") from exc
-            self._entries[name] = _VaultEntry(
-                description=description,
-                scope=scope,
-            )
+                previous = {name: keyring.get_password(self._service, name) for name in changes}
+            except _CREDENTIAL_ERRORS as exc:
+                raise RuntimeError("OS credential store could not read the previous credential family") from exc
             try:
-                self._save_unlocked()
-            except Exception:
-                # Keep the credential store and metadata index transactional.
-                # A failed metadata publication must not leave an undiscoverable
-                # new secret or overwrite the previous secret value.
-                try:
-                    if previous is None:
-                        keyring.delete_password(self._service, name)
+                for name, (value, description, scope) in changes.items():
+                    if value is None:
+                        try:
+                            keyring.delete_password(self._service, name)
+                        except PasswordDeleteError:
+                            pass
+                        self._entries.pop(name, None)
                     else:
-                        keyring.set_password(self._service, name, previous)
-                except (KeyringError, PasswordDeleteError):
-                    logger.error("vault credential rollback failed for %s", name)
-                self._load_unlocked()
+                        keyring.set_password(self._service, name, value)
+                        self._entries[name] = _VaultEntry(description=description, scope=scope)
+                self._save_unlocked()
+                return publish() if publish is not None else None
+            except Exception as failure:
+                rollback_errors = []
+                for name, value in previous.items():
+                    try:
+                        if value is None:
+                            try:
+                                keyring.delete_password(self._service, name)
+                            except PasswordDeleteError:
+                                pass
+                        else:
+                            keyring.set_password(self._service, name, value)
+                    except _CREDENTIAL_ERRORS as exc:
+                        rollback_errors.append(exc)
+                try:
+                    if original_index is None:
+                        if self._path.exists():
+                            self._path.unlink()
+                    else:
+                        current_index = self._path.read_bytes() if self._path.exists() else None
+                        if current_index != original_index:
+                            atomic_write_text(self._path, original_index.decode("utf-8"))
+                    self._load_unlocked()
+                except (OSError, VaultReadError) as exc:
+                    rollback_errors.append(exc)
+                if rollback_errors:
+                    raise ExceptionGroup("Credential family publication and rollback failed", [failure, *rollback_errors]) from failure
+                if isinstance(failure, _CREDENTIAL_ERRORS):
+                    raise RuntimeError("OS credential store rejected the credential family") from failure
                 raise
 
     def get(self, name: str) -> str | None:
@@ -133,7 +164,7 @@ class EnvVault:
                 # One-time migration from the v1 PBKDF2/XOR file. Successful
                 # migration immediately removes ciphertext from disk.
                 if not entry.encrypted_value or not entry.salt:
-                    return None
+                    raise VaultReadError(f"Vault entry {name} has no credential in the OS store")
                 key = _derive_key(_machine_passphrase(), base64.b64decode(entry.salt))
                 decrypted = _xor_bytes(base64.b64decode(entry.encrypted_value), key)
                 value = decrypted.decode()
@@ -142,38 +173,15 @@ class EnvVault:
                 entry.salt = ""
                 self._save_unlocked()
                 return value
-            except (KeyringError, ValueError, UnicodeDecodeError) as exc:
-                logger.warning("vault decrypt failed for %s: %s", name, exc)
-                return None
+            except (*_CREDENTIAL_ERRORS, ValueError, UnicodeDecodeError) as exc:
+                raise VaultReadError(f"OS credential store could not read vault entry {name}") from exc
 
     def delete(self, name: str) -> bool:
         with file_mutation_locks([self._path]):
             self._load_unlocked()
-            if self._load_failed:
-                raise RuntimeError(
-                    f"vault index at {self._path} is unreadable; refusing to "
-                    "overwrite it (repair or remove the file first)"
-                )
             if name not in self._entries:
                 return False
-            try:
-                previous = keyring.get_password(self._service, name)
-                keyring.delete_password(self._service, name)
-            except PasswordDeleteError:
-                previous = None
-            except KeyringError as exc:
-                raise RuntimeError(f"OS credential store could not delete the secret: {exc}") from exc
-            del self._entries[name]
-            try:
-                self._save_unlocked()
-            except Exception:
-                if previous is not None:
-                    try:
-                        keyring.set_password(self._service, name, previous)
-                    except KeyringError:
-                        logger.error("vault credential rollback failed for %s", name)
-                self._load_unlocked()
-                raise
+            self.set_many({name: (None, "", "")})
             return True
 
     def list_names(self) -> list[dict[str, str]]:

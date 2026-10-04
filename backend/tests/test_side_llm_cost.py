@@ -727,7 +727,7 @@ def test_anthropic_side_query_disables_cache_and_uses_small_model() -> None:
     assert captured["max_tokens"] == 4096
     assert captured["system"] == "system"
     assert all("cache_control" not in message for message in captured["messages"])
-    assert "thinking" not in captured
+    assert captured["thinking"] == {"type": "disabled"}
     assert captured["output_config"] == {
         "format": {
             "type": "json_schema",

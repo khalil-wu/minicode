@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from backend.agent.execution_journal import ExecutionJournal, JournalEvent
+from backend.agent.execution_journal import ExecutionJournal, JournalEvent, conversation_projection_owner_fields
 from backend.agent.message import AgentEvent
 
 if TYPE_CHECKING:
@@ -34,6 +34,7 @@ class QueryJournalRecorder:
     agent_message_receipts: dict[str, tuple[int, float]] = field(
         default_factory=dict
     )
+    projection_base_snapshot: dict[str, Any] = field(default_factory=dict)
 
     @property
     def terminal_intent_event_id(self) -> str:
@@ -53,11 +54,14 @@ class QueryJournalRecorder:
         return self.journal.append_lifecycle(name, payload)
 
     def record_turn_started(self) -> None:
+        self.projection_base_snapshot = self.context_builder.export_snapshot()
         self.lifecycle(
             "turn_started",
             {
                 "conversation_id": self.conversation_id,
-                "context_snapshot": self.context_builder.export_snapshot(),
+                "run_id": str(self.metadata.get("run_id") or ""),
+                "turn_id": str(self.metadata.get("turn_id") or self.metadata.get("run_id") or ""),
+                "context_snapshot": self.projection_base_snapshot,
             },
         )
         self.lifecycle(
@@ -76,6 +80,8 @@ class QueryJournalRecorder:
         if self.terminal_intent_key == next_key:
             return
         message_id = str(self.metadata.get("assistant_message_id") or "")
+        from backend.conversations.context_delta import context_snapshot_delta
+        snapshot = self.context_builder.export_snapshot()
         self.terminal_intent_event = self.lifecycle(
             "terminal_intent",
             {
@@ -91,7 +97,9 @@ class QueryJournalRecorder:
                     "terminal_status": status,
                     "termination_reason": reason,
                 },
-                "context_snapshot": self.context_builder.export_snapshot(),
+                "context_snapshot": snapshot,
+                "context_delta": context_snapshot_delta(self.projection_base_snapshot, snapshot),
+                **conversation_projection_owner_fields(self.metadata, snapshot),
                 "checkpoint": self._checkpoint_evidence(),
                 "supersedes_terminal_intent_event_id": (
                     self.terminal_intent_event_id
@@ -228,6 +236,8 @@ class QueryJournalRecorder:
                 self.state.prompt_context.get("last_completed_assistant_text", "")
             )
         terminal_context_snapshot = self.context_builder.export_snapshot()
+        from backend.conversations.context_delta import context_snapshot_delta
+        projection_owner = conversation_projection_owner_fields(self.metadata, terminal_context_snapshot)
         self.journal.append(
             "assistant",
             {
@@ -237,8 +247,21 @@ class QueryJournalRecorder:
                 "conversation_id": self.conversation_id,
                 "message_id": str(self.metadata.get("assistant_message_id") or ""),
                 "context_snapshot": terminal_context_snapshot,
+                "context_delta": context_snapshot_delta(self.projection_base_snapshot, terminal_context_snapshot),
+                **projection_owner,
             },
         )
+        open_uses = {item["tool_call_id"]: item for item in self.journal.unresolved_tool_uses()}
+        claims = {event.event_id: event.payload.get("tool_call", {})
+                  for event in self.journal.read_events() if event.event_type == "tool_use"}
+        for record in self.state.committed_tool_results(str(self.metadata.get("run_id") or "")):
+            use = open_uses.get(record.tool_call_id)
+            claim = claims.get(use["event_id"], {}) if use is not None else {}
+            if (use is not None and use["tool_name"] == record.tool_name
+                    and claim.get("turn_id") == record.turn_id
+                    and claim.get("iteration_id") == record.iteration_id
+                    and use["request_digest"] == record.request_digest):
+                self.journal.append_tool_result(record.result_payload, tool_name=record.tool_name)
         uncertain = self.journal.unresolved_tool_uses()
         self.journal.close_unresolved_tool_uses(
             reason=reason or status,
@@ -288,6 +311,7 @@ class QueryJournalRecorder:
                     if key in event.data
                 },
                 "checkpoint": self._checkpoint_evidence(),
+                **projection_owner,
             },
         )
         self.terminal_recorded = True

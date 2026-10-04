@@ -303,15 +303,11 @@ class ShellEnvironmentPolicy:
             raise ShellEnvironmentPolicyError(
                 "shell_environment_policy.set must be a table/object of string values"
             )
-        set_values = _validated_env_mapping(
-            raw_set,
-            reject_process_control=False,
-        )
         return cls(
             inherit=inherit,
             ignore_default_excludes=ignore_default_excludes,
             exclude=tuple(exclude_values),
-            set_values=set_values,
+            set_values=raw_set,
             include_only=tuple(include_values),
             use_profile=use_profile,
         )

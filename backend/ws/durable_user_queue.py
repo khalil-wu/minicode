@@ -13,7 +13,7 @@ import logging
 import re
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
@@ -23,12 +23,12 @@ from uuid import uuid4
 from filelock import FileLock, Timeout
 
 from backend.agent.message import UserCommand
-from backend.atomic_io import atomic_write_text, file_mutation_locks
+from backend.atomic_io import atomic_write_text, canonical_file_path_key, file_mutation_locks
 from backend.ws.client_command_log import _clean_command_id
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _OWNER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
@@ -57,10 +57,12 @@ class _DurableQueueState:
     inflight_owners: dict[str, str]
     turn_input_owners: dict[str, str]
     client_inflight_owners: dict[str, str]
+    migrated_sources: set[str]
+    paused_conversations: dict[str, str]
 
     @classmethod
     def empty(cls) -> "_DurableQueueState":
-        return cls({}, {}, {}, [], {}, {}, {}, {})
+        return cls({}, {}, {}, [], {}, {}, {}, {}, set(), {})
 
 
 class DurableUserMessageQueue:
@@ -85,6 +87,8 @@ class DurableUserMessageQueue:
         self._inflight_owners: dict[str, str] = {}
         self._turn_input_owners: dict[str, str] = {}
         self._client_inflight_owners: dict[str, str] = {}
+        self._migrated_sources: set[str] = set()
+        self._paused_conversations: dict[str, str] = {}
         self._owner_queues: dict[str, list[UserCommand]] = {}
         self._owner_inflight: dict[str, UserCommand] = {}
         self._owner_turn_inputs: dict[str, list[UserCommand]] = {}
@@ -305,6 +309,14 @@ class DurableUserMessageQueue:
                 "unexpected_payload", f"top-level {type(payload).__name__}"
             )
             return _DurableQueueState.empty()
+        migrated = payload.get("migrated_sources", [])
+        if not isinstance(migrated, list) or any(not isinstance(name, str) for name in migrated):
+            self._quarantine_corrupt_file_unlocked("unexpected_payload", "invalid migrated_sources")
+            return _DurableQueueState.empty()
+        paused = payload.get("paused_conversations", {})
+        if not isinstance(paused, dict) or any(not isinstance(token, str) or not token for token in paused.values()):
+            self._quarantine_corrupt_file_unlocked("unexpected_payload", "invalid paused_conversations")
+            return _DurableQueueState.empty()
         queues: dict[str, list[UserCommand]] = {}
         raw_queues = payload.get("queues")
         if not isinstance(raw_queues, dict):
@@ -379,6 +391,8 @@ class DurableUserMessageQueue:
                 "client_inflight",
                 set(client_inflight),
             ),
+            migrated_sources=set(migrated),
+            paused_conversations=paused,
         )
 
     def _adopt_state_unlocked(self, state: _DurableQueueState) -> None:
@@ -390,6 +404,57 @@ class DurableUserMessageQueue:
         self._inflight_owners = state.inflight_owners
         self._turn_input_owners = state.turn_input_owners
         self._client_inflight_owners = state.client_inflight_owners
+        self._migrated_sources = state.migrated_sources
+        self._paused_conversations = state.paused_conversations
+
+    def migrate_user_messages_to(self, destination: "DurableUserMessageQueue") -> int | None:
+        """Transfer an inactive legacy window's turn inputs, retaining its client commands."""
+        with ExitStack() as scope:
+            for queue in sorted((self, destination), key=lambda item: canonical_file_path_key(item.path)):
+                scope.enter_context(queue._locked())
+            if any(
+                lease.stem != self._owner_id and self._owner_is_live_unlocked(lease.stem)
+                for lease in self._lease_dir.glob("*.lock")
+            ):
+                return None
+            self._refresh_from_disk_unlocked()
+            if self._inflight or self._turn_inputs:
+                return None
+            destination._refresh_from_disk_unlocked()
+            if self.last_load_error is not None:
+                destination.last_load_error = self.last_load_error
+                return 0
+            source_id = self.path.name
+            transferred = 0
+            if source_id not in destination._migrated_sources:
+                for conversation_id, commands in self._queues.items():
+                    known = {
+                        self._user_command_identity(command)
+                        for command in (
+                            *destination._queues.get(conversation_id, ()),
+                            *destination._turn_inputs.get(conversation_id, ()),
+                            *([destination._inflight[conversation_id]] if conversation_id in destination._inflight else []),
+                        )
+                    }
+                    pending = destination._queues.setdefault(conversation_id, [])
+                    for command in commands:
+                        identity = self._user_command_identity(command)
+                        if identity not in known:
+                            pending.append(command)
+                            known.add(identity)
+                            transferred += 1
+                # Publish the source receipt with the transferred work. If the
+                # source clear fails, a later migration must not replay work
+                # that may already have completed in the shared queue.
+                destination._migrated_sources.add(source_id)
+                destination._write_current_unlocked()
+            self._queues.clear()
+            self._inflight.clear()
+            self._turn_inputs.clear()
+            self._inflight_owners.clear()
+            self._turn_input_owners.clear()
+            self._write_current_unlocked()
+            return transferred
 
     def _recover_stale_owners_unlocked(self, state: _DurableQueueState) -> bool:
         """Replay only work whose persisted owner lease is provably free."""
@@ -681,6 +746,8 @@ class DurableUserMessageQueue:
             json.dumps(
                 {
                     "version": _SCHEMA_VERSION,
+                    "migrated_sources": sorted(self._migrated_sources),
+                    "paused_conversations": self._paused_conversations,
                     "queues": serialized_queues,
                     "inflight": serialized_inflight,
                     "turn_inputs": serialized_turn_inputs,
@@ -726,7 +793,7 @@ class DurableUserMessageQueue:
         return _clean_command_id(command.data.get("client_command_id"))
 
     @classmethod
-    def _same_user_command(cls, left: UserCommand, right: UserCommand) -> bool:
+    def same_user_command(cls, left: UserCommand, right: UserCommand) -> bool:
         return cls._user_command_identity(left) == cls._user_command_identity(right)
 
     def _update_owner_queue_baseline_unlocked(self, conversation_id: str) -> None:
@@ -739,7 +806,28 @@ class DurableUserMessageQueue:
     @_queue_locked
     def pending_user_messages(self, conversation_id: str) -> list[UserCommand]:
         self._refresh_from_disk_unlocked()
+        self._update_owner_queue_baseline_unlocked(str(conversation_id))
         return list(self._queues.get(str(conversation_id), []))
+
+    @_queue_locked
+    def pending_user_message_snapshot(self) -> dict[str, list[UserCommand]]:
+        self._refresh_from_disk_unlocked()
+        return {owner: list(commands) for owner, commands in self._queues.items()}
+
+    @_queue_locked
+    def set_user_queue_paused(self, conversation_id: str, stopped_message_id: str) -> None:
+        """Keep repeat Stop for one message idempotent across queue owners."""
+        self._refresh_from_disk_unlocked()
+        if stopped_message_id:
+            self._paused_conversations[conversation_id] = stopped_message_id
+        else:
+            self._paused_conversations.pop(conversation_id, None)
+        self._write_current_unlocked()
+
+    @_queue_locked
+    def paused_user_queues(self) -> dict[str, str]:
+        self._refresh_from_disk_unlocked()
+        return dict(self._paused_conversations)
 
     @_queue_locked
     def claim_user_message(self, conversation_id: str) -> UserCommand | None:
@@ -761,7 +849,15 @@ class DurableUserMessageQueue:
             self._update_owner_queue_baseline_unlocked(owner)
             return None
 
-        command = queue.pop(0)
+        index = 0
+        if owner in self._paused_conversations:
+            # New input can consent to its own execution after this Stop.
+            # A Stop of a later message invalidates that earlier consent.
+            pause_token = self._paused_conversations[owner]
+            index = next((i for i, item in enumerate(queue) if item.data.get("_queue_explicit_send") == pause_token), -1)
+            if index < 0:
+                return None
+        command = queue.pop(index)
         if not queue:
             self._queues.pop(owner, None)
         self._inflight[owner] = command
@@ -771,7 +867,7 @@ class DurableUserMessageQueue:
         except Exception:
             self._inflight.pop(owner, None)
             self._inflight_owners.pop(owner, None)
-            self._queues.setdefault(owner, []).insert(0, command)
+            self._queues.setdefault(owner, []).insert(index, command)
             raise
         self._update_owner_queue_baseline_unlocked(owner)
         self._owner_inflight[owner] = command
@@ -793,7 +889,7 @@ class DurableUserMessageQueue:
         if (
             inflight is None
             or self._inflight_owners.get(owner) != self._owner_id
-            or not self._same_user_command(inflight, command)
+            or not self.same_user_command(inflight, command)
         ):
             return False
 

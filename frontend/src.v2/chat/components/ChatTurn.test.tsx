@@ -24,12 +24,30 @@ import { useAppStore } from "../../stores";
 
 afterEach(() => cleanup());
 
+it("keeps progress explanations readable when tool details are collapsed", () => {
+  render(<ChatTurn turn={{
+    id: "narration-with-tools", userCell: null, activeCell: null, status: "completed", startedAt: 1, completedAt: 3,
+    committedCells: [
+      { kind: "thinking", id: "explanation", content: "已定位到重复发送，正在核对调用方。", source: "model_preamble", isStreaming: false, createdAt: 1 },
+      { kind: "exec", id: "verify", command: "npm test", status: "success", stdoutPreview: ["Verification passed"], stderrPreview: [], collapsed: false, createdAt: 2 },
+    ],
+    finalAnswerCell: { kind: "assistant_markdown", id: "complete", markdownSource: "修复完成。", phase: "final", copyable: true, createdAt: 3 },
+  }} />);
+  expect(screen.getByText("已定位到重复发送，正在核对调用方。")).toBeTruthy();
+  expect(screen.queryByText("Verification passed")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
+  expect(screen.getByText("Verification passed")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
+  expect(screen.getByText("已定位到重复发送，正在核对调用方。")).toBeTruthy();
+  expect(screen.queryByText("Verification passed")).toBeNull();
+});
+
 it("shows the stopped state when a restored interrupted turn has no retained content", () => {
   render(<ChatTurn turn={{
     id: "empty-interrupted", userCell: null, committedCells: [], activeCell: null,
     finalAnswerCell: null, status: "interrupted", startedAt: 1, completedAt: 2,
   }} />);
-  expect(screen.getByRole("status").textContent).toContain("已停止");
+  expect(screen.getByRole("status").textContent).toContain("Stopped");
 });
 
 describe("HistoryCellRenderer", () => {
@@ -150,14 +168,14 @@ describe("ChatTurn live answer", () => {
       finalAnswerCell: { kind: "assistant_markdown", id: "answer", messageId: "answer", markdownSource: "Done", phase: "final", copyable: true, createdAt: 2 },
     };
     render(<ChatTurn turn={turn} />);
-    const group = screen.getByRole("button", { name: "读取了文件 · 2 项" });
+    const group = screen.getByRole("button", { name: "Explored" });
     expect(group.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(group);
     expect(screen.getByText("first.md")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
-    expect(screen.getByRole("button", { name: "读取了文件 · 2 项" }).getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryByText("first.md")).toBeNull();
+    expect(screen.getByRole("button", { name: "Explored" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("first.md")).toBeTruthy();
     useAppStore.setState({ viewMode: previousMode });
   });
 
@@ -212,8 +230,8 @@ describe("ChatTurn live answer", () => {
     render(<ChatTurn turn={turn} />);
 
     expect(screen.getByText("这是正在流式输出的答案。")).toBeTruthy();
-    expect(screen.getByText("搜索网页", { selector: ".activity-cell-name" })).toBeTruthy();
-    expect(screen.queryByRole("status", { name: "正在处理" })).toBeNull();
+    expect(screen.getByText("Search", { selector: ".activity-cell-name" })).toBeTruthy();
+    expect(screen.queryByRole("status", { name: "Working" })).toBeNull();
   });
 
   it("shows provisional narration in the work zone while the turn is still running", () => {
@@ -243,7 +261,7 @@ describe("ChatTurn live answer", () => {
     expect(screen.getByText("我先检查相关文件。")).toBeTruthy();
     expect(container.querySelector('[data-zone="work"]')).toBeTruthy();
     expect(container.querySelector('[data-zone="reply"]')).toBeNull();
-    expect(screen.queryByRole("status", { name: "正在处理" })).toBeNull();
+    expect(screen.queryByRole("status", { name: "Working" })).toBeNull();
   });
 });
 
@@ -324,10 +342,10 @@ describe("ChatTurn", () => {
     };
     const { container, rerender } = render(<ChatTurn turn={turn} />);
     expect(container.querySelectorAll(".activity-cell-running")).toHaveLength(0);
-    expect(screen.getAllByRole("status", { name: "正在处理" })).toHaveLength(1);
+    expect(screen.getAllByRole("status", { name: "Working" })).toHaveLength(1);
     rerender(<ChatTurn turn={{ ...turn, committedCells: [cells[0], { ...cells[1], kind: "activity", status: "running" }] }} />);
     expect(container.querySelectorAll(".activity-cell-running")).toHaveLength(1);
-    expect(screen.queryByRole("status", { name: "正在处理" })).toBeNull();
+    expect(screen.queryByRole("status", { name: "Working" })).toBeNull();
   });
 
   it("opens a shortened file reference using the successful read in the owning turn", () => {
@@ -491,10 +509,10 @@ describe("ChatTurn", () => {
 
     render(<ChatTurn turn={turn} />);
 
-    expect(screen.getAllByText("已发送消息 1 个智能体")).toHaveLength(3);
+    expect(screen.getAllByText("Sent message · 1 agent")).toHaveLength(3);
     expect(screen.getByText("请完整审计渲染链路并返回证据。")).toBeTruthy();
     expect(screen.getByText("优先核对真实生产问题。")).toBeTruthy();
-    expect(screen.getByText("已关闭 1 个智能体")).toBeTruthy();
+    expect(screen.getByText("Closed · 1 agent")).toBeTruthy();
     expect(screen.getAllByText("Kant", { selector: "strong" })).toHaveLength(2);
   });
 
@@ -529,13 +547,13 @@ describe("ChatTurn", () => {
     render(<ChatTurn turn={turn} />);
 
     expect(screen.getByText("Implementation complete.")).toBeTruthy();
-    expect(screen.queryByText("Ran explicit tool")).toBeNull();
-    expect(screen.getByText("用时 2 秒")).toBeTruthy();
+    expect(screen.queryByText("Run explicit tool")).toBeNull();
+    expect(screen.getByText("Worked for 2s")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
-    expect(screen.getByText("Ran explicit tool", { selector: ".activity-cell-name" })).toBeTruthy();
+    expect(screen.getByText("Run explicit tool", { selector: ".activity-cell-name" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
-    expect(screen.queryByText("Ran explicit tool", { selector: ".activity-cell-name" })).toBeNull();
-    expect(screen.queryByText("Ran explicit tool")).toBeNull();
+    expect(screen.queryByText("Run explicit tool", { selector: ".activity-cell-name" })).toBeNull();
+    expect(screen.queryByText("Run explicit tool")).toBeNull();
   });
 
   it("keeps raw URLs visible when a settled turn has no complete final answer", () => {
@@ -564,7 +582,7 @@ describe("ChatTurn", () => {
     render(<ChatTurn turn={turn} />);
 
     expect(screen.getByTitle(command)).toBeTruthy();
-    expect(screen.getByText("用时 26 秒")).toBeTruthy();
+    expect(screen.getByText("Worked for 26s")).toBeTruthy();
     expect(screen.queryByText("1 个工具")).toBeNull();
     expect(screen.queryByText("1 条命令")).toBeNull();
     expect(screen.queryByRole("button", { name: "展开处理步骤" })).toBeNull();
@@ -629,7 +647,7 @@ describe("ChatTurn", () => {
     const workArea = screen.getByLabelText("Agent 处理进度");
     const workText = workArea.textContent || "";
     expect(workText.indexOf("重新发起，将这些调研任务标记为只读以并行执行。"))
-      .toBeLessThan(workText.indexOf("正在执行工具"));
+      .toBeLessThan(workText.indexOf(workArea.querySelector(".activity-cell-name")!.textContent!));
     expect(screen.queryByLabelText("Agent reply")).toBeNull();
     expect(screen.queryByLabelText("Assistant response")).toBeNull();
   });
@@ -655,8 +673,8 @@ describe("ChatTurn", () => {
     const { rerender } = render(<ChatTurn turn={runningTurn} />);
 
     expect(screen.queryByRole("button", { name: "收起处理步骤" })).toBeNull();
-    expect(screen.queryByRole("status", { name: "正在处理" })).toBeNull();
-    expect(screen.getByText("正在执行工具", { selector: ".activity-cell-name" })).toBeTruthy();
+    expect(screen.queryByRole("status", { name: "Working" })).toBeNull();
+    expect(screen.getByText("Inspecting projection", { selector: ".activity-cell-name" })).toBeTruthy();
     const workArea = screen.getByLabelText("Agent 处理进度");
     const summary = workArea.querySelector('[data-position="bottom"]');
     const timeline = workArea.querySelector(".agent-loop-timeline");
@@ -686,7 +704,7 @@ describe("ChatTurn", () => {
     }} />);
 
     expect(screen.getByRole("button", { name: "展开处理步骤" }).getAttribute("aria-expanded")).toBe("false");
-    expect(screen.getByText("用时 2 秒")).toBeTruthy();
+    expect(screen.getByText("Worked for 2s")).toBeTruthy();
     expect(screen.queryByText("Inspecting projection", { selector: ".activity-cell-name" })).toBeNull();
   });
 
@@ -715,8 +733,8 @@ describe("ChatTurn", () => {
     const workArea = screen.getByLabelText("Agent 处理进度");
     const timeline = workArea.querySelector(".agent-loop-timeline");
     const summary = workArea.querySelector('[data-position="bottom"]');
-    expect(screen.getByText("搜索网页", { selector: ".activity-cell-name" })).toBeTruthy();
-    expect(screen.getByRole("status", { name: "正在处理" })).toBeTruthy();
+    expect(screen.getByText("Search", { selector: ".activity-cell-name" })).toBeTruthy();
+    expect(screen.getByRole("status", { name: "Working" })).toBeTruthy();
     expect(timeline).toBeTruthy();
     expect(summary).toBeTruthy();
     expect(Array.from(workArea.children).indexOf(timeline as Element))

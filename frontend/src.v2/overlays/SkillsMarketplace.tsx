@@ -10,7 +10,7 @@ import { ContextMenu, type ContextMenuItem } from "../components/ContextMenu";
 import { isDesktop, pickDirectory } from "../desktop/runtime";
 import { openSettings } from "../lib/settings-navigation";
 import { selectSkillForComposer } from "../lib/select-skill-for-composer";
-import { showAlert, showConfirm, showPrompt } from "./DialogService";
+import { showConfirm, showPrompt } from "./DialogService";
 import { PluginsTab } from "./PluginsTab";
 import { pushToast } from "./ToastContainer";
 import "./SkillsMarketplace.css";
@@ -68,7 +68,7 @@ export const SkillsMarketplace = () => {
 const SkillsCatalog = ({ toolbarHost, active }: { toolbarHost: HTMLElement | null; active: boolean }) => {
   const availableSkills = useAppStore((s) => s.availableSkills);
   const marketplaceSkills = useAppStore((s) => s.marketplaceSkills);
-  const [scope, setScope] = useState("builtin");
+  const [scope, setScope] = useState("all");
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -77,6 +77,12 @@ const SkillsCatalog = ({ toolbarHost, active }: { toolbarHost: HTMLElement | nul
   const pendingRef = useRef(false);
   const loadAbortRef = useRef<AbortController | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
+  const [detail, setDetail] = useState<{ kind: "installed"; skill: SkillInfo } | { kind: "public"; skill: MarketplaceSkill } | null>(null);
+  const detailRef = useRef<HTMLElement>(null);
+  const detailTrigger = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (detail) detailRef.current?.focus();
+  }, [detail]);
   const loadMarketplace = useCallback(async (force = false) => {
     loadAbortRef.current?.abort();
     const controller = new AbortController();
@@ -135,11 +141,13 @@ const SkillsCatalog = ({ toolbarHost, active }: { toolbarHost: HTMLElement | nul
   const q = query.trim().toLocaleLowerCase();
   const matches = (text: string) => !q || text.toLocaleLowerCase().includes(q);
   const installed = availableSkills.filter((skill) => matches(`${skill.name} ${skill.display_name ?? ""} ${skill.description}`));
-  const scoped = installed.filter((skill) => skill.source_level === scope);
+  const scoped = scope === "all" ? installed : installed.filter((skill) => skill.source_level === scope);
   const catalog = marketplaceSkills.filter((skill) => matches(`${skill.name} ${skill.title} ${skill.description}`));
   const installedNames = new Set(availableSkills.map((skill) => skill.name));
+  const detailInstalled = detail && (installedNames.has(detail.skill.name) || (detail.kind === "public" && marketplaceSkills.some((skill) => skill.name === detail.skill.name && skill.installed)));
   const scopes = Object.entries(sourceLabels).filter(([key]) => key === "builtin" || key === "user" || key === scope || availableSkills.some((skill) => skill.source_level === key));
-  const showSkillDetails = (skill: SkillInfo) => void showAlert({ title: skill.display_name || skill.name, message: `${skill.description}\n\n来源：${sourceLabels[skill.source_level ?? ""] ?? skill.source_level ?? "本地"}${skill.path ? `\n${skill.path}` : ""}${skill.user_invocable === false ? "\n此技能由模型按需调用。" : ""}` });
+  const showSkillDetails = (skill: SkillInfo) => { detailTrigger.current = document.activeElement as HTMLElement; setDetail({ kind: "installed", skill }); setMenu(null); };
+  const closeDetails = () => { setDetail(null); window.requestAnimationFrame(() => detailTrigger.current?.focus()); };
   const skillMenu = (skill: SkillInfo, target: HTMLButtonElement) => {
     const rect = target.getBoundingClientRect();
     setMenu({ kind: "skill", position: { x: rect.right - 200, y: rect.bottom + 4 }, items: [
@@ -163,13 +171,40 @@ const SkillsCatalog = ({ toolbarHost, active }: { toolbarHost: HTMLElement | nul
         setMenu({ kind: "add", position: { x: rect.right - 200, y: rect.bottom + 4 }, items: [{ label: "导入本地技能", icon: <FolderOpen />, onClick: () => void mutate("import") }, { label: "浏览公开技能", icon: <Globe2 />, onClick: () => setScope("public") }] });
       }}>添加 <ChevronDown /></button>
     </>, toolbarHost)}
+    {detail && <section ref={detailRef} tabIndex={-1} className="skills-detail-page" aria-label="技能详情" onKeyDown={(event) => {
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeDetails(); }
+    }}>
+      <button type="button" className="skills-detail-back" onClick={closeDetails}><ArrowLeft size={16} />返回技能列表</button>
+      <div className="skills-detail-heading"><SkillLogo value={detail.kind === "installed" ? detail.skill.display_name || detail.skill.name : detail.skill.title} iconUrl={detail.kind === "installed" ? detail.skill.icon_large || detail.skill.icon : detail.skill.iconUrl} /><div>
+        <h1>{detail.kind === "installed" ? detail.skill.display_name || detail.skill.name : detail.skill.title}</h1><code>{detail.skill.name}</code>
+      </div></div>
+      <div className="skills-detail-description">{detail.skill.description}</div>
+      {detail.kind === "installed" ? <>
+        <dl className="skills-detail-meta"><div><dt>来源</dt><dd>{sourceLabels[detail.skill.source_level || ""] || detail.skill.source_level || "本地"}</dd></div>
+          {detail.skill.version && <div><dt>版本</dt><dd>{detail.skill.version}</dd></div>}
+          <div><dt>调用方式</dt><dd>{detail.skill.user_invocable === false ? "由模型按需调用" : "可用于下一条消息"}{detail.skill.allow_implicit_invocation === false ? " · 不自动触发" : ""}</dd></div>
+          {detail.skill.path && <div><dt>源文件</dt><dd><code>{detail.skill.path}</code></dd></div>}
+        </dl>
+        {(detail.skill.mcp_dependencies?.length || 0) > 0 && <div className="skills-detail-note"><strong>依赖的 MCP 服务</strong><p>{detail.skill.mcp_dependencies!.join("、")}</p><button type="button" className="skills-text-button" onClick={() => { useAppStore.setState({ skillsMarketplaceOpen: false }); openSettings("connectors"); }}>打开 MCP 设置</button></div>}
+        <div className="skills-detail-actions"><button type="button" className="skills-text-button" disabled={detail.skill.user_invocable === false} onClick={() => selectSkillForComposer(detail.skill)}><MessageSquarePlus size={16} />用于下一条消息</button>
+          {detail.skill.source_level === "user" && <button type="button" className="skills-text-button" disabled={Boolean(operation)} onClick={() => void mutate("remove", detail.skill.name)}>卸载技能</button>}
+          {detail.skill.source_level === "plugin" && <button type="button" className="skills-text-button" onClick={() => useAppStore.setState({ skillsMarketplaceTab: "plugins" })}>管理所属插件</button>}
+        </div>
+      </> : <>
+        <dl className="skills-detail-meta"><div><dt>来源</dt><dd>{detail.skill.source || "OpenAI 技能目录"}</dd></div><div><dt>安装范围</dt><dd>个人技能目录</dd></div></dl>
+        {(detail.skill.triggers?.length || 0) > 0 && <div className="skills-detail-note"><strong>适用任务</strong><p>{detail.skill.triggers.join("、")}</p></div>}
+        <button type="button" className="skills-text-button" disabled={Boolean(operation) || Boolean(detailInstalled)} onClick={() => void mutate("install", detail.skill.name)}>{operation === `install:${detail.skill.name}` ? "安装中…" : detailInstalled ? "已安装到个人技能目录" : "安装到个人技能目录"}</button>
+      </>}
+    </section>}
+    <div hidden={Boolean(detail)}>
     <header className="skills-page-heading"><h1>技能</h1><p>通过任务专用技能扩展 MiniCode</p></header>
     <label className="skills-search"><Search aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索技能" aria-label="搜索技能" /></label>
-    <section className="skills-catalog-section" aria-label="已安装技能"><h2>已安装</h2><div className="skills-catalog-grid">{installed.slice(0, expanded ? undefined : 6).map(renderInstalled)}</div>
+    {scope === "public" && <section className="skills-catalog-section" aria-label="已安装技能"><h2>已安装</h2><div className="skills-catalog-grid">{installed.slice(0, expanded ? undefined : 6).map(renderInstalled)}</div>
       {installed.length === 0 && <EmptyState title={q ? "没有匹配的技能" : "尚未安装技能"} hint="从公开目录安装，或添加本地技能文件夹。" />}
       {installed.length > 6 && <button type="button" className="skills-show-more" onClick={() => setExpanded(!expanded)}>{expanded ? "收起" : `查看另外 ${installed.length - 6} 项`}</button>}
-    </section>
+    </section>}
     <div className="skills-catalog-toolbar"><div className="skills-scope-tabs" role="group" aria-label="技能来源">
+      <button type="button" aria-pressed={scope === "all"} onClick={() => setScope("all")}>全部</button>
       {scopes.map(([key, label]) => <button key={key} type="button" aria-pressed={scope === key} onClick={() => setScope(key)}>{label}</button>)}
       <button type="button" aria-pressed={scope === "public"} onClick={() => setScope("public")}>公开</button>
     </div></div>
@@ -177,12 +212,13 @@ const SkillsCatalog = ({ toolbarHost, active }: { toolbarHost: HTMLElement | nul
       {loadError && <div className="skills-error" role="alert"><span>{loadError}</span><button type="button" disabled={loading} onClick={() => refresh(true)}>重试</button></div>}
       <div className="skills-catalog-grid">{catalog.map((skill) => <article className="skills-catalog-row" key={skill.name}>
         <SkillLogo value={skill.title} iconUrl={skill.iconUrl} />
-        <div className="skills-item-copy"><div className="skills-item-title"><strong>{skill.title}</strong></div><p title={skill.description}>{skill.description}</p></div>
+        <button type="button" className="skills-item-copy skills-item-open" aria-label={`查看公开技能详情 ${skill.name}`} onClick={() => { detailTrigger.current = document.activeElement as HTMLElement; setDetail({ kind: "public", skill }); }}><span className="skills-item-title"><strong>{skill.title}</strong></span><span className="skills-item-description">{skill.description}</span></button>
         <button type="button" className="skills-text-button" disabled={Boolean(operation) || skill.installed || installedNames.has(skill.name)} onClick={() => void mutate("install", skill.name)} aria-label={`安装技能 ${skill.name}`}>{operation === `install:${skill.name}` ? "安装中…" : skill.installed || installedNames.has(skill.name) ? "已安装" : "安装"}</button>
       </article>)}</div>
       {catalog.length === 0 && <EmptyState title={loading ? "正在加载目录" : "没有可显示的技能"} hint={q ? "尝试其他搜索词。" : "目录状态不会影响已安装技能的使用。"} />}
-    </section> : <section className="skills-catalog-section" aria-label={`${sourceLabels[scope]}技能`}><div className="skills-catalog-grid">{scoped.map(renderInstalled)}</div>{scoped.length === 0 && <EmptyState title="没有匹配的技能" hint="选择其他来源或添加技能。" />}</section>}
+    </section> : <section className="skills-catalog-section" aria-label={scope === "all" ? "已安装技能" : `${sourceLabels[scope]}技能`}><h2>{scope === "all" ? "已安装" : sourceLabels[scope]}</h2><div className="skills-catalog-grid">{scoped.map(renderInstalled)}</div>{scoped.length === 0 && <EmptyState title="没有匹配的技能" hint="选择其他来源或添加技能。" />}</section>}
     {active && menu && <ContextMenu items={menu.items} position={menu.position} onClose={() => setMenu(null)} />}
+    </div>
   </div>;
 };
 

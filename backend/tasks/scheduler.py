@@ -21,12 +21,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from backend.async_cleanup import cancel_and_drain, cancel_and_drain_receipt
 from backend.atomic_io import atomic_write_text
-from backend.config import PROJECT_ROOT
+from backend.config import STATE_ROOT
 
 logger = logging.getLogger(__name__)
 
-SCHEDULE_FILE = PROJECT_ROOT / ".minicode" / "scheduled_tasks.json"
-SCHEDULE_REGISTRY_FILE = PROJECT_ROOT / ".minicode" / "scheduled_task_projects.json"
+SCHEDULE_FILE = STATE_ROOT / ".minicode" / "scheduled_tasks.json"
+SCHEDULE_REGISTRY_FILE = STATE_ROOT / ".minicode" / "scheduled_task_projects.json"
 PROJECT_SCHEDULE_RELATIVE_PATH = Path(".minicode") / "scheduled_tasks.json"
 
 
@@ -568,7 +568,7 @@ class TaskScheduler:
             rows.append(row)
         return sorted(rows, key=lambda row: (str(row.get("created_at") or ""), str(row.get("id") or "")), reverse=True)
 
-    def list_runs(self, *, task_id: str | None = None, workspace_root: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    def list_runs(self, *, task_id: str | None = None, workspace_root: str | None = None, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         requested_workspace = _normalize_workspace_root(workspace_root) if workspace_root is not None else None
         rows = [
             run.to_dict()
@@ -577,7 +577,7 @@ class TaskScheduler:
             and (requested_workspace is None or run.workspace_root == requested_workspace)
         ]
         rows.sort(key=lambda row: (str(row.get("started_at") or row.get("scheduled_at") or ""), str(row.get("id") or "")), reverse=True)
-        return rows[:max(1, int(limit))]
+        return rows[offset:offset + limit]
 
     def add_task(
         self,
@@ -620,6 +620,27 @@ class TaskScheduler:
         self._tasks[task.id] = task
         self._save()
         return task
+
+    def update_task(
+        self, task_id: str, *, name: str, prompt: str, schedule: str,
+        timezone: str, isolation: str, conversation_id: str,
+        permission_mode: str, workspace_root: str | None = None,
+    ) -> bool:
+        task = self._tasks.get(task_id)
+        if task is None or task.deleted_at is not None or not self._workspace_matches(task.workspace_root, workspace_root):
+            return False
+        task.name = name
+        task.prompt = prompt
+        task.schedule = schedule
+        task.timezone = timezone
+        task.isolation = isolation
+        task.conversation_id = conversation_id
+        task.permission_mode = permission_mode
+        next_run = next_run_after(schedule, datetime.now(UTC), timezone=timezone) if task.enabled else None
+        task.next_run_at = next_run.isoformat() if next_run else None
+        self._unusable_schedule_ids.discard(task_id)
+        self._save()
+        return True
 
     def remove_task(self, task_id: str, *, workspace_root: str | None = None) -> bool:
         task = self._tasks.get(task_id)
@@ -892,10 +913,11 @@ class TaskScheduler:
         *,
         start_gate: asyncio.Event | None = None,
     ) -> asyncio.Task[None]:
+        execution_task = ScheduledTask.from_dict(task.to_dict())
         async def execute() -> None:
             if start_gate is not None:
                 await start_gate.wait()
-            await self._fire_one(task, run)
+            await self._fire_one(task, run, execution_task)
 
         worker = asyncio.create_task(execute())
         self._run_tasks[run.id] = worker
@@ -963,7 +985,7 @@ class TaskScheduler:
         start_gate.set()
         return run
 
-    async def _fire_one(self, task: ScheduledTask, run: ScheduledTaskRun) -> None:
+    async def _fire_one(self, task: ScheduledTask, run: ScheduledTaskRun, execution_task: ScheduledTask) -> None:
         try:
             run.status = "running"
             run.started_at = datetime.now(UTC).isoformat()
@@ -971,7 +993,7 @@ class TaskScheduler:
             self._save(workspace_root=task.workspace_root)
             if self._on_fire is None:
                 raise RuntimeError("Scheduled task runner is not configured")
-            result = await self._invoke_callback(task, run)
+            result = await self._invoke_callback(execution_task, run)
             result = result if isinstance(result, dict) else {}
             run.status = str(result.get("status") or "completed")
             run.conversation_id = str(result.get("conversation_id") or run.conversation_id)
@@ -1034,6 +1056,17 @@ class TaskScheduler:
 
 
 _GLOBAL_SCHEDULER: TaskScheduler | None = None
+
+
+def get_running_scheduler() -> TaskScheduler | None:
+    """Return the host that can execute schedules without creating one."""
+    scheduler = _GLOBAL_SCHEDULER
+    if (
+        scheduler is None or not scheduler._running or scheduler._on_fire is None
+        or scheduler._loop_task is None or scheduler._loop_task.done()
+    ):
+        return None
+    return scheduler
 
 
 def get_global_scheduler(on_fire: TaskFireCallback | None = None) -> TaskScheduler:

@@ -1,11 +1,10 @@
 import asyncio
-import re
 from pathlib import Path
 
 import backend.tools.search_tools as search_tools
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.tools.file_tools import EditFileTool, ListFilesTool, WriteFileTool
-from backend.tools.file_tools_common import clear_list_files_cache, content_hash
+from backend.tools.file_tools_common import content_hash
 from backend.tools.search_tools import GlobFilesTool, GrepFilesTool
 from backend.tools.search_support import clear_search_caches
 
@@ -76,11 +75,14 @@ def test_grep_files_default_returns_matching_file_names(tmp_path) -> None:
     assert "ordering_parts = True" not in result.content
 
 
-def test_grep_files_rejects_absolute_path_without_workspace_context(tmp_path) -> None:
+def test_grep_files_rejects_absolute_path_outside_its_standalone_workspace(tmp_path, monkeypatch) -> None:
     clear_search_caches()
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret.txt").write_text("MINICODE_SECRET=1\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
 
     result = asyncio.run(
         GrepFilesTool().execute({
@@ -236,36 +238,25 @@ def test_grep_files_supports_multiline_patterns(tmp_path) -> None:
     assert "class Shape" in result.content
 
 
-def test_list_files_reuses_unchanged_dependency_snapshot(monkeypatch, tmp_path) -> None:
-    clear_list_files_cache()
+def test_list_files_reads_the_current_directory_on_each_request(tmp_path) -> None:
     (tmp_path / "alpha.txt").write_text("a", encoding="utf-8")
     (tmp_path / "beta.txt").write_text("b", encoding="utf-8")
 
     tool = ListFilesTool()
 
-    original_iterdir = Path.iterdir
-    iterdir_calls = 0
-
-    def counting_iterdir(self: Path):
-        nonlocal iterdir_calls
-        iterdir_calls += 1
-        return original_iterdir(self)
-
-    monkeypatch.setattr(Path, "iterdir", counting_iterdir)
-
     args = {"directory": str(tmp_path), "recursive": False}
     context = _workspace_context(tmp_path)
     first = asyncio.run(tool.execute(args, context=context))
+    (tmp_path / "gamma.txt").write_text("c", encoding="utf-8")
     second = asyncio.run(tool.execute(args, context=context))
 
     assert first.is_error is False
     assert second.is_error is False
-    assert first.content == second.content
-    assert iterdir_calls == 1
+    assert "gamma.txt" not in first.content
+    assert "gamma.txt" in second.content
 
 
 def test_recursive_list_cache_invalidates_after_external_nested_change(tmp_path) -> None:
-    clear_list_files_cache()
     nested = tmp_path / "src" / "nested"
     nested.mkdir(parents=True)
     (nested / "first.txt").write_text("first", encoding="utf-8")
@@ -284,7 +275,6 @@ def test_recursive_list_cache_invalidates_after_external_nested_change(tmp_path)
 
 
 def test_list_files_skips_windows_reserved_device_names(tmp_path) -> None:
-    clear_list_files_cache()
     (tmp_path / "normal.txt").write_text("ok", encoding="utf-8")
     (tmp_path / "nul").write_text("reserved", encoding="utf-8")
 
@@ -304,7 +294,6 @@ def test_list_files_skips_windows_reserved_device_names(tmp_path) -> None:
 
 
 def test_write_file_refreshes_list_files_result(tmp_path) -> None:
-    clear_list_files_cache()
     (tmp_path / "first.txt").write_text("first", encoding="utf-8")
 
     list_tool = ListFilesTool()
@@ -460,13 +449,12 @@ def test_edit_file_applies_without_expected_hash_for_existing_file(tmp_path) -> 
     assert target.read_text(encoding="utf-8") == "value = 2\n"
 
 
-def test_stdlib_regex_fallback_rejects_uncancellable_backtracking_pattern(
+def test_python_regex_backend_times_out_backtracking_pattern(
     tmp_path,
     monkeypatch,
 ) -> None:
     (tmp_path / "sample.txt").write_text("a" * 128 + "!", encoding="utf-8")
     monkeypatch.setattr(search_tools, "_HAS_RIPGREP", False)
-    monkeypatch.setattr(search_tools, "_safe_regex", re)
     tool = search_tools.GrepFilesTool(workspace_root=tmp_path)
 
     result = asyncio.run(
@@ -480,4 +468,4 @@ def test_stdlib_regex_fallback_rejects_uncancellable_backtracking_pattern(
     )
 
     assert result.is_error is True
-    assert "无法安全执行" in result.content
+    assert "Regex safety limit reached" in result.content

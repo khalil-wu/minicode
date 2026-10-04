@@ -8,7 +8,6 @@ protocol bookkeeping belongs here.
 
 from __future__ import annotations
 
-import inspect
 from copy import deepcopy
 from typing import Any
 
@@ -86,20 +85,5 @@ def append_assistant_history(
     phase: str = "",
     provider_items: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Append assistant history while tolerating legacy context fakes."""
-
-    append_assistant = ctx.append_assistant
-    try:
-        parameters = inspect.signature(append_assistant).parameters
-    except (TypeError, ValueError):
-        parameters = {}
-    accepts_kwargs = any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    )
-    kwargs: dict[str, Any] = {}
-    if accepts_kwargs or "phase" in parameters:
-        kwargs["phase"] = phase
-    if accepts_kwargs or "provider_items" in parameters:
-        kwargs["provider_items"] = provider_items
-    append_assistant(content, **kwargs)
+    """Append through the canonical context history contract."""
+    ctx.append_assistant(content, phase=phase, provider_items=provider_items)

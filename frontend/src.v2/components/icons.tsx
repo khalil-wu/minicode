@@ -39,7 +39,7 @@ const STATUS_COLOR: Record<StatusIconStatus, string> = {
 };
 
 export function statusIconColor(status: StatusIconStatus): string {
-  return STATUS_COLOR[status] ?? "currentColor";
+  return STATUS_COLOR[status];
 }
 
 export function StatusIcon({
@@ -53,7 +53,7 @@ export function StatusIcon({
   spinningClassName?: string;
   className?: string;
 }) {
-  const color = STATUS_COLOR[status] ?? "currentColor";
+  const color = STATUS_COLOR[status];
   const props = { size, color, className, "data-testid": `status-icon-${status}` };
   if (status === "running") {
     const runningClassName = spinningClassName || [className, "animate-spin"].filter(Boolean).join(" ");

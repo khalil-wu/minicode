@@ -19,6 +19,7 @@ from backend.agent.instruction_discovery import _get_managed_minicode_dir
 from backend.agent.markdown_scopes import get_minicode_config_home_dir
 from backend.config import PROJECT_ROOT, STATE_ROOT
 from backend.feature_flags import feature_enabled
+from backend.skills.frontmatter import parse_skill_frontmatter
 
 logger = logging.getLogger(__name__)
 
@@ -221,17 +222,6 @@ class SkillLoader:
                     dirs.append((f"plugin:{plugin.get('id') or plugin_name}", skills_dir))
         return dirs
 
-    @staticmethod
-    def _candidate_plugin_dirs(root: Path) -> list[Path]:
-        if (root / "skills").is_dir():
-            return [root]
-        candidates = [path for path in root.iterdir() if path.is_dir()]
-        # Versioned marketplace caches may nest plugin roots three levels deep.
-        cache_dir = root / "cache"
-        if cache_dir.is_dir():
-            candidates.extend(path for path in cache_dir.glob("*/*/*") if path.is_dir())
-        return candidates
-
     def discover(self) -> list[SkillMeta]:
         """
         Recursively discover Agent Skills, stopping at each skill root.
@@ -338,7 +328,7 @@ class SkillLoader:
         # 读取完整文件
         skill_file = meta.source_path
         try:
-            raw = skill_file.read_text(encoding="utf-8")
+            raw = skill_file.read_text(encoding="utf-8-sig")
             content = self._extract_body(raw)
         except (OSError, UnicodeDecodeError) as exc:
             logger.error("读取 %s 失败: %s", skill_file, exc)
@@ -428,35 +418,14 @@ class SkillLoader:
         只读取 frontmatter 部分（--- 之间的内容），不读正文。
         """
         try:
-            raw = skill_file.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            fm = parse_skill_frontmatter(
+                skill_file.read_text(encoding="utf-8-sig"), skill_file.parent.name,
+            )
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            logger.warning("Ignoring invalid skill %s: %s", skill_file, exc)
             return None
-
-        fm_match = re.match(r"^---\s*\n(.*?)\n---", raw, re.DOTALL)
-        if not fm_match:
-            logger.warning("Ignoring skill without YAML frontmatter: %s", skill_file)
-            return None
-        else:
-            fm_text = fm_match.group(1)
-            try:
-                fm_payload = yaml.safe_load(fm_text)
-            except yaml.YAMLError as exc:
-                logger.warning("Ignoring skill with invalid YAML frontmatter %s: %s", skill_file, exc)
-                return None
-            else:
-                if not isinstance(fm_payload, dict):
-                    logger.warning("Ignoring skill with non-object YAML frontmatter: %s", skill_file)
-                    return None
-                else:
-                    fm = fm_payload
-        raw_name = fm.get("name")
-        frontmatter_name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else ""
-        name = frontmatter_name or skill_file.parent.name
-        description = fm.get("description", "")
-        description = description.strip() if isinstance(description, str) else ""
-        if not description:
-            logger.warning("Ignoring skill without description metadata: %s", skill_file)
-            return None
+        name = fm["name"]
+        description = fm["description"]
         for warning in self._skill_name_warnings(name, skill_file.parent.name):
             logger.warning("Skill metadata warning for %s: %s", skill_file, warning)
         if len(description) > 1024:

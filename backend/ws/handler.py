@@ -35,7 +35,6 @@ from backend.config import (
 )
 from backend.conversations.models import DEFAULT_CONVERSATION_PERMISSION_MODE
 from backend.conversations.public_projection import (
-    project_public_conversation,
     project_public_conversation_summary,
 )
 from backend.conversations.repository import CONVERSATION_DATA_DIR, ConversationRepository
@@ -67,7 +66,7 @@ from backend.ws.fork_registry import ForkRegistry
 from backend.ws.manager import _SESSION_MCP_MANAGER_UNSET
 from backend.ws.permission_runtime import SessionPermissionRuntimeMixin
 from backend.ws.run_manager import SessionRunManager
-from backend.ws.stream_state import apply_stream_event
+from backend.ws.stream_state import apply_stream_event, create_stream_state
 from backend.ws.turn_wait_state import TurnWaitState
 from backend.ws.ui_agent_state_store import UiAgentStateStore
 from backend.ws.payload_contracts import validate_session_projection_payload
@@ -548,7 +547,8 @@ class WebSocketSession(
         ):
             active = None
             self.active_conversation_id = None
-        workspace_root = self.session_lifecycle.current_workspace_root() if active is not None else None
+        workspace_context = self.session_lifecycle.workspace_context_for_conversation(active) if active is not None else None
+        workspace_root = workspace_context.root_path.resolve() if workspace_context is not None else None
         workspace_scope = workspace_scope_for(
             workspace_root=getattr(active, "workspace_root", "") if active is not None else "",
             worktree_path=getattr(active, "worktree_path", "") if active is not None else "",
@@ -568,7 +568,9 @@ class WebSocketSession(
             "session_id": self.session_id,
             "parent_session_id": None,
             "active_conversation_id": self.active_conversation_id,
-            "workspace_root": str(workspace_root) if workspace_root is not None else None,
+            # A missing project mount is pending; None explicitly means projectless.
+            **({"workspace_root": str(workspace_root) if workspace_root is not None else None}
+               if workspace_root is not None or workspace_scope == "computer" else {}),
             "active_conversation": project_public_conversation_summary(active)
             if active is not None
             else None,
@@ -717,7 +719,7 @@ class WebSocketSession(
             logger.debug("session %s provider capability snapshot failed: %s", self.session_id, exc)
             return {}
 
-    def runtime_capability_snapshot(self) -> dict[str, Any]:
+    def runtime_capability_snapshot(self, *, skill_catalog: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Full per-session capability contract, including current permissions."""
         from backend.commands.catalog import get_enabled_composer_command_catalog
         from backend.feature_flags import feature_flags_payload
@@ -791,27 +793,32 @@ class WebSocketSession(
             ),
         ]
         snapshot["feature_flags"] = feature_flags_payload()
-        if self.skill_manager is not None and not snapshot.get("skills"):
-            list_all = getattr(self.skill_manager, "list_all", None)
-            skills = list_all() if callable(list_all) else []
-            if skills:
-                snapshot["skills"] = skills
-                snapshot["summary"] = {
-                    **dict(snapshot.get("summary") or {}),
-                    "skills": len(skills),
-                    "skill_catalog": True,
-                }
+        if self.skill_manager is not None:
+            skills = (skill_catalog if skill_catalog is not None
+                      else self.skill_manager.snapshot(active_workspace_root).list_all())
+            snapshot["skills"] = skills
+            snapshot["summary"] = {
+                **dict(snapshot.get("summary") or {}),
+                "skills": len(skills),
+                "skill_catalog": bool(skills),
+            }
         snapshot["permission"] = self._runtime_permission_payload()
         snapshot["mcp_registry_version"] = self._mcp_registry_version_snapshot
         snapshot["provider_capabilities"] = self._provider_capabilities_payload()
         return snapshot
 
-    def runtime_capabilities_payload(self, *, source: str = "session") -> dict[str, Any]:
+    def runtime_capabilities_payload(
+        self, *, source: str = "session", skill_catalog: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        conversation_id = str(self.active_conversation_id or "")
+        workspace_root = str(self.session_lifecycle.workspace_root_for_conversation() or "")
         return {
             "type": "runtime.capabilities",
             "session_id": self.session_id,
             "source": source,
-            "capabilities": self.runtime_capability_snapshot(),
+            "conversation_id": conversation_id,
+            "workspace_root": workspace_root,
+            "capabilities": self.runtime_capability_snapshot(skill_catalog=skill_catalog),
         }
 
     def _mcp_summary(self) -> dict[str, Any]:
@@ -820,12 +827,8 @@ class WebSocketSession(
         Kept intentionally small (no tools/errors/full dicts) so the snapshot
         stays light. Reads the in-memory manager status; empty when no bootstrap.
         """
-        try:
-            from backend.api.routes_health import get_mcp_status
-
-            servers = get_mcp_status() or []
-        except Exception:  # pragma: no cover - manager unavailable / not started
-            servers = []
+        manager = self.mcp_manager
+        servers = manager.get_all_status() if manager is not None else []
         return {
             "connected": sum(1 for s in servers if s.get("status") == "connected"),
             "failed": sum(1 for s in servers if s.get("phase") == "failed"),
@@ -878,6 +881,7 @@ class WebSocketSession(
             conversation_id
         )
         queue_owned_run = self.run_manager.is_queue_owned_run(task_id)
+        owns_current_run = self.run_manager.run_task_ids.get(conversation_id) == task_id
         cleanup_succeeded = False
         try:
             self.run_manager.cleanup(
@@ -887,6 +891,8 @@ class WebSocketSession(
                 cancel_event=cancel_event,
             )
             cleanup_succeeded = True
+            if owns_current_run:
+                self._conversation_streams.pop(conversation_id, None)
         finally:
             if queue_owned_run:
                 self.run_manager.finish_queue_owned_run(
@@ -999,6 +1005,10 @@ class WebSocketSession(
             busy_error.data["conversation_id"] = target_conversation_id
             await self.send_event(busy_error)
             raise
+
+        self._conversation_streams[target_conversation_id] = create_stream_state(
+            target_conversation_id, assistant_message_id,
+        )
 
         async def _wait_and_cleanup() -> None:
             # A task that returns without the runner's delivery fence is not a
@@ -1118,20 +1128,8 @@ class WebSocketSession(
                         await self.send_event(
                             AgentEvent.agent_run_completed(durable_record)
                         )
-                    durable_terminal = durable_record is not None
                     done_delivered = False
                     try:
-                        if not durable_terminal and not str(run_metadata.get("run_id") or "").strip():
-                            # Validation rejected the command before durable
-                            # admission. There is no run to complete and no
-                            # terminal event should be fabricated for one.
-                            self._cleanup_agent_run(
-                                conversation_id=target_conversation_id,
-                                task=managed_run.task,
-                                task_id=managed_run.id,
-                                cancel_event=run_cancel_event,
-                            )
-                            return
                         done_event = AgentEvent.done(
                             status=terminal_status,
                             reason=terminal_reason or terminal_status,
@@ -1187,6 +1185,11 @@ class WebSocketSession(
             )
             if admission_future in done:
                 await admission_future
+            elif managed_run.task.cancelled():
+                # Cancellation before the runner's first step has no runner
+                # catch/finally. Its scheduler owns delivery and this accepted
+                # command must complete instead of replaying after reconnect.
+                await asyncio.shield(cleanup_task)
             else:
                 delivery_complete = self.run_manager.is_delivery_complete(
                     target_conversation_id,
@@ -1648,7 +1651,7 @@ class WebSocketSession(
         from backend.hooks.manager import get_hook_manager_for_session
 
         hook_scope_id = str(payload.get("conversation_id") or self.active_conversation_id or self.session_id)
-        hook_manager = get_hook_manager_for_session(hook_scope_id)
+        hook_manager = get_hook_manager_for_session(hook_scope_id, owner_session_id=self.session_id)
         # Notification is observational work. It must not hold up the
         # authoritative WebSocket projection or make a started child appear
         # only after it has completed. Keep the task session-owned so shutdown

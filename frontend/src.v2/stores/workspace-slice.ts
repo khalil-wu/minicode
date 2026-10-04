@@ -14,11 +14,10 @@ import {
   defaultPanelSlots,
   persistPanelSlots,
   loadInitialLayout,
-  preferredRightSidebarWidth,
   normalizeEditorPath,
   uniqueMessageId,
 } from "./shared-helpers";
-import { isWindowsLikeWorkspacePath, normalizeWorkspacePath } from "../lib/workspace-path";
+import { isWindowsLikeWorkspacePath, normalizeWorkspacePath, workspaceRootsEqual } from "../lib/workspace-path";
 
 const normalizeEditorOpenPath = (path: string, workingDirectory = ""): string =>
   normalizeEditorPath(path, workingDirectory);
@@ -48,6 +47,8 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
   const layout = loadInitialLayout();
   return {
     ...layout,
+    rightPanelExpanded: false,
+    gitReviewRequest: null,
     sideChatOpen: false,
     sideChatPendingContext: null,
     terminalSessions: [],
@@ -72,8 +73,25 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
       set((s) => {
         const rightPanelOpen = !s.rightPanelOpen;
         writeLS(LS.layout.rightOpen, rightPanelOpen ? "1" : "0");
-        return { rightPanelOpen };
+        return { rightPanelOpen, rightPanelExpanded: false };
       }),
+    setRightPanelExpanded: (expanded) => set({ rightPanelExpanded: expanded }),
+    openGitReview: (request) => {
+      if (get().appMode === "chat") get().setAppMode("code");
+      set((state) => {
+        const panelSlots = state.panelSlots.some((slot) => slot.maximized)
+          ? state.panelSlots.map((slot) => ({ ...slot, maximized: false }))
+          : state.panelSlots;
+        if (panelSlots !== state.panelSlots) persistPanelSlots(panelSlots);
+        return {
+          gitReviewRequest: { ...request, id: uniqueMessageId("git-review") },
+          settingsOpen: false,
+          skillsMarketplaceOpen: false,
+          panelSlots,
+        };
+      });
+      get().setRightStackTab("diff");
+    },
     setDockHeight: (h) => {
       const v = clamp(180, 520, h);
       writeLS(LS.layout.dockHeight, String(v));
@@ -88,7 +106,16 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
     openBottomTab: (t) => {
       writeLS(LS.layout.dockTab, t);
       writeLS(LS.layout.dockCollapsed, "0");
-      set({ activeBottomTab: t, dockCollapsed: false });
+      set((state) => {
+        const panelSlots = state.panelSlots.some((slot) => slot.maximized)
+          ? state.panelSlots.map((slot) => ({ ...slot, maximized: false }))
+          : state.panelSlots;
+        if (panelSlots !== state.panelSlots) persistPanelSlots(panelSlots);
+        return {
+          activeBottomTab: t, dockCollapsed: false, rightPanelExpanded: false, panelSlots,
+          appMode: state.appMode === "chat" ? "code" : state.appMode,
+        };
+      });
     },
     closeBottomDock: () => {
       writeLS(LS.layout.dockCollapsed, "1");
@@ -98,8 +125,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
       writeLS(LS.layout.dockTab, t);
       set({ activeBottomTab: t });
     },
-    addPanel: (slot) =>
-      set((s) => {
+    addPanel: (slot) => {
         const canonicalSlot: PanelSlot =
           slot.kind === "subagent"
             ? { ...slot, kind: "subagents", label: slot.label ?? "协作" }
@@ -115,28 +141,15 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
           inspector: "inspector",
         };
         if (canonicalSlot.kind === "terminal") {
-          writeLS(LS.layout.dockTab, "terminal");
-          writeLS(LS.layout.dockCollapsed, "0");
-          return {
-            activeBottomTab: "terminal",
-            dockCollapsed: false,
-          };
+          get().openBottomTab("terminal");
+          return;
         }
         const rightTab = rightStackByKind[canonicalSlot.kind];
         if (rightTab) {
-          const rightSidebarWidth = preferredRightSidebarWidth(rightTab, s.rightSidebarWidth);
-          if (rightSidebarWidth !== s.rightSidebarWidth) {
-            writeLS(LS.layout.rightWidth, String(rightSidebarWidth));
-          }
-          writeLS(LS.layout.rightOpen, "1");
-          return {
-            rightStackTab: rightTab,
-            rightPanelOpen: true,
-            rightSidebarWidth,
-            dockCollapsed: true,
-            panelSlots: normalizePanelSlots(s.panelSlots.filter((p) => p.kind === "chat")),
-          };
+          get().setRightStackTab(rightTab);
+          return;
         }
+      set((s) => {
         if (s.panelSlots.some((p) => p.kind === canonicalSlot.kind && canonicalSlot.kind !== "chat")) {
           const next = normalizePanelSlots(s.panelSlots.map((p) => ({ ...p, focused: p.kind === canonicalSlot.kind })));
           persistPanelSlots(next);
@@ -154,7 +167,8 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         next = normalizePanelSlots(next);
         persistPanelSlots(next);
         return { panelSlots: next };
-      }),
+      });
+    },
     removePanel: (id) =>
       set((s) => {
         const next = s.panelSlots.filter((p) => p.id !== id);
@@ -166,9 +180,14 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
       }),
     focusPanel: (id) =>
       set((s) => {
-        const next = normalizePanelSlots(s.panelSlots.map((p) => ({ ...p, focused: p.id === id })));
+        const maximized = s.panelSlots.some((panel) => panel.maximized);
+        const next = normalizePanelSlots(s.panelSlots.map((p) => ({
+          ...p,
+          focused: p.id === id,
+          ...(maximized ? { maximized: p.id === id } : {}),
+        })));
         persistPanelSlots(next);
-        return { panelSlots: next };
+        return { panelSlots: next, rightPanelExpanded: false };
       }),
     movePanel: (id, direction) =>
       set((s) => {
@@ -236,6 +255,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         leftSidebarWidth: LEFT_SIDEBAR_DEFAULT_WIDTH,
         rightSidebarWidth: RIGHT_SIDEBAR_DEFAULT_WIDTH,
         rightPanelOpen: false,
+        rightPanelExpanded: false,
         dockHeight: 240,
         dockCollapsed: true,
         activeBottomTab: "terminal",
@@ -334,11 +354,13 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
               ...(target?.exact || /[/\\]/.test(path) ? { exact: true } : {}),
               ...(line ? { line } : {}),
               ...(column ? { column } : {}),
+              ...(target?.endLine ? { endLine: target.endLine, endColumn: target.endColumn } : {}),
             },
           ],
           activeEditorOpenRequestId: requestId,
           activeEditorPath: normalizedPath,
           appMode: "code",
+          rightPanelExpanded: false,
         };
       });
     },
@@ -357,12 +379,13 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
       }
     },
     closeSideChat: () => set({ sideChatOpen: false }),
-    openSideChatWithSelection: (text, source) => {
-      const selected = String(text || "").trim().slice(0, 12_000);
-      if (!selected) return;
-      const context = { text: selected, ...(source ? { source } : {}) };
+    openSideChatWithSelection: (text, source, location) => {
+      if (!text.trim()) return;
+      const context = { text, ...(source ? { source } : {}), workspaceRoot: get().workingDirectory, ...location };
       set((state) => {
-        const activeThreadId = state.sideChatOpen ? Object.keys(state.sideChats).at(-1) : undefined;
+        const activeThreadId = state.sideChatOpen
+          ? Object.values(state.sideChats).find((thread) => workspaceRootsEqual(thread.workspaceRoot ?? "", context.workspaceRoot))?.id
+          : undefined;
         if (activeThreadId && state.sideChats[activeThreadId]) {
           return {
             sideChatOpen: true,
@@ -405,13 +428,13 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         ];
         const retainedSettledIds = new Set(
           nextTasks
-            .filter((item) => !isActiveStatus(item.status))
+            .filter((item) => !isActiveStatus(item.status) && !item.cleanupPending)
             .slice(0, 30)
             .map((item) => `${item.conversationId}\u0000${item.id}`),
         );
         return {
           backgroundTasks: nextTasks.filter(
-            (item) => isActiveStatus(item.status)
+            (item) => isActiveStatus(item.status) || item.cleanupPending
               || retainedSettledIds.has(`${item.conversationId}\u0000${item.id}`),
           ),
         };

@@ -40,7 +40,7 @@ def _tool_name_from_schema(schema: Any) -> str:
 def _safe_tool_name(name: str) -> str:
     text = str(name or "").strip()
     if text.startswith("mcp__"):
-        return "mcp"
+        return "mcp:" + _short_sha256(text)
     return text
 
 

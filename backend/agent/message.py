@@ -254,6 +254,7 @@ class AgentEvent:
         reason: str = "",
         target_message_id: str = "",
         turn_mode: str = "",
+        paused: bool | None = None,
     ) -> AgentEvent:
         clean_status = _required_event_text(
             status,
@@ -315,6 +316,8 @@ class AgentEvent:
             data["user_message_id"] = clean_user_message_id
         if position > 0:
             data["position"] = position
+            if paused is not None:
+                data["paused"] = paused
         if clean_reason:
             data["reason"] = clean_reason
         if clean_target_message_id:
@@ -803,6 +806,7 @@ class AgentEvent:
                     "retry_safe",
                     "manual_recovery_required",
                     "cleanup_completed_after_deadline",
+                    "resource_cleanup",
                 }
             }
         if output_files:
@@ -1664,16 +1668,13 @@ class AgentEvent:
                     field_name=f"{field_name}.name",
                     maximum=_MAX_EVENT_ID_CHARS,
                 )
-                if require_args:
-                    clean["args"] = _bounded_event_record(
-                        clean.get("args"),
-                        field_name=f"{field_name}.args",
-                    )
-                elif clean.get("args") is not None:
-                    clean["args"] = _bounded_event_record(
-                        clean["args"],
-                        field_name=f"{field_name}.args",
-                    )
+                args = clean.get("args")
+                if require_args or args is not None:
+                    if not isinstance(args, dict):
+                        raise ValueError(f"{field_name}.args must be an object")
+                    # The enclosing record has already traversed and bounded
+                    # these JSON values at the event boundary.
+                    clean["args"] = dict(args)
                 cleaned.append(clean)
             return cleaned
 

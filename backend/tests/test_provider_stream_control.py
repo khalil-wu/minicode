@@ -483,6 +483,8 @@ def test_provider_retry_discards_tracked_tools_before_resetting_payload() -> Non
     calls: list[str] = []
 
     class ToolExecutor:
+        tracked_tools = {}
+
         def cancel_remaining(self) -> None:
             calls.append("cancel_tools")
 
@@ -520,9 +522,9 @@ def test_provider_retry_discards_tracked_tools_before_resetting_payload() -> Non
     # abandoned attempt still knows about it: reset_provider_payload() forgets
     # it, and nothing downstream can ever settle that card afterwards.
     assert calls == [
-        "cancel_tools",
         "cancel_message",
         "settle_announcements",
+        "cancel_tools",
         "reset_text",
         "reset_payload",
     ]

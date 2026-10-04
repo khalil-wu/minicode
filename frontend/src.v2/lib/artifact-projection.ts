@@ -120,10 +120,35 @@ export const artifactFallbackLabel = (
 export const cleanArtifactLabel = (value?: unknown): string =>
   typeof value === "string" ? value.trim() : "";
 
+export const isExecutionStatusLabel = (value?: unknown): boolean =>
+  /^Script (completed|yielded|running|failed|cancelled)$/.test(cleanArtifactLabel(value));
+
+export const isExecutionOutputMediaType = (value?: unknown): boolean => {
+  const mediaType = normalizeArtifactMediaType(value);
+  return !mediaType || mediaType.startsWith("text/") || mediaType === "application/json";
+};
+
+export const isExecutionResultArtifact = (
+  record: Pick<ToolCallRecord, "name" | "artifactId" | "artifactKind" | "artifactMediaType" | "args" | "resultKind" | "activityKind" | "displaySummary" | "summary" | "outputFiles">,
+): boolean => {
+  // These tools store their selected text output when it is too large for the
+  // transcript. Workspace deliverables remain separately listed in outputFiles.
+  return ["tool_exec", "tool_wait"].includes(record.name)
+    && Boolean(record.artifactId)
+    && ["", "text", "json"].includes(normalizedValue(record.artifactKind))
+    && isExecutionOutputMediaType(record.artifactMediaType)
+    && !recordHasImageArtifact(record);
+};
+
 export const artifactSummaryForRecord = (
   record: Pick<ToolCallRecord, "displaySummary" | "summary" | "name" | "args" | "artifactKind" | "artifactMediaType" | "artifactId" | "resultKind" | "activityKind" | "outputFiles">,
 ): string => {
   const kind = canonicalArtifactKind(record.artifactKind, record.artifactMediaType, record);
+  if (isExecutionResultArtifact(record)) {
+    const label = cleanArtifactLabel(record.displaySummary);
+    return label && !isExecutionStatusLabel(label)
+      ? label : "代码执行输出";
+  }
   return cleanArtifactLabel(record.displaySummary)
     || cleanArtifactLabel(record.summary)
     || (isBrowserScreenshotRecord(record) ? "浏览器截图" : artifactFallbackLabel(kind, record.artifactMediaType));

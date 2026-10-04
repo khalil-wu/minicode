@@ -5,15 +5,18 @@ import type { ComposerAttachment } from "../stores/types";
 import { cancelComposerUpload, retryComposerAttachment } from "./uploads";
 import { openAttachmentPreview, openLocalFilePreview } from "../chat/openAttachmentPreview";
 
-export const AttachmentStrip = () => {
-  const attachments = useAppStore((s) => s.attachments);
+const NO_ATTACHMENTS: ComposerAttachment[] = [];
+export const AttachmentStrip = ({ conversationId }: { conversationId?: string } = {}) => {
+  const attachments = useAppStore((s) => conversationId ? s.sideChats[conversationId]?.attachments ?? NO_ATTACHMENTS : s.attachments);
   const removeAttachment = useAppStore((s) => s.removeAttachment);
   const remove = (attachment: ComposerAttachment) => {
     cancelComposerUpload(attachment.id);
-    if (attachment.dataUrl?.startsWith("blob:") && typeof URL.revokeObjectURL === "function") {
-      URL.revokeObjectURL(attachment.dataUrl);
-    }
-    removeAttachment(attachment.id);
+    if (conversationId) {
+      if (attachment.dataUrl?.startsWith("blob:")) URL.revokeObjectURL(attachment.dataUrl);
+      useAppStore.setState((state) => ({ sideChats: { ...state.sideChats, [conversationId]: {
+        ...state.sideChats[conversationId], attachments: state.sideChats[conversationId].attachments!.filter((item) => item.id !== attachment.id),
+      } } }));
+    } else removeAttachment(attachment.id);
   };
   if (attachments.length === 0) return null;
   return (
@@ -35,69 +38,35 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
   return (
     <div
       title={attachmentTitle(a)}
-      style={{
-        position: "relative",
-        width: 88,
-        height: 88,
-        borderRadius: "var(--radius-md)",
-        background: "var(--workbench-tool)",
-        border: `1px solid ${a.status === "error" ? "var(--state-danger)" : "var(--border-subtle)"}`,
-        overflow: "hidden",
-        cursor: "zoom-in",
-      }}
-      className="shrink-0"
+      className="composer-attachment-image"
+      data-status={a.status}
     >
       <button
         type="button"
         aria-label={`预览 ${a.name}`}
         onClick={openPreview}
-        style={{ width: "100%", height: "100%", padding: 0, border: 0, background: "transparent", cursor: "zoom-in" }}
+        className="composer-attachment-image-preview"
       >
         <img
           src={a.dataUrl}
           alt={a.name}
-          style={{ width: "100%", height: "100%", objectFit: "contain" }}
         />
       </button>
       {a.status === "uploading" && (
         <div
           role="status"
           aria-label={`${uploadStatusLabel(a)} ${a.name}`}
-          style={{
-            position: "absolute",
-            inset: 0,
-            background: "var(--backdrop-overlay)",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 4,
-            color: "var(--text-on-accent)",
-            fontSize: "var(--text-xs)",
-          }}
+          className="composer-attachment-image-upload"
         >
           <LoaderCircle size={16} className="animate-spin" aria-hidden="true" />
           <span>{uploadStatusLabel(a)}</span>
           {a.uploadPhase !== "processing" ? (
             <span
               aria-hidden="true"
-              style={{
-                width: 42,
-                height: 3,
-                overflow: "hidden",
-                borderRadius: 999,
-                background: "color-mix(in srgb, currentColor 28%, transparent)",
-              }}
+              className="composer-attachment-image-progress"
             >
               <span
-                style={{
-                  display: "block",
-                  width: `${uploadPercent(a)}%`,
-                  height: "100%",
-                  borderRadius: "inherit",
-                  background: "currentColor",
-                  transition: "width var(--transition-fast)",
-                }}
+                style={{ width: `${uploadPercent(a)}%` }}
               />
             </span>
           ) : null}
@@ -112,26 +81,8 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
             event.stopPropagation();
             if (a.status === "error" && a.localFile) retryComposerAttachment(a.id);
           }}
-          style={{
-            position: "absolute",
-            left: 3,
-            right: 3,
-            bottom: 3,
-            minHeight: 16,
-            padding: "1px 4px",
-            borderRadius: "var(--radius-sm, 4px)",
-            border: 0,
-            background: "var(--backdrop-strong)",
-            color: a.status === "error" ? "var(--state-danger)" : "var(--state-warning)",
-            fontSize: "var(--text-3xs)",
-            fontWeight: "var(--fw-bold)",
-            lineHeight: "14px",
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 2,
-            cursor: a.status === "error" && a.localFile ? "pointer" : "default",
-          }}
+          className="composer-attachment-image-problem"
+          data-retry={a.status === "error" && Boolean(a.localFile)}
         >
           {a.status === "error" && a.localFile
             ? <RotateCcw size={12} aria-hidden="true" />
@@ -146,24 +97,7 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
           onRemove();
         }}
         aria-label={`移除 ${a.name}`}
-        style={{
-          position: "absolute",
-          top: 2,
-          right: 2,
-          width: 20,
-          height: 20,
-          minWidth: 20,
-          minHeight: 20,
-          borderRadius: "50%",
-          background: "var(--backdrop-strong)",
-          color: "var(--text-on-accent)",
-          border: 0,
-          cursor: "pointer",
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: 0,
-        }}
+        className="composer-attachment-image-remove"
       >
         <X size={14} />
       </button>
@@ -171,72 +105,48 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
   );
 };
 
-const truncateFilename = (name: string): string => {
-  if (name.length <= 25) return name;
-  const lastDotIndex = name.lastIndexOf(".");
-  if (lastDotIndex === -1 || lastDotIndex === 0) {
-    return `${name.slice(0, 22)}...`;
-  }
-  const ext = name.slice(lastDotIndex);
-  const base = name.slice(0, Math.max(0, 22 - ext.length));
-  return `${base}...${ext}`;
-};
-
 const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment; onRemove: () => void }) => {
   const problem = a.error || (a.status === "error" ? "上传失败" : "");
-  const problemColor = a.status === "error" ? "var(--state-danger)" : "var(--state-warning)";
   const canPreview = Boolean(a.artifactId || a.localFile || a.dataUrl);
 
   return (
     <div
       title={attachmentTitle(a)}
-      style={{
-        position: "relative",
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        padding: a.status === "uploading" ? "3px 4px 5px 8px" : "3px 4px 3px 8px",
-        background: "var(--attachment-chip-bg)",
-        border: `1px solid ${problem ? problemColor : "var(--border-subtle)"}`,
-        borderRadius: "var(--radius-sm, 6px)",
-        fontSize: "var(--text-xs)",
-        color: a.status === "error" ? "var(--state-danger)" : "var(--attachment-chip-fg)",
-        maxWidth: problem ? 420 : 260,
-        minWidth: 0,
-        cursor: canPreview ? "pointer" : "default",
-      }}
+      className="composer-attachment-file"
+      data-status={a.status}
+      data-problem={problem ? a.status === "error" ? "error" : "warning" : undefined}
     >
       <button
         type="button"
         disabled={!canPreview}
         aria-label={`预览 ${a.name}`}
         onClick={() => openComposerAttachment(a)}
-        style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, padding: 0, border: 0, background: "transparent", color: "inherit", font: "inherit", cursor: canPreview ? "pointer" : "default" }}
+        className="composer-attachment-file-preview"
       >
       {a.status === "uploading" ? (
         <LoaderCircle size={14} className="animate-spin shrink-0" aria-hidden="true" />
       ) : problem ? (
-        <TriangleAlert size={14} className="shrink-0" aria-hidden="true" style={{ color: problemColor }} />
+        <TriangleAlert size={14} className="composer-attachment-problem-icon" aria-hidden="true" />
       ) : (
         fileIcon(a.name, { size: 16, className: "composer-attachment-file-icon" })
       )}
-      <span className="truncate" style={{ minWidth: 0 }}>{truncateFilename(a.name)}</span>
+      <span className="composer-attachment-name">{a.name}</span>
       {a.status === "uploading" ? (
         <span
           role="status"
           aria-label={`${uploadStatusLabel(a)} ${a.name}`}
-          style={{ color: "var(--text-muted)", whiteSpace: "nowrap" }}
+          className="composer-attachment-meta"
         >
           {uploadStatusLabel(a)}
         </span>
       ) : null}
       {a.inputSource === "pasted_text" && a.sourceCharCount ? (
-        <span style={{ color: "var(--text-muted)", whiteSpace: "nowrap" }}>
+        <span className="composer-attachment-meta">
           {a.sourceCharCount.toLocaleString()} chars
         </span>
       ) : null}
       {problem && (
-        <span className="truncate" style={{ color: problemColor, minWidth: 0 }}>
+        <span className="composer-attachment-problem-text">
           {problem}
         </span>
       )}
@@ -250,8 +160,7 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
           }}
           aria-label={`重新上传 ${a.name}`}
           title="重新上传"
-          className="shrink-0"
-          style={fileChipActionStyle}
+          className="composer-attachment-action"
         >
           <RotateCcw size={14} />
         </button>
@@ -263,45 +172,17 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
           onRemove();
         }}
         aria-label={`移除 ${a.name}`}
-        className="shrink-0"
-        style={{
-          width: 24,
-          height: 24,
-          background: "transparent",
-          color: "var(--text-muted)",
-          border: 0,
-          borderRadius: "var(--radius-sm, 4px)",
-          cursor: "pointer",
-          padding: 0,
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
+        className="composer-attachment-action"
       >
         <X size={14} />
       </button>
       {a.status === "uploading" && a.uploadPhase !== "processing" ? (
         <span
           aria-hidden="true"
-          style={{
-            position: "absolute",
-            left: 0,
-            right: 0,
-            bottom: 0,
-            height: 2,
-            overflow: "hidden",
-            borderRadius: "0 0 var(--radius-sm, 6px) var(--radius-sm, 6px)",
-            background: "var(--surface-soft)",
-          }}
+          className="composer-attachment-file-progress"
         >
           <span
-            style={{
-              display: "block",
-              width: `${uploadPercent(a)}%`,
-              height: "100%",
-              background: "var(--accent-primary)",
-              transition: "width var(--transition-fast)",
-            }}
+            style={{ width: `${uploadPercent(a)}%` }}
           />
         </span>
       ) : null}
@@ -310,9 +191,7 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
 };
 
 const uploadPercent = (attachment: ComposerAttachment): number => {
-  const value = Number(attachment.progress ?? 0);
-  if (!Number.isFinite(value)) return 0;
-  return Math.max(0, Math.min(100, Math.round(value)));
+  return Math.round(attachment.progress ?? 0);
 };
 
 const openComposerAttachment = (attachment: ComposerAttachment): boolean => {
@@ -344,18 +223,4 @@ const uploadStatusLabel = (attachment: ComposerAttachment): string =>
 const attachmentTitle = (attachment: ComposerAttachment): string => {
   if (attachment.error) return attachment.error;
   return attachment.name || "附件";
-};
-
-const fileChipActionStyle: React.CSSProperties = {
-  width: 24,
-  height: 24,
-  background: "transparent",
-  color: "var(--text-muted)",
-  border: 0,
-  borderRadius: "var(--radius-sm, 4px)",
-  cursor: "pointer",
-  padding: 0,
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
 };

@@ -10,9 +10,7 @@ from backend.agent.policies.stream_retry import DefaultStreamRetryPolicy, Stream
 from backend.llm.base import LLMMessage, ToolCallEvent
 from backend.llm.errors import classify_llm_error, retry_after_seconds
 from backend.llm.openai_errors import (
-    _is_blocked_gateway_error,
     _is_stream_options_unsupported_error,
-    _is_transient_gateway_error,
 )
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
@@ -68,8 +66,6 @@ def test_cloudflare_525_is_transient_even_when_body_looks_blocked() -> None:
     assert classification.retryable is True
     assert classification.error_type == "api"
     assert classification.provider_error_type == "network"
-    assert _is_transient_gateway_error(error) is True
-    assert _is_blocked_gateway_error(error) is False
 
 
 def test_stream_retry_retries_525_but_not_real_policy_block() -> None:

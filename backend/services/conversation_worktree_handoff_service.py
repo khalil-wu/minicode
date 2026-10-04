@@ -7,7 +7,8 @@ import subprocess
 from typing import Any, TYPE_CHECKING
 from uuid import uuid4
 
-from backend.services.workspace_service import readonly_git_policy, run_readonly_git, sanitized_git_env
+from backend.runtime_env import sanitized_git_env
+from backend.services.workspace_service import readonly_git_policy, run_readonly_git
 from backend.workspace.worktree import isolated_worktree_root
 from backend.sandbox.runner import SandboxUnavailableError
 
@@ -90,9 +91,14 @@ def build_handoff_preflight(
         checks.append(_check("repository.missing", "blocking", "The main Git checkout no longer exists.", path=str(base_root)))
 
     source_status = _status(source_path, sandbox_policy=source_policy) if source_path.exists() else "<missing>"
-    main_status = _status(base_root, sandbox_policy=main_policy) if base_root.exists() else "<missing>"
-    main_head = _head(base_root, sandbox_policy=main_policy) if base_root.exists() else ""
-    main_branch = _branch(base_root, sandbox_policy=main_policy) if base_root.exists() else ""
+    source_head = _head(source_path, sandbox_policy=source_policy) if source_path.exists() else ""
+    source_branch = _branch(source_path, sandbox_policy=source_policy) if source_path.exists() else ""
+    if source_path == base_root:
+        main_status, main_head, main_branch = source_status, source_head, source_branch
+    else:
+        main_status = _status(base_root, sandbox_policy=main_policy) if base_root.exists() else "<missing>"
+        main_head = _head(base_root, sandbox_policy=main_policy) if base_root.exists() else ""
+        main_branch = _branch(base_root, sandbox_policy=main_policy) if base_root.exists() else ""
     if source_status and source_status != "<missing>" and source_status != "<status unavailable>":
         if dirty_action == "stash":
             checks.append(_check("source.dirty.stash", "warning", "Local changes will be stashed and restored in the destination workspace."))
@@ -130,8 +136,8 @@ def build_handoff_preflight(
         "conversation_id": conversation_id,
         "direction": direction,
         "source_path": str(source_path),
-        "source_head": _head(source_path, sandbox_policy=source_policy) if source_path.exists() else "",
-        "source_branch": _branch(source_path, sandbox_policy=source_policy) if source_path.exists() else "",
+        "source_head": source_head,
+        "source_branch": source_branch,
         "source_status": source_status,
         "target_path": str(worktree_path if direction == "local_to_worktree" else base_root),
         "target_head": main_head,
@@ -170,7 +176,7 @@ def stash_workspace_changes(root: Path, *, label: str) -> tuple[bool, str]:
     # choosing the stash path does not block an otherwise valid handoff.
     if "No local changes" in output:
         return True, ""
-    ok, entries = _git_snapshot(root, "stash", "list", "--format=%H%x00%gs")
+    ok, entries = _git(root, "stash", "list", "--format=%H%x00%gs")
     if not ok:
         return False, entries
     for entry in entries.splitlines():

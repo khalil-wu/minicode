@@ -5,7 +5,7 @@ import asyncio
 import binascii
 import logging
 import mimetypes
-from contextlib import aclosing, nullcontext, suppress
+from contextlib import aclosing, suppress
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 from uuid import uuid4
@@ -27,6 +27,8 @@ from backend.artifact.media import AUDIO_MEDIA_EXTENSIONS
 from backend.config import load_config
 from backend.documents.service import ingest_uploaded_document
 from backend.permissions.context import PermissionContext
+from backend.owner_scope import canonical_workspace_root
+from backend.services.workspace_service import parse_user_message_workspace_request
 
 logger = logging.getLogger(__name__)
 
@@ -50,16 +52,13 @@ class AttachmentUploadContext:
     workspace_root: Any | None
     artifact_store: Any
     attachment_store: Any
-    release_upload: Callable[[], None] | None = field(
-        default=None,
+    release_upload: Callable[[], None] = field(
         repr=False,
         compare=False,
     )
 
     def release(self) -> None:
-        release = self.release_upload
-        if callable(release):
-            release()
+        self.release_upload()
 
 
 class ChatApiServiceError(Exception):
@@ -228,19 +227,24 @@ async def run_owned_rest_chat(
         conversation_id or "rest",
         journal_turn_id,
     )
-    agent_runtime = default_runtime()
-    session_id = f"scheduled:{run_id}" if run_id else "rest_api"
-    run_context.execution_journal = agent_runtime.execution_journal(journal_owner)
+    agent_runtime = run_context.agent_runtime or default_runtime()
+    session_id = f"scheduled_{run_id}" if run_id else "rest_api"
+    if run_context.execution_journal is None:
+        run_context.execution_journal = agent_runtime.execution_journal(journal_owner)
     run_context.mcp_manager = mcp_manager
     run_context.agent_runtime = agent_runtime
     run_context.cost_session_id = session_id
     run_context.requires_explicit_workspace = bool(workspace_root)
     run_context.connected_mcp_servers = tuple(connected_mcp_servers)
     runtime = AgentLoopSessionContext(
-        permission_context=PermissionContext(
-            mode=normalized_permission_mode,
-            workspace_scope="project",
-            source="scheduled_task" if run_id else "rest_api",
+        permission_context=(
+            run_context.permission_context_provider()
+            if run_context.permission_context_provider is not None
+            else PermissionContext(
+                mode=normalized_permission_mode,
+                workspace_scope="project",
+                source="scheduled_task" if run_id else "rest_api",
+            )
         ),
         workspace_root=workspace_root,
         session_id=session_id,
@@ -248,6 +252,10 @@ async def run_owned_rest_chat(
             "source": "scheduled_task" if run_id else "rest_api",
             "conversation_id": conversation_id,
             "run_id": run_id,
+            "assistant_message_id": (
+                f"assistant_schedule_{run_id}" if run_id else f"assistant_rest_{journal_turn_id}"
+            ),
+            "user_message_id": f"schedule_{run_id}" if run_id else "",
         },
         run_context=run_context,
     )
@@ -331,6 +339,7 @@ def reserve_attachment_upload_context(
     *,
     session_id: str,
     conversation_id: str = "",
+    workspace_root: str = "",
     ws_manager: Any,
     attachment_store: Any,
 ) -> AttachmentUploadContext:
@@ -338,61 +347,49 @@ def reserve_attachment_upload_context(
     if session is None:
         raise ChatApiServiceError(404, f"Session '{session_id}' is not connected.")
 
-    # Real WebSocketSession instances always expose this lock. Keep the
-    # fallback for narrow service test doubles without silently weakening the
-    # production invariant.
-    upload_lock = getattr(session, "_attachment_upload_lock", None)
-    lock_context = upload_lock if upload_lock is not None else nullcontext()
-    with lock_context:
+    with session._attachment_upload_lock:
         requested_id = str(conversation_id or "").strip()
         conversation = None
         if requested_id:
             conversation = session.conversation_repo.get_conversation(requested_id)
-            if conversation is None or bool(getattr(conversation, "archived", False)):
+            if conversation is None or conversation.archived:
                 raise ChatApiServiceError(404, "The target conversation is not available.")
         else:
             active_id = str(session.active_conversation_id or "").strip()
             if active_id:
                 conversation = session.conversation_repo.get_conversation(active_id)
-                if conversation is not None and bool(getattr(conversation, "archived", False)):
+                if conversation is not None and conversation.archived:
                     conversation = None
             if conversation is None:
-                conversation = session.conversation_repo.create_conversation()
+                creation_workspace = ""
+                if workspace_root:
+                    workspace = parse_user_message_workspace_request(workspace_root)
+                    if workspace.error_event is not None:
+                        raise ChatApiServiceError(400, workspace.error_event.data["message"])
+                    creation_workspace = str(workspace.project_path)
+                conversation = session.conversation_repo.create_conversation(
+                    workspace_root=creation_workspace,
+                )
                 session.active_conversation_id = conversation.id
 
-        fixed_conversation_id = str(getattr(conversation, "id", "") or "").strip()
-        if not fixed_conversation_id:
-            raise ChatApiServiceError(500, "Failed to reserve an attachment conversation.")
-        workspace_root = session.session_lifecycle.workspace_root_for_conversation(conversation)
-        reserve_upload = getattr(ws_manager, "reserve_attachment_upload", None)
-        release_upload: Callable[[], None] | None = None
-        if callable(reserve_upload):
-            upload_token = reserve_upload(fixed_conversation_id)
-            if not upload_token:
-                raise ChatApiServiceError(
-                    409,
-                    "The target conversation is being deleted; retry the upload after it settles.",
-                )
-            released = False
-
-            def release_reserved_upload() -> None:
-                nonlocal released
-                if released:
-                    return
-                released = True
-                release = getattr(ws_manager, "release_attachment_upload", None)
-                if callable(release):
-                    release(upload_token)
-
-            release_upload = release_reserved_upload
+        fixed_conversation_id = conversation.id
+        owner_workspace_root = session.session_lifecycle.workspace_root_for_conversation(conversation)
+        if workspace_root and canonical_workspace_root(workspace_root) != canonical_workspace_root(owner_workspace_root):
+            raise ChatApiServiceError(409, "The target conversation belongs to another workspace.")
+        upload_token = ws_manager.reserve_attachment_upload(fixed_conversation_id)
+        if upload_token is None:
+            raise ChatApiServiceError(
+                409,
+                "The target conversation is being deleted; retry the upload after it settles.",
+            )
         return AttachmentUploadContext(
             session_id=session_id,
             conversation_id=fixed_conversation_id,
             conversation=conversation,
-            workspace_root=workspace_root,
+            workspace_root=owner_workspace_root,
             artifact_store=session.artifact_store,
             attachment_store=attachment_store,
-            release_upload=release_upload,
+            release_upload=lambda: ws_manager.release_attachment_upload(upload_token),
         )
 
 

@@ -71,6 +71,16 @@ def record_unproven_cleanup(
     exc.cleanup_reason = (  # type: ignore[attr-defined]
         "" if reaped else f"subprocess_tree_survived_kill:pid={pid}"
     )
+    exc.cleanup_receipt = {  # type: ignore[attr-defined]
+        "resource_kind": "process",
+        "resource_id": str(pid) if pid is not None else "",
+        "reason": exc.cleanup_reason,
+        "requested": True,
+        "acknowledged": True,
+        "completed": reaped,
+        "pending": 0 if reaped else 1,
+        "manual_recovery_required": not reaped,
+    }
 
 
 def process_group_kwargs() -> dict[str, Any]:
@@ -154,6 +164,8 @@ async def terminate_process_tree(
                     proc.kill()
         elif os.name == "nt":
             def kill_windows_tree() -> bool:
+                if not psutil.pid_exists(pid):
+                    return True
                 taskkill_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 try:
                     completed = subprocess.run(
@@ -325,7 +337,7 @@ async def _read_bounded_stream(
         retained += len(chunk)
 
 
-async def _close_stdin(
+async def write_process_stdin(
     proc: asyncio.subprocess.Process,
     input_data: bytes | None,
 ) -> None:
@@ -367,7 +379,7 @@ async def _bounded_communicate_operation(
             limit_bytes=stderr_limit_bytes,
         )
     )
-    stdin_task = asyncio.create_task(_close_stdin(proc, input_data))
+    stdin_task = asyncio.create_task(write_process_stdin(proc, input_data))
     wait_task = asyncio.create_task(proc.wait())
     tasks = (stdout_task, stderr_task, stdin_task, wait_task)
     try:

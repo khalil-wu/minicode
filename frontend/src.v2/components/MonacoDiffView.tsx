@@ -1,7 +1,9 @@
-import { lazy, Suspense, useRef, useEffect, useState, useMemo } from "react";
-import type React from "react";
+import { lazy, Suspense, useRef, useLayoutEffect, useId, useMemo } from "react";
+import type * as Monaco from "monaco-editor/editor/editor.api.js";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
-import { parseUnifiedDiffLines, type UnifiedDiffLine } from "../lib/unified-diff";
+import { extractFilePathFromDiff, parseUnifiedDiffLines, type UnifiedDiffLine } from "../lib/unified-diff";
+import { useAppStore } from "../stores";
+import { defineMiniCodeMonacoTheme, miniCodeMonacoThemeName } from "../panels/monacoTheme";
 
 const MonacoDiffEditor = lazy(async () => {
   const scope = globalThis as typeof globalThis & { MonacoEnvironment?: { getWorker?: () => Worker } };
@@ -29,27 +31,43 @@ const MonacoDiffEditor = lazy(async () => {
 export function parseUnifiedDiffToOriginalModified(
   patch: string,
 ): { original: string; modified: string; filePath: string } {
-  const lines = parseUnifiedDiffLines(patch);
-  let filePath = "";
+  const { original, modified, filePath } = parseUnifiedDiffExcerpt(patch);
+  return { original, modified, filePath };
+}
 
-  // Extract file path from header
-  for (const { text: line, kind } of lines) {
-    if (kind !== "meta") continue;
-    if (line.startsWith("+++ b/")) {
-      filePath = line.slice(6);
-      break;
-    }
-    if (line.startsWith("+++ ") && line !== "+++ ") {
-      filePath = line.slice(4);
-      break;
-    }
-  }
+export function parseUnifiedDiffExcerpt(patch: string): { original: string; modified: string; filePath: string; originalLines: (number | null)[]; modifiedLines: (number | null)[] } {
+  const lines = parseUnifiedDiffLines(patch);
+  const filePath = extractFilePathFromDiff(lines);
+  const rawLines = patch.split("\n");
 
   const origParts: string[] = [];
   const modParts: string[] = [];
+  const originalLines: (number | null)[] = [];
+  const modifiedLines: (number | null)[] = [];
+  let oldLine: number | undefined;
+  let newLine: number | undefined;
 
   let previousBodyKind: UnifiedDiffLine["kind"] | undefined;
-  for (const { text: line, kind } of lines) {
+  for (const [index, { text: line, kind }] of lines.entries()) {
+    if (kind === "hunk") {
+      const range = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+      if (range) {
+        const oldStart = Number(range[1]);
+        const newStart = Number(range[2]);
+        const omitted = oldLine === undefined || newLine === undefined ? 0 : Math.max(oldStart - oldLine, newStart - newLine);
+        if (omitted > 0) {
+          const gap = `⋯ 中间省略 ${omitted} 行 ⋯\n`;
+          origParts.push(gap);
+          modParts.push(gap);
+          originalLines.push(null);
+          modifiedLines.push(null);
+        }
+        oldLine = oldStart;
+        newLine = newStart;
+      }
+      previousBodyKind = undefined;
+      continue;
+    }
     if (kind === "marker") {
       if (previousBodyKind === "del" || previousBodyKind === "context") {
         origParts[origParts.length - 1] = origParts[origParts.length - 1].replace(/\n$/, "");
@@ -60,13 +78,23 @@ export function parseUnifiedDiffToOriginalModified(
       continue;
     }
     if (kind === "add") {
-      modParts.push(line.slice(1) + "\n");
+      modParts.push(line.slice(1) + (rawLines[index].endsWith("\r") ? "\r\n" : "\n"));
+      modifiedLines.push(newLine ?? null);
+      if (newLine !== undefined) newLine++;
     } else if (kind === "del") {
-      origParts.push(line.slice(1) + "\n");
+      origParts.push(line.slice(1) + (rawLines[index].endsWith("\r") ? "\r\n" : "\n"));
+      originalLines.push(oldLine ?? null);
+      if (oldLine !== undefined) oldLine++;
     } else if (kind === "context" && line.startsWith(" ")) {
-      origParts.push(line.slice(1) + "\n");
-      modParts.push(line.slice(1) + "\n");
+      const context = line.slice(1) + (rawLines[index].endsWith("\r") ? "\r\n" : "\n");
+      origParts.push(context);
+      modParts.push(context);
+      originalLines.push(oldLine ?? null);
+      modifiedLines.push(newLine ?? null);
+      if (oldLine !== undefined) oldLine++;
+      if (newLine !== undefined) newLine++;
     } else {
+      if (line.startsWith("diff --git ") || line.startsWith("Index: ")) { oldLine = undefined; newLine = undefined; }
       previousBodyKind = undefined;
       continue;
     }
@@ -77,93 +105,71 @@ export function parseUnifiedDiffToOriginalModified(
     original: origParts.join(""),
     modified: modParts.join(""),
     filePath,
+    originalLines,
+    modifiedLines,
   };
 }
 
 interface MonacoDiffViewProps {
-  /** Unified diff patch string. If provided, will be parsed automatically. */
-  patch?: string;
-  /** Original content (left side). Overrides patch parsing. */
-  original?: string;
-  /** Modified content (right side). Overrides patch parsing. */
-  modified?: string;
+  /** The selected file's unified patch; this view displays its excerpts. */
+  patch: string;
   /** Programming language for syntax highlighting in the diff editor. */
   language?: string;
   /** File path shown in the header bar. */
   filePath?: string;
   /** Editor height. */
   height?: string | number;
-  /** Whether the editor content is read-only. */
-  readOnly?: boolean;
-  /** Callback for the Accept button. If omitted, the button is hidden. */
-  onAccept?: () => void;
-  /** Callback for the Reject button. If omitted, the button is hidden. */
-  onReject?: () => void;
 }
 
 export function MonacoDiffView({
   patch,
-  original: originalProp,
-  modified: modifiedProp,
   language = "plaintext",
   filePath: filePathProp,
   height = 400,
-  readOnly = true,
-  onAccept,
-  onReject,
 }: MonacoDiffViewProps) {
-  const editorRef = useRef<import("monaco-editor").editor.IStandaloneDiffEditor | null>(null);
-  const [theme, setTheme] = useState<"vs-dark" | "vs">("vs-dark");
+  const monacoRef = useRef<typeof Monaco | null>(null);
+  const diffEditorRef = useRef<Monaco.editor.IStandaloneDiffEditor | null>(null);
+  const instanceId = useId();
+  const theme = useAppStore((state) => state.resolvedTheme);
+  const codeTextScale = useAppStore((state) => state.codeTextScale);
+  useLayoutEffect(() => {
+    if (monacoRef.current) defineMiniCodeMonacoTheme(monacoRef.current, theme);
+  }, [theme]);
 
-  // Sync with app theme
-  useEffect(() => {
-    const root = document.documentElement;
-    const currentTheme = root.getAttribute("data-theme");
-    setTheme(currentTheme === "light" ? "vs" : "vs-dark");
-
-    const observer = new MutationObserver(() => {
-      const t = root.getAttribute("data-theme");
-      setTheme(t === "light" ? "vs" : "vs-dark");
-    });
-    observer.observe(root, {
-      attributes: true,
-      attributeFilter: ["data-theme"],
-    });
-    return () => observer.disconnect();
-  }, []);
-
-  const { original, modified, filePath } = useMemo(() => {
-    if (originalProp != null && modifiedProp != null) {
-      return {
-        original: originalProp,
-        modified: modifiedProp,
-        filePath: filePathProp ?? "",
-      };
-    }
-    if (patch) {
-      const parsed = parseUnifiedDiffToOriginalModified(patch);
-      return {
-        original: parsed.original,
-        modified: parsed.modified,
-        filePath: filePathProp ?? parsed.filePath,
-      };
-    }
-    return { original: "", modified: "", filePath: filePathProp ?? "" };
-  }, [patch, originalProp, modifiedProp, filePathProp]);
+  const { original, modified, filePath, originalLines, modifiedLines } = useMemo(() => {
+    const parsed = parseUnifiedDiffExcerpt(patch);
+    return { ...parsed, filePath: filePathProp ?? parsed.filePath };
+  }, [patch, filePathProp]);
+  const applySourceLineNumbers = (editor: Monaco.editor.IStandaloneDiffEditor) => {
+    editor.getOriginalEditor().updateOptions({ lineNumbers: (line) => originalLines[line - 1]?.toString() ?? "⋯" });
+    editor.getModifiedEditor().updateOptions({ lineNumbers: (line) => modifiedLines[line - 1]?.toString() ?? "⋯" });
+  };
+  useLayoutEffect(() => {
+    if (diffEditorRef.current) applySourceLineNumbers(diffEditorRef.current);
+  }, [originalLines, modifiedLines]);
+  const viewPath = `minicode-diff://preview/${encodeURIComponent(instanceId)}/${encodeURIComponent(filePath || (language === "typescript" ? "preview.ts" : language === "javascript" ? "preview.js" : "preview"))}`;
+  const scriptExtension = /(?:\.d)?\.[cm]?[jt]sx?$/i.exec(filePath)?.[0] ?? (language === "typescript" ? ".ts" : language === "javascript" ? ".js" : "");
+  const onlyEolChanged = original.includes("\r\n") !== modified.includes("\r\n")
+    && original.replace(/\r\n/g, "\n") === modified.replace(/\r\n/g, "\n");
 
   return (
     <div
       style={{
+        height,
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
         border: "1px solid var(--border-subtle)",
         borderRadius: "6px",
         overflow: "hidden",
       }}
     >
       {/* Header */}
-      {filePath && (
+      {(filePath || patch || onlyEolChanged) && (
         <div
           style={{
             display: "flex",
+            flexShrink: 0,
             alignItems: "center",
             justifyContent: "space-between",
             padding: "6px 12px",
@@ -180,28 +186,15 @@ export function MonacoDiffView({
           >
             {filePath}
           </span>
-          {(onAccept || onReject) && (
-            <div style={{ display: "flex", gap: "8px" }}>
-              {onReject && (
-                <button type="button" onClick={onReject} style={rejectBtnStyle}>
-                  拒绝
-                </button>
-              )}
-              {onAccept && (
-                <button type="button" onClick={onAccept} style={acceptBtnStyle}>
-                  接受
-                </button>
-              )}
-            </div>
-          )}
+          <span style={{ fontSize: "var(--text-xxs)", color: "var(--text-muted)" }}>{onlyEolChanged ? `换行符从 ${original.includes("\r\n") ? "CRLF" : "LF"} 改为 ${modified.includes("\r\n") ? "CRLF" : "LF"}` : patch ? "仅显示差异片段" : ""}</span>
         </div>
       )}
       {/* Editor */}
-      <Suspense
+      <div style={{ flex: 1, minHeight: 0, background: "var(--editor-background)", color: "var(--editor-foreground)" }}><Suspense
         fallback={
           <div
             style={{
-              height,
+              height: "100%",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -213,48 +206,35 @@ export function MonacoDiffView({
         }
       >
         <MonacoDiffEditor
-          height={height}
+          key={viewPath}
+          height="100%"
           language={language}
           original={original}
           modified={modified}
-          theme={theme}
+          originalModelPath={`${viewPath}/original${scriptExtension}`}
+          modifiedModelPath={`${viewPath}/modified${scriptExtension}`}
+          theme={miniCodeMonacoThemeName(theme)}
           options={{
-            readOnly,
+            readOnly: true,
             renderSideBySide: true,
             minimap: { enabled: false },
             scrollBeyondLastLine: false,
-            fontSize: 15,
-            lineHeight: 23,
+            fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--editor-font-family").trim(),
+            fontSize: Math.round(14 * codeTextScale),
+            lineHeight: Math.round(22 * codeTextScale),
+            fontLigatures: false,
             lineNumbers: "on",
             wordWrap: "on",
             padding: { top: 8 },
             originalEditable: false,
           }}
-          onMount={(editor: import("monaco-editor").editor.IStandaloneDiffEditor) => {
-            editorRef.current = editor;
+          beforeMount={(monaco: typeof Monaco) => {
+            monacoRef.current = monaco;
+            defineMiniCodeMonacoTheme(monaco, useAppStore.getState().resolvedTheme);
           }}
+          onMount={(editor: Monaco.editor.IStandaloneDiffEditor) => { diffEditorRef.current = editor; applySourceLineNumbers(editor); }}
         />
-      </Suspense>
+      </Suspense></div>
     </div>
   );
 }
-
-const acceptBtnStyle: React.CSSProperties = {
-  padding: "3px 12px",
-  borderRadius: "var(--radius-sm)",
-  border: "none",
-  cursor: "pointer",
-  background: "var(--accent-primary)",
-  color: "var(--text-on-accent)",
-  fontSize: "var(--text-xxs)",
-};
-
-const rejectBtnStyle: React.CSSProperties = {
-  padding: "3px 12px",
-  borderRadius: "var(--radius-sm)",
-  border: "1px solid var(--border-soft)",
-  cursor: "pointer",
-  background: "transparent",
-  color: "var(--text-secondary)",
-  fontSize: "var(--text-xxs)",
-};

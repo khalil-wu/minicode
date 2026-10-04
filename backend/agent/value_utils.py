@@ -9,6 +9,8 @@ from typing import Any
 def nonnegative_int(value: Any, *, maximum: int | float | None = None) -> int | None:
     if isinstance(value, bool):
         return None
+    if isinstance(value, int):
+        return value if value >= 0 and (maximum is None or value <= maximum) else None
     try:
         numeric = float(value)
     except (TypeError, ValueError):
@@ -23,6 +25,8 @@ def nonnegative_int(value: Any, *, maximum: int | float | None = None) -> int | 
 def finite_number(value: Any) -> int | float | None:
     if isinstance(value, bool):
         return None
+    if isinstance(value, int):
+        return value
     try:
         numeric = float(value)
     except (TypeError, ValueError):

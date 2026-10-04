@@ -118,19 +118,6 @@ export const sessionTitleStyle: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-export const sessionMetaLineStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 5,
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  fontSize: "var(--text-2xs)",
-  color: "var(--text-muted)",
-  marginTop: 2,
-};
-
 export const renameInputStyle: React.CSSProperties = {
   width: "100%",
   background: "var(--surface-base)",

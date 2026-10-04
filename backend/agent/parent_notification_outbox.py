@@ -502,6 +502,8 @@ class ParentNotificationOutbox:
             for item in notifications:
                 if item.notification_id != notification_id:
                     continue
+                if item.status == "acked":
+                    return item
                 target = item
                 now = epoch_ms()
                 if bump_attempt:

@@ -17,6 +17,7 @@ from backend.config_requirements import (
     load_config_requirements,
 )
 from backend.runtime_env import ShellEnvironmentPolicy, ShellEnvironmentPolicyError
+from backend.workspace.path_filters import is_local_filename
 
 
 _PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -137,9 +138,10 @@ class ConfigLayer:
         if not isinstance(self.config, Mapping):
             raise ConfigLayerError(f"{self.source.display()} must contain a table/object")
         copied = copy.deepcopy(dict(self.config))
-        _validate_project_document_config(copied, self.source.display())
+        if self.disabled_reason is None:
+            _normalize_project_document_config(copied, self.source.display())
         shell_environment_policy = copied.get("shell_environment_policy")
-        if shell_environment_policy is not None and not self.disabled_reason:
+        if shell_environment_policy is not None and self.disabled_reason is None:
             try:
                 ShellEnvironmentPolicy.from_mapping(shell_environment_policy)
             except ShellEnvironmentPolicyError as exc:
@@ -398,9 +400,22 @@ def load_config_layers_state(
             )
         )
 
+    session_layer = ConfigLayer(ConfigLayerSource("session_flags"), session_flags) if session_flags else None
+    policy_layers = tuple(policy_config_layers)
+    for layer in policy_layers:
+        if layer.source.kind != "policy":
+            raise ConfigLayerError("Policy config layers must use policy sources")
+
     effective_before_project: dict[str, Any] = {}
-    for layer in layers:
-        _deep_merge(effective_before_project, layer.config)
+    # Discovery uses the same non-project sources as instruction selection;
+    # project-local content cannot select the boundary that admitted it.
+    for layer in (*layers, *((session_layer,) if session_layer is not None else ()), *policy_layers):
+        if layer.is_disabled:
+            continue
+        if layer.source.kind == "policy":
+            _deep_merge_managed_policy(effective_before_project, layer.config)
+        else:
+            _deep_merge(effective_before_project, layer.config)
 
     if cwd is not None:
         resolved_cwd = Path(cwd).expanduser().resolve()
@@ -442,15 +457,9 @@ def load_config_layers_state(
                 )
             )
 
-    if session_flags:
-        layers.append(
-            ConfigLayer(ConfigLayerSource("session_flags"), copy.deepcopy(dict(session_flags)))
-        )
-
-    for layer in policy_config_layers:
-        if layer.source.kind != "policy":
-            raise ConfigLayerError("Policy config layers must use policy sources")
-        layers.append(layer)
+    if session_layer is not None:
+        layers.append(session_layer)
+    layers.extend(policy_layers)
 
     layers.sort(key=lambda layer: layer.source.precedence)
     requirements = load_config_requirements(
@@ -506,13 +515,11 @@ def _project_root_markers(config: Mapping[str, Any]) -> tuple[str, ...]:
     raw = config.get("project_root_markers")
     if raw is None:
         return _DEFAULT_PROJECT_ROOT_MARKERS
-    if not isinstance(raw, list) or any(not isinstance(value, str) for value in raw):
-        raise ConfigLayerError("project_root_markers must be an array of strings")
-    return tuple(value for value in raw if value)
+    return tuple(raw)
 
 
-def _validate_project_document_config(
-    config: Mapping[str, Any],
+def _normalize_project_document_config(
+    config: dict[str, Any],
     source: str,
 ) -> None:
     markers = config.get("project_root_markers")
@@ -531,6 +538,14 @@ def _validate_project_document_config(
         raise ConfigLayerError(
             f"project_doc_fallback_filenames in {source} must be an array of strings"
         )
+    for field_name in ("project_root_markers", "project_doc_fallback_filenames"):
+        raw = config.get(field_name)
+        if raw is None:
+            continue
+        names = [value.strip() for value in raw if value.strip()]
+        if any(not is_local_filename(name) for name in names):
+            raise ConfigLayerError(f"{field_name} in {source} must contain filenames, not paths")
+        config[field_name] = list(dict.fromkeys(names))
     max_bytes = config.get("project_doc_max_bytes")
     if max_bytes is not None and (
         isinstance(max_bytes, bool)

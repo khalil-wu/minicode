@@ -7,11 +7,6 @@ import { desktop, isDesktop, ptyAckExit, ptyClear, ptyKill, ptyList, ptyResize, 
 import type { TerminalSessionInfo } from "../stores/types";
 import { commandResultSucceeded, sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { openWebInBrowser } from "../chat/openWebInBrowser";
-import {
-  NEW_TERMINAL_SESSION_EVENT,
-  consumeNewTerminalSessionRequest,
-  hasPendingNewTerminalSessionRequest,
-} from "./terminalRequests";
 
 type XtermLike = {
   cols: number;
@@ -22,12 +17,17 @@ type XtermLike = {
   dispose: () => void;
   focus?: () => void;
   getSelection?: () => string;
+  getSelectionPosition: () => { start: { x: number; y: number }; end: { x: number; y: number } } | undefined;
+  select: (column: number, row: number, length: number) => void;
+  scrollToLine: (line: number) => void;
+  scrollToBottom: () => void;
+  buffer: { active: { viewportY: number; baseY: number } };
   hasSelection?: () => boolean;
   attachCustomKeyEventHandler?: (handler: (event: KeyboardEvent) => boolean) => void;
   loadAddon: (addon: unknown) => void;
   onData: (handler: (input: string) => void) => void;
   open: (element: HTMLElement) => void;
-  write: (data: string) => void;
+  write: (data: string, onParsed?: () => void) => void;
   writeln: (data: string) => void;
 };
 
@@ -43,19 +43,18 @@ type XtermWithOptions = XtermLike & {
   };
 };
 
+type TerminalView = {
+  owner: string;
+  term: XtermWithOptions;
+  fit: FitAddonLike;
+  host: HTMLDivElement;
+  hydrated: boolean;
+  output: string;
+  cursor?: number;
+};
+
 const DEV_SERVER_URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+(?:[/?#][^\s'"<>]*)?/gi;
 const TERMINAL_OUTPUT_BUFFER_CHARS = 80_000;
-
-export const mergeTerminalOutputSnapshot = (snapshot: string, live: string): string => {
-  if (!snapshot) return live.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
-  if (!live) return snapshot.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
-  if (snapshot.endsWith(live)) return snapshot.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
-  if (live.endsWith(snapshot)) return live.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
-  const overlapLimit = Math.min(snapshot.length, live.length, 4096);
-  let overlap = overlapLimit;
-  while (overlap > 0 && snapshot.slice(-overlap) !== live.slice(0, overlap)) overlap -= 1;
-  return `${snapshot}${live.slice(overlap)}`.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
-};
 
 export const mergeTerminalOutputByCursor = (
   snapshot: string,
@@ -65,7 +64,12 @@ export const mergeTerminalOutputByCursor = (
   liveEndCursor: number | undefined,
 ): { output: string; endCursor?: number } => {
   if (snapshotStartCursor == null || snapshotEndCursor == null) {
-    return { output: mergeTerminalOutputSnapshot(snapshot, live), endCursor: snapshotEndCursor ?? liveEndCursor };
+    return { output: snapshot.slice(-TERMINAL_OUTPUT_BUFFER_CHARS) };
+  }
+  // A cleared buffer retains its cursor; an older snapshot must not bring
+  // cleared output back. Chunks received after the clear remain in `live`.
+  if (liveEndCursor != null && snapshotEndCursor <= liveEndCursor && !live) {
+    return { output: live, endCursor: liveEndCursor };
   }
   if (liveEndCursor == null || liveEndCursor <= snapshotEndCursor) {
     return { output: snapshot.slice(-TERMINAL_OUTPUT_BUFFER_CHARS), endCursor: snapshotEndCursor };
@@ -186,19 +190,21 @@ const terminalTheme = (isLight: boolean): Record<string, string> => (
       }
 );
 
-export const TerminalPanel = () => {
+export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XtermLike | null>(null);
   const fitRef = useRef<FitAddonLike | null>(null);
   const activeRef = useRef<string | null>(null);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const terminalViewsRef = useRef(new Map<string, TerminalView>());
+  const terminalModulesRef = useRef<{ Terminal: typeof import("@xterm/xterm").Terminal; FitAddon: typeof import("@xterm/addon-fit").FitAddon } | null>(null);
   const outputBufferRef = useRef<Record<string, string>>({});
   const outputCursorRef = useRef<Record<string, number>>({});
-  const hydratedSnapshotRef = useRef<Set<string>>(new Set());
   const refreshEpochRef = useRef(0);
   const inputQueueRef = useRef<Record<string, string[]>>({});
   const webLineRef = useRef("");
   const mountedRef = useRef(true);
-  const createSessionRef = useRef<() => Promise<void>>(async () => {});
   const refreshSessionsRef = useRef<() => Promise<void>>(async () => {});
   const terminalSessions = useAppStore((s) => s.terminalSessions);
   const activeTerminalSessionId = useAppStore((s) => s.activeTerminalSessionId);
@@ -206,6 +212,7 @@ export const TerminalPanel = () => {
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const resolvedTheme = useAppStore((s) => s.resolvedTheme);
   const terminalSnapshots = useAppStore((s) => s.terminalSnapshots);
+  const conversations = useAppStore((s) => s.conversations);
   const [booting, setBooting] = useState(true);
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
   const [autoCreating, setAutoCreating] = useState(false);
@@ -223,43 +230,6 @@ export const TerminalPanel = () => {
   const liveUrl = detectedUrls[0];
   const isCurrentConversation = (owner: string) => mountedRef.current
     && useAppStore.getState().conversationId === owner;
-
-  const mirrorTerminalCreated = (session: TerminalSessionInfo) => {
-    if (!isDesktop() || !session.conversationId) return;
-    sendClientCommand({
-      type: "terminal.mirror.created",
-      conversation_id: session.conversationId,
-      session_id: session.id,
-      pid: session.pid,
-      shell: session.shell,
-      cwd: session.cwd,
-      is_alive: session.status !== "exited",
-    });
-  };
-
-  const mirrorTerminalOutput = (sessionId: string, conversationOwner: string, data: string) => {
-    if (!isDesktop() || !conversationOwner || !data) return;
-    const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
-    sendClientCommand({
-      type: "terminal.mirror.output",
-      conversation_id: conversationOwner,
-      session_id: sessionId,
-      data,
-      pid: session?.pid,
-      shell: session?.shell,
-      cwd: session?.cwd,
-    });
-  };
-
-  const mirrorTerminalExit = (sessionId: string, conversationOwner: string, exitCode?: number) => {
-    if (!isDesktop() || !conversationOwner) return;
-    sendClientCommand({
-      type: "terminal.mirror.exit",
-      conversation_id: conversationOwner,
-      session_id: sessionId,
-      exit_code: exitCode,
-    });
-  };
 
   const removeMirroredTerminal = (sessionId: string, conversationOwner: string) => {
     if (!isDesktop() || !conversationOwner) return;
@@ -288,50 +258,12 @@ export const TerminalPanel = () => {
     Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")])
       .then(([{ Terminal }, { FitAddon }]) => {
         if (disposed || !containerRef.current) return;
-        const isLight = useAppStore.getState().resolvedTheme === "light";
-        const term = new Terminal({
-          fontSize: terminalFontSize(),
-          fontFamily: terminalFontFamily(),
-          lineHeight: 1.12,
-          letterSpacing: 0,
-          cursorBlink: true,
-          convertEol: !isDesktop(),
-          allowTransparency: true,
-          scrollback: 8000,
-          theme: terminalTheme(isLight),
-        }) as unknown as XtermWithOptions;
-        const fitAddon = new FitAddon() as FitAddonLike;
-        term.loadAddon(fitAddon);
-        term.open(containerRef.current);
-        fitAddon.fit();
-        termRef.current = term;
-        fitRef.current = fitAddon;
+        terminalModulesRef.current = { Terminal, FitAddon };
+        redrawActiveSession();
         setTerminalReady(true);
-        term.attachCustomKeyEventHandler?.((event: KeyboardEvent) => {
-          const isCopy = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c";
-          const isExplicitCopy = isCopy && event.shiftKey;
-          if (isExplicitCopy) {
-            void copyTerminalSelection(term);
-            return false;
-          }
-          if (isCopy && term.hasSelection?.()) {
-            void copyTerminalSelection(term);
-            return false;
-          }
-          return true;
-        });
-        term.onData((input) => {
-          const sessionId = activeRef.current;
-          if (sessionId) {
-            writeToSession(sessionId, input);
-            return;
-          }
-          if (outputBufferRef.current["web-fallback"] !== undefined) writeWebFallbackInput(input);
-        });
         requestAnimationFrame(() => {
-          fitAddon.fit();
-          redrawActiveSession();
-          term.focus?.();
+          safeFit();
+          if (visibleRef.current) termRef.current?.focus?.();
         });
       })
       .catch((error) => {
@@ -342,30 +274,29 @@ export const TerminalPanel = () => {
       disposed = true;
       mountedRef.current = false;
       refreshEpochRef.current += 1;
-      termRef.current?.dispose();
+      for (const view of terminalViewsRef.current.values()) view.term.dispose();
+      terminalViewsRef.current.clear();
+      terminalModulesRef.current = null;
       setTerminalReady(false);
     };
   }, []);
 
   useEffect(() => {
-    if (!termRef.current) return;
-    const isLight = resolvedTheme === "light";
-    const term = termRef.current as unknown as XtermWithOptions;
-    term.options.theme = terminalTheme(isLight);
+    const theme = terminalTheme(resolvedTheme === "light");
+    for (const view of terminalViewsRef.current.values()) view.term.options.theme = theme;
   }, [resolvedTheme]);
 
   // Follow the Appearance-tab code zoom: xterm needs a numeric px, so re-read
   // the scaled token and re-fit the grid.
   const codeTextScale = useAppStore((s) => s.codeTextScale);
   useEffect(() => {
-    if (!termRef.current) return;
-    const term = termRef.current as unknown as XtermWithOptions;
-    term.options.fontSize = terminalFontSize();
+    for (const view of terminalViewsRef.current.values()) view.term.options.fontSize = terminalFontSize();
     safeFit();
   }, [codeTextScale]);
 
   useEffect(() => {
     const resizeObserver = new ResizeObserver(() => {
+      if (!visibleRef.current) return;
       safeFit();
       const sessionId = activeRef.current;
       const term = termRef.current;
@@ -377,12 +308,21 @@ export const TerminalPanel = () => {
   }, []);
 
   useEffect(() => {
+    if (!visible || !terminalReady) return;
+    safeFit();
+    const term = termRef.current!;
+    if (activeRef.current) resizeSession(activeRef.current, term.cols, term.rows);
+  }, [visible, terminalReady]);
+
+  useEffect(() => {
     const ws = getWebSocket();
     const unsub = ws?.subscribe((msg) => {
       const e = msg as {
         type?: string;
         session_id?: string;
         data?: string;
+        start_cursor?: number;
+        end_cursor?: number;
         output?: string;
         command?: string;
         exit_code?: number;
@@ -400,7 +340,7 @@ export const TerminalPanel = () => {
         && (!eventOwner || !activeOwner || eventOwner !== activeOwner)
       ) return;
       if (e.type === "terminal.output" && e.session_id && e.data) {
-        appendOutput(e.session_id, e.data);
+        appendOutput(e.session_id, e.data, e.start_cursor, e.end_cursor, eventOwner);
       } else if (e.type === "terminal.output" && e.output != null) {
         appendOutput("web-fallback", `${e.output}\r\n[exit ${terminalExitCodeLabel(e.exit_code)}]\r\n$ `);
       } else if (e.type === "terminal.exit" && e.session_id) {
@@ -408,14 +348,13 @@ export const TerminalPanel = () => {
       } else if (e.type === "terminal.killed" && e.session_id) {
         delete outputBufferRef.current[e.session_id];
         delete outputCursorRef.current[e.session_id];
-        hydratedSnapshotRef.current.delete(e.session_id);
+        disposeTerminalView(e.session_id);
       } else if (e.type === "terminal.list") {
         if (mountedRef.current) setBooting(false);
       }
     });
 
     let desktopDataCleanup: (() => void) | undefined;
-    let desktopExitCleanup: (() => void) | undefined;
     if (isDesktop()) {
       const d = desktop();
       desktopDataCleanup = d?.pty.onData(({ sessionId, conversationId: owner, data, startCursor, endCursor }) => {
@@ -423,22 +362,12 @@ export const TerminalPanel = () => {
         const acceptedCursor = outputCursorRef.current[sessionId];
         if (endCursor != null && acceptedCursor != null && endCursor <= acceptedCursor) return;
         appendOutput(sessionId, data, startCursor, endCursor, owner);
-        mirrorTerminalOutput(sessionId, owner, data);
-      }) as (() => void) | undefined;
-      desktopExitCleanup = d?.pty.onExit(({ sessionId, conversationId: owner, exitCode }) => {
-        if (!owner) return;
-        mirrorTerminalExit(sessionId, owner, exitCode);
-        const current = useAppStore.getState().terminalSessions.find((session) => session.id === sessionId);
-        if (current?.conversationId === owner) {
-          useAppStore.getState().upsertTerminalSession({ ...current, status: "exited", exitCode, exitedAt: Date.now() });
-        }
       }) as (() => void) | undefined;
     }
 
     return () => {
       unsub?.();
       desktopDataCleanup?.();
-      desktopExitCleanup?.();
     };
   }, []);
 
@@ -446,6 +375,7 @@ export const TerminalPanel = () => {
     autoCreateAttemptedRef.current = false;
     webLineRef.current = "";
     delete outputBufferRef.current["web-fallback"];
+    disposeTerminalView(`fallback:${conversationId || ""}`);
     setDetectedUrls([]);
     // restoreWorkbenchState has already projected the target conversation's
     // cached sessions and preferred terminal. Keep them visible until the
@@ -463,9 +393,9 @@ export const TerminalPanel = () => {
     redrawActiveSession();
     requestAnimationFrame(() => {
       safeFit();
-      termRef.current?.focus?.();
+      if (visibleRef.current) termRef.current?.focus?.();
     });
-  }, [activeTerminalSessionId, activeSession?.terminalMode, workingDirectory]);
+  }, [activeTerminalSessionId, activeSession?.terminalMode, workingDirectory, conversationId]);
 
   useEffect(() => {
     if (activeSession && statusMessage === "正在启动后端 Shell...") {
@@ -477,7 +407,7 @@ export const TerminalPanel = () => {
     const onVisibilityFit = () => {
       requestAnimationFrame(() => {
         safeFit();
-        termRef.current?.focus?.();
+        if (visibleRef.current) termRef.current?.focus?.();
       });
     };
     window.addEventListener("focus", onVisibilityFit);
@@ -489,13 +419,12 @@ export const TerminalPanel = () => {
   }, []);
 
   useEffect(() => {
-    if (!terminalReady || booting || autoCreating || loadedConversationId !== conversationId
+    if (!visible || !terminalReady || booting || autoCreating || loadedConversationId !== conversationId
       || terminalSessions.length > 0 || autoCreateAttemptedRef.current) return;
-    if (hasPendingNewTerminalSessionRequest()) return;
     if (!termRef.current) return;
     autoCreateAttemptedRef.current = true;
     void createSession();
-  }, [terminalReady, booting, autoCreating, loadedConversationId, conversationId, terminalSessions.length]);
+  }, [visible, terminalReady, booting, autoCreating, loadedConversationId, conversationId, terminalSessions.length]);
 
   const refreshSessions = async () => {
     const refreshEpoch = ++refreshEpochRef.current;
@@ -527,6 +456,7 @@ export const TerminalPanel = () => {
           );
           outputBufferRef.current[session.sessionId] = merged.output;
           if (merged.endCursor != null) outputCursorRef.current[session.sessionId] = merged.endCursor;
+          applySnapshotToView(session.sessionId, merged.output, merged.endCursor);
         }
         const normalized: TerminalSessionInfo[] = sessions.map((session) => ({
           id: session.sessionId,
@@ -536,13 +466,13 @@ export const TerminalPanel = () => {
           cwd: session.cwd,
           status: session.isAlive === false ? "exited" : "running",
           exitCode: session.exitCode,
+          exitSignal: session.exitSignal,
           exitedAt: session.exitedAt,
           terminalMode: "pty",
         }));
         useAppStore.getState().setTerminalSessions(
           normalized.filter((session) => session.conversationId === ownerConversationId),
         );
-        for (const session of normalized) mirrorTerminalCreated(session);
         redrawActiveSession();
       } else {
         const result = await sendClientCommandAwaitResult(
@@ -596,7 +526,7 @@ export const TerminalPanel = () => {
           }
           useAppStore.getState().setActiveTerminalSession(null);
           redrawActiveSession();
-          requestAnimationFrame(() => termRef.current?.focus?.());
+          requestAnimationFrame(() => { if (visibleRef.current) termRef.current?.focus?.(); });
           return;
         }
         const terminalSession: TerminalSessionInfo = {
@@ -609,7 +539,6 @@ export const TerminalPanel = () => {
           createdAt: Date.now(),
           terminalMode: "pty",
         };
-        mirrorTerminalCreated(terminalSession);
         if (!isCurrent()) return;
         useAppStore.getState().upsertTerminalSession(terminalSession);
         useAppStore.getState().setActiveTerminalSession(session.sessionId);
@@ -619,7 +548,7 @@ export const TerminalPanel = () => {
           if (term && session.sessionId) {
             resizeSession(session.sessionId, term.cols, term.rows);
           }
-          term?.focus?.();
+          if (visibleRef.current) term?.focus?.();
         });
       } else {
         const result = await sendClientCommandAwaitResult(
@@ -644,7 +573,7 @@ export const TerminalPanel = () => {
         }
         requestAnimationFrame(() => {
           safeFit();
-          termRef.current?.focus?.();
+          if (visibleRef.current) termRef.current?.focus?.();
         });
       }
     } catch (error) {
@@ -657,18 +586,6 @@ export const TerminalPanel = () => {
       if (mountedRef.current) setAutoCreating(false);
     }
   };
-  createSessionRef.current = createSession;
-
-  useEffect(() => {
-    if (!terminalReady || booting) return;
-    const openRequestedTerminal = () => {
-      if (!consumeNewTerminalSessionRequest()) return;
-      void createSessionRef.current();
-    };
-    openRequestedTerminal();
-    window.addEventListener(NEW_TERMINAL_SESSION_EVENT, openRequestedTerminal);
-    return () => window.removeEventListener(NEW_TERMINAL_SESSION_EVENT, openRequestedTerminal);
-  }, [terminalReady, booting]);
 
   const killSession = async (sessionId: string): Promise<boolean> => {
     if (terminatingSessionIdsRef.current.has(sessionId)) return false;
@@ -693,7 +610,7 @@ export const TerminalPanel = () => {
           }
           delete outputBufferRef.current[sessionId];
           delete outputCursorRef.current[sessionId];
-          hydratedSnapshotRef.current.delete(sessionId);
+      disposeTerminalView(sessionId);
           removeMirroredTerminal(sessionId, session.conversationId);
           if (isCurrentConversation(owner)) useAppStore.getState().removeTerminalSession(sessionId);
           return true;
@@ -755,7 +672,7 @@ export const TerminalPanel = () => {
         }
         delete outputBufferRef.current[sessionId];
         delete outputCursorRef.current[sessionId];
-        hydratedSnapshotRef.current.delete(sessionId);
+      disposeTerminalView(sessionId);
         return;
       }
       const replacement = await ptyRestart(sessionId, owner);
@@ -765,7 +682,7 @@ export const TerminalPanel = () => {
       }
       delete outputBufferRef.current[sessionId];
       delete outputCursorRef.current[sessionId];
-      hydratedSnapshotRef.current.delete(sessionId);
+      disposeTerminalView(sessionId);
       removeMirroredTerminal(sessionId, owner);
       const terminalSession: TerminalSessionInfo = {
         id: replacement.sessionId,
@@ -777,7 +694,6 @@ export const TerminalPanel = () => {
         createdAt: Date.now(),
         terminalMode: "pty",
       };
-      mirrorTerminalCreated(terminalSession);
       if (!isCurrentConversation(owner)) return;
       const store = useAppStore.getState();
       store.removeTerminalSession(sessionId);
@@ -793,27 +709,26 @@ export const TerminalPanel = () => {
     owner = useAppStore.getState().conversationId || "",
   ) => {
     let appendedData = data;
-    let redrawRequired = false;
+    let missingOutput = false;
     const currentCursor = outputCursorRef.current[sessionId];
     if (startCursor != null && endCursor != null) {
       if (currentCursor != null && endCursor <= currentCursor) return;
       if (currentCursor != null && startCursor < currentCursor) {
         appendedData = data.slice(Math.max(0, currentCursor - startCursor));
       }
+      if (currentCursor != null && startCursor > currentCursor) {
+        // Keep a contiguous suffix until the reconnect snapshot fills the gap.
+        outputBufferRef.current[sessionId] = "";
+        missingOutput = true;
+      }
       outputCursorRef.current[sessionId] = endCursor;
       outputBufferRef.current[sessionId] = `${outputBufferRef.current[sessionId] ?? ""}${appendedData}`.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
-    } else if (hydratedSnapshotRef.current.has(sessionId)) {
-      const currentOutput = outputBufferRef.current[sessionId] ?? "";
-      const mergedOutput = mergeTerminalOutputSnapshot(currentOutput, data);
-      outputBufferRef.current[sessionId] = mergedOutput;
-      appendedData = mergedOutput.startsWith(currentOutput)
-        ? mergedOutput.slice(currentOutput.length)
-        : "";
-      redrawRequired = !mergedOutput.startsWith(currentOutput);
-      hydratedSnapshotRef.current.delete(sessionId);
     } else {
       outputBufferRef.current[sessionId] = `${outputBufferRef.current[sessionId] ?? ""}${appendedData}`.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
     }
+    const key = sessionId === "web-fallback" ? `fallback:${owner}` : sessionId;
+    const view = terminalViewsRef.current.get(key);
+    if (view?.owner === owner) writeViewOutput(view, `${missingOutput ? "\r\n[断开期间的部分输出未保留]\r\n" : ""}${appendedData}`, endCursor);
     if (!isCurrentConversation(owner)) return;
     const found = Array.from(appendedData.matchAll(DEV_SERVER_URL_RE), (match) => normalizeDetectedUrl(match[0]));
     if (found.length > 0) {
@@ -828,11 +743,6 @@ export const TerminalPanel = () => {
         const next = [...found, ...current.filter((url) => !found.includes(url))];
         return next.slice(0, 5);
       });
-    }
-    if (redrawRequired && activeRef.current === sessionId) {
-      redrawActiveSession();
-    } else if (activeRef.current === sessionId || (!activeRef.current && sessionId === "web-fallback")) {
-      termRef.current?.write(appendedData);
     }
   };
 
@@ -885,36 +795,93 @@ export const TerminalPanel = () => {
     }
   };
 
+  const disposeTerminalView = (key: string) => {
+    const view = terminalViewsRef.current.get(key);
+    if (!view) return;
+    if (termRef.current === view.term) { termRef.current = null; fitRef.current = null; }
+    view.term.dispose();
+    view.host.remove();
+    terminalViewsRef.current.delete(key);
+  };
+
+  const writeViewOutput = (view: TerminalView, data: string, cursor?: number) => {
+    view.term.write(data);
+    view.output = `${view.output}${data}`.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
+    if (cursor !== undefined) view.cursor = cursor;
+  };
+
+  const applySnapshotToView = (sessionId: string, output: string, endCursor?: number) => {
+    const view = terminalViewsRef.current.get(sessionId);
+    if (!view || !view.hydrated) return;
+    if (endCursor !== undefined && view.cursor !== undefined) {
+      if (endCursor <= view.cursor) return;
+      const startCursor = endCursor - output.length;
+      const skipped = startCursor > view.cursor;
+      writeViewOutput(view, `${skipped ? "\r\n[断开期间的部分输出未保留]\r\n" : ""}${output.slice(Math.max(0, view.cursor - startCursor))}`, endCursor);
+    } else if (output.startsWith(view.output)) {
+      writeViewOutput(view, output.slice(view.output.length), endCursor);
+    }
+  };
+
   const redrawActiveSession = () => {
-    const term = termRef.current as XtermWithOptions | null;
-    if (!term) return;
+    const modules = terminalModulesRef.current;
+    if (!modules || !containerRef.current) return;
+    const state = useAppStore.getState();
+    const owner = state.conversationId || "";
     const sessionId = activeRef.current;
-    const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
-    term.options.convertEol = !sessionId || session?.terminalMode === "pipe";
-    term.reset();
+    const key = sessionId || `fallback:${owner}`;
+    const session = state.terminalSessions.find((item) => item.id === sessionId);
+    let view = terminalViewsRef.current.get(key);
+    if (!view) {
+      const host = document.createElement("div");
+      host.className = "mc-terminal-session-surface";
+      host.dataset.terminalSession = key;
+      host.style.height = "100%";
+      host.style.width = "100%";
+      containerRef.current.appendChild(host);
+      const term = new modules.Terminal({
+        fontSize: terminalFontSize(), fontFamily: terminalFontFamily(), lineHeight: 1.12,
+        letterSpacing: 0, cursorBlink: true, convertEol: !sessionId || session?.terminalMode === "pipe",
+        allowTransparency: true, scrollback: 8000, theme: terminalTheme(state.resolvedTheme === "light"),
+      }) as unknown as XtermWithOptions;
+      const fit = new modules.FitAddon() as FitAddonLike;
+      term.loadAddon(fit);
+      term.open(host);
+      term.attachCustomKeyEventHandler?.((event: KeyboardEvent) => {
+        const isCopy = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c";
+        if (isCopy && (event.shiftKey || term.hasSelection?.())) { void copyTerminalSelection(term); return false; }
+        return true;
+      });
+      term.onData((input) => {
+        if (!isCurrentConversation(owner)) return;
+        if (sessionId) writeToSession(sessionId, input);
+        else if (outputBufferRef.current["web-fallback"] !== undefined) writeWebFallbackInput(input);
+      });
+      view = { owner, term, fit, host, hydrated: false, output: "" };
+      terminalViewsRef.current.set(key, view);
+    }
+    for (const [viewKey, existing] of terminalViewsRef.current) existing.host.hidden = viewKey !== key;
+    termRef.current = view.term;
+    fitRef.current = view.fit;
+    view.term.options.convertEol = !sessionId || session?.terminalMode === "pipe";
     safeFit();
     if (!sessionId) {
-      const state = useAppStore.getState();
-      if (!state.conversationId || !state.workingDirectory) {
-        term.writeln(state.conversationId
-          ? "请先打开工作区，再启动终端或运行命令。"
-          : "请先选择会话，再打开终端。");
-        return;
+      const runnerOutput = outputBufferRef.current["web-fallback"];
+      if (runnerOutput) {
+        if (!view.output) { view.term.reset(); writeViewOutput(view, runnerOutput); }
+        else applySnapshotToView(key, runnerOutput);
+      } else if (!state.conversationId || !state.workingDirectory) {
+        view.term.reset();
+      } else {
+        view.term.reset();
+        view.term.writeln(statusMessage || (booting || autoCreating ? "正在启动终端..." : "暂无终端会话，点击 + 新建。"));
       }
-      const fallbackOutput = outputBufferRef.current["web-fallback"];
-      if (fallbackOutput) {
-        term.write(fallbackOutput);
-        return;
-      }
-      const message = statusMessage || (
-        booting || autoCreating ? "正在启动终端..." : "暂无终端会话，点击 + 新建。"
-      );
-      term.writeln(message);
+      view.hydrated = true;
       return;
     }
-    const buffered = outputBufferRef.current[sessionId] ?? "";
-    if (buffered) {
-      term.write(buffered);
+    if (!view.hydrated) {
+      writeViewOutput(view, outputBufferRef.current[sessionId] ?? "", outputCursorRef.current[sessionId]);
+      view.hydrated = true;
     }
     const queued = inputQueueRef.current[sessionId] ?? [];
     if (queued.length > 0) {
@@ -928,14 +895,41 @@ export const TerminalPanel = () => {
     let activeSnapshotWasApplied = false;
     for (const snapshot of Object.values(terminalSnapshots)) {
       if (snapshot.conversationId !== conversationId) continue;
-      if (!snapshot.output) continue;
+      // Electron snapshots own PTY hydration; the backend mirror has a
+      // separate lifetime and must not replace its authoritative scrollback.
+      if (isDesktop() && snapshot.terminalMode === "pty") continue;
+      if (snapshot.error) continue;
       const current = outputBufferRef.current[snapshot.id] ?? "";
-      outputBufferRef.current[snapshot.id] = mergeTerminalOutputSnapshot(snapshot.output, current);
-      hydratedSnapshotRef.current.add(snapshot.id);
+      const merged = mergeTerminalOutputByCursor(
+        snapshot.output, snapshot.outputStartCursor, snapshot.outputEndCursor,
+        current, outputCursorRef.current[snapshot.id],
+      );
+      outputBufferRef.current[snapshot.id] = merged.output;
+      if (merged.endCursor != null) outputCursorRef.current[snapshot.id] = merged.endCursor;
+      applySnapshotToView(snapshot.id, merged.output, merged.endCursor);
       if (activeRef.current === snapshot.id) activeSnapshotWasApplied = true;
     }
     if (activeSnapshotWasApplied) redrawActiveSession();
   }, [terminalSnapshots, terminalReady, conversationId]);
+
+  useEffect(() => {
+    if (booting || loadedConversationId !== conversationId) return;
+    const retained = new Set(terminalSessions.map((session) => session.id));
+    for (const [key, view] of terminalViewsRef.current) {
+      if (view.owner === conversationId && !key.startsWith("fallback:") && !retained.has(key)) disposeTerminalView(key);
+    }
+  }, [terminalSessions, booting, loadedConversationId, conversationId]);
+
+  useEffect(() => {
+    const owners = new Set(conversations.map((conversation) => conversation.id));
+    for (const [key, view] of terminalViewsRef.current) {
+      if (view.owner !== conversationId && !owners.has(view.owner)) {
+        disposeTerminalView(key);
+        delete outputBufferRef.current[key];
+        delete outputCursorRef.current[key];
+      }
+    }
+  }, [conversations, conversationId]);
 
   const writeToSession = (sessionId: string, data: string) => {
     const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
@@ -962,11 +956,7 @@ export const TerminalPanel = () => {
   };
 
   const safeFit = () => {
-    try {
-      fitRef.current?.fit();
-    } catch {
-      // xterm fit can throw while the panel is hidden or has zero size.
-    }
+    if (visibleRef.current && containerRef.current?.clientWidth && containerRef.current.clientHeight) fitRef.current?.fit();
   };
 
   const resizeSession = (sessionId: string, cols: number, rows: number) => {
@@ -1014,6 +1004,8 @@ export const TerminalPanel = () => {
       if (outputBufferRef.current["web-fallback"] !== undefined) {
         outputBufferRef.current["web-fallback"] = "$ ";
         termRef.current?.write("$ ");
+        const fallback = terminalViewsRef.current.get(`fallback:${state.conversationId || ""}`);
+        if (fallback) fallback.output = "$ ";
       }
       termRef.current?.focus?.();
       return;
@@ -1021,6 +1013,7 @@ export const TerminalPanel = () => {
 
     setStatusMessage("");
     try {
+      let clearCursor: number;
       if (isDesktop()) {
         const result = await ptyClear(session.id, session.conversationId);
         if (!result.cleared) {
@@ -1030,7 +1023,7 @@ export const TerminalPanel = () => {
           }
           return;
         }
-        outputCursorRef.current[session.id] = result.outputCursor;
+        clearCursor = result.outputCursor;
         // Keep the backend's reconnectable mirror consistent with the Electron
         // PTY. A disconnected backend does not invalidate the local clear.
         sendClientCommand(
@@ -1056,11 +1049,23 @@ export const TerminalPanel = () => {
           if (isCurrentConversation(session.conversationId)) setStatusMessage(result.message || "清空终端失败。");
           return;
         }
+        clearCursor = result.data?.output_cursor as number;
       }
 
-      outputBufferRef.current[session.id] = "";
-      hydratedSnapshotRef.current.delete(session.id);
+      const merged = mergeTerminalOutputByCursor(
+        "", clearCursor, clearCursor,
+        outputBufferRef.current[session.id] ?? "", outputCursorRef.current[session.id],
+      );
+      outputBufferRef.current[session.id] = merged.output;
+      outputCursorRef.current[session.id] = merged.endCursor ?? clearCursor;
       if (!isCurrentConversation(session.conversationId)) return;
+      const view = terminalViewsRef.current.get(session.id);
+      if (view) {
+        view.term.reset();
+        view.output = "";
+        view.cursor = clearCursor;
+        writeViewOutput(view, merged.output, merged.endCursor);
+      }
       state.upsertTerminalSnapshot({
         id: session.id,
         conversationId: session.conversationId,
@@ -1069,14 +1074,23 @@ export const TerminalPanel = () => {
         cwd: session.cwd,
         status: session.status,
         terminalMode: session.terminalMode,
-        output: "",
-        outputChars: 0,
-        totalOutputChars: 0,
+        exitCode: session.exitCode,
+        exitSignal: session.exitSignal,
+        exitedAt: session.exitedAt,
+        cleanupPending: session.cleanupPending,
+        cleanupReason: session.cleanupReason,
+        output: merged.output,
+        outputChars: merged.output.length,
+        totalOutputChars: outputCursorRef.current[session.id],
+        outputStartCursor: outputCursorRef.current[session.id] - merged.output.length,
+        outputEndCursor: outputCursorRef.current[session.id],
         truncated: false,
         capturedAt: Date.now(),
       });
-      termRef.current?.clear();
-      termRef.current?.focus?.();
+      if (activeRef.current === session.id) {
+        redrawActiveSession();
+        if (visibleRef.current) termRef.current?.focus?.();
+      }
     } catch (error) {
       if (isCurrentConversation(session.conversationId)) setStatusMessage(`清空终端失败：${String(error)}`);
     }

@@ -13,9 +13,12 @@ The on-the-wire integration (Authorization header, 401 → refresh + retry) is i
 
 from __future__ import annotations
 
+from backend.async_cleanup import to_thread_cancel_safe
+
 import base64
 import hashlib
 import json
+import math
 import os
 import time
 import asyncio
@@ -31,6 +34,16 @@ from filelock import AsyncFileLock, FileLock
 from mcp.client.auth import OAuthClientProvider as SDKOAuthClientProvider
 
 from backend.atomic_io import atomic_write_text, file_mutation_locks
+
+_CREDENTIAL_ERRORS = (KeyringError,)
+if os.name == "nt":
+    import pywintypes
+
+    _CREDENTIAL_ERRORS += (pywintypes.error,)
+
+
+class MCPTokenStoreError(RuntimeError):
+    """An existing MCP credential or its legacy file cannot be read or committed."""
 
 
 class MCPAuthenticationRequired(ConnectionError):
@@ -90,9 +103,13 @@ class TokenStore:
     def _load_unlocked(self) -> dict[str, dict[str, Any]]:
         try:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return {}
-        return payload if isinstance(payload, dict) else {}
+        except (OSError, ValueError) as exc:
+            raise MCPTokenStoreError("MCP legacy credential file cannot be read") from exc
+        if not isinstance(payload, dict):
+            raise MCPTokenStoreError("MCP legacy credential file must contain an object")
+        return payload
 
     def _save(self, data: dict[str, dict[str, Any]]) -> None:
         with file_mutation_locks([self._path]):
@@ -129,77 +146,91 @@ class TokenStore:
         with file_mutation_locks([self._path]):
             try:
                 secret = keyring.get_password(self._service, f"{server}:legacy")
-            except KeyringError:
-                secret = None
-            legacy_data = self._load_unlocked() if not secret else {}
+            except _CREDENTIAL_ERRORS as exc:
+                raise MCPTokenStoreError("MCP credential store cannot read legacy credentials") from exc
+            legacy_data = self._load_unlocked() if secret is None else {}
             try:
-                row = json.loads(secret) if secret else legacy_data.get(server)
-            except (TypeError, ValueError):
-                row = None
-            if not isinstance(row, dict) or not row.get("access_token"):
-                return None
-            try:
+                row = json.loads(secret) if secret is not None else legacy_data.get(server)
+                if row is None and secret is None:
+                    return None
+                if not isinstance(row, dict) or not isinstance(row.get("access_token"), str) or not row["access_token"].strip():
+                    raise ValueError("stored access token must be a non-empty string")
+                expires_at = float(row.get("expires_at", 0.0) or 0.0)
+                if not math.isfinite(expires_at):
+                    raise ValueError("stored expiry must be finite")
                 tokens = OAuthTokens(
-                    access_token=str(row["access_token"]),
-                    refresh_token=str(row.get("refresh_token", "")),
-                    expires_at=float(row.get("expires_at", 0.0) or 0.0),
+                    access_token=row["access_token"],
+                    refresh_token=str(row.get("refresh_token") or ""),
+                    expires_at=expires_at,
                     token_type=str(row.get("token_type", "Bearer") or "Bearer"),
                 )
-                if not secret:
-                    self.set(server, tokens)
-                    # Reload after the keyring write so another TokenStore's
-                    # migration cannot be erased by this instance's stale map.
-                    latest = self._load_unlocked()
-                    latest.pop(server, None)
-                    self._save_unlocked(latest)
-                return tokens
-            except (KeyError, TypeError, ValueError):
-                return None
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise MCPTokenStoreError("MCP legacy credential record is invalid") from exc
+            if secret is None:
+                self.set(server, tokens)
+            return tokens
+
+    def _commit_credentials(self, server: str, changes: dict[str, str | None]) -> None:
+        with file_mutation_locks([self._path]):
+            legacy_data = self._load_unlocked()
+            original_file = self._path.read_bytes() if self._path.exists() else None
+            try:
+                previous = {suffix: keyring.get_password(self._service, f"{server}:{suffix}") for suffix in changes}
+            except _CREDENTIAL_ERRORS as exc:
+                raise MCPTokenStoreError("MCP credential store cannot read the previous credential family") from exc
+            try:
+                for suffix, value in changes.items():
+                    if value is None:
+                        try:
+                            keyring.delete_password(self._service, f"{server}:{suffix}")
+                        except PasswordDeleteError:
+                            pass
+                    else:
+                        keyring.set_password(self._service, f"{server}:{suffix}", value)
+                if server in legacy_data:
+                    legacy_data.pop(server)
+                    self._save_unlocked(legacy_data)
+            except Exception as failure:
+                rollback_errors = []
+                for suffix, value in previous.items():
+                    try:
+                        if value is None:
+                            try:
+                                keyring.delete_password(self._service, f"{server}:{suffix}")
+                            except PasswordDeleteError:
+                                pass
+                        else:
+                            keyring.set_password(self._service, f"{server}:{suffix}", value)
+                    except _CREDENTIAL_ERRORS as exc:
+                        rollback_errors.append(exc)
+                try:
+                    current_file = self._path.read_bytes() if self._path.exists() else None
+                    if current_file != original_file:
+                        if original_file is None:
+                            self._path.unlink()
+                        else:
+                            atomic_write_text(self._path, original_file.decode("utf-8"))
+                except OSError as exc:
+                    rollback_errors.append(exc)
+                if rollback_errors:
+                    raise ExceptionGroup("MCP credential publication and rollback failed", [failure, *rollback_errors]) from failure
+                if isinstance(failure, _CREDENTIAL_ERRORS):
+                    raise MCPTokenStoreError("MCP credential store rejected the credential family") from failure
+                raise
 
     def set(self, server: str, tokens: OAuthTokens) -> None:
-        with file_mutation_locks([self._path]):
-            payload = {
-                "access_token": tokens.access_token,
-                "refresh_token": tokens.refresh_token,
-                "expires_at": tokens.expires_at,
-                "token_type": tokens.token_type,
-            }
-            try:
-                previous = keyring.get_password(self._service, f"{server}:legacy")
-                keyring.set_password(self._service, f"{server}:legacy", json.dumps(payload))
-                legacy_data = self._load_unlocked()
-                if server in legacy_data:
-                    legacy_data.pop(server, None)
-                    self._save_unlocked(legacy_data)
-            except KeyringError as exc:
-                raise RuntimeError(f"OAuth token store rejected credentials: {exc}") from exc
-            except Exception:
-                if previous is None:
-                    try:
-                        keyring.delete_password(self._service, f"{server}:legacy")
-                    except (KeyringError, PasswordDeleteError):
-                        pass
-                else:
-                    try:
-                        keyring.set_password(self._service, f"{server}:legacy", previous)
-                    except KeyringError:
-                        pass
-                raise
+        payload = {
+            "access_token": tokens.access_token,
+            "refresh_token": tokens.refresh_token,
+            "expires_at": tokens.expires_at,
+            "token_type": tokens.token_type,
+        }
+        self._commit_credentials(server, {"legacy": json.dumps(payload)})
 
     def clear(self, server: str) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with FileLock(str(_credential_lock_path(self._service, server, self._path)), timeout=60), file_mutation_locks([self._path]):
-            for suffix in ("legacy", "tokens", "client"):
-                try:
-                    keyring.delete_password(self._service, f"{server}:{suffix}")
-                except PasswordDeleteError:
-                    pass
-                except KeyringError as exc:
-                    raise RuntimeError(f"OAuth token store could not clear credentials: {exc}") from exc
-            legacy_data = self._load_unlocked()
-            if server in legacy_data:
-                legacy_data.pop(server, None)
-                self._save_unlocked(legacy_data)
+        with FileLock(str(_credential_lock_path(self._service, server, self._path)), timeout=60):
+            self._commit_credentials(server, dict.fromkeys(("legacy", "tokens", "client")))
 
     def sdk_storage(self, server: str) -> "SDKTokenStorage":
         return SDKTokenStorage(self._service, server, self._path)
@@ -207,15 +238,12 @@ class TokenStore:
     def has_sdk_tokens(self, server: str) -> bool:
         try:
             raw = keyring.get_password(self._service, f"{server}:tokens")
-        except KeyringError:
+        except _CREDENTIAL_ERRORS as exc:
+            raise MCPTokenStoreError("MCP credential store cannot read SDK tokens") from exc
+        if raw is None:
             return False
-        if not raw:
-            return False
-        try:
-            payload = json.loads(raw)
-        except (TypeError, ValueError):
-            return False
-        return isinstance(payload, dict) and bool(str(payload.get("access_token") or "").strip())
+        SDKTokenStorage._parse_tokens(raw)
+        return True
 
 
 class SDKTokenStorage:
@@ -233,14 +261,15 @@ class SDKTokenStorage:
         self.context: Any = None
 
     async def _get(self, suffix: str) -> str | None:
-        return await asyncio.to_thread(
-            keyring.get_password,
-            self._service,
-            f"{self._server}:{suffix}",
-        )
+        try:
+            return await asyncio.to_thread(
+                keyring.get_password, self._service, f"{self._server}:{suffix}",
+            )
+        except _CREDENTIAL_ERRORS as exc:
+            raise MCPTokenStoreError("MCP credential store cannot read SDK credentials") from exc
 
     async def _set(self, suffix: str, value: str) -> None:
-        write = asyncio.create_task(asyncio.to_thread(
+        write = asyncio.create_task(to_thread_cancel_safe(
             keyring.set_password,
             self._service,
             f"{self._server}:{suffix}",
@@ -258,29 +287,49 @@ class SDKTokenStorage:
         if cancelled:
             raise asyncio.CancelledError
 
-    async def get_tokens(self) -> Any | None:
+    @staticmethod
+    def _parse_tokens(raw: str) -> tuple[Any, float | None, Any, Any, str | None]:
         from mcp.shared.auth import OAuthMetadata, OAuthToken, ProtectedResourceMetadata
 
+        try:
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError("stored SDK token must be an object")
+            # Old records lack acquisition time; preserve the one-time refresh.
+            expiry = payload.pop("_minicode_expires_at", 1.0 if payload.get("expires_in") is not None else None)
+            expires_at = float(expiry) if expiry is not None else None
+            if expires_at is not None and not math.isfinite(expires_at):
+                raise ValueError("stored expiry must be finite")
+            metadata = payload.pop("_minicode_oauth_metadata", None)
+            resource = payload.pop("_minicode_resource_metadata", None)
+            auth_server_url = payload.pop("_minicode_auth_server_url", None)
+            if auth_server_url is not None and not isinstance(auth_server_url, str):
+                raise ValueError("stored auth server URL must be a string")
+            oauth_metadata = OAuthMetadata.model_validate(metadata) if metadata is not None else None
+            protected_resource_metadata = ProtectedResourceMetadata.model_validate(resource) if resource is not None else None
+            tokens = OAuthToken.model_validate(payload)
+            if not tokens.access_token.strip():
+                raise ValueError("stored access token must not be empty")
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise MCPTokenStoreError("MCP SDK token record is invalid") from exc
+        return tokens, expires_at, oauth_metadata, protected_resource_metadata, auth_server_url
+
+    async def get_tokens(self) -> Any | None:
         raw = await self._get("tokens")
-        if not raw:
+        if raw is None:
             self.expires_at = None
             return None
-        payload = json.loads(raw)
-        # Old records lack acquisition time. Refresh expiring legacy tokens
-        # once rather than restarting their relative TTL on every connection.
-        expiry = payload.pop("_minicode_expires_at", 1.0 if payload.get("expires_in") is not None else None)
-        self.expires_at = float(expiry) if expiry is not None else None
-        metadata = payload.pop("_minicode_oauth_metadata", None)
-        resource = payload.pop("_minicode_resource_metadata", None)
-        self.auth_server_url = payload.pop("_minicode_auth_server_url", None)
-        self.oauth_metadata = OAuthMetadata.model_validate(metadata) if metadata is not None else None
-        self.protected_resource_metadata = ProtectedResourceMetadata.model_validate(resource) if resource is not None else None
-        return OAuthToken.model_validate(payload)
+        tokens, expires_at, oauth_metadata, protected_resource_metadata, auth_server_url = self._parse_tokens(raw)
+        self.expires_at = expires_at
+        self.oauth_metadata = oauth_metadata
+        self.protected_resource_metadata = protected_resource_metadata
+        self.auth_server_url = auth_server_url
+        return tokens
 
     async def set_tokens(self, tokens: Any) -> None:
         payload = tokens.model_dump(mode="json")
-        self.expires_at = time.time() + tokens.expires_in if tokens.expires_in is not None else None
-        payload["_minicode_expires_at"] = self.expires_at
+        expires_at = time.time() + tokens.expires_in if tokens.expires_in is not None else None
+        payload["_minicode_expires_at"] = expires_at
         if self.context is not None:
             metadata = self.context.oauth_metadata
             resource = self.context.protected_resource_metadata
@@ -288,12 +337,18 @@ class SDKTokenStorage:
             payload["_minicode_resource_metadata"] = resource.model_dump(mode="json") if resource is not None else None
             payload["_minicode_auth_server_url"] = self.context.auth_server_url
         await self._set("tokens", json.dumps(payload))
+        self.expires_at = expires_at
 
     async def get_client_info(self) -> Any | None:
         from mcp.shared.auth import OAuthClientInformationFull
 
         raw = await self._get("client")
-        return OAuthClientInformationFull.model_validate_json(raw) if raw else None
+        if raw is None:
+            return None
+        try:
+            return OAuthClientInformationFull.model_validate_json(raw)
+        except (TypeError, ValueError) as exc:
+            raise MCPTokenStoreError("MCP SDK client record is invalid") from exc
 
     async def set_client_info(self, client_info: Any) -> None:
         await self._set("client", client_info.model_dump_json())

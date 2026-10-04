@@ -182,7 +182,7 @@ def test_time_based_microcompact_snapshot_resume_keeps_marker_and_timestamp() ->
 def test_build_boundary_and_partial_hydration_preserve_cleared_prefix(
     monkeypatch, tmp_path
 ) -> None:
-    async def _no_git_status(_workspace_root):
+    async def _no_git_status(_workspace_root, *, context=None):
         return ""
 
     monkeypatch.setattr(

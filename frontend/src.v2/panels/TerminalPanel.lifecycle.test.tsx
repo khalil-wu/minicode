@@ -14,11 +14,15 @@ const mocks = vi.hoisted(() => {
   return {
     native: true,
     input: null as ((data: string) => void) | null,
-    output: null as ((event: { sessionId: string; conversationId: string; data: string }) => void) | null,
+    output: null as ((event: { sessionId: string; conversationId: string; data: string; startCursor?: number; endCursor?: number }) => void) | null,
     list: vi.fn(), snapshot: vi.fn(), spawn: vi.fn(), restart: vi.fn(), clearPty: vi.fn(),
     write: vi.fn(), resize: vi.fn(), kill: vi.fn(), ackExit: vi.fn(),
     send: vi.fn(), awaitResult: vi.fn(), clearScreen: vi.fn(), renderOutput: vi.fn(),
     resetScreen: vi.fn(), terminalOptions: {} as { convertEol?: boolean; fontFamily?: string },
+    viewport: { viewportY: 0, baseY: 0 },
+    selection: undefined as { start: { x: number; y: number }; end: { x: number; y: number } } | undefined,
+    selectText: vi.fn(), scrollToLine: vi.fn(), scrollToBottom: vi.fn(),
+    instances: [] as Array<{ host?: HTMLElement; content: string; disposed: boolean; buffer: { active: { viewportY: number; baseY: number } }; selection?: { start: { x: number; y: number }; end: { x: number; y: number } } }>,
   };
 });
 
@@ -42,18 +46,37 @@ vi.mock("../protocol/ws-outbox", async (importOriginal) => ({
 vi.mock("@xterm/xterm", () => ({ Terminal: class {
   cols = 80;
   rows = 24;
-  options = mocks.terminalOptions;
-  constructor(options: { convertEol?: boolean }) { Object.assign(this.options, options); }
-  clear = mocks.clearScreen;
-  reset = mocks.resetScreen;
-  write = mocks.renderOutput;
-  writeln = mocks.renderOutput;
+  content = "";
+  disposed = false;
+  host?: HTMLElement;
+  screen?: HTMLPreElement;
+  options: { convertEol?: boolean; fontFamily?: string };
+  buffer = { active: { viewportY: 0, baseY: 0 } };
+  selection?: { start: { x: number; y: number }; end: { x: number; y: number } };
+  constructor(options: { convertEol?: boolean }) { this.options = { ...options }; mocks.terminalOptions = this.options; mocks.instances.push(this); }
+  clear() { this.content = ""; this.screen!.textContent = ""; mocks.clearScreen(); }
+  reset() { this.content = ""; this.screen!.textContent = ""; this.buffer.active = { viewportY: 0, baseY: 0 }; this.selection = undefined; mocks.resetScreen(); }
+  write(data: string, onParsed?: () => void) {
+    const following = this.buffer.active.viewportY >= this.buffer.active.baseY;
+    this.content += data;
+    this.screen!.textContent = this.content;
+    this.buffer.active.baseY = Math.max(0, this.content.split("\n").length - this.rows);
+    if (following) this.buffer.active.viewportY = this.buffer.active.baseY;
+    mocks.terminalOptions = this.options;
+    mocks.renderOutput(data);
+    onParsed?.();
+  }
+  writeln(data: string) { this.write(`${data}\r\n`); }
   onData(callback: (data: string) => void) { mocks.input = callback; }
   loadAddon() {}
-  open() {}
-  dispose() {}
-  focus() {}
+  open(host: HTMLElement) { this.host = host; this.screen = document.createElement("pre"); host.appendChild(this.screen); }
+  dispose() { this.disposed = true; }
+  focus() { mocks.terminalOptions = this.options; }
   attachCustomKeyEventHandler() {}
+  getSelectionPosition() { return this.selection; }
+  select = mocks.selectText;
+  scrollToLine = mocks.scrollToLine;
+  scrollToBottom = mocks.scrollToBottom;
 } }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
 
@@ -83,6 +106,7 @@ describe("terminal lifecycle", () => {
     mocks.input = null;
     mocks.output = null;
     mocks.terminalOptions = {};
+    mocks.instances = [];
     mocks.list.mockResolvedValue([]);
     mocks.snapshot.mockImplementation(async (id: string, owner: string) => pty(owner, id));
     mocks.spawn.mockImplementation(async (_cwd: string, owner: string) => pty(owner, `${owner}-new`));
@@ -97,7 +121,7 @@ describe("terminal lifecycle", () => {
     useAppStore.setState({
       conversationId: "conv-a", workingDirectory: "C:/conv-a", terminalSessions: [],
       activeTerminalSessionId: null, terminalSnapshots: {}, conversationWorkbenchStates: {},
-      previewServers: [], resolvedTheme: "dark",
+      previewServers: [], resolvedTheme: "dark", conversations: [],
     });
   });
 
@@ -119,6 +143,68 @@ describe("terminal lifecycle", () => {
     await waitFor(() => expect(mocks.terminalOptions.fontFamily).toBe(stack));
   });
 
+  it("preserves previously read long output and each real session surface instead of rebuilding from the 80k cache", async () => {
+    mocks.list.mockResolvedValue([pty("conv-a", "term-a"), pty("conv-a", "term-b")]);
+    render(<TerminalPanel />);
+    await screen.findByRole("tab", { name: "pwsh 1" });
+    await waitFor(() => expect(mocks.instances.some((instance) => instance.host?.dataset.terminalSession === "term-a")).toBe(true));
+    const first = mocks.instances.find((instance) => instance.host?.dataset.terminalSession === "term-a")!;
+    const firstHost = first.host;
+    const longOutput = Array.from({ length: 2000 }, (_, index) => `LOG_${String(index).padStart(4, "0")} ${"x".repeat(64)}\r\n`).join("");
+    expect(longOutput.length).toBeGreaterThan(80_000);
+    act(() => mocks.output!({ sessionId: "term-a", conversationId: "conv-a", data: longOutput, startCursor: 20, endCursor: 20 + longOutput.length }));
+    first.buffer.active.viewportY = 80;
+    first.selection = { start: { x: 0, y: 101 }, end: { x: 8, y: 101 } };
+    const selectedLog = first.content.split("\n")[101];
+    const resetCount = mocks.resetScreen.mock.calls.length;
+    act(() => useAppStore.getState().setActiveTerminalSession("term-b"));
+    const second = mocks.instances.find((instance) => instance.host?.dataset.terminalSession === "term-b")!;
+    second.buffer.active.viewportY = 0;
+    second.selection = { start: { x: 2, y: 0 }, end: { x: 5, y: 0 } };
+    expect(firstHost!.hidden).toBe(true);
+    act(() => mocks.output!({ sessionId: "term-a", conversationId: "conv-a", data: "BACKGROUND\r\n", startCursor: 20 + longOutput.length, endCursor: 20 + longOutput.length + 12 }));
+    act(() => useAppStore.getState().setActiveTerminalSession("term-a"));
+    expect(first.host).toBe(firstHost);
+    expect(first.host!.hidden).toBe(false);
+    expect(first.content).toContain("LOG_0000");
+    expect(first.content).toContain("BACKGROUND");
+    expect(first.content.split("\n")[101]).toBe(selectedLog);
+    expect(first.buffer.active.viewportY).toBe(80);
+    expect(first.selection).toEqual({ start: { x: 0, y: 101 }, end: { x: 8, y: 101 } });
+    const endCursor = 20 + longOutput.length + 12;
+    mocks.snapshot.mockImplementation(async (id: string, owner: string) => id === "term-a" ? { ...pty(owner, id), output: first.content.slice(-80_000), outputStartCursor: endCursor - 80_000, outputEndCursor: endCursor } : pty(owner, id));
+    fireEvent.click(screen.getByRole("button", { name: "刷新终端列表" }));
+    await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(2));
+    expect(first.content).toContain("LOG_0000");
+    expect(first.buffer.active.viewportY).toBe(80);
+    expect(mocks.resetScreen).toHaveBeenCalledTimes(resetCount);
+    act(() => useAppStore.getState().setActiveTerminalSession("term-b"));
+    expect(second.host!.hidden).toBe(false);
+    expect(second.selection).toEqual({ start: { x: 2, y: 0 }, end: { x: 5, y: 0 } });
+  });
+
+  it("releases a removed terminal surface and disposes all remaining instances at panel teardown", async () => {
+    mocks.list.mockResolvedValue([pty("conv-a", "term-a"), pty("conv-a", "term-b")]);
+    const { unmount } = render(<TerminalPanel />);
+    await screen.findByRole("tab", { name: "pwsh 1" });
+    await waitFor(() => expect(mocks.instances.some((instance) => instance.host?.dataset.terminalSession === "term-a")).toBe(true));
+    const first = mocks.instances.find((instance) => instance.host?.dataset.terminalSession === "term-a")!;
+    act(() => useAppStore.getState().setActiveTerminalSession("term-b"));
+    act(() => useAppStore.getState().removeTerminalSession("term-a"));
+    expect(first.disposed).toBe(true);
+    expect(document.body.contains(first.host!)).toBe(false);
+    unmount();
+    expect(mocks.instances.every((instance) => instance.disposed)).toBe(true);
+  });
+
+  it("does not automatically start or focus a hidden terminal in a newly selected conversation", async () => {
+    render(<TerminalPanel visible={false} />);
+    await waitFor(() => expect(mocks.input).toBeTypeOf("function"));
+    await switchOwner("conv-b");
+    await waitFor(() => expect(mocks.list).toHaveBeenCalledWith("conv-b"));
+    expect(mocks.spawn).not.toHaveBeenCalled();
+  });
+
   it.each([true, false])("does not start a terminal or promise a command runner without a workspace (desktop=%s)", async (native) => {
     mocks.native = native;
     useAppStore.setState({ workingDirectory: null });
@@ -127,6 +213,8 @@ describe("terminal lifecycle", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "新建终端" }));
     await screen.findByText("请先打开工作区，再启动终端或运行命令。");
+    expect(screen.getAllByText("请先打开工作区，再启动终端或运行命令。")).toHaveLength(1);
+    expect(screen.getByRole("status").textContent).toBe("请先打开工作区，再启动终端或运行命令。");
     act(() => mocks.input!("echo unexpected\r"));
 
     expect(mocks.spawn).not.toHaveBeenCalled();
@@ -181,7 +269,7 @@ describe("terminal lifecycle", () => {
     expect(mocks.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "terminal.exec" }));
   });
 
-  it("resets the screen and selects newline handling for the active transport", async () => {
+  it("retains separate source surfaces and selects newline handling for each active transport", async () => {
     mocks.native = false;
     const pipe = {
       id: "term-pipe", conversationId: "conv-a", cwd: "C:/conv-a", shell: "bash",
@@ -209,7 +297,7 @@ describe("terminal lifecycle", () => {
     await act(async () => useAppStore.getState().setActiveTerminalSession(native.id));
 
     await waitFor(() => expect(rendered).toContainEqual({ output: nativeOutput, convertEol: false }));
-    expect(mocks.resetScreen.mock.calls.length).toBeGreaterThan(resetCount);
+    expect(mocks.resetScreen.mock.calls.length).toBe(resetCount);
     expect(mocks.clearScreen).not.toHaveBeenCalled();
   });
 
@@ -218,7 +306,7 @@ describe("terminal lifecycle", () => {
     const session = { id: "term-a", conversationId: "conv-a", cwd: "C:/conv-a", shell: "bash" };
     useAppStore.setState({ terminalSessions: [session], activeTerminalSessionId: session.id });
     render(<TerminalPanel />);
-    await waitFor(() => expect(mocks.resetScreen).toHaveBeenCalled());
+    await waitFor(() => expect(mocks.instances.some((instance) => instance.host?.dataset.terminalSession === "term-a")).toBe(true));
     expect(mocks.terminalOptions.convertEol).toBe(false);
 
     await act(async () => useAppStore.getState().upsertTerminalSession({ ...session, terminalMode: "pipe" }));

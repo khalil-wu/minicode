@@ -12,6 +12,7 @@ import {
   RotateCcw,
   XCircle,
 } from "lucide-react";
+import { useEscapeKey, useFocusTrap } from "../hooks/useFocusTrap";
 
 // ── Small shared components ────────────────────────────────────────────
 
@@ -70,6 +71,7 @@ export const MenuItem = ({
   <button
     type="button"
     role="menuitem"
+    tabIndex={-1}
     className={danger ? "btn-ghost-danger" : "btn-ghost"}
     onClick={onClick}
     disabled={disabled}
@@ -200,11 +202,15 @@ export const ConversationMenu = ({
     };
   }, [anchor, archived, canCopy, canMerge, canReveal, isIsolated]);
 
+  const menuReady = position !== null;
+  useEffect(() => {
+    if (menuReady) menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus();
+  }, [anchor, menuReady]);
+
   useEffect(() => {
     const menu = menuRef.current;
     if (!menu || !position) return;
     const items = () => Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'));
-    items()[0]?.focus();
 
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target;
@@ -213,8 +219,9 @@ export const ConversationMenu = ({
     };
     const onKeyDown = (event: KeyboardEvent) => {
       const available = items();
-      if (event.key === "Escape") {
-        event.preventDefault();
+      if (event.key === "Escape" || event.key === "Tab") {
+        if (event.key === "Escape") event.preventDefault();
+        event.stopPropagation();
         onClose();
         anchor?.focus();
         return;
@@ -228,6 +235,7 @@ export const ConversationMenu = ({
       else if (event.key === "End") next = available.length - 1;
       if (next == null) return;
       event.preventDefault();
+      event.stopPropagation();
       available[next]?.focus();
     };
     document.addEventListener("pointerdown", onPointerDown, true);
@@ -307,17 +315,12 @@ export const ConfirmDialog = ({
   onConfirm: () => void;
 }) => {
   const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useFocusTrap(true);
+  useEscapeKey(onCancel, true, dialogRef);
   useEffect(() => {
     cancelRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      onCancel();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onCancel]);
-  return (
+  }, []);
+  return createPortal(
   <div
     role="presentation"
     onClick={onCancel}
@@ -332,7 +335,9 @@ export const ConfirmDialog = ({
     }}
   >
     <div
+      ref={dialogRef}
       role="dialog"
+      tabIndex={-1}
       aria-modal="true"
       aria-label={dialog.title}
       onClick={(e) => e.stopPropagation()}
@@ -367,7 +372,7 @@ export const ConfirmDialog = ({
         </button>
       </div>
     </div>
-  </div>
+  </div>, document.body,
   );
 };
 

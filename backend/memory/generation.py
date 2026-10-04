@@ -10,6 +10,7 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -541,19 +542,7 @@ class MemoryGenerationCoordinator:
         return Phase1Result(raw_memory, rollout_summary, normalized_slug)
 
     def _rollout_path(self, conversation_id: str) -> str:
-        resolver = getattr(self.repository, "transcript_path", None)
-        if callable(resolver):
-            try:
-                return str(resolver(conversation_id))
-            except Exception:
-                pass
-        resolver = getattr(self.repository, "_transcript_path", None)
-        if callable(resolver):
-            try:
-                return str(resolver(conversation_id))
-            except Exception:
-                pass
-        return conversation_id
+        return str(self.repository.transcript_path(conversation_id))
 
     async def _run_phase2(self) -> None:
         await self._wait_for_foreground()
@@ -588,16 +577,35 @@ class MemoryGenerationCoordinator:
                     raise MemoryGenerationError("Phase 2 ownership changed before commit")
                 return
 
-            await self._consolidate_phase2()
-            if not await _to_thread_cancel_safe(self._outputs_still_eligible, outputs):
-                raise MemoryGenerationError("Phase 2 selection changed during consolidation")
-            committed = await _to_thread_cancel_safe(
-                self._commit_phase2_artifacts,
-                claim,
-                outputs,
-            )
-            if not committed:
-                raise MemoryGenerationError("Phase 2 ownership changed before commit")
+            # The editing workspace is temporary content, outside the live
+            # application state protected from generic model file tools.
+            from backend.security.sensitive_files import application_state_roots
+
+            staging_parent = self.memory_root.parent
+            for state_root in application_state_roots():
+                if staging_parent.is_relative_to(state_root):
+                    staging_parent = state_root.parent
+            staged = Path(tempfile.mkdtemp(
+                prefix=f".{self.memory_root.name}.consolidation-",
+                dir=staging_parent,
+            ))
+            try:
+                await _to_thread_cancel_safe(
+                    shutil.copytree, self.memory_root, staged,
+                    dirs_exist_ok=True, symlinks=True,
+                    ignore=shutil.ignore_patterns(f"{MEMORY_DB_NAME}*", "*.lock"),
+                )
+                await self._consolidate_phase2(staged)
+                committed = await _to_thread_cancel_safe(
+                    self._commit_phase2_artifacts, claim, outputs, staged,
+                )
+                if not committed:
+                    raise MemoryGenerationError("Phase 2 ownership changed before commit")
+            finally:
+                if staged.exists():
+                    await _to_thread_cancel_safe(
+                        shutil.rmtree, staged, onerror=_remove_readonly_git_path,
+                    )
         except asyncio.CancelledError:
             if not memory_reset_in_progress():
                 await _to_thread_cancel_safe(
@@ -824,31 +832,64 @@ class MemoryGenerationCoordinator:
             rendered += "\n"
         return rendered + "```\n"
 
-    async def _consolidate_phase2(self) -> None:
+    async def _consolidate_phase2(self, memory_root: Path) -> None:
         await run_memory_consolidation_agent(
             llm=self.llm,
-            memory_root=self.memory_root,
-            prompt=build_consolidation_prompt(self.memory_root),
+            memory_root=memory_root,
+            prompt=build_consolidation_prompt(memory_root),
             token_budget=self.token_budget,
         )
+
+    @staticmethod
+    def _phase2_inputs(memory_root: Path) -> dict[str, bytes]:
+        inputs: dict[str, bytes] = {}
+        for name in ("raw_memories.md", "rollout_summaries", "extensions"):
+            source = resolve_memory_path(memory_root, name)
+            paths = source.rglob("*") if source.is_dir() else (source,)
+            for path in paths:
+                if path.is_file():
+                    relative = path.relative_to(memory_root)
+                    inputs[relative.as_posix()] = resolve_memory_path(memory_root, relative).read_bytes()
+        return inputs
 
     def _commit_phase2_artifacts(
         self,
         claim: JobClaim,
         outputs: list[Stage1Output],
+        staged: Path,
     ) -> bool:
         lock = self.file_memory.reset_lock
         try:
             with lock.acquire(timeout=5.0):
                 if not self.store.owns_phase2(claim):
                     return False
-                if not self._artifacts_valid():
+                if not self._outputs_still_eligible(outputs):
+                    raise MemoryGenerationError("Phase 2 selection changed during consolidation")
+                if self._phase2_inputs(self.memory_root) != self._phase2_inputs(staged):
+                    raise MemoryGenerationError("Phase 2 source files changed during consolidation")
+                if not self._artifacts_valid(staged):
                     raise MemoryGenerationError("Phase 2 artifacts failed validation")
-                self._commit_git_baseline()
-                return self.store.complete_phase2(
-                    claim,
-                    outputs,
-                )
+                # The DB is closed here and every job/note mutation shares the
+                # reset lock. Keep its current claim in the published tree.
+                for database in self.memory_root.glob(f"{MEMORY_DB_NAME}*"):
+                    shutil.copy2(database, staged / database.name)
+                self._commit_git_baseline(staged)
+                previous = staged.with_name(f"{staged.name}.previous")
+                self.memory_root.replace(previous)
+                try:
+                    staged.replace(self.memory_root)
+                    if not self.store.complete_phase2(claim, outputs):
+                        raise MemoryGenerationError("Phase 2 ownership changed before publication")
+                except BaseException:
+                    if self.memory_root.exists():
+                        self.memory_root.replace(staged)
+                    previous.replace(self.memory_root)
+                    raise
+                try:
+                    shutil.rmtree(previous, onerror=_remove_readonly_git_path)
+                except OSError:
+                    logger.warning("Published memories, but old tree cleanup failed: %s", previous, exc_info=True)
+                return True
         except FileLockTimeout as exc:
             raise MemoryGenerationError("Timed out waiting for the memory reset lock") from exc
 
@@ -862,6 +903,8 @@ class MemoryGenerationCoordinator:
             with lock.acquire(timeout=5.0):
                 if not self.store.owns_phase2(claim) or not self._artifacts_valid():
                     return False
+                if not self._outputs_still_eligible(outputs):
+                    raise MemoryGenerationError("Phase 2 selection changed before commit")
                 return self.store.complete_phase2(
                     claim,
                     outputs,
@@ -869,29 +912,31 @@ class MemoryGenerationCoordinator:
         except FileLockTimeout as exc:
             raise MemoryGenerationError("Timed out waiting for the memory reset lock") from exc
 
-    def _commit_git_baseline(self) -> None:
-        git_path = resolve_memory_path(self.memory_root, ".git")
-        diff_path = resolve_memory_path(self.memory_root, PHASE2_WORKSPACE_DIFF_FILE)
+    def _commit_git_baseline(self, memory_root: Path) -> None:
+        git_path = resolve_memory_path(memory_root, ".git")
+        diff_path = resolve_memory_path(memory_root, PHASE2_WORKSPACE_DIFF_FILE)
         if diff_path.exists():
             diff_path.unlink()
         if git_path.is_dir():
             shutil.rmtree(git_path, onerror=_remove_readonly_git_path)
         elif git_path.exists():
             git_path.unlink()
-        self._git("init", "--quiet")
-        self._git("config", "user.name", "MiniCode Memory")
-        self._git("config", "user.email", "memory@minicode.local")
-        self._git("add", "-A")
-        self._git("commit", "--quiet", "--allow-empty", "-m", "memory baseline")
+        self._git("init", "--quiet", cwd=memory_root)
+        self._git("config", "user.name", "MiniCode Memory", cwd=memory_root)
+        self._git("config", "user.email", "memory@minicode.local", cwd=memory_root)
+        self._git("add", "-A", cwd=memory_root)
+        self._git("commit", "--quiet", "--allow-empty", "-m", "memory baseline", cwd=memory_root)
 
-    def _artifacts_valid(self) -> bool:
-        if not resolve_memory_path(self.memory_root, "MEMORY.md").is_file():
+    def _artifacts_valid(self, memory_root: Path | None = None) -> bool:
+        root = self.memory_root if memory_root is None else memory_root
+        if not resolve_memory_path(root, "MEMORY.md").is_file():
             return False
-        summary = _read_text(resolve_memory_path(self.memory_root, "memory_summary.md"))
+        summary = _read_text(resolve_memory_path(root, "memory_summary.md"))
         return summary.splitlines()[:1] == ["v1"]
 
-    def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        environment = sanitized_git_env(self.memory_root)
+    def _git(self, *args: str, check: bool = True, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        root = self.memory_root if cwd is None else cwd
+        environment = sanitized_git_env(root)
         environment.update(
             {
                 "GIT_AUTHOR_NAME": "MiniCode Memory",
@@ -902,7 +947,7 @@ class MemoryGenerationCoordinator:
         )
         result = subprocess.run(
             ["git", *args],
-            cwd=self.memory_root,
+            cwd=root,
             env=environment,
             capture_output=True,
             text=True,

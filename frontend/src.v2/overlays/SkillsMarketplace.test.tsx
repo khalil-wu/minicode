@@ -5,7 +5,6 @@ import { useAppStore } from "../stores";
 import { SkillsMarketplace } from "./SkillsMarketplace";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "./ToastContainer";
-import { showAlert } from "./DialogService";
 
 vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", { writable: true, value: vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })) }));
 vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn() }));
@@ -53,7 +52,9 @@ describe("Plugins and skills workspace", () => {
   it("opens row details and keeps the Add menu state separate from row actions", () => {
     render(<SkillsMarketplace />);
     fireEvent.click(screen.getByRole("button", { name: "查看技能详情 docs" }));
-    expect(showAlert).toHaveBeenCalledWith(expect.objectContaining({ title: "文档处理" }));
+    expect(within(screen.getByRole("region", { name: "技能详情" })).getByRole("heading", { name: "文档处理" })).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "返回技能列表" }));
     fireEvent.click(screen.getByRole("button", { name: "管理技能 docs" }));
     expect(screen.getByRole("button", { name: "添加", exact: true }).getAttribute("aria-expanded")).toBe("false");
   });
@@ -134,5 +135,26 @@ describe("Plugins and skills workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "返回技能设置" }));
     expect(useAppStore.getState().settingsOpen).toBe(true);
     expect(useAppStore.getState().settingsTab).toBe("skills");
+  });
+
+  it("shows each installed skill once when filtering its source", () => {
+    render(<SkillsMarketplace />);
+    expect(screen.getAllByRole("button", { name: "查看技能详情 internal" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "系统", exact: true }));
+    expect(screen.getAllByRole("button", { name: "查看技能详情 internal" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "查看技能详情 docs" })).toBeNull();
+  });
+
+  it("exposes source and invocation behavior in readable details and keeps list filters", () => {
+    render(<SkillsMarketplace />);
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索技能" }), { target: { value: "文档" } });
+    fireEvent.click(screen.getByRole("button", { name: "查看技能详情 docs" }));
+    const detail = screen.getByRole("region", { name: "技能详情" });
+    expect(within(detail).getByText("C:/skills/docs/SKILL.md")).toBeTruthy();
+    expect(within(detail).getByText("个人")).toBeTruthy();
+    expect(within(detail).getByRole("button", { name: "用于下一条消息" })).toBeTruthy();
+    fireEvent.keyDown(detail, { key: "Escape" });
+    expect(screen.getByRole("textbox", { name: "搜索技能" })).toHaveProperty("value", "文档");
+    expect(useAppStore.getState().skillsMarketplaceOpen).toBe(true);
   });
 });

@@ -71,6 +71,9 @@ useAppStore.subscribe(
   (state, previous) => {
     if (pruningConversationTranscripts) return;
     const now = Date.now();
+    for (const id of conversationTranscriptAccess.keys()) {
+      if (id !== state.conversationId && !(id in state.conversationMessages)) conversationTranscriptAccess.delete(id);
+    }
     if (state.conversationId) conversationTranscriptAccess.set(state.conversationId, now);
     for (const [id, messages] of Object.entries(state.conversationMessages)) {
       if (previous.conversationMessages[id] !== messages) {

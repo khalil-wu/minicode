@@ -238,6 +238,7 @@ def materialize_source(
     urlopen: Callable[..., Any] | None = None,
     timeout_seconds: float = 30.0,
     overwrite: bool = True,
+    copy_local_directory: bool = False,
     validate: Callable[[Path], None] | None = None,
     after_activate: Callable[[MaterializedSource], None] | None = None,
 ) -> MaterializedSource:
@@ -260,8 +261,15 @@ def materialize_source(
         path = Path(parsed.locator).expanduser().resolve()
         if not path.is_dir():
             raise MaterializationError(f"local marketplace directory does not exist: {path}")
+        if copy_local_directory:
+            path = _assert_materialized_root(path)
         if validate is not None:
             validate(path)
+        if copy_local_directory:
+            return _activate(
+                path, destination, parsed,
+                overwrite=overwrite, after_activate=after_activate,
+            )
         result = MaterializedSource(path, parsed, reused_local=True)
         if after_activate is not None:
             after_activate(result)
@@ -342,7 +350,6 @@ def _activate(
     overwrite: bool,
     after_activate: Callable[[MaterializedSource], None] | None = None,
 ) -> MaterializedSource:
-    source_root = _assert_materialized_root(source_root)
     if destination.exists() and not overwrite:
         raise MaterializationError(f"destination already exists: {destination}")
     staged_copy = destination.parent / f".{destination.name}.{uuid4().hex}.activate"

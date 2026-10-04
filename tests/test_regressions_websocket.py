@@ -950,6 +950,7 @@ def test_user_message_workspace_switch_waits_for_workspace_activation(monkeypatc
 
 def test_websocket_session_interrupt_cancels_active_run(monkeypatch, tmp_path) -> None:
     cancelled = asyncio.Event()
+    started = asyncio.Event()
 
     monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", tmp_path / "conversations")
 
@@ -984,6 +985,7 @@ def test_websocket_session_interrupt_cancels_active_run(monkeypatch, tmp_path) -
                 message_id,
                 turn_id="turn-test",
             )
+            started.set()
             try:
                 await asyncio.sleep(3600)
             except asyncio.CancelledError:
@@ -994,6 +996,9 @@ def test_websocket_session_interrupt_cancels_active_run(monkeypatch, tmp_path) -
                     "message_id": message_id,
                 })
                 await session.send_event(done)
+                session.run_manager.mark_delivery_complete(
+                    conversation_id, str((metadata or {}).get("_run_task_id") or ""),
+                )
                 raise
 
         session._run_agent = blocking_run
@@ -1018,6 +1023,7 @@ def test_websocket_session_interrupt_cancels_active_run(monkeypatch, tmp_path) -
                     break
                 await asyncio.sleep(0)
         agent_task = session.run_manager.active_run_task
+        await asyncio.wait_for(started.wait(), timeout=30)
         stream_state = session._conversation_streams[conversation_id]
         await session.command_dispatcher._handle_command(UserCommand(type="interrupt", data={
             "conversation_id": conversation_id,
@@ -1876,7 +1882,7 @@ def test_durable_client_command_persistence_failure_is_rejected_before_ack(monke
             permission_checker=PermissionChecker(PermissionSettings()),
             config=AppConfig(llm=LLMSettings(api_key="")),
         )
-        durable_queue = session.run_manager.durable_queue
+        durable_queue = session.run_manager.durable_client_commands
         assert durable_queue is not None
 
         def fail_persist(_command: UserCommand) -> bool:
@@ -1918,7 +1924,7 @@ def test_durable_client_command_replays_after_ack_before_task_creation_crash(mon
         )
         first.command_dispatcher._schedule_durable_client_command = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
         await first.session_lifecycle.handle()
-        first_queue = first.run_manager.durable_queue
+        first_queue = first.run_manager.durable_client_commands
         assert first_queue is not None
         assert [
             command.data.get("client_command_id")
@@ -2023,7 +2029,7 @@ def test_durable_client_command_records_recent_id_before_completion(monkeypatch,
             permission_checker=PermissionChecker(PermissionSettings()),
             config=AppConfig(llm=LLMSettings(api_key="")),
         )
-        durable_queue = session.run_manager.durable_queue
+        durable_queue = session.run_manager.durable_client_commands
         assert durable_queue is not None
         durable_queue.persist_client_command(UserCommand(
             type="session.sync",
@@ -2085,7 +2091,7 @@ def test_durable_client_command_stays_pending_when_dedup_persistence_fails(monke
             permission_checker=PermissionChecker(PermissionSettings()),
             config=AppConfig(llm=LLMSettings(api_key="")),
         )
-        durable_queue = session.run_manager.durable_queue
+        durable_queue = session.run_manager.durable_client_commands
         assert durable_queue is not None
         command_id = "cmd-dedup-failure"
         durable_queue.persist_client_command(UserCommand(
@@ -2132,7 +2138,7 @@ def test_durable_client_handler_failure_keeps_command_pending(monkeypatch, tmp_p
             permission_checker=PermissionChecker(PermissionSettings()),
             config=AppConfig(llm=LLMSettings(api_key="")),
         )
-        durable_queue = session.run_manager.durable_queue
+        durable_queue = session.run_manager.durable_client_commands
         assert durable_queue is not None
         command_id = "cmd-handler-failure"
         durable_queue.persist_client_command(UserCommand(
@@ -2176,7 +2182,7 @@ def test_interrupted_durable_client_command_returns_to_pending(
             permission_checker=PermissionChecker(PermissionSettings()),
             config=AppConfig(llm=LLMSettings(api_key="")),
         )
-        durable_queue = session.run_manager.durable_queue
+        durable_queue = session.run_manager.durable_client_commands
         assert durable_queue is not None
         client_command_id = f"cmd-{failure_mode}"
         durable_queue.persist_client_command(UserCommand(

@@ -74,6 +74,12 @@ describe("agent edit review", () => {
     expect(revertAgentEditBlock(current, blocks[0])).toBe("a\r\nb\r\nc\r\nd\r\n");
   });
 
+  it.each([["\n", "\r\n"], ["\r\n", "\n"]])("restores the removed %j terminator when a full replacement changes the file to %j", (removedEol, addedEol) => {
+    const patch = `${header}@@ -1,2 +1,2 @@\n-alpha${removedEol}-bravo${removedEol}+ALPHA${addedEol}+BRAVO${addedEol}`;
+    const current = `ALPHA${addedEol}BRAVO${addedEol}`;
+    expect(revertAgentEditBlocks(current, reviewAgentEdits(patch, current).blocks)).toBe(`alpha${removedEol}bravo${removedEol}`);
+  });
+
   it("reverts a new file to empty and a pure deletion to its removed lines", () => {
     const created = reviewAgentEdits(`${header}@@ -0,0 +1,2 @@\n+x\n+y\n`, "x\ny\n");
     expect(created.blocks).toEqual([expect.objectContaining({ line: 1, added: ["x", "y"], removed: [] })]);
@@ -106,10 +112,34 @@ describe("agent edit review", () => {
     const patch = `${header}@@ -1,2 +1,2 @@\n----x\n+++-y\n keep\n`;
     const [hunk] = parsePatchHunks(patch);
     expect(hunk.lines).toEqual([
-      { kind: "del", text: "---x" },
+      { kind: "del", text: "---x", eol: "\n" },
       { kind: "add", text: "++-y" },
       { kind: "context", text: "keep" },
     ]);
+  });
+
+  it("preserves repeated block identities when an earlier hunk stops matching", () => {
+    const patch = `${header}@@ -1,3 +1,3 @@\n first\n-old\n+NEW\n tail1\n@@ -5,3 +5,3 @@\n second\n-old\n+NEW\n tail2\n`;
+    const current = "first\nNEW\ntail1\ngap\nsecond\nNEW\ntail2\n";
+    const initial = reviewAgentEdits(patch, current);
+    const updated = reviewAgentEdits(patch, current.replace("first\nNEW", "first\nUSER"));
+    expect(updated.blocks).toHaveLength(1);
+    expect(updated.blocks[0].key).toBe(initial.blocks[1].key);
+    expect(updated.blocks[0].key).not.toBe(initial.blocks[0].key);
+  });
+
+  it("preserves an existing block identity when growing diffs merge hunks", () => {
+    const before = `${header}@@ -5,3 +5,3 @@\n second\n-old\n+NEW\n tail2\n`;
+    const after = `${header}@@ -1,7 +1,7 @@\n first\n-before\n+BEFORE\n tail1\n gap\n second\n-old\n+NEW\n tail2\n`;
+    const current = "first\nBEFORE\ntail1\ngap\nsecond\nNEW\ntail2\n";
+    expect(reviewAgentEdits(after, current).blocks[1].key).toBe(reviewAgentEdits(before, current).blocks[0].key);
+  });
+
+  it("stops reviewing a complete deletion after the user supplies new content", () => {
+    const patch = `${header}@@ -1 +0,0 @@\n-old\n\\ No newline at end of file\n`;
+    expect(reviewAgentEdits(patch, "").blocks).toHaveLength(1);
+    expect(reviewAgentEdits(patch, "old").blocks).toHaveLength(0);
+    expect(reviewAgentEdits(patch, "user content").blocks).toHaveLength(0);
   });
 });
 
@@ -126,6 +156,19 @@ const applyModelEdit = (content: string, edit: AgentEditTextEdit): string => {
 };
 
 describe("agent edit undo as an editor edit", () => {
+  it.each([
+    ["removed final newline", `${header}@@ -1 +1 @@\n-old\n+NEW\n\\ No newline at end of file\n`, "NEW", "old\n"],
+    ["added final newline", `${header}@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+NEW\n`, "NEW\n", "old"],
+    ["empty deleted file", `${header}@@ -1 +0,0 @@\n-old\n\\ No newline at end of file\n`, "", "old"],
+    ["empty deleted terminated file", `${header}@@ -1 +0,0 @@\n-old\n`, "", "old\n"],
+  ])("restores the actual removed EOF for %s", (_name, patch, content, expected) => {
+    const [block] = reviewAgentEdits(patch, content).blocks;
+    const modelLines = content.split("\n");
+    const edit = agentEditUndoEdit(block, modelLines.length, (line) => modelLines[line - 1].length + 1, "\n");
+    expect(applyModelEdit(content, edit)).toBe(expected);
+    expect(revertAgentEditBlock(content, block)).toBe(expected);
+  });
+
   const cases: Array<[string, string, string]> = [
     ["multi", MULTI_PATCH, MULTI_NEW],
     ["new file", `${header}@@ -0,0 +1,2 @@\n+x\n+y\n`, "x\ny\n"],

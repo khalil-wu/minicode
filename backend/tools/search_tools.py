@@ -9,52 +9,29 @@
 
 from __future__ import annotations
 
-import asyncio
-import os
 import re
-import time
-from collections import deque
+import regex as _safe_regex
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Iterator
 
 from backend.permissions.context import ToolExecutionContext
-from backend.subprocesses import (
-    SubprocessOutputLimitError,
-    communicate_bounded,
-    spawn_exec,
-)
+from backend.async_cleanup import to_thread_cancel_safe
 from backend.tools.base import (
     BaseTool,
     PermissionLevel,
-    MAX_TOOL_RESULT_BYTES,
-    MAX_TOOL_RESULT_LINES,
     ToolResult,
     ToolSchema,
-    truncate_tool_result,
 )
 from backend.tools.contracts import ToolSpec
 from backend.tools.command_support import _as_bool
 from backend.tools.path_resolution import (
     PathTraversalError,
     _is_bypass_mode,
-    _is_declared_readable_path,
 )
-from backend.workspace.path_filters import is_windows_reserved_path
-
-try:
-    import regex as _safe_regex
-except ImportError:  # pragma: no cover - declared dependency, defensive fallback
-    _safe_regex = re
 
 # Default result budget for a grep. 250 keeps large-codebase searches useful
 # without flooding one tool result.
 GLOB_MAX_MATCHES = 100
-
-
-_NESTED_QUANTIFIER_RE = re.compile(
-    r"\((?:[^()\\]|\\.){0,512}(?:[*+]|\{\d+(?:,\d*)?\})(?:[^()\\]|\\.){0,512}\)"
-    r"\s*(?:[*+]|\{\d+(?:,\d*)?\})",
-)
 
 
 from backend.tools.search_support import (
@@ -74,7 +51,6 @@ from backend.tools.search_support import (
     _normalize_output_mode,
     _pagination_suffix,
     _resolve_search_path,
-    _stdlib_regex_pattern_is_unsafe,
 
     GREP_DISPLAY_LINE_MAX_CHARS,
     _HAS_RIPGREP,
@@ -210,12 +186,10 @@ class GlobFilesTool(BaseTool):
                 return self._error_result(error)
             output_limit_reached = False
         else:
-            # Fallback glob: stop after one look-ahead result and surface the
-            # 50-KiB boundary (that cap and the result ceiling mirror Pi's
-            # tool-output contract; the lazy traversal shape itself is
-            # MiniCode's own — Pi's fallback shells out to rg/fd instead).
+            # Collect and sort candidates before pagination so both backends
+            # use the same modification-time order and output boundary.
             try:
-                fallback = await asyncio.to_thread(
+                fallback = await to_thread_cancel_safe(
                     _glob_with_python,
                     search_root=path,
                     pattern=str(pattern),
@@ -267,6 +241,7 @@ class GrepFilesTool(BaseTool):
     display_label = "Search"
     description = (
         "Search file contents with ripgrep-style regex; returns matching file paths by default. "
+        "Set fixed_strings=true for literal source snippets such as 'fetch(' or 'eval('; regex is the default. "
         "Use for content search instead of shell grep/rg. Supports regex, glob/type filters, output modes ('content', 'files_with_matches', 'count'), context, and multiline."
     )
     permission = PermissionLevel.AUTO
@@ -277,7 +252,11 @@ class GrepFilesTool(BaseTool):
         self._workspace_root = workspace_root
 
     def model_description(self) -> str:
-        return "Regex-search file contents; returns matching file paths by default. Use output_mode='content' for lines."
+        return (
+            "Search file contents; returns matching file paths by default. Use output_mode='content' for lines. "
+            "Set fixed_strings=true for literal code/text such as 'fetch(' or 'eval('. "
+            "Otherwise use ripgrep regex and escape literal metacharacters."
+        )
 
     def model_schema(self) -> ToolSchema:
         # A narrower model-facing schema is not a cosmetic difference here:
@@ -291,7 +270,14 @@ class GrepFilesTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "Regex pattern to search for."},
+                    "pattern": {
+                        "type": "string",
+                        "description": r"Ripgrep regex by default; escape literal parentheses, e.g. fetch\(. With fixed_strings=true, supply the exact text instead.",
+                    },
+                    "fixed_strings": {
+                        "type": "boolean",
+                        "description": "Treat pattern as literal text (rg -F); recommended for copied code with punctuation. Default false. The | character is literal in this mode.",
+                    },
                     "path": {
                         "type": "string",
                         "description": "File or directory to search; defaults to workspace root.",
@@ -362,7 +348,11 @@ class GrepFilesTool(BaseTool):
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "Regex pattern, e.g. 'def run_agent' or 'TODO:'.",
+                        "description": r"Ripgrep regex by default; escape literal parentheses, e.g. fetch\(. With fixed_strings=true, supply the exact text instead.",
+                    },
+                    "fixed_strings": {
+                        "type": "boolean",
+                        "description": "Treat pattern as literal text (rg -F); default false. The | character is literal in this mode.",
                     },
                     "directory": {
                         "type": "string",
@@ -438,6 +428,7 @@ class GrepFilesTool(BaseTool):
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         pattern = args.get("pattern", "")
+        fixed_strings = _as_bool(args.get("fixed_strings", False))
         directory = args.get("path") or args.get("directory", ".")
         output_mode = _normalize_output_mode(args.get("output_mode"))
         file_type = str(args.get("type") or "").strip()
@@ -490,11 +481,14 @@ class GrepFilesTool(BaseTool):
                 offset=offset,
                 output_mode=output_mode,
                 multiline=multiline,
+                fixed_strings=fixed_strings,
                 file_type=file_type or None,
                 file_extensions=file_extensions,
                 is_allowed=is_allowed,
             )
             if is_error:
+                if "regex parse error:" in rg_output:
+                    return self._invalid_regex_result(rg_output)
                 return self._error_result(rg_output)
 
             header = f"在 {directory} 中搜索 '{pattern}'（模式: {output_mode}）"
@@ -504,17 +498,19 @@ class GrepFilesTool(BaseTool):
             return self._success_result(_bounded_search_output(result))
 
         # --- Python fallback backend ---
+        if file_type and not file_extensions:
+            return self._error_result(
+                f"File type '{file_type}' requires ripgrep. Use an explicit glob "
+                "filter for this Python search backend."
+            )
         try:
             flags = re.IGNORECASE if case_insensitive else 0
             if multiline:
                 flags |= re.DOTALL | re.MULTILINE
-            if _safe_regex is re and _stdlib_regex_pattern_is_unsafe(pattern):
-                return self._error_result(
-                    "正则表达式过于复杂，当前环境无法安全执行；请改用更简单的模式"
-                )
-            regex = _safe_regex.compile(pattern, flags)
-        except (re.error, getattr(_safe_regex, "error", re.error)) as exc:
-            return self._error_result(f"无效的正则表达式: {exc}")
+            search_pattern = re.escape(pattern) if fixed_strings else pattern
+            regex = _safe_regex.compile(search_pattern, flags)
+        except _safe_regex.error as exc:
+            return self._invalid_regex_result(f"无效的正则表达式: {exc}")
 
         candidate_files: Iterator[Path] = _iter_candidate_files(
             path,
@@ -532,7 +528,7 @@ class GrepFilesTool(BaseTool):
 
             candidate_files = (candidate for candidate in candidate_files if matches_glob(candidate))
         try:
-            batch = await asyncio.to_thread(
+            batch = await to_thread_cancel_safe(
                 _grep_candidates,
                 candidate_files,
                 path,
@@ -593,3 +589,13 @@ class GrepFilesTool(BaseTool):
         if notices:
             result += f"\n\n[{'. '.join(notices)}]"
         return self._success_result(_bounded_search_output(result))
+
+    def _invalid_regex_result(self, detail: str) -> ToolResult:
+        result = self._error_result(
+            detail + "\nCorrect the regex before retrying. Escape literal parentheses, for example `fetch\\(` or `eval\\(`; "
+            "or use fixed_strings=true with one exact source snippet. Use regex alternatives for multiple terms."
+        )
+        result.error_kind = "validation_error"
+        result.user_summary = "搜索表达式语法无效。"
+        result.model_observation = "The regex was rejected; no content search completed. Correct the expression or choose an explicit literal search."
+        return result

@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
-import shutil
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from backend.async_cleanup import to_thread_cancel_safe
 from backend.atomic_io import canonical_file_path_key, file_mutation_locks
 from backend.config import (
     SETTINGS_FILE,
@@ -50,12 +50,9 @@ from backend.plugins.manifest import (
 )
 from backend.plugins.package import (
     _extract_plugin_package,
-    _is_plugin_directory,
     _is_relative_to,
     _looks_like_remote_plugin_source,
     _normalized_extracted_plugin_dir,
-    _plugin_name_from_package,
-    _plugin_symlink_paths,
     _remove_within_root,
     _safe_plugin_data_segment,
     _safe_plugin_folder_name,
@@ -757,8 +754,8 @@ async def import_plugin_from_path(
     _marketplace_source_descriptor: Mapping[str, Any] | None = None,
     _expected_plugin_id: str | None = None,
 ) -> dict[str, Any]:
-    policy = _policy or _plugin_policy_from_stack()
-    if not feature_enabled("plugin_lifecycle_api", True):
+    policy = _policy if _policy is not None else await to_thread_cancel_safe(_plugin_policy_from_stack)
+    if not await to_thread_cancel_safe(feature_enabled, "plugin_lifecycle_api", True):
         raise PluginSettingsError("Plugin lifecycle API is disabled", status_code=404)
     if _trusted_marketplace and not isinstance(_marketplace_source_descriptor, Mapping):
         raise PluginSettingsError(
@@ -797,8 +794,8 @@ async def import_plugin_from_path(
             staging_root = plugin_install_root().parent / ".remote-imports"
             staging_root.mkdir(parents=True, exist_ok=True)
             destination = staging_root / uuid4().hex
-            materialized = materialize_source(parsed_source, destination)
             try:
+                materialized = await to_thread_cancel_safe(materialize_source, parsed_source, destination)
                 return await _install_plugin_directory(
                     materialized.path,
                     overwrite=overwrite,
@@ -816,7 +813,7 @@ async def import_plugin_from_path(
                 )
             finally:
                 if destination.exists():
-                    _remove_within_root(destination, staging_root)
+                    await to_thread_cancel_safe(_remove_within_root, destination, staging_root)
         except MaterializationError as exc:
             raise PluginSettingsError(str(exc), status_code=400) from exc
     if not source.is_dir():
@@ -857,8 +854,8 @@ async def import_plugin_package(
     _marketplace_source_descriptor: Mapping[str, Any] | None = None,
     _expected_plugin_id: str | None = None,
 ) -> dict[str, Any]:
-    policy = _policy or _plugin_policy_from_stack()
-    if not feature_enabled("plugin_lifecycle_api", True):
+    policy = _policy if _policy is not None else await to_thread_cancel_safe(_plugin_policy_from_stack)
+    if not await to_thread_cancel_safe(feature_enabled, "plugin_lifecycle_api", True):
         raise PluginSettingsError("Plugin lifecycle API is disabled", status_code=404)
     if _trusted_marketplace and not isinstance(_marketplace_source_descriptor, Mapping):
         raise PluginSettingsError(
@@ -893,7 +890,7 @@ async def import_plugin_package(
     tmp_extract = tmp_root / f"{token}.{uuid4().hex}.tmp"
     tmp_extract.mkdir(parents=True)
     try:
-        _extract_plugin_package(package, tmp_extract)
+        await to_thread_cancel_safe(_extract_plugin_package, package, tmp_extract)
         source = _normalized_extracted_plugin_dir(tmp_extract)
         return await _install_plugin_directory(
             source,
@@ -910,7 +907,7 @@ async def import_plugin_package(
         )
     finally:
         if tmp_extract.exists():
-            _remove_within_root(tmp_extract, install_root)
+            await to_thread_cancel_safe(_remove_within_root, tmp_extract, install_root)
 
 
 async def _install_plugin_directory(
@@ -927,17 +924,12 @@ async def _install_plugin_directory(
     marketplace_source_descriptor: Mapping[str, Any] | None = None,
     expected_plugin_id: str | None = None,
 ) -> dict[str, Any]:
-    linked_paths = _plugin_symlink_paths(source)
-    if linked_paths:
-        raise PluginSettingsError(
-            "Plugin directories cannot contain symbolic links or junctions: " + ", ".join(linked_paths[:3]),
-            status_code=400,
+    validation = await to_thread_cancel_safe(validate_plugin_directory, source)
+    if not validation.get("ok"):
+        first_error = str(
+            (validation.get("errors") or ["Plugin validation failed"])[0]
         )
-    if not _is_plugin_directory(source):
-        raise PluginSettingsError(
-            "Plugin directory must contain .minicode-plugin/plugin.json",
-            status_code=400,
-        )
+        raise PluginSettingsError(first_error, status_code=400)
 
     plugin_name = plugin_name_from_directory(source)
     folder_name = _safe_plugin_folder_name(plugin_name or source.name)
@@ -974,13 +966,6 @@ async def _install_plugin_directory(
         version=str((manifest_payload or {}).get("version") or "").strip(),
         trusted_marketplace=trusted_marketplace,
     )
-    validation = validate_plugin_directory(source)
-    if not validation.get("ok"):
-        first_error = str(
-            (validation.get("errors") or ["Plugin validation failed"])[0]
-        )
-        raise PluginSettingsError(first_error, status_code=400)
-
     install_root = plugin_install_root()
     install_root.mkdir(parents=True, exist_ok=True)
     destination_folder = (
@@ -996,7 +981,7 @@ async def _install_plugin_directory(
         raise PluginSettingsError("Plugin destination escapes the plugin root", status_code=400)
     if _same_path(source_resolved, destination_resolved):
         return {
-            **get_plugin_settings(policy=effective_policy),
+            **(await to_thread_cancel_safe(get_plugin_settings, policy=effective_policy)),
             "imported": {
                 "name": plugin_name,
                 "id": plugin_id,
@@ -1030,7 +1015,8 @@ async def _install_plugin_directory(
 
     # The canonical store retains its old tree and selector until enablement
     # commits. A failed store update cannot publish a different flat runtime.
-    stored = store.materialize(
+    stored = await to_thread_cancel_safe(
+        store.materialize,
         source,
         name=plugin_name,
         marketplace=marketplace,
@@ -1041,26 +1027,16 @@ async def _install_plugin_directory(
         after_activate=activate_plugin,
     )
 
-    # cc surfaces declared-but-missing plugin dependencies instead of letting
-    # an install silently proceed without them (installedPluginsManager tracks
-    # the dependency closure). Report them so the UI and caller can reconcile.
-    declared_dependencies = (manifest_payload or {}).get("dependencies")
-    if isinstance(declared_dependencies, str):
-        declared_dependencies = [declared_dependencies]
-    missing_dependencies: list[str] = []
-    if isinstance(declared_dependencies, list):
-        installed_ids = {
-            str(entry.get("id") or entry.get("name") or "").strip()
-            for entry in get_plugin_settings(policy=effective_policy).get("plugins", [])
-            if isinstance(entry, dict)
-        }
-        for dependency in declared_dependencies:
-            token = str(dependency or "").strip()
-            if token and token not in installed_ids:
-                missing_dependencies.append(token)
+    # Runtime enablement and the installation receipt share the same qualified
+    # dependency/version decision; bare names and ranges are not installed IDs.
+    snapshot = await to_thread_cancel_safe(get_plugin_settings, policy=effective_policy)
+    missing_dependencies = list(dict.fromkeys(
+        error["dependency"] for error in snapshot["dependency_errors"]
+        if error["required_by"].casefold() == plugin_id.casefold()
+    ))
 
     return {
-        **get_plugin_settings(policy=effective_policy),
+        **snapshot,
         "imported": {
             "name": plugin_name,
             "id": plugin_id,
@@ -1319,6 +1295,7 @@ def resolve_enabled_plugin_mentions(
     *,
     connected_mcp_servers: Iterable[str] = (),
     config_stack: Any | None = None,
+    workspace_root: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve structured ``plugin://`` mentions against enabled local plugins.
 
@@ -1326,6 +1303,10 @@ def resolve_enabled_plugin_mentions(
     are dropped, and only MCP
     servers that are actually connected for this session are advertised.
     """
+    if config_stack is None:
+        from backend.config import load_config_layer_stack
+
+        config_stack = load_config_layer_stack(cwd=workspace_root)
     inventory_by_id: dict[str, Mapping[str, Any]] = {}
     inventory_by_name: dict[str, list[Mapping[str, Any]]] = {}
     for item in get_plugin_snapshot(config_stack=config_stack).get("plugins", []):
@@ -1370,7 +1351,7 @@ def resolve_enabled_plugin_mentions(
             if str(name).strip()
         }
         resolved.append({
-            "config_name": str(plugin.get("name") or config_name),
+            "config_name": str(plugin["id"]),
             "display_name": str(plugin.get("displayName") or plugin.get("name") or config_name),
             "description": str(plugin.get("shortDescription") or plugin.get("description") or ""),
             "has_skills": int(plugin.get("skill_count") or 0) > 0,

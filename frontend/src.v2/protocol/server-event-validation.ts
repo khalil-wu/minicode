@@ -1269,6 +1269,8 @@ const hasValidSemanticPayload = (
       ))
       && (!('artifact_bytes' in value) || isNonNegativeSafeInteger(value.artifact_bytes))
       && (!('is_error' in value) || typeof value.is_error === "boolean")
+      && (!("completed_at_ms" in value) || isNonNegativeSafeInteger(value.completed_at_ms))
+      && (!("cleanup_receipt" in value) || (isRecord(value.cleanup_receipt) && hasBoundedJsonShape(value.cleanup_receipt)))
       && (!('visibility' in value) || AGENT_ITEM_VISIBILITIES.has(String(value.visibility)))
       && (!('output_files' in value) || (
         Array.isArray(value.output_files)
@@ -1972,6 +1974,10 @@ const hasValidSemanticPayload = (
       && typeof value.data === "string"
       && value.data.length > 0
       && value.data.length <= MAX_TERMINAL_OUTPUT_CHARS
+      && (!("start_cursor" in value) && !("end_cursor" in value)
+        || Number.isSafeInteger(value.start_cursor) && Number(value.start_cursor) >= 0
+          && Number.isSafeInteger(value.end_cursor)
+          && Number(value.end_cursor) - Number(value.start_cursor) === value.data.length)
       && !("command" in value)
       && !("output" in value)
       && !("exit_code" in value);
@@ -1983,6 +1989,12 @@ const hasValidSemanticPayload = (
     valid = isBoundedString(value.conversation_id, 1_024)
       && (streamShape !== commandShape);
   }
+  if (type === "terminal.snapshot" && ("output_start_cursor" in value || "output_end_cursor" in value)) {
+    valid = typeof value.output === "string"
+      && Number.isSafeInteger(value.output_start_cursor) && Number(value.output_start_cursor) >= 0
+      && Number.isSafeInteger(value.output_end_cursor)
+      && Number(value.output_end_cursor) - Number(value.output_start_cursor) === value.output.length;
+  }
   if (type === "user_message.queue.updated") {
     const queued = value.status === "queued";
     const dequeued = value.status === "dequeued";
@@ -1993,6 +2005,7 @@ const hasValidSemanticPayload = (
       && isBoundedString(value.message_id, 1_024)
       && (!("user_message_id" in value) || isBoundedString(value.user_message_id, 1_024))
       && (!("reason" in value) || isBoundedString(value.reason, 16_384))
+      && (!("paused" in value) || typeof value.paused === "boolean")
       && (!("target_message_id" in value) || isBoundedString(value.target_message_id, 1_024))
       && (turnMode === undefined || turnMode === "follow_up" || turnMode === "steer")
       && (queued

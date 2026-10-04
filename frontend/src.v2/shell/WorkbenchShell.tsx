@@ -106,6 +106,7 @@ const ChatModeShell = () => (
 
 const WorkbenchModeShell = ({ mode }: { mode: "cowork" | "code" }) => {
   const ensureCodeLayout = useAppStore((s) => s.ensureCodeLayout);
+  const workbenchLayout = useAppStore((s) => s.workbenchLayout);
   useEffect(() => {
     if (mode === "code") ensureCodeLayout();
   }, [ensureCodeLayout, mode]);
@@ -115,7 +116,7 @@ const WorkbenchModeShell = ({ mode }: { mode: "cowork" | "code" }) => {
         className="flex-1 flex overflow-hidden min-h-0"
         style={{ flex: 1, display: "flex", overflow: "hidden", minWidth: 0, minHeight: 0 }}
       >
-        <MainSlots mode="tabs" forceChat={mode === "cowork"} />
+        <MainSlots mode={mode === "cowork" ? "tabs" : workbenchLayout} forceChat={mode === "cowork"} />
       </div>
     </>
   );
@@ -215,6 +216,9 @@ export const WorkbenchShell = () => {
   const leftSidebarWidth = useAppStore((s) => s.leftSidebarWidth);
   const panelSlots = useAppStore((s) => s.panelSlots);
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
+  const rightPanelExpanded = useAppStore((s) => s.rightPanelExpanded);
+  const setRightPanelExpanded = useAppStore((s) => s.setRightPanelExpanded);
+  const editorOpenRequestId = useAppStore((s) => s.activeEditorOpenRequestId);
   const rightStackTab = useAppStore((s) => s.rightStackTab);
   const previewRequestAt = useAppStore((s) => selectPreviewSurface(s).previewArtifact?.loadedAt ?? 0);
   const setLeftSidebarWidth = useAppStore((s) => s.setLeftSidebarWidth);
@@ -231,11 +235,26 @@ export const WorkbenchShell = () => {
     appMode === "code" && activeCodeSlot?.maximized && activeCodeSlot.kind !== "chat",
   );
   const leftPanelAvailable = skillsMarketplaceOpen || appMode === "cowork" || (appMode === "code" && !codePanelMaximized);
-  const rightPanelAvailable = !skillsMarketplaceOpen && (sideChatOpen || appMode === "cowork" || (appMode === "code" && !codePanelMaximized));
+  const rightPanelAvailable = !skillsMarketplaceOpen && (rightPanelExpanded || sideChatOpen || appMode === "cowork" || (appMode === "code" && !codePanelMaximized));
+  const expandedRight = rightPanelExpanded && rightPanelOpen && rightPanelAvailable;
+  const bottomVisible = appMode !== "chat" && !codePanelMaximized && !settingsOpen && !skillsMarketplaceOpen && !expandedRight;
 
   useEffect(() => {
     if (!compact) setCompactPanel(null);
   }, [compact]);
+
+  useEffect(() => {
+    const revealComposer = () => {
+      setCompactPanel(null);
+      setRightPanelExpanded(false);
+    };
+    window.addEventListener("composer:focus", revealComposer);
+    return () => window.removeEventListener("composer:focus", revealComposer);
+  }, [setRightPanelExpanded]);
+
+  useEffect(() => {
+    if (editorOpenRequestId && compact) setCompactPanel(null);
+  }, [editorOpenRequestId, compact]);
 
   useEffect(() => {
     if (compactPanel === "left" && !leftPanelAvailable) setCompactPanel(null);
@@ -265,6 +284,7 @@ export const WorkbenchShell = () => {
   };
 
   const toggleWorkbenchRightPanel = () => {
+    if (expandedRight) { toggleRightPanel(); return; }
     if (compact) {
       if (compactPanel !== "right" && !rightPanelOpen) toggleRightPanel();
       setCompactPanel((current) => current === "right" ? null : "right");
@@ -290,9 +310,9 @@ export const WorkbenchShell = () => {
         leftPanelControls={compact ? "left-sidebar-drawer" : undefined}
         leftPanelAvailable={leftPanelAvailable}
         leftPanelOpen={compact ? compactPanel === "left" : leftSidebarWidth > 0}
-        rightPanelControls={compact ? "right-panel-drawer" : undefined}
+        rightPanelControls={compact && !expandedRight ? "right-panel-drawer" : undefined}
         rightPanelAvailable={rightPanelAvailable}
-        rightPanelOpen={compact ? compactPanel === "right" : rightPanelOpen}
+        rightPanelOpen={expandedRight || (compact ? compactPanel === "right" : rightPanelOpen)}
         onToggleLeftPanel={toggleLeftPanel}
         onToggleRightPanel={toggleWorkbenchRightPanel}
       />
@@ -301,11 +321,13 @@ export const WorkbenchShell = () => {
         <div className="workbench-mode-body" style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
           {!compact && leftPanelAvailable && leftSidebarWidth > 0 && <SidebarLeft />}
           <div className="workbench-stage" style={{ position: "relative", flex: 1, minWidth: 0, minHeight: 0, display: "flex", overflow: "hidden" }}>
-            <div className="workbench-primary" hidden={skillsMarketplaceOpen} style={{ flex: 1, minWidth: 0, minHeight: 0, display: skillsMarketplaceOpen ? "none" : "flex", flexDirection: "column", overflow: "hidden" }}>
+            <div className="workbench-primary" hidden={skillsMarketplaceOpen || expandedRight} style={{ flex: 1, minWidth: 0, minHeight: 0, display: skillsMarketplaceOpen || expandedRight ? "none" : "flex", flexDirection: "column", overflow: "hidden" }} onFocusCapture={() => { if (compact) setCompactPanel(null); }}>
               <div className="workbench-content" style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", overflow: "hidden" }}>
                 {appMode === "chat" ? <ChatModeShell /> : <WorkbenchModeShell mode={appMode === "code" ? "code" : "cowork"} />}
               </div>
-              {appMode !== "chat" && !codePanelMaximized && <BottomDock />}
+              <div hidden={!bottomVisible} style={{ display: bottomVisible ? "contents" : "none" }}>
+                <BottomDock visible={bottomVisible} />
+              </div>
             </div>
             <div hidden={!skillsMarketplaceOpen} style={{ display: skillsMarketplaceOpen ? "flex" : "none", flex: 1, minWidth: 0 }}>
               <Suspense fallback={<div role="status" className="skills-empty-state">正在加载插件与技能…</div>}>
@@ -314,10 +336,10 @@ export const WorkbenchShell = () => {
             </div>
             <NarrowSidebarDrawer
               id="right-panel-drawer" label="右侧面板" side="right"
-              modal={compact} open={!settingsOpen && rightPanelAvailable && (!compact || compactPanel === "right")}
+              modal={compact && !expandedRight} open={!settingsOpen && rightPanelAvailable && (expandedRight || !compact || compactPanel === "right")}
               onClose={() => setCompactPanel(null)}
             >
-              <SidebarRight embedded={compact} visible={!settingsOpen && rightPanelAvailable && (compact ? compactPanel === "right" : rightPanelOpen)} />
+              <SidebarRight embedded={compact && !expandedRight} visible={!settingsOpen && rightPanelAvailable && (expandedRight || (compact ? compactPanel === "right" : rightPanelOpen))} />
             </NarrowSidebarDrawer>
           </div>
         </div>

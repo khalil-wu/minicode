@@ -22,7 +22,7 @@ Usage:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +34,6 @@ try:
 except ImportError:
     _ts = None  # type: ignore[assignment]
     _HAS_TREE_SITTER = False
-
-if TYPE_CHECKING:
-    pass
 
 # ── Extension → language mapping ─────────────────────────────────
 EXTENSION_TO_LANGUAGE: dict[str, str] = {
@@ -71,8 +68,6 @@ _LANGUAGE_PACKAGES: dict[str, tuple[str, str]] = {
 
 # Cache of already-loaded Language objects
 _language_cache: dict[str, Any | None] = {}
-# Cache of Parser objects per language
-_parser_cache: dict[str, Any | None] = {}
 
 
 # ── Public API ───────────────────────────────────────────────────
@@ -104,17 +99,7 @@ def get_language(language: str) -> Any | None:
     module_name, func_name = pkg_info
     try:
         mod = __import__(module_name)
-        lang_fn = getattr(mod, func_name)
-        lang_obj = lang_fn()
-
-        # tree-sitter >= 0.22 returns a Language directly;
-        # older versions may need Language(lang_obj) wrapping.
-        if not isinstance(lang_obj, _ts.Language):
-            try:
-                lang_obj = _ts.Language(lang_obj)
-            except (TypeError, ValueError):
-                pass
-
+        lang_obj = _ts.Language(getattr(mod, func_name)())
         _language_cache[lang_key] = lang_obj
         return lang_obj
     except ImportError:
@@ -125,46 +110,25 @@ def get_language(language: str) -> Any | None:
         )
         _language_cache[lang_key] = None
         return None
-    except Exception as exc:
-        logger.debug("Failed to load tree-sitter grammar '%s': %s", lang_key, exc)
-        _language_cache[lang_key] = None
-        return None
 
 
 def get_parser(language: str) -> Any | None:
     """
     Return a configured tree-sitter Parser for *language*, or None.
 
-    The parser is cached per language. Returns None when tree-sitter
+    Each analysis owns its parser; workspace analyses can run in parallel
+    workers. The immutable grammar is cached. Returns None when tree-sitter
     or the grammar package is not installed.
     """
     if not _HAS_TREE_SITTER:
         return None
 
     lang_key = language.lower()
-    if lang_key in _parser_cache:
-        return _parser_cache[lang_key]
-
     lang_obj = get_language(lang_key)
     if lang_obj is None:
-        _parser_cache[lang_key] = None
         return None
 
-    try:
-        parser = _ts.Parser()
-        # tree-sitter >= 0.22 API: parser.language = lang
-        # tree-sitter <  0.22 API: parser.set_language(lang)
-        try:
-            parser.language = lang_obj
-        except (AttributeError, TypeError):
-            parser.set_language(lang_obj)
-
-        _parser_cache[lang_key] = parser
-        return parser
-    except Exception as exc:
-        logger.debug("Failed to create parser for '%s': %s", lang_key, exc)
-        _parser_cache[lang_key] = None
-        return None
+    return _ts.Parser(lang_obj)
 
 
 def language_for_extension(ext: str) -> str | None:
@@ -185,25 +149,19 @@ def _walk_nodes(node: Any) -> list[Any]:
     while stack:
         current = stack.pop()
         result.append(current)
-        if hasattr(current, "children"):
-            # Extend in reverse so left-most child is processed first
-            stack.extend(reversed(current.children))
+        # Extend in reverse so left-most child is processed first
+        stack.extend(reversed(current.children))
     return result
 
 
 def _node_text(node: Any) -> str:
     """Extract the UTF-8 text of a tree-sitter node."""
-    raw = node.text
-    if isinstance(raw, bytes):
-        return raw.decode("utf-8", errors="replace")
-    return str(raw)
+    return node.text.decode("utf-8", errors="replace")
 
 
 def _line_of_node(node: Any) -> int:
     """Return 1-indexed line number for a node's start position."""
-    if hasattr(node, "start_point"):
-        return node.start_point[0] + 1
-    return 1
+    return node.start_point[0] + 1
 
 
 # ── Definition node types per language ───────────────────────────
@@ -214,7 +172,6 @@ _DEFINITION_NODE_TYPES: dict[str, set[str]] = {
         "class_declaration",
         "method_definition",
         "variable_declarator",
-        "arrow_function",
     },
     "typescript": {
         "function_declaration",
@@ -224,12 +181,12 @@ _DEFINITION_NODE_TYPES: dict[str, set[str]] = {
         "interface_declaration",
         "type_alias_declaration",
         "enum_declaration",
-        "arrow_function",
     },
     "go": {
         "function_declaration",
         "method_declaration",
-        "type_declaration",
+        "type_spec",
+        "type_alias",
         "short_var_declaration",
     },
     "rust": {
@@ -237,7 +194,6 @@ _DEFINITION_NODE_TYPES: dict[str, set[str]] = {
         "struct_item",
         "enum_item",
         "trait_item",
-        "impl_item",
         "let_declaration",
     },
     "java": {
@@ -246,16 +202,12 @@ _DEFINITION_NODE_TYPES: dict[str, set[str]] = {
         "interface_declaration",
         "enum_declaration",
         "record_declaration",
-        "field_declaration",
-        "local_variable_declaration",
+        "variable_declarator",
     },
 }
 
 # TSX is a separate grammar but declares the same constructs as TypeScript.
 _DEFINITION_NODE_TYPES["tsx"] = _DEFINITION_NODE_TYPES["typescript"]
-
-# Child field names that typically hold the defined identifier
-_NAME_FIELDS = ("name", "identifier", "declarator")
 
 # Node types for identifier/name nodes
 _IDENTIFIER_TYPES = {
@@ -264,12 +216,14 @@ _IDENTIFIER_TYPES = {
     "type_identifier",
     "field_identifier",
     "shorthand_property_identifier",
+    "shorthand_property_identifier_pattern",
+    "shorthand_field_identifier",
 }
 
 
 # ── Core search functions ────────────────────────────────────────
 
-def find_definitions(source: str, name: str, language: str) -> list[tuple[int, str]]:
+def find_definitions(source: str, name: str, language: str) -> list[tuple[int, str]] | None:
     """
     Find definition locations of *name* in *source* using tree-sitter.
 
@@ -280,18 +234,13 @@ def find_definitions(source: str, name: str, language: str) -> list[tuple[int, s
 
     Returns:
         List of (line_number, line_text) tuples.  Line numbers are 1-indexed.
-        Returns an empty list if tree-sitter is not available for this language.
+        Returns None if the grammar is unavailable; [] means no matching definition.
     """
     parser = get_parser(language)
     if parser is None:
-        return []
+        return None
 
-    try:
-        source_bytes = source.encode("utf-8")
-        tree = parser.parse(source_bytes)
-    except Exception as exc:
-        logger.debug("tree-sitter parse failed for language '%s': %s", language, exc)
-        return []
+    tree = parser.parse(source.encode("utf-8"))
 
     lang_key = language.lower()
     def_types = _DEFINITION_NODE_TYPES.get(lang_key, set())
@@ -305,7 +254,7 @@ def find_definitions(source: str, name: str, language: str) -> list[tuple[int, s
             continue
 
         # Look for the name inside this definition node
-        matched = _node_defines_name(node, name)
+        matched = any(_node_text(identifier) == name for identifier in _definition_identifiers(node))
         if not matched:
             continue
 
@@ -320,7 +269,9 @@ def find_definitions(source: str, name: str, language: str) -> list[tuple[int, s
     return results
 
 
-def find_references(source: str, name: str, language: str) -> list[tuple[int, str]]:
+def find_references(
+    source: str, name: str, language: str, *, include_definitions: bool = True,
+) -> list[tuple[int, str]] | None:
     """
     Find all references to *name* in *source* using tree-sitter.
 
@@ -335,29 +286,32 @@ def find_references(source: str, name: str, language: str) -> list[tuple[int, st
 
     Returns:
         List of (line_number, line_text) tuples.  Line numbers are 1-indexed.
-        Returns an empty list if tree-sitter is not available for this language.
+        Returns None if the grammar is unavailable; [] means no matching reference.
     """
     parser = get_parser(language)
     if parser is None:
-        return []
+        return None
 
-    try:
-        source_bytes = source.encode("utf-8")
-        tree = parser.parse(source_bytes)
-    except Exception as exc:
-        logger.debug("tree-sitter parse failed for language '%s': %s", language, exc)
-        return []
+    tree = parser.parse(source.encode("utf-8"))
 
     source_lines = source.splitlines()
     results: list[tuple[int, str]] = []
     seen_lines: set[int] = set()
 
     all_nodes = _walk_nodes(tree.root_node)
+    definition_ids = {
+        identifier.id
+        for node in all_nodes
+        if node.type in _DEFINITION_NODE_TYPES.get(language.lower(), set())
+        for identifier in _definition_identifiers(node)
+    } if not include_definitions else set()
     for node in all_nodes:
         # Match identifier-type nodes whose text equals the target name
         if node.type not in _IDENTIFIER_TYPES:
             continue
         if _node_text(node) != name:
+            continue
+        if node.id in definition_ids:
             continue
 
         lineno = _line_of_node(node)
@@ -371,39 +325,22 @@ def find_references(source: str, name: str, language: str) -> list[tuple[int, st
     return results
 
 
-def _node_defines_name(node: Any, name: str) -> bool:
-    """
-    Check whether a definition AST node defines the symbol *name*.
+def _definition_identifiers(node: Any) -> list[Any]:
+    """Read only declaration binding fields, never types, initializers or bodies."""
+    field = "left" if node.type == "short_var_declaration" else "pattern" if node.type == "let_declaration" else "name"
+    binding = node.child_by_field_name(field)
+    if binding is None:
+        return []
+    if binding.type in _IDENTIFIER_TYPES:
+        return [binding]
+    return _pattern_identifiers(binding)
 
-    Inspects the node's 'name' field and its immediate children for
-    identifier nodes matching *name*.
-    """
-    # Strategy 1: check named fields
-    for field in _NAME_FIELDS:
-        try:
-            child = node.child_by_field_name(field)
-        except Exception:
-            child = None
-        if child is not None:
-            # The field might be a declarator node — recurse one level
-            if _node_text(child) == name:
-                return True
-            # For Go type_declaration, the name might be nested
-            for sub in getattr(child, "children", []):
-                if sub.type in _IDENTIFIER_TYPES and _node_text(sub) == name:
-                    return True
-                # One more level for wrapped declarators
-                for sub2 in getattr(sub, "children", []):
-                    if sub2.type in _IDENTIFIER_TYPES and _node_text(sub2) == name:
-                        return True
 
-    # Strategy 2: scan immediate children for identifier matching name
-    for child in getattr(node, "children", []):
-        if child.type in _IDENTIFIER_TYPES and _node_text(child) == name:
-            return True
-        # Handle Go's declaration spec (e.g. type Foo struct { ... })
-        for sub in getattr(child, "children", []):
-            if sub.type in _IDENTIFIER_TYPES and _node_text(sub) == name:
-                return True
-
-    return False
+def _pattern_identifiers(node: Any) -> list[Any]:
+    if node.type in {"identifier", "shorthand_property_identifier_pattern", "shorthand_field_identifier"}:
+        return [node]
+    if node.type == "pair_pattern":
+        return _pattern_identifiers(node.child_by_field_name("value"))
+    if node.type in {"assignment_pattern", "object_assignment_pattern"}:
+        return _pattern_identifiers(node.child_by_field_name("left"))
+    return [identifier for child in node.named_children for identifier in _pattern_identifiers(child)]

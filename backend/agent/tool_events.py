@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from backend.agent.message import AgentEvent
 from backend.agent.state import AgentState
@@ -114,6 +114,7 @@ def cancelled_pending_tool_events(
     tool_tracker: StreamingToolTracker,
     *,
     iteration_id: str = "",
+    reason: Literal["turn_cancelled", "provider_retry", "provider_truncated"] = "turn_cancelled",
 ) -> list[AgentEvent]:
     """Close complete calls that were collected but never entered execution.
 
@@ -124,6 +125,26 @@ def cancelled_pending_tool_events(
     """
 
     tracked_tools = tool_tracker.tracked_tools
+    reason_data = {
+        "turn_cancelled": {
+            "display_summary": "Not executed: turn cancelled",
+            "error_kind": "turn_cancelled_before_tool_execution",
+            "user_summary": "工具调用尚未执行，本轮已取消。",
+            "developer_detail": "The provider emitted a complete tool call, but turn cancellation arrived before the ordered tool transition started.",
+        },
+        "provider_retry": {
+            "display_summary": "Not executed: provider request retried",
+            "error_kind": "provider_retry_before_tool_execution",
+            "user_summary": "该工具调用未执行，提供商请求将重新生成。",
+            "developer_detail": "The complete queued call was discarded before execution while the speculative provider attempt was retried.",
+        },
+        "provider_truncated": {
+            "display_summary": "Not executed: provider response truncated",
+            "error_kind": "provider_truncated_before_tool_execution",
+            "user_summary": "该工具调用未执行，提供商响应尚未完整提交。",
+            "developer_detail": "The provider response ended before this queued call became executable; completed local tool effects are retained separately.",
+        },
+    }[reason]
     events: list[AgentEvent] = []
     settled_ids: set[str] = set()
     for tool_call in list(getattr(stream_state, "tool_calls", ())):
@@ -145,13 +166,7 @@ def cancelled_pending_tool_events(
                 is_error=True,
                 status="cancelled",
                 tool_name=tool_name,
-                display_summary="Not executed: turn cancelled",
-                error_kind="turn_cancelled_before_tool_execution",
-                user_summary="工具调用尚未执行，本轮已取消。",
-                developer_detail=(
-                    "The provider emitted a complete tool call, but turn cancellation "
-                    "arrived before the ordered tool transition started."
-                ),
+                **reason_data,
                 recoverable=True,
                 group_id=iteration_id,
                 step_id=call_id,

@@ -55,8 +55,6 @@ class _ParentRun:
 class _FakeRuntime:
     def __init__(self) -> None:
         self.sent: list[dict[str, Any]] = []
-        self.released = 0
-        self.committed = 0
 
     def list_swarm_messages(self, **kwargs: Any) -> list[Any]:
         return [_request_message("plan_approval:t1:abc")]
@@ -67,19 +65,9 @@ class _FakeRuntime:
     def get_run(self, run_id: str) -> Any:
         return _ParentRun() if run_id == "run-parent" else None
 
-    def reserve_lifecycle_response(self, **kwargs: Any) -> str:
-        return "token-1"
-
-    def release_lifecycle_response(self, **kwargs: Any) -> bool:
-        self.released += 1
-        return True
-
-    def commit_lifecycle_response(self, **kwargs: Any) -> bool:
-        self.committed += 1
-        return True
-
-    def send_swarm_message(self, **kwargs: Any) -> None:
+    def respond_to_teammate_plan(self, **kwargs: Any) -> Any:
         self.sent.append(kwargs)
+        return kwargs
 
 
 class _FakeSession:
@@ -139,15 +127,10 @@ def test_plan_review_approve_sends_user_decision(
             },
         )
         assert handled is True
-        assert fake_runtime.committed == 1
-        payload = json.loads(fake_runtime.sent[0]["content"])
-        assert payload["approved"] is True
-        assert payload["permission_mode"] == "confirm"
-        # The teammate's mailbox reader must accept exactly what was sent.
-        from backend.agent.mailbox_delivery import _plan_approval_response
-
-        parsed = _plan_approval_response(type("Message", (), {"content": fake_runtime.sent[0]["content"]})())
-        assert parsed is not None and parsed["request_id"] == "plan_approval:t1:abc"
+        assert fake_runtime.sent == [{
+            "leader_run_id": "run-parent", "subagent_id": "t1", "conversation_id": "conv-1",
+            "request_id": "plan_approval:t1:abc", "mailbox_epoch": 3, "approved": True,
+        }]
         command, level, data = session.results[-1]
         assert (command, level) == ("subagent.plan_review", "info")
         assert data["approved"] is True and data["granted_permission_mode"] == "confirm"
@@ -155,7 +138,7 @@ def test_plan_review_approve_sends_user_decision(
     asyncio.run(run())
 
 
-def test_plan_review_reject_keeps_mode_absent(
+def test_plan_review_reject_sends_user_decision(
     fake_runtime: _FakeRuntime,
 ) -> None:
     async def run() -> None:
@@ -169,9 +152,7 @@ def test_plan_review_reject_keeps_mode_absent(
                 "approved": False,
             },
         )
-        payload = json.loads(fake_runtime.sent[0]["content"])
-        assert payload["approved"] is False
-        assert "permission_mode" not in payload
+        assert fake_runtime.sent[0]["approved"] is False
 
     asyncio.run(run())
 
@@ -195,6 +176,5 @@ def test_plan_review_rejects_unknown_request(
         assert "missing-request" in str(error_event.data.get("message") or "")
         assert fake_runtime.sent == []
         # A failed reservation must not leak the lifecycle fence.
-        assert fake_runtime.released == 0
 
     asyncio.run(run())

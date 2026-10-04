@@ -13,7 +13,7 @@
   --mc-font-heading: var(--text-lg);
   --mc-control-radius: var(--radius-md);
   --mc-card-radius: var(--radius-md);
-  --mc-sidebar-row-height: 36px;
+  --mc-sidebar-row-height: 34px;
   --mc-content-gutter: 24px;
   /* Keep the composer on the same reading axis as assistant answers. */
   --mc-chat-width: min(var(--input-max-width), calc(100vw - 48px));
@@ -66,7 +66,16 @@ svg.lucide {
   outline: none !important;
 }
 
-#root :where(input:not(.composer-textarea), select, textarea:not(.composer-textarea)):focus-visible {
+#root :where(
+  input:not(
+    .composer-textarea,
+    .mc-browser-address input,
+    .settings-search input,
+    .skills-search input
+  ),
+  select,
+  textarea:not(.composer-textarea)
+):focus-visible {
   border-color: var(--border-focus) !important;
   box-shadow: 0 0 0 2px var(--accent-soft) !important;
 }
@@ -151,19 +160,19 @@ svg.lucide {
 }
 
 .mc-sidebar-left [role="tablist"] {
-  height: 40px !important;
-  min-height: 40px !important;
+  height: 36px !important;
+  min-height: 36px !important;
   padding: 2px !important;
   box-sizing: border-box !important;
   gap: 2px !important;
-  border: 1px solid var(--border-soft) !important;
+  border: 0 !important;
   border-radius: calc(var(--mc-control-radius) + 2px) !important;
-  background: var(--surface-base) !important;
+  background: var(--workbench-tool) !important;
 }
 
 .mc-sidebar-mode-tab {
-  height: 34px !important;
-  min-height: 34px !important;
+  height: 32px !important;
+  min-height: 32px !important;
   box-sizing: border-box !important;
   padding: 0 8px !important;
   line-height: 1 !important;
@@ -180,7 +189,7 @@ svg.lucide {
 /* Selected mode tab: accent-tinted so it separates clearly from hover. */
 .mc-sidebar-mode-tab[aria-selected="true"] {
   border-color: transparent !important;
-  background: var(--workbench-active) !important;
+  background: var(--surface-base) !important;
   color: var(--text-primary) !important;
   box-shadow: none !important;
 }
@@ -217,7 +226,7 @@ svg.lucide {
 
 .mc-sidebar-nav {
   gap: 0 !important;
-  padding: 10px 2px 18px !important;
+  padding: 8px 2px 14px !important;
 }
 
 .mc-sidebar-action {
@@ -351,7 +360,7 @@ svg.lucide {
 }
 
 .mc-main-surface {
-  border-top-left-radius: 12px;
+  border-top-left-radius: 0;
 }
 
 .mc-sidebar-right:not([data-embedded="true"]) {
@@ -383,14 +392,14 @@ svg.lucide {
 }
 
 .mc-sidebar-right-header {
-  min-height: 44px !important;
-  padding: 5px 8px !important;
+  min-height: 40px !important;
+  padding: 4px 8px !important;
   border-bottom: 1px solid var(--border-subtle) !important;
   background: var(--surface-base) !important;
 }
 
 .mc-sidebar-right-tab-frame {
-  height: 34px !important;
+  height: 30px !important;
   max-width: 152px;
   border-radius: var(--mc-control-radius) !important;
 }
@@ -512,9 +521,8 @@ svg.lucide {
 }
 
 .agent-loop-process-summary-wrap[data-position="top"] {
-  width: 100%;
-  padding-bottom: 7px;
-  border-bottom: 1px solid var(--border-subtle);
+  width: fit-content;
+  padding-bottom: 4px;
 }
 
 #root .agent-loop-process-summary,
@@ -529,7 +537,7 @@ svg.lucide {
   border-radius: 0 !important;
   background: transparent !important;
   color: var(--text-muted) !important;
-  font-size: var(--text-base) !important;
+  font-size: var(--mc-font-secondary) !important;
   font-weight: var(--fw-regular) !important;
   line-height: 1.35;
   box-shadow: none !important;
@@ -563,11 +571,11 @@ svg.lucide {
   margin-inline: auto !important;
   margin-top: 0 !important;
   margin-bottom: 20px !important;
-  padding: 12px 10px 8px !important;
-  border: 1px solid var(--border-subtle) !important;
-  border-radius: var(--radius-xl) !important;
-  background: transparent !important;
-  box-shadow: 0 2px 10px color-mix(in oklch, black 4%, transparent) !important;
+  padding: 12px 12px 8px !important;
+  border: 1px solid var(--border-soft) !important;
+  border-radius: 18px !important;
+  background: var(--surface-base) !important;
+  box-shadow: var(--shadow-sm) !important;
 }
 
 /* Command mode is an intentional transient surface; ordinary composing
@@ -721,7 +729,7 @@ svg.lucide {
 }
 
 .composer-footer[data-permission-mode="bypass"] .composer-permission-picker > .composer-permission-btn {
-  color: var(--state-warning) !important;
+  color: color-mix(in oklch, var(--state-warning) 65%, var(--text-secondary)) !important;
 }
 
 .composer-send-btn .anim-icon-swap,
@@ -791,7 +799,7 @@ svg.lucide {
 }
 
 .settings-center-tab {
-  min-height: 38px !important;
+  min-height: 34px !important;
   border-radius: var(--mc-control-radius) !important;
   font-size: var(--mc-font-secondary) !important;
   transition:
@@ -802,15 +810,15 @@ svg.lucide {
 }
 
 .settings-center-tab[aria-current="page"] {
-  border-color: var(--border-subtle) !important;
+  border-color: transparent !important;
   background: var(--surface-soft) !important;
   box-shadow: none !important;
   animation: mc-control-settle var(--duration-base) var(--easing-enter) both;
 }
 
 .settings-page-heading h2 {
-  font-size: 24px !important;
-  font-weight: var(--fw-bold) !important;
+  font-size: 22px !important;
+  font-weight: var(--fw-semibold) !important;
   letter-spacing: 0 !important;
 }
 
@@ -821,7 +829,6 @@ svg.lucide {
 
 .settings-center-main :where(
   .settings-card,
-  .settings-row,
   .settings-section,
   .settings-source-list,
   .settings-archive-list,
@@ -850,7 +857,6 @@ svg.lucide {
 }
 
 .settings-center-main :where(
-  .settings-row,
   .settings-source-row,
   .settings-archive-row,
   .settings-skill-row,
@@ -976,7 +982,7 @@ svg.lucide {
   .mc-browser-address,
   .mc-browser-annotation input,
   .mc-browser-annotation textarea,
-  .mc-browser-setting-row select,
+  .mc-browser-setting-row .mc-select-trigger,
   .mc-browser-picker-button,
   .mc-pdf-scale,
   .mc-pdf-page-control

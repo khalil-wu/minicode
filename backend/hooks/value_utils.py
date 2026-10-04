@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
+
+
+def parse_json_object(value: str) -> dict[str, Any] | None:
+    stripped = value.strip()
+    if not stripped or not stripped.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def coerce_bool(value: Any, default: bool = False) -> bool:

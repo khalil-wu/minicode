@@ -370,19 +370,13 @@ async def test_permission_rule_hook_can_prevent_the_write(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_heartbeat_reads_and_persists_its_existing_model_context(tmp_path, monkeypatch):
+    from backend.agent.runtime import AgentRuntime
+    from backend.conversations.repository import ConversationRepository
     from backend.services import chat_api_service as chat, scheduled_task_runner as scheduled
-    conversation = SimpleNamespace(id="heartbeat-regression", workspace_root=str(tmp_path), archived=False, git_isolated=False,
-        transcript=[{"role": "user", "content": "prior task context"}], context_snapshot={})
-    class Repository:
-        def get_conversation(self, identity): return conversation
-        def append_transcript_message(self, identity, message):
-            conversation.transcript.append(message)
-            return SimpleNamespace(revision=1)
-        def commit_turn_projection(self, identity, *, assistant_message, context_snapshot, expected_revision):
-            assert expected_revision == 1
-            conversation.transcript.append(assistant_message)
-            conversation.context_snapshot = context_snapshot
-            return conversation
+    repository = ConversationRepository(base_dir=tmp_path / "conversations")
+    conversation = repository.create_conversation(workspace_root=str(tmp_path))
+    repository.append_transcript_message(conversation.id, {"id": "prior-user", "role": "user", "content": "prior task context"})
+    runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", enable_lease_heartbeat=False)
     class Engine:
         def submit(self, submission):
             context = submission.session.context_builder
@@ -396,17 +390,22 @@ async def test_heartbeat_reads_and_persists_its_existing_model_context(tmp_path,
     async def run(**kwargs):
         kwargs["query_engine"] = Engine()
         return await original_run(**kwargs)
-    monkeypatch.setattr(scheduled, "ConversationRepository", Repository)
+    monkeypatch.setattr(scheduled, "ConversationRepository", lambda: repository)
     monkeypatch.setattr(scheduled, "main_worktree_root", lambda root: Path(root).resolve())
     monkeypatch.setattr(scheduled, "run_owned_rest_chat", run)
     monkeypatch.setattr(chat, "load_config", lambda **kwargs: SimpleNamespace(agent=AgentSettings(), token_budget=TokenBudget()))
     monkeypatch.setattr(chat, "ArtifactStore", object)
-    monkeypatch.setattr(chat, "default_runtime", lambda: SimpleNamespace(execution_journal=lambda owner: object()))
+    monkeypatch.setattr(chat, "default_runtime", lambda: runtime)
+    monkeypatch.setattr(scheduled, "default_runtime", lambda: runtime)
     bootstrap = SimpleNamespace(create_tool_registry=lambda *args, **kwargs: object(),
         create_permission_checker=lambda **kwargs: object(), create_llm=lambda **kwargs: object(), mcp_manager=None)
     task = SimpleNamespace(id="schedule", name="heartbeat", prompt="Continue", conversation_id=conversation.id,
         workspace_root=str(tmp_path), permission_mode="confirm", isolation="workspace")
-    result = await scheduled.run_scheduled_task(task, SimpleNamespace(id="heartbeat-run"), bootstrap=bootstrap)
+    try:
+        result = await scheduled.run_scheduled_task(task, SimpleNamespace(id="heartbeat-run"), bootstrap=bootstrap)
+    finally:
+        runtime.close()
+    conversation = repository.get_conversation(conversation.id)
     assert result["status"] == "completed"
     assert "new heartbeat checkpoint" in json.dumps(conversation.context_snapshot)
 

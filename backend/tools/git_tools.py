@@ -13,7 +13,6 @@ checkpoint/worktree 相关机制另见对应模块的上游标注。
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any
 
@@ -23,13 +22,11 @@ from backend.subprocesses import (
     decode_process_output,
 )
 
-logger = logging.getLogger(__name__)
 _WORKSPACE_ROOT_UNSET = object()
 from backend.tools.git_support import (
     _run_git,
     _is_denied_path,
     _raise_if_cancelled,
-    _resolve_work_dir,
     _workspace_root,
 )
 
@@ -88,7 +85,9 @@ class GitStatusTool(BaseTool):
         root = _workspace_root(context, self._workspace_root)
         if root is None:
             return self._error_result("Git status requires an open workspace.")
-        work_dir = _resolve_work_dir(root, path_str)
+        work_dir = (root / (path_str or ".")).resolve()
+        if not work_dir.is_relative_to(root):
+            return self._error_result(f"路径 {path_str} 超出工作区边界 ({root})")
 
         if not work_dir.exists():
             return self._error_result(f"路径不存在: {path_str} (workspace: {root})")
@@ -116,9 +115,6 @@ class GitStatusTool(BaseTool):
             return self._error_result("Git 未安装或不在 PATH 中")
         except SubprocessOutputLimitError:
             return self._error_result("Git status 输出超过 20 MB；请缩小仓库范围后重试")
-        except Exception as e:
-            logger.error(f"Git status 执行失败: {e}", exc_info=True)
-            return self._error_result(f"执行失败: {e}")
 
 
 class GitDiffTool(BaseTool):
@@ -170,6 +166,7 @@ class GitDiffTool(BaseTool):
                     },
                     "context_lines": {
                         "type": "integer",
+                        "minimum": 0,
                         "description": "上下文行数（默认 3）",
                         "default": 3,
                     },
@@ -231,8 +228,6 @@ class GitDiffTool(BaseTool):
             return self._error_result("Git 未安装")
         except SubprocessOutputLimitError:
             return self._error_result("Git diff 输出超过 20 MB；请指定 file_path 缩小范围")
-        except Exception as e:
-            return self._error_result(f"执行失败: {e}")
 
     async def _denied_changed_paths(
         self,
@@ -310,6 +305,7 @@ class GitLogTool(BaseTool):
                 "properties": {
                     "limit": {
                         "type": "integer",
+                        "minimum": 0,
                         "description": "显示的提交数量（默认 10）",
                         "default": 10,
                     },
@@ -365,8 +361,6 @@ class GitLogTool(BaseTool):
             return self._error_result("Git 未安装")
         except SubprocessOutputLimitError:
             return self._error_result("Git log 输出超过 20 MB；请降低 limit 或指定 file_path")
-        except Exception as e:
-            return self._error_result(f"执行失败: {e}")
 
 
 class GitCommitTool(BaseTool):
@@ -468,5 +462,3 @@ class GitCommitTool(BaseTool):
             return self._error_result("Git 未安装")
         except SubprocessOutputLimitError:
             return self._error_result("Git commit 输出超过 20 MB；提交结果无法可靠确认")
-        except Exception as e:
-            return self._error_result(f"执行失败: {e}")

@@ -30,7 +30,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import shlex
 from dataclasses import dataclass, field, replace
@@ -42,6 +41,7 @@ if TYPE_CHECKING:
 
 from backend.hooks.models import HookEvent
 from backend.hooks.value_utils import coerce_bool as _coerce_hook_bool
+from backend.hooks.value_utils import parse_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +76,7 @@ def _async_hook_stdout(
     response: dict[str, Any] | None = None
     for line in str(stdout or "").splitlines():
         candidate = line.strip()
-        parsed: Any = None
-        if candidate.startswith("{"):
-            try:
-                parsed = json.loads(candidate)
-            except (TypeError, ValueError):
-                parsed = None
+        parsed = parse_json_object(candidate)
         if isinstance(parsed, dict) and parsed.get("async") is True:
             continue
         if response is None and isinstance(parsed, dict):
@@ -94,7 +89,9 @@ def _async_hook_stdout(
     return visible_stdout, response
 
 
-def _async_hook_context_messages(stdout: str, entry: Any) -> tuple[str, ...]:
+def _async_hook_context_messages(
+    stdout: str, entry: Any, *, response: dict[str, Any] | None = None
+) -> tuple[str, ...]:
     """Extract model context from one completed async hook response.
 
     The async registry scans stdout line-by-line, skips the
@@ -104,7 +101,8 @@ def _async_hook_context_messages(stdout: str, entry: Any) -> tuple[str, ...]:
     new model steer.
     """
 
-    _, response = _async_hook_stdout(stdout)
+    if response is None:
+        _, response = _async_hook_stdout(stdout)
     if response is None:
         return ()
 
@@ -467,6 +465,7 @@ def load_hook_manager_for_workspace(
     config_layer_stack: Any | None = None,
     plugin_sources: Any | None = None,
     session_id: str = "",
+    owner_session_id: str = "",
 ) -> "HookManager":
     """Load hooks exclusively from MiniCode's immutable config snapshot."""
     if config_layer_stack is None:
@@ -484,12 +483,15 @@ def load_hook_manager_for_workspace(
         ),
         plugin_sources=plugin_sources,
     )
-    previous = get_hook_manager_for_session(session_id)
+    previous = get_hook_manager_for_session(session_id, owner_session_id=owner_session_id)
     if previous is not None and previous.registry_fingerprint == snapshot.fingerprint:
-        return previous.fork_for_turn(workspace_root=workspace_root)
-    manager = HookManager.from_snapshot(snapshot, workspace_root=workspace_root)
-    if previous is not None:
-        manager.adopt_session_runtime(previous)
+        manager = previous.fork_for_turn(workspace_root=workspace_root)
+    else:
+        manager = HookManager.from_snapshot(snapshot, workspace_root=workspace_root)
+        if previous is not None:
+            manager.adopt_session_runtime(previous)
+    manager.scope_id = str(session_id or "").strip()
+    manager.owner_session_id = str(owner_session_id or "").strip() or manager.scope_id
     return manager
 
 
@@ -766,15 +768,20 @@ class HookManager:
             await asyncio.gather(*tasks, return_exceptions=True)
         # A wrapper cancelled before its first poll never enters the coroutine's
         # finally block. The session already owns the physical command here.
-        from backend.hooks.runners import HookExecutionError, _terminate_hook_operation
+        from backend.hooks.runners import _terminate_hook_operation
 
+        errors: list[Exception] = []
         for task, command in tuple(self._session_runtime.async_commands.items()):
-            await _terminate_hook_operation(command.process, command.operation, command.capture)
-            if command.process.returncode is None:
-                raise HookExecutionError("Async hook process is still running after termination")
-            self._session_runtime.async_commands.pop(task, None)
+            try:
+                await _terminate_hook_operation(command.process, command.operation, command.capture)
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                self._session_runtime.async_commands.pop(task, None)
         self._async_tasks.clear()
         self._inflight_once_hooks.clear()
+        if errors:
+            raise ExceptionGroup("Async hook processes could not be finalized", errors)
 
     def take_async_context(self) -> tuple[str, ...]:
         values = tuple(self._async_context)
@@ -1243,18 +1250,14 @@ class HookManager:
         reason: str = "",
     ) -> HookResult:
         canonical_reason = _canonical_session_end_reason(reason)
-        try:
-            return await self._run_event(
-                HookEvent.SESSION_END,
-                match_target=canonical_reason,
-                env_extras={
-                    "SESSION_ID": session_id,
-                    "SESSION_END_REASON": canonical_reason,
-                },
-            )
-        finally:
-            if session_id:
-                _session_hook_managers.pop(session_id, None)
+        return await self._run_event(
+            HookEvent.SESSION_END,
+            match_target=canonical_reason,
+            env_extras={
+                "SESSION_ID": session_id,
+                "SESSION_END_REASON": canonical_reason,
+            },
+        )
 
     async def run_session_start(self, session_id: str = "", *, source: str = "startup") -> HookResult:
         return await self._run_event(
@@ -1266,9 +1269,12 @@ class HookManager:
     async def run_session_start_once(self, session_id: str) -> HookResult:
         """Fire session_start once per session (first agent turn). No-op on
         subsequent turns of the same session."""
-        if not session_id or session_id in _session_hook_managers:
+        if not session_id:
             return HookResult()
-        _session_hook_managers[session_id] = self
+        key = (self.owner_session_id or session_id, session_id)
+        if key in _session_hook_managers:
+            return HookResult()
+        _session_hook_managers[key] = self
         return await self.run_session_start(session_id)
 
     async def run_user_prompt_submit(self, user_message: str) -> HookResult:
@@ -1538,15 +1544,17 @@ class HookManager:
 
         def _done(done: asyncio.Task[Any]) -> None:
             self._async_tasks.discard(done)
-            command = self._session_runtime.async_commands.get(done)
-            if command is not None and command.operation.done() and command.process.returncode is not None:
-                self._session_runtime.async_commands.pop(done, None)
             if done.cancelled():
                 return
             try:
                 done.result()
             except Exception as exc:
                 logger.warning("Async hook failed for event %s: %s", event.value, exc)
+                if getattr(exc, "cleanup_pending", False):
+                    return
+            command = self._session_runtime.async_commands.get(done)
+            if command is not None and command.operation.done() and command.process.returncode is not None:
+                self._session_runtime.async_commands.pop(done, None)
 
         task.add_done_callback(_done)
 
@@ -1600,6 +1608,7 @@ class HookManager:
             result.stderr,
             result.exit_code,
             runtime=runtime,
+            semantic_stdout=result.semantic_stdout,
         )
 
     async def _run_async_entry(
@@ -1656,6 +1665,7 @@ class HookManager:
             result.stderr,
             result.exit_code,
             runtime=runtime,
+            semantic_stdout=result.semantic_stdout,
         )
 
     async def _complete_async_entry(
@@ -1668,8 +1678,13 @@ class HookManager:
         exit_code: int,
         *,
         runtime: Any,
+        semantic_stdout: str | None = None,
     ) -> None:
-        visible_stdout, response = _async_hook_stdout(stdout)
+        visible_stdout, response = _async_hook_stdout(
+            semantic_stdout if semantic_stdout is not None else stdout
+        )
+        if semantic_stdout is not None:
+            visible_stdout = "" if response is not None and response.get("suppress_output") is True else stdout
         semantic_stdout = (
             json.dumps(response, ensure_ascii=False)
             if response is not None
@@ -1700,7 +1715,7 @@ class HookManager:
         # asyncRewake hook deliberately bypasses that registry and only wakes
         # the model for exit code 2.
         if not entry.async_rewake and stdout:
-            self._async_context.extend(_async_hook_context_messages(stdout, entry))
+            self._async_context.extend(_async_hook_context_messages(stdout, entry, response=response))
         await _emit_async_hook_response(
             process_id=process_id,
             entry=entry,
@@ -1786,16 +1801,19 @@ class HookManager:
         return env
 
 _active_manager: HookManager | None = None
-_session_hook_managers: dict[str, HookManager] = {}
+_session_hook_managers: dict[tuple[str, str], HookManager] = {}
 
 
 def get_hook_manager() -> HookManager | None:
     return _active_manager
 
 
-def get_hook_manager_for_session(session_id: str) -> HookManager | None:
+def get_hook_manager_for_session(
+    session_id: str, *, owner_session_id: str = "",
+) -> HookManager | None:
     clean_session_id = str(session_id or "").strip()
-    return _session_hook_managers.get(clean_session_id) if clean_session_id else None
+    clean_owner = str(owner_session_id or "").strip() or clean_session_id
+    return _session_hook_managers.get((clean_owner, clean_session_id)) if clean_session_id else None
 
 
 def register_hook_manager_for_session(
@@ -1806,9 +1824,10 @@ def register_hook_manager_for_session(
 ) -> None:
     clean_session_id = str(session_id or "").strip()
     if clean_session_id:
+        clean_owner = str(owner_session_id or "").strip() or clean_session_id
         manager.scope_id = clean_session_id
-        manager.owner_session_id = str(owner_session_id or clean_session_id).strip()
-        _session_hook_managers[clean_session_id] = manager
+        manager.owner_session_id = clean_owner
+        _session_hook_managers[(clean_owner, clean_session_id)] = manager
 
 
 def iter_hook_managers_for_owner(
@@ -1821,29 +1840,20 @@ def iter_hook_managers_for_owner(
         return ()
     return tuple(
         (scope_id, manager)
-        for scope_id, manager in _session_hook_managers.items()
-        if manager.owner_session_id == clean_owner or scope_id == clean_owner
+        for (owner_id, scope_id), manager in _session_hook_managers.items()
+        if owner_id == clean_owner
     )
 
 
-def pop_hook_managers_for_owner(session_id: str) -> list[tuple[str, HookManager]]:
-    """Detach every conversation-scoped hook runtime owned by one WS session."""
+def _release_hook_manager_for_owner(session_id: str, manager: HookManager) -> None:
+    """Detach aliases only after this session runtime has actually finalized."""
 
-    clean_owner = str(session_id or "").strip()
-    if not clean_owner:
-        return []
-    selected: list[tuple[str, HookManager]] = []
-    seen: set[int] = set()
-    for scope_id, manager in list(_session_hook_managers.items()):
-        if manager.owner_session_id != clean_owner and scope_id != clean_owner:
-            continue
-        _session_hook_managers.pop(scope_id, None)
-        identity = id(manager._session_runtime)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        selected.append((scope_id, manager))
-    return selected
+    for key, current in tuple(_session_hook_managers.items()):
+        if (
+            key[0] == session_id
+            and current._session_runtime is manager._session_runtime
+        ):
+            _session_hook_managers.pop(key)
 
 
 def set_hook_manager(manager: HookManager | None) -> None:

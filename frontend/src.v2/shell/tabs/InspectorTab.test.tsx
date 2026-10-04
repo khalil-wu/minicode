@@ -95,6 +95,50 @@ describe('InspectorTab control-plane refresh', () => {
 
   afterEach(() => cleanup())
 
+  it('selects the exact Inspector kind and hides other conversation records', () => {
+    const state = useAppStore.getState();
+    state.addInspectorEntry({ targetKind: 'provider', targetId: 'shared', payload: { conversation_id: 'conv-inspector', kind: 'provider_trace', model: 'current-model' }, timestamp: 1 });
+    state.addInspectorEntry({ targetKind: 'tool_call', targetId: 'shared', payload: { conversation_id: 'conv-inspector', marker: 'EXACT_TOOL_SELECTION' }, timestamp: 2 });
+    state.addInspectorEntry({ targetKind: 'provider', targetId: 'foreign', payload: { conversation_id: 'another-conversation', kind: 'provider_trace', model: 'FOREIGN_MODEL' }, timestamp: 3 });
+    state.setInspectorFocus({ kind: 'tool_call', id: 'shared', conversationId: 'conv-inspector' });
+    render(<InspectorTab />);
+    fireEvent.click(screen.getByRole('button', { name: /高级诊断/ }));
+    expect(document.body.textContent).toContain('EXACT_TOOL_SELECTION');
+    expect(document.body.textContent).not.toContain('FOREIGN_MODEL');
+    expect(screen.getByText('1 次')).toBeTruthy();
+  });
+
+  it('retains the provider request ID through actual imported trace copying', async () => {
+    const { providerTraceExportPackage, providerTracePayloadFromExport } = await import('../../chat/providerTrace');
+    const exported = providerTraceExportPackage({ provider: 'openai_responses', model: 'exported-model',
+      request_id: 'req-imported-copy', usage: { input_tokens: 10, output_tokens: 2 } });
+    const state = useAppStore.getState();
+    state.addInspectorEntry({ targetKind: 'provider', targetId: 'imported-request', conversationId: 'conv-inspector',
+      payload: providerTracePayloadFromExport(exported)!, timestamp: 1 });
+    state.setInspectorFocus({ kind: 'provider', id: 'imported-request', conversationId: 'conv-inspector' });
+    useAppStore.setState({ runtimeCapabilities: { feature_flags: { agent_trace_export_v1: { enabled: true } } } });
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    render(<InspectorTab />);
+    fireEvent.click(screen.getByRole('button', { name: /高级诊断/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Copy Trace' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledOnce());
+    expect(JSON.parse(writeText.mock.calls[0][0])).toMatchObject({ request_id: 'req-imported-copy' });
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps unowned diagnostic evidence inspectable without adding it to current provider totals', () => {
+    const state = useAppStore.getState();
+    state.addInspectorEntry({ targetKind: 'provider', targetId: 'unowned-provider', payload: { kind: 'provider_trace', model: 'UNOWNED_EVIDENCE' }, timestamp: 1 });
+    render(<InspectorTab />);
+    fireEvent.click(screen.getByRole('button', { name: /高级诊断/ }));
+    expect(screen.getByText('暂无追踪记录')).toBeTruthy();
+    expect(document.body.textContent).toContain('UNOWNED_EVIDENCE');
+    fireEvent.click(screen.getByRole('button', { name: /provider.*unowned-prov/ }));
+    expect(document.body.textContent).toContain('UNOWNED_EVIDENCE');
+    expect(screen.queryByText('1 次')).toBeNull();
+  });
+
   it('keeps Git counts in their workspace and counts staged-plus-modified files once', async () => {
     let resolveOld!: (value: unknown) => void
     fetchWorkspaceGitStatusMock.mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve }))
@@ -165,6 +209,7 @@ describe('InspectorTab control-plane refresh', () => {
       inspectorEntries: [{
         targetKind: 'provider',
         targetId: 'trace-anthropic-1',
+        conversationId: 'conv-inspector',
         timestamp: 1,
         payload: {
           kind: 'provider_trace',
@@ -229,6 +274,7 @@ describe('InspectorTab control-plane refresh', () => {
       inspectorEntries: [{
         targetKind: 'provider',
         targetId: 'trace-anthropic-empty-optionals',
+        conversationId: 'conv-inspector',
         timestamp: 1,
         payload: {
           kind: 'provider_trace',
@@ -254,6 +300,7 @@ describe('InspectorTab control-plane refresh', () => {
       inspectorEntries: [{
         targetKind: 'provider',
         targetId: 'provider:iter:1:1',
+        conversationId: 'conv-inspector',
         timestamp: 1,
         payload: {
           type: 'runtime.span',

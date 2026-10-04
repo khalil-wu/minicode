@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+from backend.async_cleanup import to_thread_cancel_safe
+
 import asyncio
 import base64
 import hashlib
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from backend.atomic_io import atomic_write_bytes, file_mutation_locks, run_blocking_io
+from backend.atomic_io import atomic_write_bytes, canonical_file_path_key, file_mutation_locks, run_blocking_io
 from backend.checkpoint.store import (
     CheckpointFileSnapshot,
+    CheckpointCorruptError,
     CheckpointRecord,
     CheckpointStore,
     checkpoint_owner_key,
@@ -54,7 +58,7 @@ class CheckpointManager:
                 # rewrite every Windows file's line endings.
                 raw = await asyncio.to_thread(target.read_bytes)
                 blob = hashlib.sha256(f"{record_id}:{rel_path}".encode("utf-8")).hexdigest()
-                await asyncio.to_thread(self._store.write_blob, blob, raw)
+                await to_thread_cancel_safe(self._store.write_blob, blob, raw)
                 files.append(
                     CheckpointFileSnapshot(
                         path=rel_path,
@@ -85,23 +89,13 @@ class CheckpointManager:
             raise ValueError(f"Checkpoint '{checkpoint_id}' was not found.")
 
         root = Path(record.workspace_root).resolve()
-        unrestorable = [
-            snapshot.path
-            for snapshot in record.files
-            if snapshot.existed and snapshot.content is None and snapshot.blob is None
-        ]
-        if unrestorable:
-            raise ValueError(
-                "Checkpoint does not contain restorable content for: "
-                + ", ".join(unrestorable)
-            )
-
         # cc's applySnapshot restores every tracked file to the chosen point.
         # A sparse MiniCode record needs the first later snapshot for each file:
         # it contains that file's state immediately before its first edit after
         # the chosen point.
         restore_files: dict[str, CheckpointFileSnapshot] = {
-            snapshot.path: snapshot for snapshot in record.files
+            canonical_file_path_key(self._resolve_target(root, snapshot.path)[0]): snapshot
+            for snapshot in record.files
         }
         conversation_id = record.conversation_id
         if conversation_id:
@@ -110,12 +104,13 @@ class CheckpointManager:
                 for candidate in self._store.list_for_conversation(
                     conversation_id,
                     limit=None,
+                    strict=True,
                 )
             }
             records[record.id] = record
             ordered = sorted(
-                records.values(),
-                key=lambda candidate: (candidate.created_at, candidate.id),
+                reversed(tuple(records.values())),
+                key=lambda candidate: candidate.created_at,
             )
             chosen_index = next(
                 index
@@ -123,18 +118,18 @@ class CheckpointManager:
                 if candidate.id == record.id
             )
             for newer in ordered[chosen_index + 1 :]:
-                if newer.workspace_root != record.workspace_root:
+                if canonical_file_path_key(Path(newer.workspace_root)) != canonical_file_path_key(root):
                     continue
                 for snapshot in newer.files:
                     restore_files.setdefault(
-                        snapshot.path,
+                        canonical_file_path_key(self._resolve_target(root, snapshot.path)[0]),
                         snapshot,
                     )
 
         await run_blocking_io(
             self._restore_files, root, list(restore_files.values())
         )
-        return record
+        return replace(record, paths=[snapshot.path for snapshot in restore_files.values()], files=list(restore_files.values()))
 
     def get(self, checkpoint_id: str) -> CheckpointRecord | None:
         return self._store.get(checkpoint_id)
@@ -200,16 +195,18 @@ class CheckpointManager:
                     # Sidecar payload (current format): raw byte copy.
                     decoded.append((target, snapshot, self._store.read_blob(snapshot.blob)))
                     continue
+                if snapshot.content is None:
+                    raise CheckpointCorruptError(f"Checkpoint does not contain restorable content for: {snapshot.path}")
                 # Legacy inline payload: base64 (or plain text) inside the
                 # record JSON, written before the sidecar migration.
                 if snapshot.encoding == "base64":
                     try:
-                        raw = base64.b64decode(snapshot.content or "", validate=True)
+                        raw = base64.b64decode(snapshot.content, validate=True)
                     except ValueError as exc:
                         raise ValueError(f"Checkpoint content is invalid for {snapshot.path}") from exc
                 else:
                     try:
-                        raw = (snapshot.content or "").encode(snapshot.encoding)
+                        raw = snapshot.content.encode(snapshot.encoding)
                     except (LookupError, UnicodeEncodeError) as exc:
                         raise ValueError(f"Checkpoint encoding is invalid for {snapshot.path}") from exc
                 decoded.append((target, snapshot, raw))
@@ -220,3 +217,6 @@ class CheckpointManager:
                     atomic_write_bytes(target, raw or b"")
                 elif target.exists() and target.is_file():
                     target.unlink()
+        from backend.tools.file_tools_common import invalidate_workspace_file_caches
+
+        invalidate_workspace_file_caches(file_tree_changed=True, clear_file_state=True)

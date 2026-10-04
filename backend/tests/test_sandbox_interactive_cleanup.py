@@ -19,13 +19,14 @@ def test_sandbox_interactive_spawn_failure_removes_prepared_state(
 
     def wrap(*args, **kwargs) -> str:
         temporary.mkdir()
-        runner._low_integrity_temp_dir = temporary
+        runner._windows_native_temp_dir = temporary
         return "launch"
 
     async def failed_spawn(*args, **kwargs):
         raise OSError("spawn failed")
 
     monkeypatch.setattr(runner, "_wrap_command", wrap)
+    monkeypatch.setattr(runner, "capability", lambda **kwargs: SimpleNamespace(available=True, backend="fixture-wrapper"))
     monkeypatch.setattr("backend.sandbox.runner.spawn_shell", failed_spawn)
 
     async def scenario() -> None:
@@ -52,13 +53,13 @@ def test_sandbox_interactive_cancellation_reaps_spawned_process(
 
     def wrap(*args, **kwargs) -> str:
         temporary.mkdir()
-        runner._low_integrity_temp_dir = temporary
+        runner._windows_native_temp_dir = temporary
         return "launch"
 
     async def spawn(*args, **kwargs):
         return process
 
-    async def await_ready(_process) -> None:
+    async def await_ready(_process, *, capture_startup_output=False) -> None:
         ready.set()
         await asyncio.Event().wait()
 
@@ -69,6 +70,7 @@ def test_sandbox_interactive_cancellation_reaps_spawned_process(
         return True
 
     monkeypatch.setattr(runner, "_wrap_command", wrap)
+    monkeypatch.setattr(runner, "capability", lambda **kwargs: SimpleNamespace(available=True, backend="fixture-wrapper"))
     monkeypatch.setattr(runner, "_await_sandbox_ready", await_ready)
     monkeypatch.setattr(runner, "_kill_tree", kill_tree)
     monkeypatch.setattr("backend.sandbox.runner.spawn_shell", spawn)
@@ -79,7 +81,13 @@ def test_sandbox_interactive_cancellation_reaps_spawned_process(
             if interactive
             else runner.spawn_shell_interactive("server")
         )
-        await ready.wait()
+        ready_waiter = asyncio.create_task(ready.wait())
+        done, _ = await asyncio.wait({ready_waiter, call}, return_when=asyncio.FIRST_COMPLETED)
+        if call in done:
+            ready_waiter.cancel()
+            call.result()
+            raise AssertionError("Interactive spawn exited before readiness")
+        await ready_waiter
         call.cancel()
         with pytest.raises(asyncio.CancelledError):
             await call

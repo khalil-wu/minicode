@@ -113,7 +113,6 @@ class DurableTaskOutput:
         if not content or self._closed or self._capped:
             return
         encoded = content.encode("utf-8")
-        self._characters_written += len(content)
         if self._bytes_written + len(encoded) > MAX_TASK_OUTPUT_BYTES:
             self._file.write(_DISK_CAP_NOTICE)
             self._bytes_written += len(_DISK_CAP_NOTICE)
@@ -122,6 +121,7 @@ class DurableTaskOutput:
             return
         self._file.write(encoded)
         self._bytes_written += len(encoded)
+        self._characters_written += len(content)
 
     def flush(self) -> None:
         if self._closed:

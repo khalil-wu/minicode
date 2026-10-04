@@ -3,7 +3,7 @@ import type { CSSProperties } from "react";
 import { ArrowLeft, Check, ExternalLink, LoaderCircle, LogIn, LogOut, Pencil, Play, Plus, RefreshCw, Save, ShieldCheck, Trash2 } from "lucide-react";
 import { pushToast } from "./ToastContainer";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
-import { commandResultSucceeded, sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
+import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import type { ProviderOAuthCommand } from "../protocol/events";
 import { ModelBrandIcon } from "../components/ModelBrandIcon";
 import { SelectMenu } from "../components/SelectMenu";
@@ -12,6 +12,7 @@ import type { EffortLevel } from "../stores/types";
 import { useAppStore } from "../stores";
 import { selectableModelsForProvider } from "../lib/provider-models";
 import { isDesktop, openExternal } from "../desktop/runtime";
+import { workspaceRootsEqual } from "../lib/workspace-path";
 import {
   type ProviderId,
   type CustomWireApi,
@@ -127,12 +128,16 @@ export const ProviderTab = ({
   settingsPayloadRef,
   onProviderChange,
   onSettingsPayloadChange,
+  searchTarget,
+  isActive = true,
 }: {
   selectedProvider: ProviderId;
   settingsPayload: LLMSettingsPayload | null;
   settingsPayloadRef: React.MutableRefObject<LLMSettingsPayload | null>;
   onProviderChange: (id: ProviderId) => void;
   onSettingsPayloadChange?: (payload: LLMSettingsPayload) => void;
+  searchTarget?: string;
+  isActive?: boolean;
 }) => {
   const [provider, setProvider] = useState<ProviderId>(selectedProvider);
   const activeConversationId = useAppStore((state) => state.conversationId);
@@ -178,6 +183,8 @@ export const ProviderTab = ({
   const draftModelCounterRef = useRef(0);
   const operationRef = useRef<ProviderOperation>("");
   const [oauthNow, setOauthNow] = useState(() => Date.now());
+  const detailDrafts = useRef(new Map<string, ProviderDraft>());
+  const detailKey = useRef("");
 
   const beginOperation = (operation: Exclude<ProviderOperation, "">): boolean => {
     if (operationRef.current) return false;
@@ -236,6 +243,21 @@ export const ProviderTab = ({
     imageSize,
     imageQuality,
   });
+
+  const restoreDetailDraft = (draft: ProviderDraft) => {
+    setProvider(draft.provider); setDisplayName(draft.displayName); setApiKey(draft.apiKey);
+    setProviderHeaders(draft.headers); setProviderAuthHeader(draft.authHeader);
+    setBaseUrl(draft.baseUrl); setModelName(draft.modelName); setSmallFastModel(draft.smallFastModel);
+    setAvailableModelList(draft.availableModelList); setModelsSource(draft.modelsSource);
+    setModelMetadata(draft.modelMetadata); setModelLabels(draft.modelLabels);
+    setConfiguredReasoningEffort(draft.configuredReasoningEffort); setReasoningEffortLevels(draft.reasoningEffortLevels);
+    setCustomWireApi(draft.customWireApi); setProxyMode(draft.proxyMode); setThinkingBudget(draft.thinkingBudget);
+    setResponsesReasoningSummary(draft.responsesReasoningSummary); setPromptCacheRetention(draft.promptCacheRetention);
+    setMaxTokens(draft.maxTokens); setImageModel(draft.imageModel); setImageSize(draft.imageSize); setImageQuality(draft.imageQuality);
+  };
+  const rememberDetail = () => {
+    if (providerView === "detail" && detailKey.current) detailDrafts.current.set(detailKey.current, draftFromState());
+  };
 
   const applyCapabilitySection = (
     nextProvider: ProviderId,
@@ -315,9 +337,15 @@ export const ProviderTab = ({
 
   const openProviderList = () => {
     if (operationRef.current) return;
-    clearDetailDraftPin();
+    rememberDetail();
     setProviderView("list");
   };
+
+  useEffect(() => {
+    if (!searchTarget) return;
+    pinDetailDraft();
+    setProviderView("detail");
+  }, [searchTarget]);
 
   useEffect(() => {
     if (detailDraftPinnedRef.current) return;
@@ -326,13 +354,15 @@ export const ProviderTab = ({
   }, [selectedProvider, settingsPayload]);
 
   useEffect(() => {
+    if (!isActive) return;
     if (!oauthFlow?.expiresAt) return undefined;
     setOauthNow(Date.now());
     const timer = window.setInterval(() => setOauthNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [oauthFlow?.expiresAt]);
+  }, [oauthFlow?.expiresAt, isActive]);
 
   useEffect(() => {
+    if (!isActive) return;
     let active = true;
     setOauthSupported(false);
     setOauthConfigured(false);
@@ -353,7 +383,7 @@ export const ProviderTab = ({
       setOauthConfigured(Boolean(data.configured));
     }).catch(() => undefined);
     return () => { active = false; };
-  }, [provider, activeConversationId]);
+  }, [provider, activeConversationId, isActive]);
 
   const oauthAction = async (action: "login" | "logout") => {
     const owner = activeConversationId?.trim();
@@ -434,6 +464,13 @@ export const ProviderTab = ({
 
   const addProvider = () => {
     if (operationRef.current) return;
+    rememberDetail();
+    detailKey.current = "new";
+    const existingDraft = detailDrafts.current.get("new");
+    if (existingDraft) {
+      restoreDetailDraft(existingDraft); pinDetailDraft(); setProviderView("detail"); onProviderChange(existingDraft.provider);
+      return;
+    }
     setProvider("custom");
     applyProviderSection("custom", {
       display_name: "",
@@ -578,6 +615,15 @@ export const ProviderTab = ({
 
   const saveProvider = async (draft = draftFromState(), options: { activate?: boolean; quiet?: boolean } = {}) => {
     if (!beginOperation("save")) return;
+    const ownerAtSave = useAppStore.getState();
+    const conversationId = ownerAtSave.conversationId || "";
+    const workspaceRoot = ownerAtSave.workingDirectory;
+    const isCurrentOwner = () => {
+      const current = useAppStore.getState();
+      return (current.conversationId || "") === conversationId
+        && workspaceRootsEqual(current.workingDirectory, workspaceRoot);
+    };
+    let profileSaved = false;
     setSaving(true);
     try {
       const res = await fetchWithTimeout(`${apiBase()}/api/llm/settings`, {
@@ -590,6 +636,7 @@ export const ProviderTab = ({
         throw new Error(errorMessageFromResponseText(text, res.statusText));
       }
       const saved = await res.json();
+      profileSaved = true;
       const savedPayload = saved as LLMSettingsPayload;
       settingsPayloadRef.current = savedPayload;
       onSettingsPayloadChange?.(savedPayload);
@@ -624,16 +671,23 @@ export const ProviderTab = ({
       setResponsesReasoningSummary(section?.responses_reasoning_summary ?? draft.responsesReasoningSummary);
       setPromptCacheRetention(section?.prompt_cache_retention ?? draft.promptCacheRetention);
       applyCapabilitySection(draft.provider, section, active || draft.modelName);
-      // Update the Composer from the same response that was just persisted.
-      // The websocket projection remains authoritative, but waiting for it
-      // leaves a visible window where the old provider/model is still shown.
+      // Persisting a global profile and applying it to this conversation are
+      // separate operations. The latter retains the initiating owner across IO.
+      if (conversationId || isCurrentOwner()) {
+        const result = await sendClientCommandAwaitResult({
+          type: "llm.config.set", provider: bp, model: active || draft.modelName,
+          conversation_id: conversationId, workspace_root: workspaceRoot,
+          source: options.activate ? "settings.provider.activate" : "settings.provider.save",
+        }, "llm.config.set", { silent: true });
+        if (!commandResultSucceeded(result)) throw new Error(result.message || "无法应用到发起会话");
+      }
       const composerModels = selectableModelsForProvider(
         section?.available_models ?? draft.availableModelList,
         active || draft.modelName,
         bp,
         section?.models_source ?? draft.modelsSource,
       );
-      useAppStore.setState({
+      if (isCurrentOwner()) useAppStore.setState({
         currentProvider: bp,
         currentModel: active || draft.modelName,
         availableModels: composerModels,
@@ -651,7 +705,7 @@ export const ProviderTab = ({
         ? effectiveCustomWireApi(draft.provider, section?.base_url || draft.baseUrl, ((section?.wire_api as CustomWireApi | undefined) || effectiveCustomWireApi(draft.provider, draft.baseUrl, draft.customWireApi)))
         : undefined;
       if (appliedWireApi) setCustomWireApi(appliedWireApi);
-            if (options.activate) {
+      if (options.activate) {
         setActiveIdentityOverride(cardIdentityForDraft(draft.provider, {
           base_url: section?.base_url || draft.baseUrl,
           wire_api: section?.wire_api || effectiveCustomWireApi(
@@ -660,17 +714,6 @@ export const ProviderTab = ({
             draft.customWireApi,
           ),
         }));
-        sendClientCommand({
-          type: "llm.config.set",
-          provider: bp,
-          source: "settings.provider.activate",
-        }, { silent: true });
-      } else {
-        sendClientCommand({
-          type: "llm.config.set",
-          provider: bp,
-          source: "settings.provider.save",
-        }, { silent: true });
       }
       if (!options.quiet) {
         pushToast(
@@ -681,9 +724,10 @@ export const ProviderTab = ({
         );
       }
       setProviderView("list");
+      if (!options.activate) { detailDrafts.current.delete(detailKey.current); detailKey.current = ""; }
       clearDetailDraftPin();
     } catch (error) {
-      pushToast(`提供商保存失败：${formatProviderError(error)}`, "error");
+      pushToast(`${profileSaved ? "提供商已保存，但应用失败" : "提供商保存失败"}：${formatProviderError(error)}`, "error");
     } finally {
       setSaving(false);
       endOperation("save");
@@ -734,9 +778,14 @@ export const ProviderTab = ({
 
   const editProviderCard = (card: ProviderCard) => {
     if (operationRef.current) return;
+    rememberDetail();
+    const key = cardKeyFor(card.provider, card.section, "saved").replace(/::saved$/, "");
+    detailKey.current = key;
     pinDetailDraft();
     setProvider(card.provider);
-    applyProviderSection(card.provider, card.section);
+    const savedDraft = detailDrafts.current.get(key);
+    if (savedDraft) restoreDetailDraft(savedDraft);
+    else applyProviderSection(card.provider, card.section);
     setModelsStatus("idle");
     setModelsResult(null);
     setProviderView("detail");
@@ -745,6 +794,7 @@ export const ProviderTab = ({
 
   const useProviderCard = async (card: ProviderCard) => {
     if (operationRef.current) return;
+    rememberDetail();
     clearDetailDraftPin();
     setProvider(card.provider);
     applyProviderSection(card.provider, card.section);
@@ -1124,8 +1174,15 @@ export const ProviderTab = ({
         <div className="provider-detail-heading">
           <div>{draftTitle}</div>
           <p>配置提供商的连接方式、凭据和默认模型。</p>
+          {detailKey.current && <span className="settings-unsaved">编辑草稿会保留</span>}
         </div>
       </div>
+
+      {searchTarget && ((searchTarget.startsWith("Responses") && effectiveWireApi !== "responses")
+        || (searchTarget === "扩展思考 Token 预算" && effectiveWireApi !== "anthropic")
+        || (searchTarget === "OAuth 登录" && !oauthSupported)) && <Section title={searchTarget}>
+          <p className="settings-page-note">{searchTarget === "OAuth 登录" ? "当前提供商未提供 OAuth 登录；可使用下方 API 密钥配置认证。" : `此选项仅适用于 ${searchTarget.startsWith("Responses") ? "Responses API" : "Anthropic Messages"}。请在提供商列表选择对应接口后配置。`}</p>
+        </Section>}
 
       <Section title="显示名称">
         <input

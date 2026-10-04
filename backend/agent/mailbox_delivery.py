@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
 from typing import Any
 
 from backend.agent.context import ContextBuilder
@@ -23,8 +22,6 @@ def _run_is_conversation_leader(
     runtime: AgentRuntime,
     run_id: Any,
     conversation_id: str,
-    *,
-    spawn_parent_run_id: str = "",
 ) -> bool:
     """Whether ``run_id`` is the leader lineage of ``conversation_id``.
 
@@ -37,11 +34,11 @@ def _run_is_conversation_leader(
     candidate = str(run_id or "").strip()
     if not candidate:
         return False
-    if spawn_parent_run_id and candidate == str(spawn_parent_run_id).strip():
-        return True
     record = runtime.get_run(candidate)
     return (
         record is not None
+        and not record.parent_run_id
+        and record.role == "main"
         and str(getattr(record, "conversation_id", "") or "") == str(conversation_id or "")
     )
 
@@ -92,7 +89,6 @@ async def _handle_teammate_plan_approval_responses(
     active_request_id = str(getattr(record, "active_plan_request_id", "") or "")
     if not active_request_id:
         return 0
-    parent_run_id = str(getattr(record, "parent_run_id", "") or "")
     team_name = str(getattr(record, "team_name", "") or "")
     messages = runtime.list_swarm_messages(
         participant_id=participant_id,
@@ -109,7 +105,6 @@ async def _handle_teammate_plan_approval_responses(
             continue
         if not _run_is_conversation_leader(
             runtime, getattr(message, "sender_id", ""), conversation_id,
-            spawn_parent_run_id=parent_run_id,
         ):
             continue
         if str(getattr(message, "team_name", "") or "") != team_name:
@@ -131,7 +126,6 @@ async def _handle_teammate_plan_approval_responses(
             metadata["active_plan_request_id"] = ""
             runtime.update_subagent_lifecycle(
                 participant_id,
-                permission_mode=target_mode,
                 awaiting_plan_approval=False,
                 active_plan_request_id="",
                 current_activity="approved",
@@ -305,49 +299,12 @@ async def _handle_parent_plan_approval_requests(
                         sender_id,
                     )
             continue
-        reservation_token = runtime.reserve_lifecycle_response(
-            response_kind="plan_approval_response",
-            participant_id=sender_id,
-            mailbox_epoch=sender_epoch,
-            request_id=request_id,
-            target_id=parent_run_id,
-            expected_active_plan_request_id=request_id,
+        response = runtime.respond_to_teammate_plan(
+            leader_run_id=parent_run_id, subagent_id=sender_id,
+            conversation_id=conversation_id, request_id=request_id,
+            mailbox_epoch=sender_epoch, approved=True,
         )
-        if not reservation_token:
-            continue
-        response = {
-            "type": "plan_approval_response",
-            "request_id": request_id,
-            "approved": True,
-            "timestamp": datetime.now(UTC).isoformat(),
-            # Plan approval never widens a teammate beyond default execution
-            # permissions; the leader's own mode is not transferable.
-            "permission_mode": "confirm",
-        }
-        reservation = {
-            "response_kind": "plan_approval_response",
-            "participant_id": sender_id,
-            "mailbox_epoch": sender_epoch,
-            "request_id": request_id,
-            "reservation_token": reservation_token,
-        }
-        try:
-            runtime.send_swarm_message(
-                sender_id=parent_run_id,
-                recipient_id=sender_id,
-                content=json.dumps(response, ensure_ascii=False),
-                conversation_id=conversation_id,
-                team_name=str(getattr(message, "team_name", "") or ""),
-                recipient_mailbox_epoch=sender_epoch,
-            )
-        except Exception:
-            runtime.release_lifecycle_response(**reservation)
-            raise
-        if not runtime.commit_lifecycle_response(**reservation):
-            logger.error(
-                "plan approval response delivered but lifecycle fence commit failed: %s",
-                request_id,
-            )
+        if response is None:
             continue
         handled += 1
         if emit_event is not None:

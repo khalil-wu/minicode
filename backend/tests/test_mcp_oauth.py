@@ -20,6 +20,14 @@ import pytest
 from backend.mcp.oauth import OAuthTokens, TokenStore
 
 
+@pytest.fixture(autouse=True)
+def _mock_os_credentials(monkeypatch):
+    values = {}
+    monkeypatch.setattr("keyring.get_password", lambda service, name: values.get((service, name)))
+    monkeypatch.setattr("keyring.set_password", lambda service, name, value: values.__setitem__((service, name), value))
+    monkeypatch.setattr("keyring.delete_password", lambda service, name: values.pop((service, name), None))
+
+
 def test_tokens_expiry_skew():
     fresh = OAuthTokens(access_token="a", expires_at=time.time() + 60)
     assert not fresh.is_expired()

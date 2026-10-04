@@ -132,8 +132,7 @@ def clone_context_builder(builder: "ContextBuilder") -> "ContextBuilder":
     ):
         if hasattr(builder, name):
             setattr(cloned, name, deepcopy(getattr(builder, name)))
-    # ConversationHistory clones independently: its estimator is a bound
-    # helper on the source builder and must not be deep-copied.
+    # History accounting is independent; the shared estimator is stateless.
     cloned._history_store = builder._history_store.clone()
     cloned._withheld_media_timestamps = set()
     cloned._tool_execution_context = None
@@ -151,7 +150,7 @@ POST_COMPACT_SKILLS_TOKEN_BUDGET = 25_000
 _POST_COMPACT_MAX_CHARS_PER_SKILL = POST_COMPACT_MAX_TOKENS_PER_SKILL * 4
 _POST_COMPACT_SKILLS_CHAR_BUDGET = POST_COMPACT_SKILLS_TOKEN_BUDGET * 4
 _SKILL_TRUNCATION_MARKER = (
-    "\n\n[... skill content truncated for compaction; use Read on the skill path "
+    "\n\n[... skill content truncated for compaction; use read_file on the skill path "
     "if you need the full text]"
 )
 INTERNAL_CONTROL_PROMPT_PREFIXES = (
@@ -601,7 +600,7 @@ class ContextBuilder:
         self._agent_settings = agent_settings or AgentSettings()
         # Ordered transcript lives in ConversationHistory; the builder reaches
         # it through the _history/_history_* property delegates below.
-        self._history_store = ConversationHistory(estimator=self._estimate_history_message)
+        self._history_store = ConversationHistory(estimator=estimate_llm_message_tokens)
         self._pending_runtime_context_update = ""
         self._persistent_notes: list[dict[str, str]] = []
         self._compaction_count = 0
@@ -656,6 +655,7 @@ class ContextBuilder:
         self._project_root_markers: tuple[str, ...] | None = None
         self._project_doc_fallback_filenames: tuple[str, ...] = ()
         self._project_doc_max_bytes: int | None = None
+        self._project_instruction_directories: tuple[Path, ...] = ()
         # Freeze each aggregate tool-result budget decision by
         # tool-use ID. A result already sent inline must never be replaced on a
         # later turn merely because newer results pushed the same wire message
@@ -667,11 +667,9 @@ class ContextBuilder:
         # transcript compaction and restores it after resume/compaction.
         self._invoked_skill_payloads: dict[str, dict[str, str]] = {}
         self._consecutive_autocompact_failures = 0
-        # Capture session-level environment defaults once.  Explicit values in
-        # a state snapshot still override these values, but a missing value no
-        # longer causes datetime/TZ drift on every provider iteration.
+        # Keep a stable timezone default; explicit host context takes precedence.
+        # The runtime date is projected at request time for long-lived sessions.
         session_now = datetime.now().astimezone()
-        self._session_current_date = session_now.strftime("%Y-%m-%d")
         self._session_timezone = local_timezone_name(session_now)
 
     def bind_llm(self, llm: Any) -> None:
@@ -804,7 +802,8 @@ class ContextBuilder:
                 # and cache the bundle under the wrong lifecycle reason.
                 clear_guideline_cache()
         return load_project_guidelines(
-            workspace_root,
+            workspace_root if workspace_root is not None else self._workspace_root,
+            additional_directories=self._project_instruction_directories,
             load_reason=reason,
             project_root_markers=self._project_root_markers,
             project_doc_fallback_filenames=self._project_doc_fallback_filenames,
@@ -835,7 +834,7 @@ class ContextBuilder:
             current_payloads.append(normalized)
         return [
             self._render_skill_payload(payload)
-            for payload in self._bounded_skill_payloads(current_payloads)
+            for payload in current_payloads
         ]
 
     @staticmethod
@@ -1521,19 +1520,26 @@ class ContextBuilder:
         state: AgentState,
         workspace_root: Path | None,
     ) -> PromptParts:
-        project_guidelines = self._get_project_guidelines(workspace_root)
+        self._workspace_root = workspace_root
         matched_rules = ""
+        self._project_instruction_directories = ()
         if workspace_root is not None:
             from backend.agent.instruction_discovery import load_matching_project_rules
 
             resolved_workspace_root = Path(workspace_root).resolve()
+            target_paths = self._recent_workspace_file_paths(
+                state, resolved_workspace_root, existing_only=False,
+            )
+            self._project_instruction_directories = tuple(dict.fromkeys(path.parent for path in target_paths))
             matched_rules = load_matching_project_rules(
                 resolved_workspace_root,
-                self._recent_workspace_file_paths(state, resolved_workspace_root),
+                target_paths,
+                additional_directories=self._project_instruction_directories,
                 project_root_markers=self._project_root_markers,
                 project_doc_fallback_filenames=self._project_doc_fallback_filenames,
                 hook_manager=self._hook_manager,
             )
+        project_guidelines = self._get_project_guidelines(workspace_root)
         builder = PromptBuilderV2()
         sections = builder.build_sections(
             state=state,
@@ -1820,7 +1826,7 @@ class ContextBuilder:
             lines = [f"Capabilities from the `{display_name}` plugin:"]
             if bool(plugin.get("has_skills")):
                 lines.append(
-                    f"- Skills from this plugin are prefixed with `{display_name}:`."
+                    f"- Skills from this plugin are prefixed with `{plugin['config_name']}:`."
                 )
             servers = sorted(
                 {
@@ -1928,7 +1934,7 @@ class ContextBuilder:
         current_date = str(
             environment.get("current_date")
             or prompt_context.get("current_date")
-            or self._session_current_date
+            or datetime.now().astimezone().strftime("%Y-%m-%d")
         )
         timezone = str(
             environment.get("timezone")
@@ -2004,6 +2010,12 @@ class ContextBuilder:
         else:
             user_directories_block = "  <user_directories />"
 
+        editor_fields = "\n".join(
+            f"    <{key}>{_xml_text(str(environment[key]))}</{key}>"
+            for key in ("primary_file", "active_tab_path")
+            if environment.get(key)
+        )
+        editor_context = f"  <editor_context>\n{editor_fields}\n  </editor_context>\n" if editor_fields else ""
         return (
             "<environment_context>\n"
             f"  <cwd>{_xml_text(cwd)}</cwd>\n"
@@ -2011,6 +2023,7 @@ class ContextBuilder:
             f"  <current_date>{_xml_text(current_date)}</current_date>\n"
             f"  <timezone>{_xml_text(timezone)}</timezone>\n"
             f"{user_directories_block}\n"
+            f"{editor_context}"
             "  <filesystem>\n"
             f"{workspace_roots_block}\n"
             f'    <permission_profile type="{_xml_text(mode)}" source="{_xml_text(source)}">\n'
@@ -3073,16 +3086,25 @@ class ContextBuilder:
             }
         return None
 
-    def _recent_workspace_file_paths(self, state: AgentState, root: Path) -> list[Path]:
+    def _recent_workspace_file_paths(
+        self, state: AgentState, root: Path, *, existing_only: bool = True,
+    ) -> list[Path]:
         paths: list[Path] = []
         seen: set[str] = set()
+        environment = state.prompt_context.get("environment", {})
+        raw_paths = [str(environment.get(key) or "") for key in ("primary_file", "active_tab_path")]
+        # The context owns exact paths observed by reads and committed writes,
+        # including patches/notebooks. Checkpoint tool diagnostics may truncate
+        # their large input payloads and cannot serve as a path parser.
+        raw_paths.extend(reversed(self._read_file_hashes))
         for record in reversed(state.tool_calls):
             if (
                 record.status != "success"
                 or record.tool_name not in POST_COMPACTION_RESTORE_TOOLS
             ):
                 continue
-            raw_path = self._tool_record_path(record.tool_input)
+            raw_paths.append(self._tool_record_path(record.tool_input))
+        for raw_path in raw_paths:
             if not raw_path:
                 continue
             try:
@@ -3095,8 +3117,8 @@ class ContextBuilder:
                 resolved.relative_to(root)
             except (OSError, ValueError):
                 continue
-            key = resolved.as_posix().lower()
-            if key in seen or not resolved.is_file():
+            key = os.path.normcase(str(resolved))
+            if key in seen or (existing_only and not resolved.is_file()):
                 continue
             seen.add(key)
             paths.append(resolved)
@@ -3535,6 +3557,7 @@ class ContextBuilder:
         self.extension_cursor.clear()
         self._extension_history_floor = 0
         self._last_prompt_section_summary = {}
+        self._project_instruction_directories = ()
         self._git_status_context = None
         self._git_status_workspace = ""
         self._git_status_authority = None
@@ -3711,9 +3734,7 @@ class ContextBuilder:
             "git_status_workspace": self._git_status_workspace,
             "invoked_skills": [
                 dict(payload)
-                for payload in self._bounded_skill_payloads(
-                    list(self._invoked_skill_payloads.values())
-                )
+                for payload in self._invoked_skill_payloads.values()
             ],
             "consecutive_autocompact_failures": self._consecutive_autocompact_failures,
             "context_ledger": self.context_ledger(),

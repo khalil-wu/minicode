@@ -1,16 +1,18 @@
 import { X } from "../lib/icons";
 import { BrandIcon } from "../components/BrandIcon";
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { buildPastedTextFile, shouldAttachPastedText } from "./pastedText";
 import { useAppStore } from "../stores";
+import type { ComposerSelection } from "./inputSelection";
 
 interface Props {
   value: string;
-  onChange: (v: string) => void;
+  onChange: (v: string, selection?: ComposerSelection) => void;
+  onSelectionChange?: (v: string, selection: ComposerSelection) => void;
+  selectionRequest?: ComposerSelection;
   onSubmit: () => void | Promise<void>;
   menuOpen?: boolean;
   onDropFiles?: (files: File[]) => void;
-  compact?: boolean;
   minimal?: boolean;
   commandMode?: boolean;
   commandLabel?: string | null;
@@ -26,11 +28,15 @@ interface Props {
   // Escape while focused in the composer: interrupt the running turn (cc makes
   // Escape a global interrupt even while typing). Returns true if it acted.
   onEscape?: () => boolean;
+  conversationId?: string;
+  ariaLabel?: string;
 }
 
 export const ComposerTextarea = ({
   value,
   onChange,
+  onSelectionChange,
+  selectionRequest,
   onSubmit,
   menuOpen,
   onDropFiles,
@@ -45,16 +51,25 @@ export const ComposerTextarea = ({
   onHistorySearch,
   onRecallHistory,
   onEscape,
+  conversationId,
+  ariaLabel = "消息输入",
 }: Props) => {
   const sendShortcut = useAppStore((state) => state.sendShortcut);
   const ref = useRef<HTMLTextAreaElement>(null);
+  const composingRef = useRef(false);
+  useLayoutEffect(() => {
+    if (!selectionRequest) return;
+    ref.current!.setSelectionRange(selectionRequest.start, selectionRequest.end);
+    ref.current!.focus({ preventScroll: true });
+  }, [selectionRequest]);
 
   // Allow external triggers (e.g. message edit/recall) to focus the textarea
   useEffect(() => {
     const handleFocus = () => ref.current?.focus();
-    window.addEventListener("composer:focus", handleFocus);
-    return () => window.removeEventListener("composer:focus", handleFocus);
-  }, []);
+    const eventName = conversationId ? `composer:focus:${conversationId}` : "composer:focus";
+    window.addEventListener(eventName, handleFocus);
+    return () => window.removeEventListener(eventName, handleFocus);
+  }, [conversationId]);
 
   const handlePaste = (e: React.ClipboardEvent) => {
     const items = e.clipboardData.items;
@@ -78,8 +93,8 @@ export const ComposerTextarea = ({
     if (onDropFiles) {
       const text = e.clipboardData.getData("text");
       const target = e.currentTarget as HTMLTextAreaElement;
-      const selectionStart = target.selectionStart ?? value.length;
-      const selectionEnd = target.selectionEnd ?? selectionStart;
+      const selectionStart = target.selectionStart;
+      const selectionEnd = target.selectionEnd;
       if (shouldAttachPastedText(value, text, selectionStart, selectionEnd)) {
         e.preventDefault();
         onDropFiles([buildPastedTextFile(text)]);
@@ -100,13 +115,17 @@ export const ComposerTextarea = ({
   const textarea = (
     <textarea
       ref={ref}
-      aria-label="消息输入"
+      data-composer-input
+      aria-label={ariaLabel}
       value={value}
-      onChange={(e) => onChange(e.target.value)}
+      onChange={(e) => onChange(e.currentTarget.value, { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd, composing: composingRef.current })}
+      onSelect={(e) => onSelectionChange?.(e.currentTarget.value, { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd, composing: composingRef.current })}
+      onCompositionStart={(e) => { composingRef.current = true; onSelectionChange?.(e.currentTarget.value, { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd, composing: true }); }}
+      onCompositionEnd={(e) => { composingRef.current = false; onSelectionChange?.(e.currentTarget.value, { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd, composing: false }); }}
       onPaste={handlePaste}
       onDrop={handleDrop}
       onKeyDown={(e) => {
-        if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+        if (composingRef.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "r") {
           e.preventDefault();
           e.stopPropagation();
@@ -132,8 +151,8 @@ export const ComposerTextarea = ({
         // multi-line text; skipped during IME composition.
         if ((e.key === "ArrowUp" || e.key === "ArrowDown") && onRecallHistory) {
           const el = e.currentTarget;
-          const caret = el.selectionStart ?? 0;
-          const collapsed = caret === (el.selectionEnd ?? caret);
+          const caret = el.selectionStart;
+          const collapsed = caret === el.selectionEnd;
           const firstNewline = value.indexOf("\n");
           const onFirstLine = firstNewline === -1 || caret <= firstNewline;
           const onLastLine = caret >= value.lastIndexOf("\n") + 1;
@@ -142,7 +161,7 @@ export const ComposerTextarea = ({
             const recalled = onRecallHistory(e.key === "ArrowUp" ? "up" : "down");
             if (recalled !== null) {
               e.preventDefault();
-              onChange(recalled);
+              onChange(recalled, { start: recalled.length, end: recalled.length });
               return;
             }
           }

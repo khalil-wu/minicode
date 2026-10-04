@@ -31,7 +31,7 @@ const fileChange = (id: string): AgentLoopProcessCell => ({
   kind: "activity",
   id,
   activityKind: "fileChange",
-  title: "已编辑",
+  title: "Edit",
   status: "done",
   collapsed: true,
   startedAt: 1,
@@ -63,19 +63,19 @@ const openExec = (id: string, command: string): AgentLoopProcessCell => ({
 describe("AgentTimeline", () => {
   it("preserves a user's collapse choice when a live group closes", () => {
     const { rerender } = render(<AgentTimeline cells={[openExec("one", "npm test"), openExec("latest", "npm run build")]} renderCell={renderCell} isRunning />);
-    fireEvent.click(screen.getByRole("button", { name: "运行命令 npm run build" }));
+    fireEvent.click(screen.getByRole("button", { name: "Running 2 commands" }));
     rerender(<AgentTimeline cells={[exec("one", "npm test"), exec("latest", "npm run build")]} renderCell={renderCell} />);
-    expect(screen.getByRole("button", { name: "运行了 2 条命令" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByRole("button", { name: "Ran 2 commands" }).getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByText("npm test")).toBeNull();
   });
 
   it("preserves an explicitly expanded group when it closes", () => {
     const { rerender } = render(<AgentTimeline cells={[openExec("one", "npm test"), openExec("latest", "npm run build")]} renderCell={renderCell} isRunning />);
-    const toggle = screen.getByRole("button", { name: "运行命令 npm run build" });
+    const toggle = screen.getByRole("button", { name: "Running 2 commands" });
     fireEvent.click(toggle);
     fireEvent.click(toggle);
     rerender(<AgentTimeline cells={[exec("one", "npm test"), exec("latest", "npm run build")]} renderCell={renderCell} />);
-    expect(screen.getByRole("button", { name: "运行了 2 条命令" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: "Ran 2 commands" }).getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByText("npm test")).toBeTruthy();
   });
 
@@ -89,16 +89,16 @@ describe("AgentTimeline", () => {
   it("groups a contiguous edit and command sequence under one ordered work heading", () => {
     const { container } = render(<AgentTimeline cells={[fileChange("edit"), exec("test", "npm test")]} renderCell={renderCell} />);
 
-    expect(screen.getByText("编辑了文件并运行了命令")).toBeTruthy();
-    expect(screen.getByText("编辑了文件并运行了命令").parentElement?.getAttribute("data-group-kind")).toBe("work");
+    expect(screen.getByText("Edit · Run")).toBeTruthy();
+    expect(screen.getByText("Edit · Run").parentElement?.getAttribute("data-group-kind")).toBe("work");
     expect(container.querySelector(".agent-loop-timeline-group-icon svg")).toBeTruthy();
     expect(container.querySelector(".agent-loop-timeline-group-chevron svg")).toBeTruthy();
     expect(screen.queryByText("npm test")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "编辑了文件并运行了命令" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit · Run" }));
     expect(screen.getByText("npm test")).toBeTruthy();
     expect(container.querySelector(".agent-loop-timeline-group-items")?.previousElementSibling)
-      .toBe(screen.getByRole("button", { name: "编辑了文件并运行了命令" }));
+      .toBe(screen.getByRole("button", { name: "Edit · Run" }));
   });
 
   it("keeps compaction as its own process item", () => {
@@ -139,8 +139,8 @@ describe("AgentTimeline", () => {
     );
 
     const latest = container.querySelector(".agent-loop-timeline-group-live-title");
-    expect(latest?.textContent).toBe("运行命令 npm run build");
-    expect(screen.getByRole("region", { name: "运行命令 npm run build" })).toBeTruthy();
+    expect(latest?.textContent).toBe("Running 3 commands");
+    expect(screen.getByRole("region", { name: "Running 3 commands" })).toBeTruthy();
     expect(screen.getByText("git status --short")).toBeTruthy();
     expect(screen.getByText("npm test")).toBeTruthy();
     expect(container.querySelectorAll(".agent-loop-process-cell")).toHaveLength(3);
@@ -161,10 +161,10 @@ describe("AgentTimeline", () => {
       />,
     );
 
-    expect(screen.getByRole("region", { name: "list" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Exploring" })).toBeTruthy();
     expect(screen.getByText("read")).toBeTruthy();
     expect(screen.getByText("search")).toBeTruthy();
-    expect(container.querySelector(".agent-loop-timeline-group-live-title")?.textContent).toBe("list");
+    expect(container.querySelector(".agent-loop-timeline-group-live-title")?.textContent).toBe("Exploring");
   });
 
   it("keeps the live title separate from the ordered tool rows and lets the group collapse", () => {
@@ -180,8 +180,8 @@ describe("AgentTimeline", () => {
       />,
     );
 
-    const region = screen.getByRole("region", { name: "运行命令 grep -n foo 1.txt" });
-    const title = screen.getByRole("button", { name: "运行命令 grep -n foo 1.txt" });
+    const region = screen.getByRole("region", { name: "List · Read · Run" });
+    const title = screen.getByRole("button", { name: "List · Read · Run" });
     expect(title.parentElement).toBe(region);
     expect(title.getAttribute("aria-expanded")).toBe("true");
     expect([...container.querySelectorAll(".agent-loop-process-cell")].map((node) => node.textContent)).toEqual(["list", "read", "latest"]);
@@ -216,7 +216,7 @@ describe("AgentTimeline", () => {
     const { container, rerender } = render(<AgentTimeline cells={cells} renderCell={renderCell} isRunning />);
     expect(container.querySelectorAll(".agent-loop-process-cell")).toHaveLength(2);
     rerender(<AgentTimeline cells={cells} renderCell={renderCell} isRunning={false} />);
-    const toggle = screen.getByRole("button", { name: "读取了文件 · 2 项" });
+    const toggle = screen.getByRole("button", { name: "Explored" });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(container.querySelectorAll(".agent-loop-process-cell")).toHaveLength(0);
     fireEvent.click(toggle);

@@ -4,84 +4,9 @@ import json
 import logging
 from typing import Any
 
-from backend.llm.base import StreamEvent, StreamEventType, ToolCallEvent
+from backend.llm.base import ToolCallEvent
 
 logger = logging.getLogger(__name__)
-
-_THINK_OPEN_TAG = "<think>"
-_THINK_CLOSE_TAG = "</think>"
-_THINK_TAG_HOLD = max(len(_THINK_OPEN_TAG), len(_THINK_CLOSE_TAG)) - 1
-
-
-class _ReasoningSplitter:
-    """Routes inline <think>...</think> reasoning out of the answer text stream."""
-
-    def __init__(self) -> None:
-        self._inside = False
-        self._buf = ""
-
-    def feed(self, delta: str) -> list[tuple[str, str]]:
-        self._buf += delta
-        out: list[tuple[str, str]] = []
-        while True:
-            if self._inside:
-                idx = self._buf.find(_THINK_CLOSE_TAG)
-                if idx == -1:
-                    break
-                segment = self._buf[:idx]
-                if segment:
-                    out.append(("reasoning", segment))
-                self._buf = self._buf[idx + len(_THINK_CLOSE_TAG):]
-                self._inside = False
-            else:
-                open_idx = self._buf.find(_THINK_OPEN_TAG)
-                close_idx = self._buf.find(_THINK_CLOSE_TAG)
-                if open_idx == -1 and close_idx == -1:
-                    break
-                if open_idx != -1 and (close_idx == -1 or open_idx <= close_idx):
-                    segment = self._buf[:open_idx]
-                    if segment:
-                        out.append(("text", segment))
-                    self._buf = self._buf[open_idx + len(_THINK_OPEN_TAG):]
-                    self._inside = True
-                else:
-                    # A closing tag without an opening tag is literal model
-                    # text.  Do not route the prefix into hidden reasoning.
-                    literal_end = close_idx + len(_THINK_CLOSE_TAG)
-                    segment = self._buf[:literal_end]
-                    if segment:
-                        out.append(("text", segment))
-                    self._buf = self._buf[literal_end:]
-        if len(self._buf) > _THINK_TAG_HOLD:
-            cut = len(self._buf) - _THINK_TAG_HOLD
-            out.append((self._kind(), self._buf[:cut]))
-            self._buf = self._buf[cut:]
-        return out
-
-    def flush(self) -> list[tuple[str, str]]:
-        if not self._buf:
-            return []
-        out = [(self._kind(), self._buf)]
-        self._buf = ""
-        return out
-
-    def _kind(self) -> str:
-        return "reasoning" if self._inside else "text"
-
-
-def _splitter_events(segments: list[tuple[str, str]]) -> list[StreamEvent]:
-    events: list[StreamEvent] = []
-    for kind, segment in segments:
-        if not segment:
-            continue
-        # Inline <think> blocks are provider raw reasoning, not a reasoning
-        # summary. Codex keeps raw reasoning hidden unless an explicit opt-in is
-        # enabled; MiniCode exposes no such opt-in, so strip the block while
-        # preserving the surrounding answer text.
-        if kind == "text":
-            events.append(StreamEvent(type=StreamEventType.TEXT_CHUNK, content=segment))
-    return events
-
 
 class _ToolCallAccumulator:
     """Accumulates streamed tool-call deltas by stream index."""

@@ -25,7 +25,6 @@ from backend.agent.markdown_scopes import (
     get_markdown_directories,
 )
 from backend.atomic_io import atomic_write_text, file_mutation_locks
-from backend.workspace.state import get_explicit_active_workspace_root
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
 AgentSource = Literal[
@@ -85,15 +84,24 @@ class AgentDefinition:
     background: bool | None = None
     has_output_schema: bool = False
 
+    @property
+    def editable(self) -> bool:
+        return bool(
+            self.source in {"user", "project"}
+            and self.source_path is not None
+            and self.base_dir is not None
+            and self.source_path.resolve().is_relative_to(self.base_dir.resolve())
+        )
+
 
 def _agent_search_dirs(workspace_root: Path | None = None) -> list[Path]:
     """Return MiniCode agent scopes in managed, user, project order."""
-    root = workspace_root or get_explicit_active_workspace_root()
+    root = workspace_root
     scopes = get_markdown_directories(
         "agents",
         root,
         managed_root=_get_managed_minicode_dir(),
-        session_project_root=get_explicit_active_workspace_root(),
+        session_project_root=root,
     )
     if _agents_restricted_to_plugins(root):
         scopes = [scope for scope in scopes if scope.source == "policy"]
@@ -122,7 +130,7 @@ def _source_for_agent_dir(directory: Path, workspace_root: Path | None) -> Agent
         "agents",
         workspace_root,
         managed_root=_get_managed_minicode_dir(),
-        session_project_root=get_explicit_active_workspace_root(),
+        session_project_root=workspace_root,
     ):
         if resolved == scope.path.resolve():
             return scope.source
@@ -142,7 +150,7 @@ def discover_agent_definitions(
     root = (
         Path(workspace_root).expanduser().absolute()
         if workspace_root is not None
-        else get_explicit_active_workspace_root()
+        else None
     )
     definitions: list[AgentDefinition] = []
     seen_files: set[tuple[int, int]] = set()
@@ -174,7 +182,11 @@ def discover_agents(workspace_root: str | Path | None = None) -> dict[str, Agent
     User definitions are overridden by the closest project definition and then
     by managed policy. Unknown sources remain first-wins for embedders.
     """
-    definitions = discover_agent_definitions(workspace_root)
+    return effective_agents(discover_agent_definitions(workspace_root))
+
+
+def effective_agents(definitions: list[AgentDefinition]) -> dict[str, AgentDefinition]:
+    """Select one effective name map from an already discovered scope snapshot."""
     agents: dict[str, AgentDefinition] = {}
     for agent in definitions:
         if agent.source == "unknown":
@@ -279,7 +291,7 @@ def _agents_dir_for_source(
     root = (
         Path(workspace_root).expanduser().resolve()
         if workspace_root is not None
-        else get_explicit_active_workspace_root()
+        else None
     )
     if root is None:
         raise ValueError("Open a workspace before creating a project agent.")
@@ -354,7 +366,7 @@ def save_custom_agent(
         )
         if existing is None:
             raise ValueError("Agent source file is no longer available.")
-        if existing.source not in {"user", "project"}:
+        if not existing.editable:
             raise ValueError("This Agent source is read-only.")
         if existing.source != source:
             raise ValueError("Agent source does not match its discovered file.")
@@ -431,7 +443,7 @@ def delete_custom_agent(
     )
     if agent is None or agent.source_path is None:
         return False
-    if agent.source not in {"user", "project"}:
+    if not agent.editable:
         return False
     try:
         with file_mutation_locks([agent.source_path]):

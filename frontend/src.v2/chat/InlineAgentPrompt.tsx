@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Check,
   ExternalLink,
   FileDiff,
+  LoaderCircle,
   MessageSquare,
   ShieldAlert,
   ShieldCheck,
@@ -20,6 +21,7 @@ import type {
   PendingAskUser,
   PendingDiffReview,
   PendingSubagentPlanReview,
+  SubagentState,
 } from "../stores/types";
 import { pendingPromptTargetsConversation } from "../lib/pending-prompts";
 import { ToolGlyph, summarizeArgs, humanizeKey } from "./toolUtils";
@@ -29,26 +31,30 @@ import { pushToast } from "../overlays/ToastContainer";
 import { MarkdownRenderer } from "./messages/MarkdownRenderer";
 import { Button } from "../components/Button";
 import { parseUnifiedDiffLines, type UnifiedDiffLine } from "../lib/unified-diff";
+import { safeJsonParse } from "../lib/safe-parse";
+import { addInspectorPayload } from "./inspectorEntries";
+import "./InlineAgentPrompt.css";
 
-export const InlineAgentPrompt = () => {
+export const InlineAgentPrompt = ({ conversationId }: { conversationId?: string } = {}) => {
   const pendingApproval = useAppStore((s) => s.pendingApproval);
   const approvalQueue = useAppStore((s) => s.approvalQueue);
   const pendingDiffReview = useAppStore((s) => s.pendingDiffReview);
   const diffReviewQueue = useAppStore((s) => s.diffReviewQueue);
   const pendingAskUser = useAppStore((s) => s.pendingAskUser);
   const askUserQueue = useAppStore((s) => s.askUserQueue);
-  const activeConversationId = useAppStore((s) => s.conversationId);
-  const primaryVisibleApproval = pendingPromptTargetsConversation(pendingApproval, activeConversationId, activeConversationId)
+  const selectedConversationId = useAppStore((s) => s.conversationId);
+  const activeConversationId = conversationId ?? selectedConversationId;
+  const primaryVisibleApproval = pendingPromptTargetsConversation(pendingApproval, activeConversationId)
     ? pendingApproval
     : null;
   const visibleDiffReview = [pendingDiffReview, ...diffReviewQueue].find((item) =>
-    pendingPromptTargetsConversation(item, activeConversationId, activeConversationId),
+    pendingPromptTargetsConversation(item, activeConversationId),
   ) ?? null;
   const visibleAskUser = [pendingAskUser, ...askUserQueue].find((item) =>
-    pendingPromptTargetsConversation(item, activeConversationId, activeConversationId),
+    pendingPromptTargetsConversation(item, activeConversationId),
   ) ?? null;
   const visibleApprovalQueue = approvalQueue.filter((item) =>
-    pendingPromptTargetsConversation(item, activeConversationId, activeConversationId),
+    pendingPromptTargetsConversation(item, activeConversationId),
   );
   const visibleApproval = primaryVisibleApproval ?? visibleApprovalQueue[0] ?? null;
   const queuedApprovals = visibleApproval
@@ -67,13 +73,30 @@ export const InlineAgentPrompt = () => {
   if (!visibleApproval && !visibleDiffReview && !visibleAskUser) return null;
 
   return (
-    <div className="inline-agent-prompt" style={shellStyle} aria-label="Agent 正在等待输入">
+    <div className="inline-agent-prompt" aria-label="Agent 正在等待输入">
       {visibleDiffReview && <DiffApprovalCard key={visibleDiffReview.requestId} request={visibleDiffReview} />}
-      {visiblePlanApproval && <PlanApprovalCard request={visiblePlanApproval} />}
-      {visibleGenericApproval && <ToolApprovalCard request={visibleGenericApproval} queue={queuedGenericApprovals} />}
+      {visiblePlanApproval && <PlanApprovalCard key={visiblePlanApproval.requestId} request={visiblePlanApproval} />}
+      {visibleGenericApproval && <ToolApprovalCard key={visibleGenericApproval.requestId} request={visibleGenericApproval} queue={queuedGenericApprovals} />}
       {visibleAskUser && (visibleAskUser.planReview
-        ? <SubagentPlanReviewCard request={visibleAskUser} review={visibleAskUser.planReview} />
-        : <AskUserCard request={visibleAskUser} />)}
+        ? <SubagentPlanReviewCard key={visibleAskUser.requestId} request={visibleAskUser} review={visibleAskUser.planReview} />
+        : <AskUserCard key={visibleAskUser.requestId} request={visibleAskUser} />)}
+      <details className="inline-prompt-more">
+        <summary>更多操作</summary>
+        <Button variant="ghost" size="sm" onClick={() => {
+          const prompt = visibleApproval ?? visibleDiffReview ?? visibleAskUser!;
+          const id = prompt.requestId;
+          addInspectorPayload("permission", `prompt:${id}`, {
+            kind: "pending_agent_prompts",
+            conversation_id: prompt.conversationId,
+            approvals: [visibleApproval, ...queuedApprovals].filter(Boolean),
+            diff_review: visibleDiffReview,
+            ask_user: visibleAskUser,
+          });
+          const store = useAppStore.getState();
+          store.setInspectorFocus({ kind: "permission", id: `prompt:${id}`, conversationId: prompt.conversationId });
+          store.setRightStackTab("inspector");
+        }}>技术诊断</Button>
+      </details>
     </div>
   );
 };
@@ -82,7 +105,17 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
   const [responding, setResponding] = useState(false);
   const [amending, setAmending] = useState(false);
   const [feedback, setFeedback] = useState("");
-  const summary = useMemo(() => summarizeArgs(request.args), [request.args]);
+  const subagents = useAppStore((s) => s.subagents);
+  const collaborationTool = ["task", "task_status", "task_stop", "send_message"].includes(request.toolName);
+  const collaborationArgs = request.toolName === "task" && Array.isArray(request.args.parallel_tasks)
+    ? request.args.parallel_tasks as Record<string, unknown>[]
+    : [request.args];
+  const summary = useMemo(() => collaborationTool ? [] : summarizeArgs(Object.fromEntries(
+    Object.entries(request.args).filter(([key]) =>
+      !/(?:^|_)(?:id|ids|epoch|session|thread|sender|recipient|source)(?:_|$)|^(?:agent|call|run)$/i.test(key)
+      && !/^(?:agent|subagent|thread|call|toolCall|session|run|request|conversation|turn|message)Ids?$|^source(?:Agent|Thread|Tool)$/.test(key)
+      && !["command", "cmd", "justification", "with_escalated_permissions"].includes(key)),
+  )).filter((item) => item.label !== "request"), [request.args, collaborationTool]);
   const total = 1 + queue.length;
   const displayName = displayToolName(request.toolName);
   // MiniCode escalate-on-failure: a command retried with escalated permissions
@@ -101,7 +134,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
     || (item.toolName === "run_command"
       && (item.networkUnisolated === true || networkBoundaryUnavailable));
   const escalationJustification = String(request.args?.justification ?? "").trim();
-  const sourceLabel = approvalSourceLabel(request);
+  const sourceLabel = approvalSourceLabel(request, subagents);
   const expiry = useApprovalExpiry(request.expiresAt);
 
   useEffect(() => {
@@ -212,32 +245,31 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
     <section
       className="inline-approval-bar"
       aria-label="Agent is waiting for input"
-      style={approvalBarStyle}
     >
-      <div style={approvalIconStyle}>
+      <div className="inline-approval-icon">
         <ToolGlyph />
       </div>
 
-      <div className="inline-approval-main" style={approvalMainStyle}>
-        <div style={approvalTitleRowStyle}>
-          <span style={titleStyle}>允许使用 {displayName}？</span>
-          {total > 1 && <span style={pendingPillStyle}>{total} 项待处理</span>}
+      <div className="inline-approval-main">
+        <div className="inline-prompt-title-row">
+          <span className="inline-prompt-title">允许使用 {displayName}？</span>
+          {total > 1 && <span className="inline-prompt-pending">{total} 项待处理</span>}
         </div>
-        <div style={subtitleStyle}>
+        <div className="inline-prompt-subtitle">
           {escalated
             ? "请求提升权限，将在沙箱外运行并访问完整文件系统和网络。"
             : "运行此工具前需要你的授权。"}
           {sourceLabel ? ` 来源：${sourceLabel}。` : ""}
           {expiry.label && (
-            <span style={{ color: expiry.urgent ? "var(--state-warning)" : "inherit" }}>
+            <span className="inline-prompt-expiry" data-urgent={expiry.urgent}>
               {` ${expiry.label}`}
             </span>
           )}
         </div>
 
         {escalated && (
-          <div style={escalationBannerStyle}>
-            <ShieldAlert size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+          <div className="inline-approval-escalation">
+            <ShieldAlert size={14} />
             <span>
               <strong>将在沙箱外运行。</strong>
               {escalationJustification ? ` ${escalationJustification}` : " Agent 表示沙箱内运行失败，需要完整访问权限。"}
@@ -246,48 +278,70 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
         )}
 
         {networkUnisolated && !escalated && (
-          <div style={escalationBannerStyle} role="alert">
-            <ShieldAlert size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+          <div className="inline-approval-escalation" role="alert">
+            <ShieldAlert size={14} />
             <span>当前沙箱限制文件写入，但无法隔离网络；此命令仍可直接建立网络连接。请核对完整命令后逐项决定。</span>
           </div>
         )}
 
-        <div style={compactSummaryRowStyle}>
+        <div className="inline-approval-summary">
           {summary.slice(0, 2).map((item) => (
-            <span key={item.label} style={approvalArgStyle} title={`${item.label}: ${item.value}`}>
-              <span style={approvalArgLabelStyle}>{item.label}</span>
-              <span style={approvalArgValueStyle}>{item.value}</span>
+            <span key={item.label} className="inline-approval-argument" title={`${item.label}: ${item.value}`}>
+              <span className="inline-approval-argument-label">{item.label}</span>
+              <span className="inline-approval-argument-value">{item.value}</span>
             </span>
           ))}
         </div>
 
+        {collaborationTool && collaborationArgs.map((args, index) => {
+          const targets = Array.isArray(args.subagent_ids)
+            ? args.subagent_ids
+            : [args.recipient || args.subagent_id].filter(Boolean);
+          const targetLabel = targets.map((target) => approvalSourceLabel({
+            ...request, sourceAgent: String(target), sourceThread: undefined,
+          }, subagents)).join("、");
+          const name = String(args.name || args.agent_type || targetLabel || `任务 ${index + 1}`);
+          const description = String(args.description || "");
+          const cwd = args.cwd as string | undefined;
+          let content = String(args.prompt || args.message || args.reason || "");
+          // send_message can carry a lifecycle envelope. Its routing slots
+          // belong in Inspector; ordinary messages and task prompts stay exact.
+          if (request.toolName === "send_message" && content.trim().startsWith("{")) {
+            const protocol = safeJsonParse<{ type?: string; reason?: string; summary?: string } | null>(content, null);
+            if (["idle_notification", "shutdown_request", "shutdown_response", "plan_approval_request", "plan_approval_response", "permission_request", "permission_response"].includes(protocol?.type ?? "")) {
+              content = protocol?.reason || protocol?.summary || "";
+            }
+          }
+          return (
+            <div key={index} className="inline-prompt-context">
+              <strong>{name}</strong>
+              {description && description !== name && <div>{description}</div>}
+              {content && content !== description && <div className="inline-prompt-context-body">{content}</div>}
+              {args.read_only === true && <div>只读任务</div>}
+              {Array.isArray(args.write_scope) && args.write_scope.length > 0 && <div>写入范围：{args.write_scope.join("、")}</div>}
+              {cwd && <div>工作目录：{cwd}</div>}
+            </div>
+          );
+        })}
+        {collaborationTool && request.args.run_in_background === true && <div className="inline-prompt-subtitle">后台执行</div>}
+
         {/* Show the full command verbatim — never let the exact text the user is
             approving get lost behind a single-line ellipsis (approved ≠ shown). */}
         {commandText && (
-          <pre style={fullCommandStyle} aria-label="即将运行的命令">{commandText}</pre>
+          <pre className="inline-approval-command" aria-label="即将运行的命令">{commandText}</pre>
         )}
 
         {amending && (
-          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+          <div className="inline-prompt-feedback">
             <textarea
               value={feedback}
               onChange={(e) => setFeedback(e.target.value)}
               placeholder="给 Agent 补充说明，例如拒绝原因或需要调整的内容…"
               aria-label="给 Agent 补充说明"
               rows={2}
-              style={{
-                width: "100%",
-                padding: "6px 8px",
-                borderRadius: 6,
-                border: "1px solid var(--border-subtle)",
-                background: "var(--surface-base)",
-                color: "var(--text-primary)",
-                fontSize: "var(--text-xxs)",
-                fontFamily: "inherit",
-                resize: "vertical",
-              }}
+              className="inline-prompt-feedback-input"
             />
-            <div style={{ display: "flex", gap: 6 }}>
+            <div className="inline-prompt-feedback-actions">
               <Button variant="primary" size="sm" onClick={() => respond(false, feedback)} disabled={responding || !feedback.trim()}>
                 拒绝并发送说明
               </Button>
@@ -299,16 +353,16 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
         )}
 
         {queue.length > 0 && (
-          <div style={queueStyle}>
+          <div className="inline-approval-queue">
             接下来：{queue.map((item) => displayToolName(item.toolName)).join("、")}
           </div>
         )}
         {request.status === "error" && request.error && (
-          <div style={errorStyle}>{request.error}</div>
+          <div role="alert" className="inline-prompt-error">{request.error}</div>
         )}
       </div>
 
-      <div className="inline-approval-actions" style={compactButtonRowStyle}>
+      <div className="inline-approval-actions">
         <Button variant="secondary" size="sm" onClick={() => respond(false)} disabled={responding} aria-label="拒绝使用工具">
           <X size={14} />
           拒绝
@@ -359,14 +413,18 @@ const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
   const commandPrompts = normalizeCommandPrompts(request.args.command_prompts);
   const [plan, setPlan] = useState(initialPlan);
   const [editing, setEditing] = useState(false);
+  const [planExpanded, setPlanExpanded] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectionFeedback, setRejectionFeedback] = useState("");
   const [responding, setResponding] = useState(false);
   const planWasEdited = plan !== initialPlan;
+  const isLongPlan = plan.length > 1200 || plan.split("\n").length > 14;
+  const planDocumentId = useId();
 
   useEffect(() => {
     setPlan(initialPlan);
     setEditing(false);
+    setPlanExpanded(false);
     setRejecting(false);
     setRejectionFeedback("");
     setResponding(false);
@@ -399,41 +457,63 @@ const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
   };
 
   return (
-    <section style={planApprovalCardStyle} aria-label="计划审批">
-      <div style={headerStyle}>
+    <section className="inline-prompt-card inline-prompt-plan-card" aria-label="计划审批" aria-busy={responding}>
+      <div className="inline-prompt-header">
         <ShieldCheck size={16} color="var(--accent-primary)" />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={titleStyle}>准备开始实现？</div>
-          <div style={subtitleStyle}>Agent 已完成计划，批准后将退出 Plan mode 并恢复进入前的权限模式。</div>
+        <div className="inline-prompt-header-copy">
+          <div className="inline-prompt-title">准备开始实现？</div>
+          <div className="inline-prompt-subtitle inline-prompt-subtitle-wrap">计划已准备好。批准后开始实现，并恢复进入计划模式前的权限设置。</div>
         </div>
       </div>
 
-      <div style={planDocumentStyle}>
+      <div
+        id={planDocumentId}
+        className="inline-prompt-plan-document"
+        role="region"
+        aria-label="计划内容"
+        tabIndex={editing || (isLongPlan && !planExpanded) ? undefined : 0}
+        data-collapsed={!editing && isLongPlan && !planExpanded ? "true" : "false"}>
         {editing ? (
           <textarea
             value={plan}
             onChange={(event) => setPlan(event.target.value)}
             aria-label="编辑计划"
             rows={14}
-            style={planEditorStyle}
+            disabled={responding}
+            className="inline-prompt-plan-editor"
           />
         ) : plan.trim() ? (
           <MarkdownRenderer content={plan} />
         ) : (
-          <div style={errorStyle}>没有可审批的计划内容。请拒绝并让 Agent 先写入 Plan 文件。</div>
+          <div className="inline-prompt-error">没有可审批的计划内容。请拒绝并让 Agent 先写入计划文件。</div>
         )}
       </div>
 
-      {planFilePath && <div style={planFilePathStyle}>Plan 文件：{planFilePath}</div>}
+      {!editing && isLongPlan && (
+        <Button
+          variant="secondary"
+          size="sm"
+          className="inline-prompt-plan-expand"
+          aria-expanded={planExpanded}
+          aria-controls={planDocumentId}
+          onClick={() => setPlanExpanded((value) => !value)}
+        >
+          {planExpanded ? "收起计划" : "展开计划"}
+        </Button>
+      )}
+
+      {planFilePath && <div className="inline-prompt-plan-path">计划文件：{planFilePath}</div>}
       {commandPrompts.length > 0 && (
-        <div style={requestedPermissionsStyle}>
+        <div className="inline-prompt-permissions">
           <strong>请求的实现权限</strong>
           {commandPrompts.map((item, index) => (
             <span key={`${index}-${item.tool}-${item.prompt}`}>{item.tool}：{item.prompt}</span>
           ))}
         </div>
       )}
-      {request.status === "error" && request.error && <div style={errorStyle}>{request.error}</div>}
+      {request.status === "error" && request.error && <div role="alert" className="inline-prompt-error">{request.error}</div>}
+
+      {responding && <div className="inline-prompt-response-status" role="status"><LoaderCircle size={13} className="animate-spin" aria-hidden="true" />正在提交计划…</div>}
 
       {rejecting && (
         <textarea
@@ -442,12 +522,13 @@ const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
           placeholder="说明需要调整的内容…"
           aria-label="计划拒绝反馈"
           rows={3}
+          disabled={responding}
           autoFocus
-          style={planEditorStyle}
+          className="inline-prompt-plan-editor"
         />
       )}
 
-      <div style={buttonRowStyle}>
+      <div className="inline-prompt-button-row">
         <Button variant="secondary" size="sm" onClick={() => setEditing((value) => !value)} disabled={responding}>
           {editing ? "预览计划" : "编辑计划"}
         </Button>
@@ -481,7 +562,15 @@ const SubagentPlanReviewCard = (
 ) => {
   const [responding, setResponding] = useState(false);
   const [error, setError] = useState("");
-  const plan = review.planContent?.trim() ?? "";
+  const plan = review.planContent ?? "";
+  const subagents = useAppStore((s) => s.subagents);
+  const teammate = approvalSourceLabel({
+    requestId: request.requestId,
+    conversationId: request.conversationId,
+    toolName: "subagent.plan_review",
+    args: {},
+    sourceAgent: review.teammateName || review.subagentId,
+  }, subagents, review.teammateName);
 
   useEffect(() => {
     setResponding(false);
@@ -510,26 +599,28 @@ const SubagentPlanReviewCard = (
   };
 
   return (
-    <section style={planApprovalCardStyle} aria-label="子智能体计划审批">
-      <div style={headerStyle}>
+    <section className="inline-prompt-card inline-prompt-plan-card" aria-label="子智能体计划审批" aria-busy={responding}>
+      <div className="inline-prompt-header">
         <ShieldCheck size={16} color="var(--accent-primary)" />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={titleStyle}>批准子智能体的计划？</div>
-          <div style={askSubtitleStyle}>{request.question}</div>
-          {review.teamName && <div style={subtitleStyle}>团队：{review.teamName}</div>}
-          {error && <div role="alert" style={askErrorStyle}>{error}</div>}
+        <div className="inline-prompt-header-copy">
+          <div className="inline-prompt-title">批准子智能体的计划？</div>
+          <div className="inline-prompt-question">{teammate} 提交了计划，需要你批准后才能开始实现。</div>
+          {review.teamName && <div className="inline-prompt-subtitle">团队：{review.teamName}</div>}
+          {error && <div role="alert" className="inline-prompt-error inline-prompt-ask-error">{error}</div>}
         </div>
       </div>
 
-      <div style={planDocumentStyle}>
-        {plan
+      <div className="inline-prompt-plan-document" role="region" aria-label="计划内容" tabIndex={0}>
+        {plan.trim()
           ? <MarkdownRenderer content={plan} />
-          : <div style={errorStyle}>子智能体没有提交计划内容。请拒绝，让它先写入 Plan 文件。</div>}
+          : <div className="inline-prompt-error">子智能体没有提交计划内容。请拒绝，让它先写入计划文件。</div>}
       </div>
 
-      {review.plan_file_path && <div style={planFilePathStyle}>Plan 文件：{review.plan_file_path}</div>}
+      {review.plan_file_path && <div className="inline-prompt-plan-path">计划文件：{review.plan_file_path}</div>}
 
-      <div style={buttonRowStyle}>
+      {responding && <div className="inline-prompt-response-status" role="status"><LoaderCircle size={13} className="animate-spin" aria-hidden="true" />正在提交计划…</div>}
+
+      <div className="inline-prompt-button-row">
         <Button
           variant="secondary"
           size="sm"
@@ -543,7 +634,7 @@ const SubagentPlanReviewCard = (
         <Button
           variant="primary"
           size="sm"
-          disabled={responding}
+          disabled={responding || !plan.trim()}
           onClick={() => void respond(true)}
           aria-label="批准子智能体的计划"
         >
@@ -560,11 +651,16 @@ const displayToolName = (name: string): string => {
   return readable === name ? humanizeKey(name) : readable;
 };
 
-function approvalSourceLabel(request: PendingApproval): string {
-  const agent = String(request.sourceAgent || "").trim();
-  const thread = String(request.sourceThread || "").trim();
-  if (agent && thread) return `${agent}（${thread}）`;
-  return agent || thread;
+function approvalSourceLabel(request: PendingApproval, subagents: SubagentState[], teammateName?: string): string {
+  const source = String(request.sourceAgent || "").trim();
+  if (!source) return request.sourceThread ? "智能体" : "";
+  if (source === "parent") return "主智能体";
+  if (source === "*" || source === "all") return "所有智能体";
+  const agent = subagents.find((item) => item.id === source || item.role === source);
+  const label = teammateName || agent?.role || (source.includes("@") ? source.split("@")[0] : "");
+  return !label || /^(?:(?:subagent|agent|thread|call|session|run)[-_:][\w-]+|[a-f0-9]{8,}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/i.test(label)
+    ? "智能体"
+    : label;
 }
 
 // A request retried with escalated permissions runs OUTSIDE the sandbox
@@ -644,19 +740,19 @@ const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
   };
 
   return (
-    <section style={cardStyle}>
-      <div style={headerStyle}>
+    <section className="inline-prompt-card">
+      <div className="inline-prompt-header">
         <FileDiff size={16} color="var(--accent-primary)" />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={titleStyle}>审阅文件更改</div>
-          <div style={subtitleStyle}>
+        <div className="inline-prompt-header-copy">
+          <div className="inline-prompt-title">审阅文件更改</div>
+          <div className="inline-prompt-subtitle">
             {request.filePath
               || request.reviewState?.toolName
               || (diffReview?.requestId === request.requestId ? diffReview.toolName : "")
-              || "工具编辑"} · <span style={{ color: "var(--state-success)" }}>+{stats.plus}</span>{" "}
-            <span style={{ color: "var(--state-danger)" }}>-{stats.minus}</span>
+              || "工具编辑"} · <span className="chat-change-added">+{stats.plus}</span>{" "}
+            <span className="chat-change-deleted">-{stats.minus}</span>
             {expiry.label && (
-              <span style={{ color: expiry.urgent ? "var(--state-warning)" : "var(--text-muted)" }}>
+              <span className="inline-prompt-expiry" data-urgent={expiry.urgent}>
                 {` · ${expiry.label}`}
               </span>
             )}
@@ -664,16 +760,16 @@ const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
         </div>
       </div>
 
-      <div style={diffPreviewStyle}>
+      <div className="inline-prompt-diff-preview">
         {stats.preview.length > 0 ? stats.preview.map((line, index) => (
-          <div key={`${index}-${line.text}`} style={diffLineStyle(line)}>
+          <div key={`${index}-${line.text}`} className="inline-prompt-diff-line" data-kind={line.kind}>
             {line.text}
           </div>
-        )) : <span style={{ color: "var(--text-muted)" }}>打开差异面板检查拟议更改。</span>}
+        )) : <span className="inline-prompt-context">打开差异面板检查拟议更改。</span>}
       </div>
 
-      {error && <div role="alert" style={errorStyle}>{error}</div>}
-      <div className="inline-prompt-actions" style={buttonRowStyle}>
+      {error && <div role="alert" className="inline-prompt-error">{error}</div>}
+      <div className="inline-prompt-actions inline-prompt-button-row">
         <Button variant="secondary" size="sm" onClick={openDiff}>
           <ExternalLink size={14} />
           打开差异
@@ -711,16 +807,20 @@ const useApprovalExpiry = (expiresAt?: number): { label: string; urgent: boolean
 
 const AskUserCard = ({ request }: { request: PendingAskUser }) => {
   const [answer, setAnswer] = useState("");
+  const [selectedOption, setSelectedOption] = useState<number | null>(null);
   const [responding, setResponding] = useState(false);
   const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const questionId = useId();
   const hasOptions = Boolean(request.options && request.options.length > 0);
   const hasCustomInput = request.allowCustom !== false;
   const expiry = useApprovalExpiry(request.expiresAt);
-  const canSubmit = request.allowEmpty === true || answer.length > 0;
+  const canSubmit = selectedOption !== null || request.allowEmpty === true || answer.length > 0;
 
   useEffect(() => {
     setAnswer("");
+    setSelectedOption(null);
     setResponding(false);
     setError("");
     if (hasCustomInput && !hasOptions) window.setTimeout(() => inputRef.current?.focus(), 40);
@@ -729,6 +829,7 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
   const respond = async (text: string) => {
     if (responding) return;
     setResponding(true);
+    setError("");
     try {
       const command = buildAskUserResponseCommand(
         request.requestId,
@@ -749,6 +850,7 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
   const cancel = async () => {
     if (responding) return;
     setResponding(true);
+    setError("");
     try {
       const command = {
         type: "control_cancel_request" as const,
@@ -769,39 +871,68 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
   };
 
   return (
-    <section style={{ ...cardStyle, ...askUserCardStyle }}>
-      <div style={headerStyle}>
+    <form
+      className="inline-prompt-card inline-prompt-question-card"
+      aria-busy={responding}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (canSubmit) void respond(selectedOption === null ? answer : request.options![selectedOption].value);
+      }}
+    >
+      <div className="inline-prompt-header">
         <MessageSquare size={16} color="var(--accent-primary)" />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={titleStyle}>{request.provider ? "提供商需要认证输入" : "Agent 需要你的输入"}</div>
-          {request.provider && <div style={subtitleStyle}>认证提供商：{request.provider}</div>}
+        <div className="inline-prompt-header-copy">
+          <div className="inline-prompt-title">{request.provider ? "提供商需要认证输入" : "Agent 需要你的输入"}</div>
+          {request.provider && <div className="inline-prompt-subtitle">认证提供商：{request.provider}</div>}
           {request.prompt && request.prompt.trim() !== request.question.trim() && (
-            <div style={askContextStyle}>{request.prompt}</div>
+            <div className="inline-prompt-context">{request.prompt}</div>
           )}
-          <div style={askSubtitleStyle}>{request.question}</div>
+          <div id={questionId} className="inline-prompt-question">{request.question}</div>
           {expiry.label && (
-            <div style={{ ...subtitleStyle, color: expiry.urgent ? "var(--state-warning)" : "var(--text-muted)" }}>
+            <div className="inline-prompt-subtitle inline-prompt-expiry" data-urgent={expiry.urgent}>
               {expiry.label}
             </div>
           )}
-          {error && <div role="alert" style={askErrorStyle}>{error}</div>}
+          {error && <div role="alert" className="inline-prompt-error inline-prompt-ask-error">{error}</div>}
         </div>
       </div>
 
       {hasOptions && (
-        <div style={choiceGridStyle}>
+        <div className="inline-prompt-choices" role="radiogroup" aria-labelledby={questionId}>
           {request.options?.map((option, index) => (
             <button
               key={`${option.value}:${index}`}
+              ref={(element) => { optionRefs.current[index] = element; }}
               type="button"
+              role="radio"
+              aria-checked={selectedOption === index}
+              tabIndex={index === (selectedOption ?? 0) ? 0 : -1}
               disabled={responding}
-              onClick={() => void respond(option.value)}
-              style={choiceCardStyle}
+              onClick={() => {
+                setSelectedOption(index);
+                setAnswer("");
+              }}
+              onKeyDown={(event) => {
+                const count = request.options!.length;
+                let next: number;
+                if (event.key === "ArrowDown" || event.key === "ArrowRight") next = (index + 1) % count;
+                else if (event.key === "ArrowUp" || event.key === "ArrowLeft") next = (index - 1 + count) % count;
+                else if (event.key === "Home") next = 0;
+                else if (event.key === "End") next = count - 1;
+                else return;
+                event.preventDefault();
+                setSelectedOption(next);
+                setAnswer("");
+                optionRefs.current[next]?.focus();
+              }}
+              className="inline-prompt-choice"
             >
-              <span style={choiceLetterStyle}>{optionLetter(index)}</span>
-              <span style={choiceCardBodyStyle}>
-                <span style={choiceCardTitleStyle}>{option.label}</span>
-                {option.description && <span style={choiceCardDescriptionStyle}>{option.description}</span>}
+              <span className="inline-prompt-choice-number">
+                {selectedOption === index ? <Check size={13} /> : optionLetter(index)}
+              </span>
+              <span className="inline-prompt-choice-body">
+                <span className="inline-prompt-choice-title">{option.label}</span>
+                {option.description && <span className="inline-prompt-choice-description">{option.description}</span>}
               </span>
             </button>
           ))}
@@ -809,17 +940,11 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
       )}
 
       {hasCustomInput && (
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (canSubmit) void respond(answer);
-          }}
-          style={askInputRowStyle}
-        >
-          <div style={askInputWrapStyle}>
+        <div className="inline-prompt-input-row">
+          <div className="inline-prompt-input-wrap">
             {hasOptions && (
-              <div style={askInputLabelStyle}>
-                <span style={choiceLetterStyle}>{optionLetter(request.options?.length ?? 0)}</span>
+              <div className="inline-prompt-input-label">
+                <span className="inline-prompt-choice-number">{optionLetter(request.options?.length ?? 0)}</span>
                 自定义回答
               </div>
             )}
@@ -827,29 +952,39 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
               ref={inputRef}
               type={request.secret ? "password" : "text"}
               value={answer}
-              onChange={(event) => setAnswer(event.target.value)}
+              disabled={responding}
+              onChange={(event) => {
+                setSelectedOption(null);
+                setAnswer(event.target.value);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && (event.nativeEvent.isComposing || event.keyCode === 229)) {
+                  event.preventDefault();
+                }
+              }}
               placeholder={request.placeholder || (hasOptions ? "输入自定义回答…" : "输入你的回答…")}
               aria-label={request.secret ? "输入认证密钥" : "回答 Agent 的问题"}
               autoComplete={request.secret ? "new-password" : "off"}
               spellCheck={false}
-              style={inputStyle}
+              className="inline-prompt-input"
             />
           </div>
-          <Button type="submit" variant="primary" size="sm" disabled={!canSubmit || responding}>
-            发送
-          </Button>
-        </form>
-      )}
-
-      {(
-        <div style={buttonRowStyle}>
-          <Button variant="secondary" size="sm" disabled={responding} onClick={() => void cancel()}>
-            <X size={14} />
-            取消
-          </Button>
         </div>
       )}
-    </section>
+
+      <div className="inline-prompt-footer inline-prompt-button-row">
+        <span className="inline-prompt-response-status" role="status">
+          {responding ? <><LoaderCircle size={13} className="animate-spin" aria-hidden="true" />正在提交…</> : hasOptions ? "选好后点击继续" : null}
+        </span>
+        <Button variant="secondary" size="sm" disabled={responding} onClick={() => void cancel()}>
+          <X size={14} />
+          取消
+        </Button>
+        <Button type="submit" variant="primary" size="sm" disabled={!canSubmit || responding}>
+          {hasOptions || !hasCustomInput ? "继续" : "发送"}
+        </Button>
+      </div>
+    </form>
   );
 };
 
@@ -867,372 +1002,6 @@ const diffStats = (diff: string) => {
   }
   return { plus, minus, preview };
 };
-
-const shellStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 6,
-  width: "100%",
-  margin: "0 0 8px",
-  flexShrink: 0,
-};
-
-const approvalBarStyle: React.CSSProperties = {
-  border: "1px solid var(--border-subtle)",
-  background: "color-mix(in oklch, var(--surface-page) 92%, var(--accent-primary) 8%)",
-  borderRadius: "var(--radius-sm, 6px)",
-  padding: "8px 9px",
-  display: "grid",
-  alignItems: "center",
-  gap: 9,
-  overflow: "hidden",
-};
-
-const approvalIconStyle: React.CSSProperties = {
-  width: 24,
-  height: 24,
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  borderRadius: "var(--radius-sm, 5px)",
-  background: "color-mix(in oklch, var(--state-warning) 10%, var(--surface-soft))",
-  border: "1px solid color-mix(in oklch, var(--state-warning) 28%, var(--border-subtle))",
-};
-
-const approvalMainStyle: React.CSSProperties = {
-  minWidth: 0,
-  display: "grid",
-  gap: 3,
-};
-
-const approvalTitleRowStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 7,
-  minWidth: 0,
-};
-
-const pendingPillStyle: React.CSSProperties = {
-  flexShrink: 0,
-  padding: "1px 6px",
-  borderRadius: 999,
-  background: "var(--surface-soft)",
-  border: "1px solid var(--border-subtle)",
-  color: "var(--text-muted)",
-  fontSize: "var(--text-xs)",
-  fontWeight: "var(--fw-semibold)",
-};
-
-const compactSummaryRowStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
-  minWidth: 0,
-  overflow: "hidden",
-  flex: 1,
-};
-
-const approvalArgStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 4,
-  minWidth: 0,
-  maxWidth: "min(320px, 45vw)",
-  fontSize: "var(--text-xs)",
-};
-
-const approvalArgLabelStyle: React.CSSProperties = {
-  flexShrink: 0,
-  color: "var(--text-muted)",
-};
-
-const approvalArgValueStyle: React.CSSProperties = {
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  color: "var(--text-secondary)",
-  fontFamily: "var(--font-mono)",
-};
-
-const compactButtonRowStyle: React.CSSProperties = {
-  display: "flex",
-  justifyContent: "flex-end",
-  gap: 6,
-  flexShrink: 0,
-};
-
-const fullCommandStyle: React.CSSProperties = {
-  margin: "2px 0 0",
-  padding: "6px 8px",
-  gridColumn: "1 / -1",
-  maxHeight: 132,
-  overflow: "auto",
-  borderRadius: "var(--radius-sm, 6px)",
-  border: "1px solid var(--border-subtle)",
-  background: "var(--surface-base)",
-  color: "var(--text-secondary)",
-  fontFamily: "var(--font-mono)",
-  fontSize: "var(--text-xs)",
-  lineHeight: 1.5,
-  whiteSpace: "pre-wrap",
-  wordBreak: "break-word",
-};
-
-const cardStyle: React.CSSProperties = {
-  border: "1px solid color-mix(in oklch, var(--state-warning) 45%, var(--border-subtle))",
-  background: "color-mix(in oklch, var(--state-warning) 8%, var(--surface-page))",
-  borderRadius: "var(--radius-sm, 6px)",
-  padding: 10,
-  display: "grid",
-  gap: 9,
-};
-
-const planApprovalCardStyle: React.CSSProperties = {
-  ...cardStyle,
-  maxHeight: "min(74vh, 720px)",
-  overflow: "auto",
-};
-
-const planDocumentStyle: React.CSSProperties = {
-  padding: "10px 12px",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 6px)",
-  background: "var(--surface-base)",
-  color: "var(--text-primary)",
-  maxHeight: "min(46vh, 460px)",
-  overflow: "auto",
-};
-
-const planEditorStyle: React.CSSProperties = {
-  width: "100%",
-  minHeight: 260,
-  padding: 0,
-  border: 0,
-  outline: 0,
-  resize: "vertical",
-  background: "transparent",
-  color: "var(--text-primary)",
-  font: "inherit",
-  fontFamily: "var(--font-mono)",
-  lineHeight: 1.55,
-};
-
-const planFilePathStyle: React.CSSProperties = {
-  color: "var(--text-muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: "var(--text-xs)",
-  overflowWrap: "anywhere",
-};
-
-const requestedPermissionsStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 4,
-  padding: "8px 10px",
-  borderRadius: "var(--radius-sm, 6px)",
-  background: "var(--surface-soft)",
-  color: "var(--text-secondary)",
-  fontSize: "var(--text-xs)",
-};
-
-const headerStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "flex-start",
-  gap: 9,
-  minWidth: 0,
-};
-
-const titleStyle: React.CSSProperties = {
-  color: "var(--text-primary)",
-  fontSize: "var(--text-sm)",
-  fontWeight: "var(--fw-bold)",
-};
-
-const subtitleStyle: React.CSSProperties = {
-  marginTop: 2,
-  color: "var(--text-muted)",
-  fontSize: "var(--text-xs)",
-  lineHeight: 1.45,
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const escalationBannerStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "flex-start",
-  gap: 6,
-  marginTop: 6,
-  padding: "6px 7px",
-  borderRadius: "var(--radius-sm, 6px)",
-  border: "1px solid color-mix(in oklch, var(--state-danger) 34%, var(--border-subtle))",
-  background: "color-mix(in oklch, var(--state-danger) 9%, var(--surface-page))",
-  color: "var(--text-secondary)",
-  fontSize: "var(--text-xs)",
-  lineHeight: 1.45,
-};
-
-const queueStyle: React.CSSProperties = {
-  color: "var(--text-muted)",
-  fontSize: "var(--text-xs)",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const errorStyle: React.CSSProperties = {
-  color: "var(--state-danger)",
-  fontSize: "var(--text-xs)",
-};
-
-const buttonRowStyle: React.CSSProperties = {
-  display: "flex",
-  justifyContent: "flex-end",
-  gap: 7,
-  flexWrap: "wrap",
-};
-
-const askUserCardStyle: React.CSSProperties = {
-  gap: 12,
-  padding: 12,
-};
-
-const askSubtitleStyle: React.CSSProperties = {
-  marginTop: 4,
-  color: "var(--text-secondary)",
-  fontSize: "var(--text-sm)",
-  lineHeight: 1.5,
-};
-
-const askErrorStyle: React.CSSProperties = {
-  marginTop: 6,
-  color: "var(--state-danger)",
-  fontSize: "var(--text-xs)",
-  lineHeight: 1.35,
-};
-
-const choiceGridStyle: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-  gap: 8,
-};
-
-const choiceCardStyle: React.CSSProperties = {
-  minHeight: 42,
-  display: "grid",
-  gridTemplateColumns: "24px minmax(0, 1fr)",
-  alignItems: "center",
-  gap: 9,
-  textAlign: "left",
-  padding: "8px 10px",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 6px)",
-  background: "var(--surface-base)",
-  color: "var(--text-primary)",
-  cursor: "pointer",
-};
-
-const choiceLetterStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  width: 22,
-  height: 22,
-  borderRadius: "var(--radius-sm, 5px)",
-  background: "var(--surface-soft)",
-  border: "1px solid var(--border-subtle)",
-  color: "var(--text-muted)",
-  fontSize: "var(--text-xs)",
-  fontWeight: "var(--fw-bold)",
-  lineHeight: 1,
-  flexShrink: 0,
-};
-
-const choiceCardTitleStyle: React.CSSProperties = {
-  fontSize: "var(--text-sm)",
-  fontWeight: "var(--fw-semibold)",
-  lineHeight: 1.35,
-};
-
-const choiceCardBodyStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 2,
-  minWidth: 0,
-};
-
-const choiceCardDescriptionStyle: React.CSSProperties = {
-  color: "var(--text-muted)",
-  fontSize: "var(--text-xs)",
-  fontWeight: "var(--fw-normal)",
-  lineHeight: 1.35,
-};
-
-const askContextStyle: React.CSSProperties = {
-  marginTop: 4,
-  color: "var(--text-muted)",
-  fontSize: "var(--text-xs)",
-  lineHeight: 1.45,
-};
-
-const askInputRowStyle: React.CSSProperties = {
-  display: "flex",
-  gap: 8,
-  alignItems: "end",
-  flexWrap: "wrap",
-};
-
-const askInputWrapStyle: React.CSSProperties = {
-  flex: 1,
-  minWidth: "min(280px, 100%)",
-  display: "grid",
-  gap: 6,
-};
-
-const askInputLabelStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 7,
-  color: "var(--text-muted)",
-  fontSize: "var(--text-xs)",
-  fontWeight: "var(--fw-bold)",
-};
-
-const inputStyle: React.CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-  padding: "0 9px",
-  height: 30,
-  background: "var(--surface-base)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 4px)",
-  color: "var(--text-primary)",
-  fontSize: "var(--text-sm)",
-  outline: "none",
-};
-
-const diffPreviewStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 1,
-  maxHeight: 140,
-  overflow: "auto",
-  padding: 8,
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 4px)",
-  background: "var(--surface-base)",
-  fontFamily: "var(--font-mono)",
-  fontSize: "var(--text-xs)",
-};
-
-const diffLineStyle = (line: UnifiedDiffLine): React.CSSProperties => ({
-  color: line.kind === "add"
-    ? "var(--state-success)"
-    : line.kind === "del"
-      ? "var(--state-danger)"
-      : line.kind === "hunk"
-        ? "var(--accent-primary)"
-        : "var(--text-secondary)",
-  whiteSpace: "pre",
-});
 
 function optionLetter(index: number): string {
   return String.fromCharCode(65 + Math.max(0, index));

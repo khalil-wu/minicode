@@ -91,7 +91,7 @@ async def handle_preview_launch_config(session: "WebSocketSession", data: dict[s
 
 async def handle_preview_launch_start(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.preview import mark_preview_ready, start_preview_launch
-    from backend.preview.verifier import wait_until_ready
+    from backend.preview.verifier import PreviewProcessChangedError, wait_until_ready
     from backend.services.preview_service import (
         preview_launch_detected_event,
         preview_launch_started_event,
@@ -128,7 +128,11 @@ async def handle_preview_launch_start(session: "WebSocketSession", data: dict[st
         return True
     await session.send_event(_scope_event(preview_launch_started_event(process), scope))
     await session.send_event(_scope_event(preview_launch_detected_event(process), scope))
-    verification = await wait_until_ready(process.effective_url, timeout=20.0, interval=1.0)
+    try:
+        verification = await wait_until_ready(process.effective_url, timeout=20.0, interval=1.0, process=process)
+    except PreviewProcessChangedError as exc:
+        await session.send_event(_scope_event(AgentEvent.command_result("preview.launch.start", str(exc), level="error"), scope))
+        return True
     if verification.ok and not await mark_preview_ready(process):
         verification = replace(
             verification,

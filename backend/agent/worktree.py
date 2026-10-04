@@ -155,7 +155,7 @@ def has_worktree_changes(worktree: AgentWorktree) -> bool:
 
     Conservative: any git failure counts as "changed" so the worktree is kept.
     """
-    status = _git(worktree.worktree_path, "status", "--porcelain")
+    status = _git(worktree.worktree_path, "status", "--porcelain", "--ignored")
     if status is None or status.returncode != 0:
         return True
     if (status.stdout or "").strip():
@@ -272,5 +272,6 @@ def cleanup_stale_worktrees(base: Path) -> None:
         return
     root_key = canonical_file_path_key(git_root)
     if root_key not in _STALE_SWEEP_DONE:
-        _git(git_root, "worktree", "prune")
-        _STALE_SWEEP_DONE.add(root_key)
+        pruned = _git(git_root, "worktree", "prune")
+        if pruned is not None and pruned.returncode == 0:
+            _STALE_SWEEP_DONE.add(root_key)

@@ -352,7 +352,7 @@ class ApplyPatchTool(BaseTool):
         except PathTraversalError as exc:
             return str(exc)
 
-        guard = self._guard_path(change.path, path)
+        guard = self._guard_path(change.path, path, context)
         if guard:
             return guard
 
@@ -413,7 +413,7 @@ class ApplyPatchTool(BaseTool):
                 dest_path = _resolve_path(change.move_to, context, allow_workspace_escape=bypass_mode)
             except PathTraversalError as exc:
                 return str(exc)
-            move_guard = self._guard_path(change.move_to, dest_path)
+            move_guard = self._guard_path(change.move_to, dest_path, context)
             if move_guard:
                 return move_guard
             if dest_path != path and dest_path.exists():
@@ -471,10 +471,10 @@ class ApplyPatchTool(BaseTool):
                 )
         return expected
 
-    def _guard_path(self, raw_path: str, path: Path) -> str:
+    def _guard_path(self, raw_path: str, path: Path, context: ToolExecutionContext | None) -> str:
         # Protected paths stay guarded even in bypass mode, so this deliberately
         # takes no bypass flag.
-        if is_protected_write_path(path):
+        if is_protected_write_path(path, state_roots=context.permission.protected_state_roots if context else ()):
             return (
                 f"Refusing to modify protected path: {raw_path}. "
                 "Repository and agent configuration files must be edited manually."

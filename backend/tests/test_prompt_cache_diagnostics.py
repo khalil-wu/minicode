@@ -168,9 +168,10 @@ def test_prompt_cache_safe_params_hashes_only_stable_prefix() -> None:
 
     assert first["stable_system_hash"] == second["stable_system_hash"]
     assert first["full_system_hash"] != second["full_system_hash"]
-    assert first["tool_names"] == ["mcp"]
+    assert len(first["tool_names"]) == 1
+    assert first["tool_names"][0].startswith("mcp:")
     assert first["tools_chars"] > 0
-    assert first["largest_tools"] == [{"name": "mcp", "chars": first["tools_chars"]}]
+    assert first["largest_tools"] == [{"name": first["tool_names"][0], "chars": first["tools_chars"]}]
     assert "workspace A" not in str(first)
     assert "private_server" not in str(first)
     assert first["prompt_section_summary"] == {}

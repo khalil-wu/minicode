@@ -29,6 +29,31 @@ const message = (overrides: Partial<ChatMessage> = {}): ChatMessage => ({
 });
 
 describe("LiveArtifacts projection", () => {
+  it.each(["Script completed", "Script yielded", "Script running", "Script failed", "Script cancelled"])(
+    "replaces the producer status title %s while retaining the artifact kind and owner",
+    (summary) => {
+      const [artifact] = collectLiveArtifacts([message({
+        artifacts: [{ artifactId: "execution-output", kind: "text", summary }],
+        blocks: [{ type: "tool_call", record: {
+          id: "execution-call", name: "tool_wait", args: {}, status: "success", artifactId: "execution-output",
+          artifactKind: "text", displaySummary: summary, startedAt: 100,
+        } }],
+      })], "conversation-execution");
+      expect(artifact).toMatchObject({ artifactId: "execution-output", kind: "text", summary: "代码执行输出", conversationId: "conversation-execution" });
+    },
+  );
+
+  it("preserves a specific output title when richer execution metadata is merged", () => {
+    const [artifact] = collectLiveArtifacts([message({
+      artifacts: [{ artifactId: "execution-output", kind: "text", summary: "Script completed.txt" }],
+      blocks: [{ type: "tool_call", record: {
+        id: "execution-call", name: "tool_exec", args: {}, status: "success", artifactId: "execution-output", displaySummary: "Script completed", startedAt: 100,
+      } }],
+    })], "conversation-execution");
+    expect(artifact.summary).toBe("Script completed.txt");
+    expect(artifact.kind).toBe("text");
+  });
+
   it("projects browser screenshots as owner-scoped images", () => {
     const [artifact] = collectLiveArtifacts([message()], "conversation-live");
     expect(artifact).toMatchObject({

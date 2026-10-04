@@ -13,9 +13,10 @@ import { openWebTarget } from "../openWebTarget";
 import { sendClientCommand } from "../../protocol/ws-outbox";
 import { isDesktop, openPath, revealPath } from "../../desktop/runtime";
 import { useContextMenu } from "../../components/useContextMenu";
+import { copyText } from "../../lib/clipboard";
 import { openArtifactPreview, openWorkspaceFilePreview } from "../openAttachmentPreview";
 import { sendChatMessage } from "../sendChatMessage";
-import { isWindowsLikeWorkspacePath, normalizeWorkspacePath } from "../../lib/workspace-path";
+import { isWindowsLikeWorkspacePath, normalizeWorkspacePath, workspaceRootsEqual } from "../../lib/workspace-path";
 import { mediaTypeForPath } from "../../lib/media-types";
 import { pushToast } from "../../overlays/ToastContainer";
 import { getWebSocket } from "../../hooks/useWebSocket";
@@ -26,7 +27,7 @@ import {
   normalizeArtifactPreview,
 } from "../../lib/artifact-projection";
 import {
-  artifactImageResourceUrl,
+  artifactResourceUrl,
   inlineImageResourceUrl,
   isDisplayableImageMediaType,
   withPreviewCacheBust,
@@ -51,13 +52,21 @@ export function AssistantMarkdownCell({
   knownFilePaths?: string[];
   afterContent?: React.ReactNode;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [copiedSource, setCopiedSource] = useState<{ text: string } | null>(null);
   const [sourcesExpanded, setSourcesExpanded] = useState(false);
   const setQuotedMessage = useAppStore((s) => s.setQuotedMessage);
   const conversationId = String(ownerConversationId || "").trim();
   const workspaceRoot = String(ownerWorkspaceRoot || "").trim();
+  const canEditConversation = useAppStore((s) => Boolean(conversationId && s.conversationId === conversationId
+    && workspaceRootsEqual(s.workingDirectory, workspaceRoot)));
   const rawMarkdown = cell.markdownSource;
   const displayMarkdown = rawMarkdown;
+  const copied = copiedSource?.text === displayMarkdown;
+  useEffect(() => {
+    if (!copiedSource) return;
+    const timer = window.setTimeout(() => setCopiedSource(null), 1200);
+    return () => window.clearTimeout(timer);
+  }, [copiedSource]);
   const sources = uniqueCitationSources(rawMarkdown, cell.citations);
   const visibleSources = sourcesExpanded ? sources : sources.slice(0, 3);
   const hiddenSourceCount = Math.max(0, sources.length - visibleSources.length);
@@ -102,31 +111,35 @@ export function AssistantMarkdownCell({
     && (cell.imageProgress ?? []).some((progress) => progress.status !== "failed" && progress.status !== "partial");
   const isSettled = !cell.isStreaming && !hasPendingImage;
 
-  const copy = useCallback(() => {
-    navigator.clipboard.writeText(displayMarkdown).then(() => {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    });
+  const copy = useCallback(async () => {
+    if (await copyText(displayMarkdown, "回复")) setCopiedSource({ text: displayMarkdown });
   }, [displayMarkdown]);
 
   const quoteReply = useCallback(() => {
-    if (!displayMarkdown) return;
+    const state = useAppStore.getState();
+    if (!displayMarkdown || !conversationId || state.conversationId !== conversationId
+      || !workspaceRootsEqual(state.workingDirectory, workspaceRoot)) return;
     setQuotedMessage({
       id: cell.messageId || cell.id,
       role: "assistant",
       content: displayMarkdown,
     });
     requestAnimationFrame(() => {
+      const current = useAppStore.getState();
+      if (current.conversationId !== conversationId
+        || !workspaceRootsEqual(current.workingDirectory, workspaceRoot)) return;
       const composerTextarea = document.querySelector("[data-composer-input]") as HTMLTextAreaElement | null;
       if (composerTextarea) {
         composerTextarea.focus();
       }
     });
-  }, [cell.id, cell.messageId, displayMarkdown, setQuotedMessage]);
+  }, [cell.id, cell.messageId, conversationId, displayMarkdown, setQuotedMessage, workspaceRoot]);
 
   const regenerate = useCallback(async () => {
     if (!cell.messageId) return;
     const state = useAppStore.getState();
+    if (!conversationId || state.conversationId !== conversationId
+      || !workspaceRootsEqual(state.workingDirectory, workspaceRoot)) return;
 
     const index = state.messages.findIndex((item) => item.id === cell.messageId);
     if (index < 0) return;
@@ -162,7 +175,8 @@ export function AssistantMarkdownCell({
     // retry against the pre-dialog conversation id would truncate and
     // re-run the wrong conversation.
     const current = useAppStore.getState();
-    if (current.conversationId !== state.conversationId) return;
+    if (current.conversationId !== conversationId
+      || !workspaceRootsEqual(current.workingDirectory, workspaceRoot)) return;
     const stillPresent = current.messages.findIndex((item) => item.id === cell.messageId);
     if (stillPresent < 0) return;
 
@@ -171,7 +185,8 @@ export function AssistantMarkdownCell({
       const attachmentRefs = userMessage.attachmentRefs ?? [];
       sendChatMessage({
         displayContent: userMessage.content,
-        backendContent: userMessage.content,
+        backendContent: userMessage.backendContent ?? userMessage.content,
+        quotedMessage: userMessage.quotedMessage ?? null,
         conversationId: current.conversationId || undefined,
         contextRefs: userMessage.contextRefs ?? [],
         attachmentRefs,
@@ -189,24 +204,27 @@ export function AssistantMarkdownCell({
         retryFromMessageId: userMessage.id,
       });
     }
-  }, [cell.messageId]);
+  }, [cell.messageId, conversationId, workspaceRoot]);
 
   const forkConversation = useCallback(() => {
     if (!cell.messageId) return;
     const state = useAppStore.getState();
-    const messageIndex = state.messages.findIndex((message) => message.id === cell.messageId);
+    if (!conversationId || state.conversationId !== conversationId
+      || !workspaceRootsEqual(state.workingDirectory, workspaceRoot)) return;
     sendClientCommand({
       type: "context.fork",
+      conversation_id: conversationId,
+      workspace_root: workspaceRoot,
       message_id: cell.messageId,
-      ...(messageIndex >= 0 ? { message_index: messageIndex } : {}),
       create_branch: true,
       activate: true,
     });
-  }, [cell.messageId]);
+  }, [cell.messageId, conversationId, workspaceRoot]);
 
   return (
     <div
       className="assistant-cell-wrap"
+      data-message-id={cell.messageId || cell.id}
       data-streaming={cell.isStreaming ? "true" : "false"}
       data-source={replySource}
     >
@@ -345,7 +363,7 @@ export function AssistantMarkdownCell({
               <Copy size={14} />
             </button>
           )}
-          {cell.messageId && (
+          {cell.messageId && canEditConversation && (
             <>
             <button
               type="button"
@@ -461,7 +479,7 @@ function GeneratedArtifactCard({
   const sessionId = isConnected ? String(getWebSocket()?.sessionId || "").trim() : "";
   const persistedImageUrl = useMemo(() => {
     if (kind !== "image" || !isDisplayableImageMediaType(mediaType)) return "";
-    return withPreviewCacheBust(artifactImageResourceUrl({
+    return withPreviewCacheBust(artifactResourceUrl({
       artifactId: artifact.artifactId,
       conversationId,
       sessionId,
@@ -475,7 +493,7 @@ function GeneratedArtifactCard({
   const imageFailed = Boolean(imageUrl && failedImageUrl === imageUrl);
 
   const freshImageUrl = () => {
-    return artifactImageResourceUrl({
+    return artifactResourceUrl({
       artifactId: artifact.artifactId,
       conversationId,
       sessionId,
@@ -714,7 +732,7 @@ function GeneratedFileLink({
       { label: "在资源管理器中显示", onClick: () => { void revealPath(attachment.path); } },
     ] : []),
     { label: "", separator: true },
-    { label: "复制路径", onClick: () => { void navigator.clipboard.writeText(attachment.path); } },
+    { label: "复制路径", onClick: () => { void copyText(attachment.path, "路径"); } },
   ]);
 
   return (

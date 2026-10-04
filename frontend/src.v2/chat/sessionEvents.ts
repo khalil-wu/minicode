@@ -20,7 +20,13 @@ import type {
 import { isReplayedEvent } from "../protocol/events";
 import type { StreamBuffer } from "../lib/stream-buffer";
 import { pushToast } from "../overlays/ToastContainer";
-import { hydrateMessages, type BackendTranscriptMessage } from "./transcriptHydration";
+import {
+  hydrateMessages,
+  normalizeMessageContextRefs,
+  normalizeQuotedMessage,
+  normalizeTranscriptAttachmentRefs,
+  type BackendTranscriptMessage,
+} from "./transcriptHydration";
 import { clearStreamingState } from "./streamingState";
 import type {
   AgentProgressEntry,
@@ -36,6 +42,7 @@ import type {
 import { toConversationGoal } from "../stores/types";
 import { fromBackendPermissionMode } from "../protocol/permissions";
 import { mergeCapabilities } from "../protocol/capabilities";
+import { workspaceRootsEqual } from "../lib/workspace-path";
 import {
   conversationResetPayload,
   isInFlightProjection,
@@ -57,6 +64,7 @@ import {
 import { isDesktop, ptyKillConversation } from "../desktop/runtime";
 import { releasePreviewScope } from "./previewRequestScope";
 import { providerTracePayloadFromDone } from "./providerTrace";
+import { incomingConversationMetaIsStale, isVisibleConversationMeta, normalizedConversationRevision } from "./activeConversation";
 
 type ConversationSummary = ConversationSummaryPayload;
 type ConversationPayload = ConversationRecordPayload;
@@ -166,6 +174,7 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
           ...message,
           queueState: "queued" as const,
           queuePosition: event.position,
+          queuePaused: event.paused ?? false,
           queueMessageId: event.message_id,
           ...(isAssistant ? { isStreaming: false, isThinkingStreaming: false } : {}),
         };
@@ -175,6 +184,7 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
           ...message,
           queueState: undefined,
           queuePosition: undefined,
+          queuePaused: undefined,
           ...(isUser && steeredCurrentTurn
             ? { steeredIntoMessageId: steerTargetMessageId }
             : {}),
@@ -381,6 +391,10 @@ const normalizeSubagentsFromSnapshot = (value: unknown): SubagentState[] => {
         id: String(subagent.id ?? subagent.subagent_id ?? "").trim(),
         role: String(subagent.role ?? "subagent"),
         status: SUBAGENT_STATUSES.has(status) ? status : "running",
+        cleanupPending: typeof (subagent.cleanupPending ?? subagent.cleanup_pending) === "boolean"
+          ? Boolean(subagent.cleanupPending ?? subagent.cleanup_pending)
+          : undefined,
+        cleanupReason: maybeString((subagent.cleanupReason ?? subagent.cleanup_reason) as string | null | undefined),
         agentPath: maybeString((subagent.agentPath ?? subagent.agent_path) as string | null | undefined),
         mailboxEpoch: typeof (subagent.mailboxEpoch ?? subagent.mailbox_epoch) === "number"
           ? Number(subagent.mailboxEpoch ?? subagent.mailbox_epoch)
@@ -530,9 +544,6 @@ const hasStreamingAssistantForConversation = (conversationId: string): boolean =
   );
 };
 
-const isVisibleConversationMeta = (conversation: ConversationMeta | undefined | null): boolean =>
-  Boolean(conversation && conversation.conversationType !== "side_chat" && !conversation.archived);
-
 const visibleActiveConversationId = (
   activeConversationId: string | undefined,
   conversations: ConversationMeta[],
@@ -551,29 +562,6 @@ const fallbackVisibleConversationId = (
     : undefined;
   if (isVisibleConversationMeta(current)) return currentConversationId || undefined;
   return conversations.find(isVisibleConversationMeta)?.id;
-};
-
-const normalizedConversationRevision = (value: unknown): number | undefined => (
-  Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined
-);
-
-const incomingConversationMetaIsStale = (
-  incoming: Pick<ConversationMeta, "revision" | "updatedAt">,
-  existing: Pick<ConversationMeta, "revision" | "updatedAt">,
-): boolean => {
-  const incomingRevision = normalizedConversationRevision(incoming.revision);
-  const existingRevision = normalizedConversationRevision(existing.revision);
-  if (incomingRevision !== undefined && existingRevision !== undefined) {
-    return incomingRevision < existingRevision;
-  }
-  if (existingRevision !== undefined && incomingRevision === undefined) {
-    return true;
-  }
-  const incomingUpdatedAt = Date.parse(String(incoming.updatedAt || ""));
-  const existingUpdatedAt = Date.parse(String(existing.updatedAt || ""));
-  return Number.isFinite(incomingUpdatedAt)
-    && Number.isFinite(existingUpdatedAt)
-    && incomingUpdatedAt < existingUpdatedAt;
 };
 
 const conversationSnapshotIsStale = (conversation: ConversationSummary): boolean => {
@@ -617,35 +605,51 @@ const applyQueuedUserMessageSnapshot = (
       if (!conversationId || !messageId) continue;
       const userMessageId = String(entry.user_message_id || `user_${messageId}`).trim();
       const position = typeof entry.position === "number" ? entry.position : undefined;
-      const content = String(entry.content || "");
-      const current = conversationMessages[conversationId] ? [...conversationMessages[conversationId]] : [];
-      const userIndex = current.findIndex((message) => message.id === userMessageId || message.queueMessageId === messageId);
-      const assistantIndex = current.findIndex((message) => message.id === messageId);
+      const queuePaused = entry.paused ?? false;
+      const backendContent = String(entry.content ?? "");
+      const input = {
+        content: entry.display_content ?? backendContent,
+        ...(entry.display_content !== undefined ? { backendContent } : {}),
+        ...(entry.context_refs !== undefined ? { contextRefs: normalizeMessageContextRefs(entry.context_refs) } : {}),
+        ...(entry.quoted_message !== undefined ? { quotedMessage: normalizeQuotedMessage(entry.quoted_message) } : {}),
+        ...(entry.attachments !== undefined ? { attachmentRefs: normalizeTranscriptAttachmentRefs(entry.attachments) } : {}),
+      };
+      const current = conversationMessages[conversationId] ? [...conversationMessages[conversationId]]
+        : state.conversationId === conversationId ? [...state.messages] : [];
+      const userIndex = current.findIndex((message) => message.role === "user"
+        && (message.id === userMessageId || message.queueMessageId === messageId));
       const timestamp = Date.now();
       if (userIndex >= 0) {
         current[userIndex] = {
           ...current[userIndex],
+          ...input,
+          ...(entry.display_content === undefined ? { content: current[userIndex].content } : {}),
           queueState: "queued",
           queuePosition: position,
+          queuePaused,
           queueMessageId: messageId,
         };
       } else {
-        current.push({
+        const queuedAssistantIndex = current.findIndex((message) => message.id === messageId);
+        current.splice(queuedAssistantIndex >= 0 ? queuedAssistantIndex : current.length, 0, {
           id: userMessageId,
           role: "user",
-          content,
+          ...input,
           artifacts: [],
           timestamp,
           queueState: "queued",
           queuePosition: position,
+          queuePaused,
           queueMessageId: messageId,
         });
       }
+      const assistantIndex = current.findIndex((message) => message.id === messageId);
       if (assistantIndex >= 0) {
         current[assistantIndex] = {
           ...current[assistantIndex],
           queueState: "queued",
           queuePosition: position,
+          queuePaused,
           queueMessageId: messageId,
           isStreaming: false,
           isThinkingStreaming: false,
@@ -659,6 +663,7 @@ const applyQueuedUserMessageSnapshot = (
           timestamp,
           queueState: "queued",
           queuePosition: position,
+          queuePaused,
           queueMessageId: messageId,
           isStreaming: false,
         });
@@ -667,31 +672,6 @@ const applyQueuedUserMessageSnapshot = (
       if (state.conversationId === conversationId) activeMessages = current;
     }
     return { conversationMessages, messages: activeMessages };
-  });
-};
-
-const attachmentRefsFromRuntimeInput = (
-  attachments: Record<string, unknown>[] | undefined,
-): NonNullable<ChatMessage["attachmentRefs"]> => {
-  if (!Array.isArray(attachments)) return [];
-  return attachments.flatMap((attachment) => {
-    const name = String(attachment.file_name ?? attachment.name ?? "").trim();
-    const artifactId = String(attachment.artifact_id ?? attachment.artifactId ?? "").trim();
-    if (!name || !artifactId) return [];
-    const mediaType = String(attachment.media_type ?? attachment.mediaType ?? "application/octet-stream");
-    const rawKind = String(attachment.kind ?? (mediaType.startsWith("image/") ? "image" : "document"));
-    return [{
-      id: String(attachment.id ?? artifactId),
-      name,
-      kind: rawKind === "image" ? "image" as const : rawKind === "document" ? "document" as const : "file" as const,
-      mediaType,
-      sizeBytes: Number(attachment.size_bytes ?? attachment.sizeBytes ?? 0),
-      artifactId,
-      docId: String(attachment.doc_id ?? attachment.docId ?? ""),
-      inputSource: attachment.input_source === "pasted_text" || attachment.inputSource === "pasted_text"
-        ? "pasted_text" as const
-        : "upload" as const,
-    }];
   });
 };
 
@@ -721,20 +701,29 @@ const applyPendingTurnInputSnapshot = (
         message.role === "user"
         && (message.id === userMessageId || message.queueMessageId === messageId)
       ));
-      const attachmentRefs = attachmentRefsFromRuntimeInput(entry.attachments);
+      const attachmentRefs = normalizeTranscriptAttachmentRefs(entry.attachments);
+      const backendContent = String(entry.content ?? "");
+      const input = {
+        content: entry.display_content ?? backendContent,
+        ...(entry.display_content !== undefined ? { backendContent } : {}),
+        ...(entry.context_refs !== undefined ? { contextRefs: normalizeMessageContextRefs(entry.context_refs) } : {}),
+        ...(entry.quoted_message !== undefined ? { quotedMessage: normalizeQuotedMessage(entry.quoted_message) } : {}),
+      };
       const restoredUser: ChatMessage = existingUserIndex >= 0
         ? {
             ...withoutPlaceholder[existingUserIndex]!,
+            ...input,
+            ...(entry.display_content === undefined ? { content: withoutPlaceholder[existingUserIndex]!.content } : {}),
             queueState: undefined,
             queuePosition: undefined,
             queueMessageId: messageId,
             steeredIntoMessageId: targetMessageId || undefined,
-            ...(attachmentRefs.length ? { attachmentRefs } : {}),
+            ...(entry.attachments !== undefined ? { attachmentRefs } : {}),
           }
         : {
             id: userMessageId,
             role: "user",
-            content: String(entry.content || ""),
+            ...input,
             attachmentRefs,
             artifacts: [],
             timestamp: Number(entry.queued_at_ms || Date.now()),
@@ -878,6 +867,7 @@ const hydrateActiveConversation = (
 ) => {
   const conversationId = maybeString(activeConversationId) || conversation?.id || "";
   if (!conversationId) return;
+  const previousWorkspace = useAppStore.getState().workingDirectory;
   const staleSnapshot = Boolean(
     conversation
     && !options.forceAuthoritative
@@ -890,6 +880,9 @@ const hydrateActiveConversation = (
     });
   }
   useAppStore.getState().applyConversationSwitched({ conversationId });
+  if (!workspaceRootsEqual(previousWorkspace, useAppStore.getState().workingDirectory)) {
+    useAppStore.setState({ availableSkills: [], slashCommands: [], runtimeCapabilities: null, scheduledTasks: [], scheduledTaskRuns: [] });
+  }
   if (conversation && !staleSnapshot) {
     useAppStore.getState().setActiveGoal(
       toConversationGoal(conversation.goal),
@@ -1090,12 +1083,13 @@ const applyRuntimeSessionSnapshot = (session: RuntimeSessionSnapshot | undefined
   if (session.permission_mode) {
     useAppStore.setState({ permissionMode: fromBackendPermissionMode(session.permission_mode) });
   }
-  if (session.capabilities) {
+  if (session.capabilities && session.active_conversation_id === state.conversationId
+    && workspaceRootsEqual(session.workspace_root ?? "", useAppStore.getState().workingDirectory)) {
     const current = useAppStore.getState().runtimeCapabilities;
-    const capabilities = mergeCapabilities(current ?? undefined, session.capabilities) ?? null;
+    const capabilities = mergeCapabilities(session.capabilities, current ?? undefined) ?? null;
     useAppStore.getState().setRuntimeCapabilities(capabilities);
     if (Array.isArray(capabilities?.skills)) {
-      useAppStore.getState().setAvailableSkills(normalizeSkillList(capabilities.skills));
+      useAppStore.getState().setAvailableSkills(normalizeSkillList(capabilities.skills, session.workspace_root ?? ""));
     }
     if (Array.isArray(capabilities?.composer_commands)) {
       useAppStore.getState().setSlashCommands(normalizeSlashCommands(capabilities.composer_commands));
@@ -1115,6 +1109,12 @@ export const handleSessionEvent = (
     }
     case "llm.model.updated": {
       const ev = e as LlmModelUpdatedEvent;
+      if (ev.conversation_id && s.sideChats[ev.conversation_id]) {
+        const id = ev.conversation_id;
+        const model = stringValue(ev.current_model) || stringValue(ev.model);
+        useAppStore.setState((state) => ({ sideChats: { ...state.sideChats, [id]: { ...state.sideChats[id], model } } }));
+        return true;
+      }
       if (ev.conversation_id !== undefined && (ev.conversation_id || null) !== (s.conversationId || null)) return true;
       const model = stringValue(ev.current_model) || stringValue(ev.model);
       if (model) s.setCurrentModel(model);
@@ -1570,6 +1570,17 @@ export const handleSessionEvent = (
         // Extension/project commands are conversation-scoped. A switch must
         // replace the palette even when the transport itself did not reconnect.
         sendClientCommand({ type: "commands.list" });
+        const active = useAppStore.getState();
+        if (active.conversationId) {
+          if (!Array.isArray(ev.session?.capabilities?.skills)) {
+            sendClientCommand({ type: "skills.list", conversation_id: active.conversationId,
+              workspace_root: active.workingDirectory }, { silent: true });
+          }
+          // A fast MCP startup can finish before the switch reaches the UI.
+          // Read its catalog again after the new owner is committed locally.
+          sendClientCommand({ type: "mcp.list", conversation_id: active.conversationId,
+            workspace_root: active.workingDirectory || undefined }, { silent: true });
+        }
       }
       return true;
     }

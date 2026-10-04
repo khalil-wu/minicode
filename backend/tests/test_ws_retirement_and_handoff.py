@@ -84,9 +84,10 @@ async def test_retirement_preserves_disk_pending_work_and_releases_owner_lease(m
     inflight = manager.dequeue_user_message(other)
     assert inflight is not None
     queue = manager.durable_queue
+    client_queue = manager.durable_client_commands
     client = UserCommand('session.sync', {'client_command_id': 'client-pending'})
-    assert queue.persist_client_command(client)
-    assert queue.claim_client_command('client-pending') is not None
+    assert client_queue.persist_client_command(client)
+    assert client_queue.claim_client_command('client-pending') is not None
     before = json.loads(queue.path.read_text(encoding='utf-8'))
     assert before['turn_inputs'][cid][0]['data']['content'] == 'steer'
     assert before['inflight'][other]['data']['content'] == 'inflight'
@@ -95,13 +96,14 @@ async def test_retirement_preserves_disk_pending_work_and_releases_owner_lease(m
     # crash. It must only recover it after real retirement releases the lease.
     fresh = make_session()
     assert fresh.run_manager.dequeue_user_message(other) is None
-    assert fresh.run_manager.durable_queue.claim_client_command('client-pending') is None
+    assert fresh.run_manager.durable_client_commands.claim_client_command('client-pending') is None
     await old.session_lifecycle.shutdown(reason=reason)
     persisted = json.loads(queue.path.read_text(encoding='utf-8'))
     assert persisted['queues'][cid][0]['data']['content'] == 'follow-up'
     assert persisted['turn_inputs'][cid][0]['data']['content'] == 'steer'
     assert persisted['inflight'][other]['data']['content'] == 'inflight'
-    assert persisted['client_inflight']['client-pending']['data']['client_command_id'] == 'client-pending'
+    client_state = json.loads(client_queue.path.read_text(encoding='utf-8'))
+    assert client_state['client_inflight']['client-pending']['data']['client_command_id'] == 'client-pending'
     # A retired scheduler is never allowed to read/claim through a closed lease.
     old.schedule_next_queued_user_message(cid)
     assert not old.command_dispatcher.command_tasks
@@ -113,12 +115,12 @@ async def test_retirement_preserves_disk_pending_work_and_releases_owner_lease(m
             recovered[owner].append(command.data['content'])
             fresh.run_manager.finish_user_message_dispatch(owner, command, succeeded=True)
     assert recovered == {cid: ['steer', 'follow-up'], other: ['inflight', 'tail']}
-    assert fresh.run_manager.durable_queue.claim_client_command('client-pending') == client
-    assert fresh.run_manager.durable_queue.complete_client_command('client-pending')
+    assert fresh.run_manager.durable_client_commands.claim_client_command('client-pending') == client
+    assert fresh.run_manager.durable_client_commands.complete_client_command('client-pending')
     verifier = make_session()
     assert verifier.run_manager.dequeue_user_message(cid) is None
     assert verifier.run_manager.dequeue_user_message(other) is None
-    assert verifier.run_manager.durable_queue.pending_client_commands() == []
+    assert verifier.run_manager.durable_client_commands.pending_client_commands() == []
 
 
 @pytest.mark.asyncio

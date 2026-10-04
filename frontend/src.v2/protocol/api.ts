@@ -216,12 +216,14 @@ export const skillAssetResourceUrlWithToken = (
   skillPath: string,
   variant: "small" | "large" = "small",
   base = apiBase(),
+  workspaceRoot?: string,
 ): string => {
   if (!skillPath.trim()) return "";
   const url = safeURL(`${base}/api/skills/asset`, currentHttpOrigin());
   if (!url) return "";
   url.searchParams.set("skill_path", skillPath);
   url.searchParams.set("variant", variant);
+  if (workspaceRoot !== undefined) url.searchParams.set("workspace_root", workspaceRoot);
   const assetToken = skillAssetToken(skillPath, variant);
   if (assetToken) url.searchParams.set("asset_token", assetToken);
   return url.toString();
@@ -502,6 +504,7 @@ export type AttachmentUploadPhase = "uploading" | "processing";
 
 export interface UploadAttachmentOptions {
   signal?: AbortSignal;
+  workspaceRoot?: string;
   onProgress?: (percent: number, phase: AttachmentUploadPhase) => void;
 }
 
@@ -599,6 +602,7 @@ export const uploadAttachment = async (
   if (!url) throw new ApiError(400, "Invalid attachment upload URL");
   url.searchParams.set("session_id", sessionId);
   if (conversationId.trim()) url.searchParams.set("conversation_id", conversationId.trim());
+  if (options.workspaceRoot?.trim()) url.searchParams.set("workspace_root", options.workspaceRoot.trim());
 
   if (typeof XMLHttpRequest !== "undefined") {
     return uploadAttachmentWithXhr(url.toString(), form, options);

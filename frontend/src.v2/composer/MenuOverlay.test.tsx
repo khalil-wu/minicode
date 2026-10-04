@@ -57,6 +57,38 @@ describe("MenuOverlay mentions", () => {
     vi.unstubAllGlobals();
   });
 
+  it.each(["C:/foreign-owner", ""])("requests plugin enablement for its explicit owner root '%s'", async (root) => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ plugins: [] })));
+    vi.stubGlobal("fetch", fetchMock);
+    fsListTree.mockResolvedValue([]); listWorkspaceTree.mockResolvedValue({ children: [] });
+    useAppStore.setState({ workingDirectory: "C:/global-root" });
+    render(<MenuOverlay open kind="mention" filter="@" workspaceRoot={root} onSelect={vi.fn()} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    const query = new URL(String(fetchMock.mock.calls[0][0]), window.location.origin).searchParams;
+    expect(query.has("workspace_root")).toBe(true);
+    expect(query.get("workspace_root")).toBe(root);
+  });
+
+  it.each(["tree", "search"])("does not cache a %s response that arrives after the picker unmounts", async (mode) => {
+    vi.useFakeTimers();
+    let complete!: (items: unknown[]) => void;
+    const source = mode === "tree" ? fsListTree : fsSearchFiles;
+    source.mockReturnValueOnce(new Promise((resolve) => { complete = resolve; }));
+    source.mockResolvedValue([{ name: "fresh.ts", path: "fresh.ts", kind: "file", isDirectory: false }]);
+    useAppStore.setState({ workingDirectory: "C:/unmount-owner" });
+    const filter = mode === "tree" ? "@" : "@fresh";
+    const first = render(<MenuOverlay open kind="mention" filter={filter} onSelect={vi.fn()} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+    expect(source).toHaveBeenCalledTimes(1);
+    first.unmount();
+    await act(async () => complete([{ name: "late.ts", path: "late.ts", kind: "file", isDirectory: false }]));
+    render(<MenuOverlay open kind="mention" filter={filter} onSelect={vi.fn()} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+    expect(source).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("option", { name: /fresh\.ts/ })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /late\.ts/ })).toBeNull();
+  });
+
   it("lets IME confirm text and leaves another dialog's Enter key alone", () => {
     const select = vi.fn();
     useAppStore.setState({ slashCommands: [{ name: "help", command: "help", label: "/help", type: "local", description: "Help" }] });
@@ -73,7 +105,7 @@ describe("MenuOverlay mentions", () => {
     fsListTree.mockResolvedValue([{ name: "app.ts", path: "app.ts", isDirectory: false }]);
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ detail: "Plugin service unavailable" }), { status: 503 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ plugins: [{ name: "helper", enabled: true }] })));
+      .mockResolvedValueOnce(new Response(JSON.stringify({ plugins: [{ id: "helper@local", name: "helper", marketplace: "local", enabled: true }] })));
     vi.stubGlobal("fetch", fetchMock);
     const select = vi.fn();
     render(<MenuOverlay open kind="mention" filter="@" onSelect={select} />);
@@ -166,7 +198,7 @@ describe("MenuOverlay mentions", () => {
   });
 
   it("keeps a file search error visible beside matching plugin suggestions", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ plugins: [{ name: "helper", description: "Helper plugin" }] }))));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ plugins: [{ id: "helper@local", name: "helper", marketplace: "local", description: "Helper plugin", enabled: true }] }))));
     fsListTree.mockRejectedValueOnce(new Error("Workspace access denied"));
     useAppStore.setState({ workingDirectory: "C:\\project-a" });
     render(<MenuOverlay open kind="mention" filter="@" onSelect={() => {}} />);

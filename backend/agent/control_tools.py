@@ -49,7 +49,13 @@ class ControlToolRouter:
 
     async def run(self, tc: ToolCallEvent) -> AsyncIterator[AgentEvent | RoutedToolResult]:
         """Own the elicitation gate, question, wait, and result in that order."""
-        if tc.name != "ask_user" or self.approval_handler is None:
+        if tc.name != "ask_user":
+            return
+        if self.approval_handler is None and self.await_response is None:
+            yield RoutedToolResult(result=ToolResult(
+                content="The host cannot receive user input. The question was not shown; do not assume an answer.",
+                is_error=True, status="blocked",
+            ))
             return
         if self.hook_manager is not None:
             context = self.tool_context
@@ -93,9 +99,10 @@ class ControlToolRouter:
             answer_data = await self.await_response(tc)
         else:
             answer_data = await self.approval_handler(tc.id)
-        answer = str(
-            answer_data.get("answer", answer_data.get("guidance", "")) or ""
-        ).strip()
+        action = str(answer_data.get("action") or "").strip().lower()
+        answer = "" if action in {"reject", "cancel", "deny", "decline"} else str(answer_data.get("answer") or "").strip()
+        if not answer and action in {"approve", "accept"}:
+            answer = str(answer_data.get("guidance") or "").strip()
         hook_mgr = self.hook_manager
         if hook_mgr:
             try:
@@ -113,7 +120,7 @@ class ControlToolRouter:
             # as a successful reply let the model invent the decision it had just
             # asked about and act on it. cc treats an unanswered prompt as a
             # refusal, so say so explicitly instead.
-            dismissed = str(answer_data.get("action") or "").strip().lower() == "reject"
+            dismissed = action == "reject" and not answer_data.get("guidance")
             return RoutedToolResult(
                 result=ToolResult(
                     content=(
@@ -136,9 +143,9 @@ def _sanitize_ask_user_options(raw: Any) -> list[str]:
     options: list[str] = []
     seen: set[str] = set()
     for item in raw[:4]:
-        text = str(item or "").strip()
+        text = str(item or "").strip()[:80]
         if not text or text in seen:
             continue
         seen.add(text)
-        options.append(text[:80])
+        options.append(text)
     return options

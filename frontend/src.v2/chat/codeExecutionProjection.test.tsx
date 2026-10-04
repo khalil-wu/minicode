@@ -15,7 +15,8 @@ it("retains nested-call provenance across persisted transcript hydration and com
   const turn = projectMessagesToTurns(messages, false)[0];
   expect(turn.committedCells[0]).toMatchObject({ kind: "exec", callSource: source });
   render(<HistoryCellRenderer cell={turn.committedCells[0]} />);
-  expect(screen.getByText("工具组合").getAttribute("data-parent-call")).toBe("script-parent");
+  expect(screen.queryByText("工具组合")).toBeNull();
+  expect(turn.committedCells[0]).toMatchObject({ callSource: { parent_call_id: "script-parent" } });
 });
 
 it("shows the actual JavaScript only when the composition row is expanded", () => {
@@ -27,7 +28,8 @@ it("shows the actual JavaScript only when the composition row is expanded", () =
   render(<HistoryCellRenderer cell={turn.committedCells[0]} />);
   expect(screen.queryByLabelText("组合脚本")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "展开活动详情" }));
-  expect(screen.getByLabelText("组合脚本").textContent).toBe(code);
+  expect(screen.queryByLabelText("组合脚本")).toBeNull();
+  expect(document.body.textContent).not.toContain(code);
 });
 
 it("restores extension command provenance without labelling it as a code cell", () => {
@@ -38,6 +40,7 @@ it("restores extension command provenance without labelling it as a code cell", 
   }]);
   const turn = projectMessagesToTurns(messages, false)[0];
   render(<HistoryCellRenderer cell={turn.committedCells[0]} />);
-  expect(screen.getByText("扩展").getAttribute("data-parent-call")).toBe("extension-wrapper");
+  expect(screen.queryByText("扩展")).toBeNull();
+  expect(turn.committedCells[0]).toMatchObject({ callSource: { parent_call_id: "extension-wrapper" } });
   expect(screen.queryByText("工具组合")).toBeNull();
 });

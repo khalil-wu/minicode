@@ -552,7 +552,7 @@ def test_run_command_wraps_powershell_cmdlets_on_windows(
 ) -> None:
     import base64
 
-    from backend.tools import command_tool
+    from backend.tools import command_support
     from backend.tools.command_support import _windows_powershell_shell_command
 
     wrapped = _windows_powershell_shell_command("Get-ChildItem -Name")
@@ -564,8 +564,8 @@ def test_run_command_wraps_powershell_cmdlets_on_windows(
     assert "[Console]::OutputEncoding" in decoded
     assert "Get-ChildItem -Name" in decoded
 
-    monkeypatch.setattr(command_tool.sys, "platform", "win32")
-    normalized = command_tool._host_shell_command(
+    monkeypatch.setattr(command_support.sys, "platform", "win32")
+    normalized = command_support._host_shell_command(
         'curl -s "https://arxiv.org/list/cs.CL/new" -o "C:\\Desktop\\MiniCode\\arxiv_new.html" -m 15'
     )
 
@@ -580,16 +580,16 @@ def test_run_command_wraps_powershell_cmdlets_on_windows(
 def test_windows_host_shell_uses_powershell_unless_shell_is_explicit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from backend.tools import command_tool
+    from backend.tools import command_support
 
-    monkeypatch.setattr(command_tool.sys, "platform", "win32")
-    monkeypatch.setattr(command_tool.shutil, "which", lambda name: None)
+    monkeypatch.setattr(command_support.sys, "platform", "win32")
+    monkeypatch.setattr(command_support.shutil, "which", lambda name: None)
 
-    assert command_tool._host_shell_command("python -m pytest").startswith(
+    assert command_support._host_shell_command("python -m pytest").startswith(
         "powershell.exe "
     )
-    assert command_tool._host_shell_command("cmd /c dir") == "cmd /c dir"
-    assert command_tool._host_shell_command("bash -lc 'pwd'") == "bash -lc 'pwd'"
+    assert command_support._host_shell_command("cmd /c dir") == "cmd /c dir"
+    assert command_support._host_shell_command("bash -lc 'pwd'") == "bash -lc 'pwd'"
 
 
 def test_windows_shell_command_normalizes_bare_curl_aliases() -> None:
@@ -622,16 +622,16 @@ def test_windows_shell_command_normalizes_bare_curl_aliases() -> None:
 
 
 def test_windows_command_failure_explains_posix_recovery(monkeypatch) -> None:
-    from backend.tools import command_tool
+    from backend.tools import command_support
 
-    monkeypatch.setattr(command_tool.sys, "platform", "win32")
+    monkeypatch.setattr(command_support.sys, "platform", "win32")
 
-    inline_env_hint = command_tool._windows_command_portability_hint(
+    inline_env_hint = command_support._windows_command_portability_hint(
         "PYTHONPATH=.. python -m pytest",
         "The term 'PYTHONPATH=..' is not recognized as the name of a cmdlet.",
         1,
     )
-    posix_hint = command_tool._windows_command_portability_hint(
+    posix_hint = command_support._windows_command_portability_hint(
         "head -n 20 src/_pytest/pathlib.py",
         "head : The term 'head' is not recognized as the name of a cmdlet.",
         1,
@@ -2343,17 +2343,20 @@ def test_workspace_file_watcher_reports_directory_move_destination(
         coroutine.close()
 
 
-def test_workspace_file_watcher_ignores_runtime_data_directory() -> None:
+def test_workspace_file_watcher_ignores_runtime_data_directory(tmp_path, monkeypatch) -> None:
+    from backend.workspace import file_watcher
     from backend.workspace.file_watcher import WorkspaceFileWatcher
 
-    workspace_root = Path.cwd()
+    workspace_root = tmp_path
+    runtime_data = workspace_root / "runtime-state"
+    monkeypatch.setattr(file_watcher, "DATA_ROOT", runtime_data)
     watcher = WorkspaceFileWatcher(
         workspace_root=workspace_root,
         on_change=lambda path, event_type: None,
     )
 
     assert watcher._should_ignore(
-        workspace_root / "data" / "conversations" / "session.meta.json"
+        runtime_data / "conversations" / "session.meta.json"
     )
     assert not watcher._should_ignore(workspace_root / "src" / "app.py")
 

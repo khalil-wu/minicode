@@ -176,7 +176,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
   color: var(--text-muted);
 }
 
-.agent-loop-failed-icon {
+.agent-loop-process-summary .agent-loop-failed-icon {
   color: var(--state-danger);
 }
 
@@ -194,7 +194,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 /* ── Timeline ────────────────────────────────────────────────────────── */
 
 .agent-loop-timeline {
-  gap: 10px;
+  gap: 8px;
   padding: 8px 0 0;
   border: 0;
   border-radius: 0;
@@ -335,15 +335,11 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 }
 
 .agent-loop-process-cell .activity-cell-name,
-.agent-loop-process-cell .exec-cell-title,
-.agent-loop-process-cell .exec-cell-command-preview,
-.agent-loop-process-cell .activity-cell-detail,
-.agent-loop-process-cell .activity-cell-detail-path,
-.agent-loop-process-cell .activity-cell-file-change-target {
-  font-family: var(--font-prose);
+.agent-loop-process-cell .exec-cell-title {
+  font-family: var(--font-ui);
   font-size: var(--text-sm);
   font-weight: var(--fw-regular);
-  line-height: var(--cjk-leading);
+  line-height: 1.5;
 }
 
 .agent-loop-process-cell .activity-cell-file-change-target,
@@ -381,12 +377,12 @@ html[data-theme="light"] .agent-loop-process-summary-status {
   .exec-cell-meta,
   .exec-cell-no-output
 ) {
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   line-height: 1.45;
 }
 
 .agent-loop-diff-area .diff-cell-title {
-  font-size: var(--text-md);
+  font-size: var(--text-sm);
 }
 
 .agent-loop-diff-area .diff-cell-file-path {
@@ -555,9 +551,9 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 
 .agent-loop-timeline-group-items {
   display: grid;
-  gap: 3px;
+  gap: 2px;
   margin: 4px 0 0;
-  padding-left: 0;
+  padding-left: 22px;
 }
 
 .agent-loop-timeline-group-work > .agent-loop-timeline-group-items {
@@ -575,11 +571,31 @@ html[data-theme="light"] .agent-loop-process-summary-status {
   color: inherit;
 }
 
-.agent-loop-process-cell .exec-cell-command-preview,
 .agent-loop-process-cell .exec-cell-title {
   color: var(--text-muted);
   font-family: var(--font-ui);
   font-weight: var(--fw-regular);
+}
+
+.agent-loop-process-cell .exec-cell-command-preview,
+.agent-loop-process-cell .activity-cell-detail,
+.agent-loop-process-cell .activity-cell-detail-path,
+.agent-loop-process-cell .activity-cell-file-change-target {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-regular);
+  line-height: 1.5;
+}
+
+.agent-loop-process-cell .activity-cell-detail {
+  max-width: none;
+}
+
+.agent-loop-process-cell .activity-cell-read-target:not(.activity-cell-detail-multi) {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-loop-process-cell .exec-cell-status-success {
@@ -598,12 +614,6 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 
 .agent-loop-open-work-group > .agent-loop-timeline-group {
   margin: 0;
-}
-
-@media (max-width: 820px) {
-  .agent-loop-timeline-group-items {
-    margin-left: 12px;
-  }
 }
 
 /* ── Responsive ──────────────────────────────────────────────────────── */

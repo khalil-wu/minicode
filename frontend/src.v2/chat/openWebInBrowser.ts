@@ -1,4 +1,5 @@
 import { useAppStore } from "../stores";
+import { parseHttpUrl } from "../lib/network-target";
 
 interface BrowserRequestBase {
   id: number;
@@ -8,6 +9,7 @@ interface BrowserRequestBase {
 
 type BrowserRequest = BrowserRequestBase & (
   | { kind: "open" }
+  | { kind: "resume"; targetId: string }
   | { kind: "refresh"; workspaceRoot: string }
 );
 
@@ -19,18 +21,12 @@ let requestSequence = 0;
 const pendingRequests = new Map<string, BrowserRequest>();
 let lastNavigate: { url: string; conversationId: string; at: number } | null = null;
 
-function parseBrowserUrl(value: string): URL | null {
-  try {
-    const parsed = new URL(value.trim());
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-    return parsed;
-  } catch {
-    return null;
-  }
+export function isPreviewableHttpUrl(value: string): boolean {
+  return parseHttpUrl(value) !== null;
 }
 
 export function openWebInBrowser(url: string): boolean {
-  const parsedUrl = parseBrowserUrl(url);
+  const parsedUrl = parseHttpUrl(url);
   if (!parsedUrl) return false;
   const normalizedUrl = parsedUrl.toString();
   const conversationId = String(useAppStore.getState().conversationId || "").trim();
@@ -55,7 +51,7 @@ export function openWebInBrowser(url: string): boolean {
 }
 
 export function refreshWebInBrowser(url: string, conversationId: string, workspaceRoot: string): boolean {
-  const parsedUrl = parseBrowserUrl(url);
+  const parsedUrl = parseHttpUrl(url);
   if (!parsedUrl) return false;
   const request: BrowserRequest = {
     kind: "refresh", id: ++requestSequence, url: parsedUrl.toString(), conversationId, workspaceRoot,
@@ -63,6 +59,14 @@ export function refreshWebInBrowser(url: string, conversationId: string, workspa
   pendingRequests.set(JSON.stringify([conversationId, workspaceRoot, parsedUrl.origin]), request);
   listeners.forEach((listener) => listener(request));
   return true;
+}
+
+export function returnToBrowserPage(target: { conversationId: string; targetId: string; url: string }): void {
+  if (target.conversationId !== useAppStore.getState().conversationId) return;
+  useAppStore.getState().setRightStackTab("browser");
+  const request: BrowserRequest = { ...target, kind: "resume", id: ++requestSequence };
+  pendingRequests.set("resume", request);
+  listeners.forEach((listener) => listener(request));
 }
 
 export function subscribeBrowserRequests(listener: BrowserRequestListener): () => void {

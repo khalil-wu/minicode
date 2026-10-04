@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.async_cleanup import to_thread_cancel_safe
+
 import asyncio
 from pathlib import Path
 
@@ -22,6 +24,7 @@ from .models import (
     WorkspaceFileUpdateRequest,
     WorkspacePathRenameRequest,
     WorkspacePathResponse,
+    WorkspaceProjectIndexResponse,
     WorkspaceTreeResponse,
     ProjectImportRequest,
     ProjectImportResponse,
@@ -98,6 +101,17 @@ def create_workspace_router() -> APIRouter:
             raise HTTPException(status_code=500, detail=f"Workspace search failed: {exc}") from exc
         return WorkspaceSearchResponse(**payload)
 
+    @router.get("/project-index", response_model=WorkspaceProjectIndexResponse)
+    async def workspace_project_index_api(
+        workspace_root: str = Query(..., min_length=1),
+        include_dependencies: bool = Query(True),
+    ) -> WorkspaceProjectIndexResponse:
+        service = _service(workspace_root)
+        try:
+            return await asyncio.to_thread(service.project_index, include_dependencies=include_dependencies)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Workspace project scan failed: {exc}") from exc
+
     @router.get("/file", response_model=WorkspaceFileResponse)
     async def workspace_read_file_api(
         path: str = Query(..., min_length=1),
@@ -130,7 +144,7 @@ def create_workspace_router() -> APIRouter:
         request: WorkspaceFileUpdateRequest,
         workspace_root: str = Query(..., min_length=1),
     ) -> WorkspaceFileResponse:
-        return await asyncio.to_thread(
+        return await to_thread_cancel_safe(
             _service(workspace_root).write_file,
             path=request.path,
             content=request.content,
@@ -141,7 +155,7 @@ def create_workspace_router() -> APIRouter:
         request: WorkspaceFileCompareWriteRequest,
         workspace_root: str = Query(..., min_length=1),
     ) -> WorkspaceFileResponse:
-        return await asyncio.to_thread(
+        return await to_thread_cancel_safe(
             _service(workspace_root).compare_and_write_file,
             path=request.path,
             expected_hash=request.expected_hash,
@@ -153,14 +167,14 @@ def create_workspace_router() -> APIRouter:
         request: WorkspaceDirectoryCreateRequest,
         workspace_root: str = Query(..., min_length=1),
     ) -> WorkspacePathResponse:
-        return await asyncio.to_thread(_service(workspace_root).create_directory, request.path)
+        return await to_thread_cancel_safe(_service(workspace_root).create_directory, request.path)
 
     @router.post("/rename", response_model=WorkspacePathResponse)
     async def workspace_rename_path_api(
         request: WorkspacePathRenameRequest,
         workspace_root: str = Query(..., min_length=1),
     ) -> WorkspacePathResponse:
-        return await asyncio.to_thread(
+        return await to_thread_cancel_safe(
             _service(workspace_root).rename_path,
             path=request.path,
             new_path=request.new_path,
@@ -172,7 +186,7 @@ def create_workspace_router() -> APIRouter:
         recursive: bool = Query(False),
         workspace_root: str = Query(..., min_length=1),
     ) -> WorkspaceDeleteResponse:
-        return await asyncio.to_thread(
+        return await to_thread_cancel_safe(
             _service(workspace_root).delete_path,
             path=path,
             recursive=recursive,
@@ -181,7 +195,10 @@ def create_workspace_router() -> APIRouter:
     @router.post("/import", response_model=ProjectImportResponse)
     async def import_project_api(request: ProjectImportRequest) -> ProjectImportResponse:
         """导入项目文件夹，构建上下文"""
-        return ProjectImportResponse(**(await import_project_payload(request.path)))
+        try:
+            return ProjectImportResponse(**(await import_project_payload(request.path)))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @router.post("/validate")
     async def validate_path_api(request: ProjectImportRequest) -> dict:
@@ -196,7 +213,7 @@ def create_workspace_router() -> APIRouter:
     @router.delete("/recent")
     async def remove_recent_project_api(path: str = Query(..., min_length=1)) -> dict:
         """Remove a project from the recent list without touching files on disk."""
-        return await asyncio.to_thread(remove_recent_project_payload, path)
+        return await to_thread_cancel_safe(remove_recent_project_payload, path)
 
     @router.get("/git/status")
     async def git_status_api(
@@ -248,7 +265,7 @@ def create_workspace_router() -> APIRouter:
     ) -> WorkspaceGitWorktreeRemoveResponse:
         """Remove a MiniCode isolated worktree."""
         return WorkspaceGitWorktreeRemoveResponse(
-            **(await asyncio.to_thread(
+            **(await to_thread_cancel_safe(
                 remove_workspace_git_worktree_payload,
                 root=_service(workspace_root).workspace_root_path(),
                 path=path,
@@ -277,7 +294,7 @@ def create_workspace_router() -> APIRouter:
     ) -> WorkspaceGitWorktreeRestoreResponse:
         """Restore a worktree snapshot to a detached worktree."""
         return WorkspaceGitWorktreeRestoreResponse(
-            **(await asyncio.to_thread(
+            **(await to_thread_cancel_safe(
                 restore_workspace_git_worktree_snapshot_payload,
                 root=_service(workspace_root).workspace_root_path(),
                 snapshot_id=request.snapshot_id,

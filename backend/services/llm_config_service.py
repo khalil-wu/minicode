@@ -16,7 +16,7 @@ from backend.config import (
 )
 from backend.hooks.runtime import run_config_change_hook
 from backend.hooks.runtime import raise_if_config_change_blocked
-from backend.llm.reasoning_effort import normalize_reasoning_effort, reasoning_effort_levels
+from backend.llm.reasoning_effort import normalize_reasoning_effort
 
 ConfigChangeHook = Callable[..., Awaitable[Any]]
 ProviderResolver = Callable[[], str]
@@ -107,9 +107,9 @@ def llm_model_updated_payload(
     configured_reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     requested_provider = str(provider or "").strip() or "openai"
-    extension_metadata = dict(provider_metadata or {})
+    runtime_metadata = provider_metadata if provider_metadata is not None else {}
     extension_defined = (
-        str(extension_metadata.get("models_source") or "").strip().lower()
+        str(runtime_metadata.get("models_source") or "").strip().lower()
         == "extension"
     )
     normalized_provider = (
@@ -118,14 +118,19 @@ def llm_model_updated_payload(
         else requested_provider.lower()
     )
     payload_section: dict[str, Any]
-    if not extension_defined and normalized_provider == "anthropic":
+    if provider_metadata is not None:
+        payload_section = runtime_metadata
+        provider_id = str(
+            payload_section.get("provider_id") or normalized_provider
+        ).strip()
+    elif normalized_provider == "anthropic":
         payload_section = (
             get_anthropic_settings(settings_data)
             if settings_data is not None
             else get_anthropic_settings()
         )
         provider_id = "anthropic"
-    elif not extension_defined and normalized_provider == "custom":
+    elif normalized_provider == "custom":
         payload_section = (
             get_custom_settings(settings_data)
             if settings_data is not None
@@ -133,7 +138,7 @@ def llm_model_updated_payload(
         )
         wire_api = str(payload_section.get("wire_api") or "chat").strip()
         provider_id = "custom_anthropic" if wire_api == "anthropic" else "custom"
-    elif not extension_defined and normalized_provider == "openai":
+    elif normalized_provider == "openai":
         payload_section = (
             get_openai_settings(settings_data)
             if settings_data is not None
@@ -141,7 +146,7 @@ def llm_model_updated_payload(
         )
         provider_id = "openai"
     else:
-        payload_section = extension_metadata
+        payload_section = runtime_metadata
         provider_id = str(
             payload_section.get("provider_id") or normalized_provider
         ).strip()
@@ -156,7 +161,7 @@ def llm_model_updated_payload(
     }.get(raw_wire_api, raw_wire_api)
     base_url = str(payload_section.get("base_url") or "").strip()
     resolved_models_source = str(models_source or payload_section.get("models_source") or "").strip()
-    if not extension_defined and normalized_provider in {
+    if provider_metadata is None and normalized_provider in {
         "openai",
         "anthropic",
         "custom",
@@ -165,89 +170,20 @@ def llm_model_updated_payload(
             payload_section,
             selected_model,
         )
-        reasoning_levels = list(
-            reasoning_effort_levels(
-                selected_model,
-                wire_api,
-                resolved_metadata["reasoning_effort_levels"],
-            )
-        )
-        context_window = int(resolved_metadata["context_window"])
-        context_window_source = str(resolved_metadata["context_window_source"])
-        context_window_verified = bool(resolved_metadata["context_window_verified"])
-        max_context_window = int(resolved_metadata["max_context_window"])
-        max_context_window_source = str(
-            resolved_metadata["max_context_window_source"]
-        )
-        max_context_window_verified = bool(
-            resolved_metadata["max_context_window_verified"]
-        )
-        max_output_tokens = int(resolved_metadata["max_output_tokens"])
-        max_output_tokens_source = str(
-            resolved_metadata["max_output_tokens_source"]
-        )
-        max_output_tokens_verified = bool(
-            resolved_metadata["max_output_tokens_verified"]
-        )
-        default_reasoning_effort = str(
-            resolved_metadata["default_reasoning_effort"]
-        )
-        default_reasoning_summary = str(
-            resolved_metadata["default_reasoning_summary"]
-        )
     else:
-        reasoning_levels = list(
-            reasoning_effort_levels(
-                selected_model,
-                wire_api,
-                payload_section.get("reasoning_effort_levels", []),
-            )
-        )
-        try:
-            context_window = max(
-                0,
-                int(payload_section.get("context_window") or 0),
-            )
-        except (TypeError, ValueError):
-            context_window = 0
-        context_window_source = str(
-            payload_section.get("context_window_source") or ""
-        )
-        context_window_verified = bool(
-            payload_section.get("context_window_verified", False)
-        )
-        try:
-            max_context_window = max(
-                0,
-                int(payload_section.get("max_context_window") or context_window),
-            )
-        except (TypeError, ValueError):
-            max_context_window = context_window
-        max_context_window_source = str(
-            payload_section.get("max_context_window_source") or ""
-        )
-        max_context_window_verified = bool(
-            payload_section.get("max_context_window_verified", False)
-        )
-        try:
-            max_output_tokens = max(
-                0,
-                int(payload_section.get("max_output_tokens") or 0),
-            )
-        except (TypeError, ValueError):
-            max_output_tokens = 0
-        max_output_tokens_source = str(
-            payload_section.get("max_output_tokens_source") or ""
-        )
-        max_output_tokens_verified = bool(
-            payload_section.get("max_output_tokens_verified", False)
-        )
-        default_reasoning_effort = str(
-            payload_section.get("default_reasoning_effort") or ""
-        )
-        default_reasoning_summary = str(
-            payload_section.get("default_reasoning_summary") or ""
-        )
+        resolved_metadata = payload_section
+    reasoning_levels = list(resolved_metadata.get("reasoning_effort_levels", []))
+    context_window = int(resolved_metadata.get("context_window") or 0)
+    context_window_source = str(resolved_metadata.get("context_window_source") or "")
+    context_window_verified = bool(resolved_metadata.get("context_window_verified", False))
+    max_context_window = int(resolved_metadata.get("max_context_window") or context_window)
+    max_context_window_source = str(resolved_metadata.get("max_context_window_source") or "")
+    max_context_window_verified = bool(resolved_metadata.get("max_context_window_verified", False))
+    max_output_tokens = int(resolved_metadata.get("max_output_tokens") or 0)
+    max_output_tokens_source = str(resolved_metadata.get("max_output_tokens_source") or "")
+    max_output_tokens_verified = bool(resolved_metadata.get("max_output_tokens_verified", False))
+    default_reasoning_effort = str(resolved_metadata.get("default_reasoning_effort") or "")
+    default_reasoning_summary = str(resolved_metadata.get("default_reasoning_summary") or "")
     if configured_reasoning_effort is None:
         configured_reasoning_effort = str(
             payload_section.get("configured_reasoning_effort")
@@ -277,7 +213,8 @@ def llm_model_updated_payload(
         "current_model": selected_model,
         "available_models": available_models,
         "models_source": resolved_models_source,
-        # The legacy field now reports what is actually sent on the wire.
+        # Composer choices use the canonical session level; adapters apply
+        # the selected model's thinking-level map at the wire boundary.
         "reasoning_effort": effective_reasoning_effort,
         "configured_reasoning_effort": configured_reasoning_effort,
         "effective_reasoning_effort": effective_reasoning_effort,

@@ -102,6 +102,7 @@ export const TreeNode = memo(({
         data-selected={selected || undefined}
         aria-expanded={node.is_dir ? expanded : undefined}
         aria-selected={selected}
+        aria-level={depth + 1}
         data-tree-path={node.path}
         onClick={node.is_dir ? toggle : openFile}
         onKeyDown={handleKeyDown}

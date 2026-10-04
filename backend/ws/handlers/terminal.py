@@ -72,8 +72,8 @@ async def handle_terminal_create(session: "WebSocketSession", data: dict[str, An
         cwd_path = session.resolve_workspace_cwd(cwd)
         terminal_session = await session.terminal_manager.create_session(
             cwd=str(cwd_path),
-            on_output=lambda sid, chunk: session.session_lifecycle.on_terminal_output(
-                sid, chunk, conversation_id
+            on_output=lambda sid, chunk, start, end: session.session_lifecycle.on_terminal_output(
+                sid, chunk, start, end, conversation_id
             ),
             on_exit=lambda sid, code: session.session_lifecycle.on_terminal_exit(
                 sid, code, conversation_id
@@ -209,8 +209,8 @@ async def handle_terminal_restart(session: "WebSocketSession", data: dict[str, A
 
         replacement = await session.terminal_manager.create_session(
             cwd=cwd,
-            on_output=lambda sid, chunk: session.session_lifecycle.on_terminal_output(
-                sid, chunk, conversation_id
+            on_output=lambda sid, chunk, start, end: session.session_lifecycle.on_terminal_output(
+                sid, chunk, start, end, conversation_id
             ),
             on_exit=lambda sid, code: session.session_lifecycle.on_terminal_exit(
                 sid, code, conversation_id
@@ -375,6 +375,7 @@ async def handle_terminal_clear(session: "WebSocketSession", data: dict[str, Any
             "session_id": session_id,
             "conversation_id": scope.conversation_id,
             "workspace_root": scope.workspace_root,
+            "output_cursor": snapshot["output_end_cursor"],
         },
     )
     return True
@@ -392,6 +393,17 @@ def _optional_int(value: Any) -> int | None:
     return optional_int(value)
 
 
+def _mirror_cursor_span(data: dict[str, Any], output: str, *, snapshot: bool = False) -> tuple[int | None, int | None]:
+    start_field, end_field = ("output_start_cursor", "output_end_cursor") if snapshot else ("start_cursor", "end_cursor")
+    start, end = data.get(start_field), data.get(end_field)
+    if start is None and end is None:
+        return None, None
+    if (type(start) is not int or type(end) is not int or start < 0
+            or end - start != len(output.encode("utf-16-le", "surrogatepass")) // 2):
+        raise ValueError("Terminal output cursor span does not match its UTF-16 output")
+    return start, end
+
+
 async def handle_terminal_mirror_created(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     session_id = _mirror_session_id(data)
     if not session_id:
@@ -406,15 +418,24 @@ async def handle_terminal_mirror_created(session: "WebSocketSession", data: dict
         )
         return True
     try:
-        session.terminal_manager.upsert_external_session(
+        output = data.get("output")
+        if output is not None and not isinstance(output, str):
+            raise ValueError("Terminal snapshot output must be text")
+        _, end_cursor = _mirror_cursor_span(data, output or "", snapshot=True)
+        terminal = session.terminal_manager.upsert_external_session(
             session_id,
             cwd=str(data.get("cwd") or "").strip() or None,
             shell=str(data.get("shell") or "").strip() or None,
             pid=_optional_int(data.get("pid")),
             is_alive=data.get("is_alive") is not False,
+            exit_code=_optional_int(data.get("exit_code")),
+            exit_signal=data.get("exit_signal"),
+            exited_at=data.get("exited_at"),
             conversation_id=conversation_id,
         )
-    except RuntimeError as exc:
+        if output is not None and end_cursor is not None:
+            terminal.set_external_snapshot(output, end_cursor)
+    except (RuntimeError, ValueError) as exc:
         await emit_command_error(session, "terminal.mirror.created", exc)
         return True
     if conversation_id == _active_conversation_id(session):
@@ -433,8 +454,11 @@ async def handle_terminal_mirror_output(session: "WebSocketSession", data: dict[
     if _terminal_owned_by_conversation(session, session_id, conversation_id) is None:
         await emit_command_error(session, "terminal.mirror.output", f"Terminal session '{session_id}' not found")
         return True
-    chunk = mirror_output_chunk(data)
     try:
+        chunk = str(data.get("data") or data.get("output") or "")
+        start_cursor, end_cursor = _mirror_cursor_span(data, chunk)
+        if start_cursor is None:
+            chunk = mirror_output_chunk(data)
         session.terminal_manager.append_external_output(
             session_id,
             chunk,
@@ -442,8 +466,10 @@ async def handle_terminal_mirror_output(session: "WebSocketSession", data: dict[
             shell=str(data.get("shell") or "").strip() or None,
             pid=_optional_int(data.get("pid")),
             conversation_id=conversation_id,
+            start_cursor=start_cursor,
+            end_cursor=end_cursor,
         )
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         await emit_command_error(session, "terminal.mirror.output", exc)
         return True
     if conversation_id == _active_conversation_id(session):
@@ -463,6 +489,9 @@ async def handle_terminal_mirror_exit(session: "WebSocketSession", data: dict[st
     session.terminal_manager.mark_external_exit(
         session_id,
         conversation_id=conversation_id,
+        exit_code=_optional_int(data.get("exit_code")),
+        exit_signal=data.get("exit_signal"),
+        exited_at=data.get("exited_at"),
     )
     # The mirror record survives the exit (mark_external_exit only flips
     # is_alive), so the implicit terminal target must be released the same way

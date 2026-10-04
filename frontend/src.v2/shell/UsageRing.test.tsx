@@ -10,7 +10,7 @@ describe("UsageRing authoritative context projection", () => {
   it("shows a known empty context as zero percent", () => {
     render(<UsageRing buckets={[]} contextUsage={{ used: 0, limit: 128_000 }} totalBudgetPercent={0} />);
 
-    const meter = screen.getByRole("meter", { name: "Context usage 0%" });
+    const meter = screen.getByRole("meter", { name: "上下文 0%" });
     expect(meter.getAttribute("aria-valuenow")).toBe("0");
     expect(screen.getByText("0%")).toBeTruthy();
   });
@@ -24,7 +24,7 @@ describe("UsageRing authoritative context projection", () => {
       />,
     );
 
-    expect(screen.getByRole("meter", { name: "Context usage 0%" })).toBeTruthy();
+    expect(screen.getByRole("meter", { name: "上下文 0%" })).toBeTruthy();
     expect(screen.queryByText("75%")).toBeNull();
   });
 
@@ -37,15 +37,15 @@ describe("UsageRing authoritative context projection", () => {
       />,
     );
 
-    expect(screen.getByRole("meter", { name: "Context usage 0%" }).getAttribute("aria-valuenow")).toBe("0");
+    expect(screen.getByRole("meter", { name: "任务预算 0%" }).getAttribute("aria-valuenow")).toBe("0");
   });
 
   it("uses the unknown marker only when neither context nor budget is known", () => {
     render(<UsageRing buckets={[]} contextUsage={null} totalBudgetPercent={0} />);
 
-    const meter = screen.getByRole("meter", { name: "Context usage --" });
+    const meter = screen.getByRole("meter", { name: "用量暂无数据" });
     expect(meter.hasAttribute("aria-valuenow")).toBe(false);
-    expect(screen.getByText("--")).toBeTruthy();
-    expect(meter.parentElement?.getAttribute("title")).toContain("unknown");
+    expect(screen.getByText("暂无数据")).toBeTruthy();
+    expect(meter.parentElement?.getAttribute("title")).toContain("暂无上下文或任务预算数据");
   });
 });

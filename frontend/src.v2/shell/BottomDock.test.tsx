@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { BottomDock } from "./BottomDock";
@@ -27,7 +27,7 @@ vi.mock("../panels/GitPanel", () => ({
 }));
 
 vi.mock("../panels/TerminalPanel", () => ({
-  TerminalPanel: () => <div>终端面板</div>,
+  TerminalPanel: () => <div>终端面板<textarea aria-label="终端阅读状态" defaultValue="" /></div>,
 }));
 
 describe("BottomDock", () => {
@@ -36,6 +36,9 @@ describe("BottomDock", () => {
       dockCollapsed: false,
       dockHeight: 220,
       activeBottomTab: "budget",
+      settingsOpen: false,
+      skillsMarketplaceOpen: false,
+      rightPanelExpanded: false,
       totalBudgetPercent: 0.42,
       budgetBuckets: [{ name: "history", used: 42, limit: 100 }],
       lastUsage: { input: 80, ordinaryInput: 55, output: 10, cacheRead: 20, cacheWrite: 5, promptCacheTotal: 80, reasoning: 12 },
@@ -99,7 +102,41 @@ describe("BottomDock", () => {
     fireEvent.click(screen.getByRole("button", { name: "关闭底部工具" }));
 
     await waitFor(() => expect(useAppStore.getState().dockCollapsed).toBe(true));
-    expect(screen.queryByText("终端面板")).toBeNull();
+    expect(screen.getByText("终端面板").closest("[hidden]")).toBeTruthy();
+  });
+
+  it("preserves the first terminal surface across Git switches and closing the drawer", async () => {
+    useAppStore.setState({ dockCollapsed: false, activeBottomTab: "terminal" });
+    render(<BottomDock />);
+    const surface = await screen.findByRole("textbox", { name: "终端阅读状态" });
+    fireEvent.change(surface, { target: { value: "保留阅读位置" } });
+    fireEvent.click(screen.getByRole("tab", { name: "Git" }));
+    expect(surface.closest("[hidden]")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "终端" }));
+    expect(screen.getByRole("textbox", { name: "终端阅读状态" })).toBe(surface);
+    expect((surface as HTMLTextAreaElement).value).toBe("保留阅读位置");
+    fireEvent.click(screen.getByRole("button", { name: "关闭底部工具" }));
+    act(() => useAppStore.getState().openBottomTab("terminal"));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "终端阅读状态" })).toBe(surface));
+  });
+
+  it("shows an absent task budget without turning missing data into zero use", () => {
+    useAppStore.setState({ budgetBuckets: [], totalBudgetPercent: 0 });
+    render(<BottomDock />);
+    expect(screen.getByText("暂无预算数据")).toBeTruthy();
+    expect(screen.queryByText("任务预算：0.0%")).toBeNull();
+    expect(screen.getByText("模型用量")).toBeTruthy();
+  });
+
+  it("keeps an opened terminal mounted when the containing main workspace is hidden", async () => {
+    useAppStore.setState({ dockCollapsed: false, activeBottomTab: "terminal" });
+    const { rerender } = render(<BottomDock />);
+    const surface = await screen.findByRole("textbox", { name: "终端阅读状态" });
+    rerender(<BottomDock visible={false} />);
+    expect(surface.closest("[hidden]")).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "终端" })).toBeNull();
+    rerender(<BottomDock />);
+    expect(screen.getByRole("textbox", { name: "终端阅读状态" })).toBe(surface);
   });
 
   it("keeps runtime activity out of the bottom drawer", () => {

@@ -34,6 +34,8 @@ type TranscriptPresentationSource = "none" | "durable" | "push";
 
 type TranscriptPresentation = {
   ownerId: string | null;
+  conversationId: string | null;
+  workspaceRoot: string;
   messages: ChatMessage[];
   seq: number;
   source: TranscriptPresentationSource;
@@ -41,6 +43,8 @@ type TranscriptPresentation = {
 
 const emptyTranscriptPresentation = (): TranscriptPresentation => ({
   ownerId: null,
+  conversationId: null,
+  workspaceRoot: "",
   messages: [],
   seq: -1,
   source: "none",
@@ -212,6 +216,9 @@ const AgentDetail = ({
       </header>
 
       <div className="subagents-detail-body">
+        {view.canStop && view.effectiveStatus !== "running" && view.statusLabel === "清理未完成" && (
+          <div className="subagents-transcript-error" role="status">{view.summary}</div>
+        )}
         {view.resultError && (
           <div className="subagents-transcript-error" role="alert">
             <span>{view.resultError}</span>
@@ -259,13 +266,14 @@ export const SubagentsTab = () => {
   const selectedAgentId = useAppStore((state) => state.focusedSubagentId);
   const setSelectedAgentId = useAppStore((state) => state.setFocusedSubagentId);
   const [showAllCompleted, setShowAllCompleted] = useState(false);
-  const [pendingAction, setPendingAction] = useState<{ id: string; kind: "stop" | "result" } | null>(null);
+  const [pendingAction, setPendingAction] = useState<{ id: string; kind: "stop" | "result"; conversationId: string; workspaceRoot: string } | null>(null);
   const [transcriptPresentation, setTranscriptPresentation] = useState<TranscriptPresentation>(
     emptyTranscriptPresentation,
   );
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcriptError, setTranscriptError] = useState("");
   const transcriptRequestRef = useRef(0);
+  const actionRequestRef = useRef(0);
   const transcriptPresentationRef = useRef<TranscriptPresentation>(emptyTranscriptPresentation());
   const views = projectAgentViews(subagents);
   const selectedView = views.find((view) => view.id === selectedAgentId);
@@ -273,6 +281,8 @@ export const SubagentsTab = () => {
   const conversationId = useAppStore((state) => state.conversationId);
   const workingDirectory = useAppStore((state) => state.workingDirectory);
   const visibleTranscript = transcriptPresentation.ownerId === selectedAgentId
+    && transcriptPresentation.conversationId === conversationId
+    && transcriptPresentation.workspaceRoot === workingDirectory
     ? transcriptPresentation
     : emptyTranscriptPresentation();
   const commitTranscriptPresentation = useCallback((next: TranscriptPresentation) => {
@@ -296,6 +306,7 @@ export const SubagentsTab = () => {
       if (
         requestId !== transcriptRequestRef.current
         || useAppStore.getState().conversationId !== ownerConversationId
+        || useAppStore.getState().workingDirectory !== workingDirectory
         || useAppStore.getState().focusedSubagentId !== id
       ) return;
       const resultLevel = String(result.level || "").toLowerCase();
@@ -310,6 +321,8 @@ export const SubagentsTab = () => {
       const currentPresentation = transcriptPresentationRef.current;
       if (
         currentPresentation.ownerId === id
+        && currentPresentation.conversationId === ownerConversationId
+        && currentPresentation.workspaceRoot === workingDirectory
         && Number.isFinite(responseSeq)
         && (
           responseSeq < currentPresentation.seq
@@ -320,12 +333,17 @@ export const SubagentsTab = () => {
       const hydrated = hydrateMessages(rawMessages);
       commitTranscriptPresentation({
         ownerId: id,
+        conversationId: ownerConversationId,
+        workspaceRoot: workingDirectory,
         messages: hydrated,
         seq: nextSeq,
         source: "durable",
       });
     } catch (error) {
-      if (requestId !== transcriptRequestRef.current) return;
+      if (requestId !== transcriptRequestRef.current
+        || useAppStore.getState().conversationId !== ownerConversationId
+        || useAppStore.getState().workingDirectory !== workingDirectory
+        || useAppStore.getState().focusedSubagentId !== id) return;
       setTranscriptError(error instanceof Error ? error.message : "无法读取子智能体工作记录。");
     } finally {
       if (requestId === transcriptRequestRef.current) setTranscriptLoading(false);
@@ -334,6 +352,7 @@ export const SubagentsTab = () => {
 
   useEffect(() => {
     setPendingAction(null);
+    actionRequestRef.current += 1;
     transcriptRequestRef.current += 1;
     setTranscriptLoading(false);
     setTranscriptError("");
@@ -345,6 +364,8 @@ export const SubagentsTab = () => {
     const hasPushedSnapshot = current?.transcriptSeq != null;
     commitTranscriptPresentation({
       ownerId: selectedAgentId,
+      conversationId,
+      workspaceRoot: workingDirectory,
       messages: current?.transcriptMessages ?? [],
       seq: current?.transcriptSeq ?? -1,
       source: hasPushedSnapshot ? "push" : "none",
@@ -364,6 +385,8 @@ export const SubagentsTab = () => {
     const currentPresentation = transcriptPresentationRef.current;
     if (
       currentPresentation.ownerId === selectedAgentId
+      && currentPresentation.conversationId === conversationId
+      && currentPresentation.workspaceRoot === workingDirectory
       && selectedAgent.transcriptSeq <= currentPresentation.seq
     ) return;
     transcriptRequestRef.current += 1;
@@ -371,6 +394,8 @@ export const SubagentsTab = () => {
     setTranscriptError("");
     commitTranscriptPresentation({
       ownerId: selectedAgentId,
+      conversationId,
+      workspaceRoot: workingDirectory,
       messages: pushedMessages,
       seq: selectedAgent.transcriptSeq,
       source: "push",
@@ -379,6 +404,8 @@ export const SubagentsTab = () => {
     selectedAgent?.transcriptMessages,
     selectedAgent?.transcriptSeq,
     selectedAgentId,
+    conversationId,
+    workingDirectory,
     commitTranscriptPresentation,
   ]);
 
@@ -386,7 +413,9 @@ export const SubagentsTab = () => {
     if (!conversationId) return;
     if (pendingAction?.id === id) return;
     const ownerConversationId = conversationId;
-    setPendingAction({ id, kind: "stop" });
+    const requestId = ++actionRequestRef.current;
+    const action = { id, kind: "stop" as const, conversationId, workspaceRoot: workingDirectory };
+    setPendingAction(action);
     try {
       const result = await sendClientCommandAwaitResult({
         type: "subagent.cancel",
@@ -394,16 +423,19 @@ export const SubagentsTab = () => {
         conversation_id: conversationId,
         workspace_root: workingDirectory || undefined,
       }, "subagent.cancel");
-      if (useAppStore.getState().conversationId !== ownerConversationId) return;
+      if (requestId !== actionRequestRef.current || useAppStore.getState().conversationId !== ownerConversationId
+        || useAppStore.getState().workingDirectory !== workingDirectory) return;
       if (!commandResultSucceeded(result)) {
         pushToast(result.message || "停止子智能体失败。", "error", 4000);
       } else if (String(result.level || "").toLowerCase() === "warning" && result.message) {
         pushToast(result.message, "warning", 3500);
       }
     } catch (error) {
+      if (requestId !== actionRequestRef.current || useAppStore.getState().conversationId !== ownerConversationId
+        || useAppStore.getState().workingDirectory !== workingDirectory) return;
       pushToast(error instanceof Error ? error.message : "停止子智能体失败。", "error", 4000);
     } finally {
-      setPendingAction((current) => current?.id === id && current.kind === "stop" ? null : current);
+      setPendingAction((current) => current === action ? null : current);
     }
   };
 
@@ -411,7 +443,9 @@ export const SubagentsTab = () => {
     if (!conversationId) return;
     if (pendingAction?.id === id) return;
     const ownerConversationId = conversationId;
-    setPendingAction({ id, kind: "result" });
+    const requestId = ++actionRequestRef.current;
+    const action = { id, kind: "result" as const, conversationId, workspaceRoot: workingDirectory };
+    setPendingAction(action);
     try {
       const result = await sendClientCommandAwaitResult({
         type: "subagent.status",
@@ -420,16 +454,19 @@ export const SubagentsTab = () => {
         conversation_id: conversationId,
         workspace_root: workingDirectory || undefined,
       }, "subagent.status");
-      if (useAppStore.getState().conversationId !== ownerConversationId) return;
+      if (requestId !== actionRequestRef.current || useAppStore.getState().conversationId !== ownerConversationId
+        || useAppStore.getState().workingDirectory !== workingDirectory) return;
       if (!commandResultSucceeded(result)) {
         pushToast(result.message || "获取子智能体结果失败。", "error", 4000);
       } else if (String(result.level || "").toLowerCase() === "warning" && result.message) {
         pushToast(result.message, "warning", 3500);
       }
     } catch (error) {
+      if (requestId !== actionRequestRef.current || useAppStore.getState().conversationId !== ownerConversationId
+        || useAppStore.getState().workingDirectory !== workingDirectory) return;
       pushToast(error instanceof Error ? error.message : "获取子智能体结果失败。", "error", 4000);
     } finally {
-      setPendingAction((current) => current?.id === id && current.kind === "result" ? null : current);
+      setPendingAction((current) => current === action ? null : current);
     }
   };
 
@@ -447,7 +484,8 @@ export const SubagentsTab = () => {
         transcriptLoading={transcriptLoading}
         transcriptError={transcriptError}
         onRefreshTranscript={() => void loadTranscript(selectedView.id)}
-        pendingAction={pendingAction?.id === selectedView.id ? pendingAction.kind : null}
+        pendingAction={pendingAction?.id === selectedView.id && pendingAction.conversationId === conversationId
+          && pendingAction.workspaceRoot === workingDirectory ? pendingAction.kind : null}
       />
     );
   }

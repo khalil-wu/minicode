@@ -12,6 +12,10 @@ const UNTRUSTED_RESULT_NOTICE_RE = /^The following content was retrieved from an
 const TECHNICAL_ERROR_DETAIL_RE = /\b(?:provider(?:_error_(?:type|code|schema_type))?|request_id|trace_id|call_id)=[^\s,;)}\]]+/gi;
 const INTERNAL_CALL_ID_RE = /\bcall_[a-z0-9_-]{8,}\b/gi;
 const ELAPSED_ONLY_RE = /\b\d+(?:\.\d+)?s elapsed\b/gi;
+const HTTP_STATUS_RE = /\b(?:HTTP\s*(?:status\s*)?[:=]?\s*|status(?:_code)?\s*[=:]\s*|error code\s*[:=]\s*|LLM API (?:request failed|调用失败)\s*:\s*)(\d{3})\b|\b(\d{3})\s+(?:Unauthorized|Forbidden|Payment Required|Bad Request|Bad Gateway|Service Unavailable|Gateway Timeout|Too Many Requests|Proxy Authentication Required)\b/gi;
+const httpStatusCodes = (text: string): Set<string> => new Set(
+  [...text.matchAll(HTTP_STATUS_RE)].map((match) => match[1] || match[2]),
+);
 
 function stripTechnicalErrorDetails(text: string): string {
   return text
@@ -35,6 +39,9 @@ export function purifyToolErrorText(text: string | undefined): string {
   return stripped === text ? text : stripped.trim();
 }
 
+export const normalizeToolErrorMessage = (text: string): string =>
+  stripTechnicalErrorDetails(purifyToolErrorText(text));
+
 type NormalizeAgentErrorMessageOptions = {
   includeProviderDetails?: boolean;
 };
@@ -43,6 +50,7 @@ const RATE_LIMIT_MESSAGE = "\u6a21\u578b\u6682\u65f6\u7e41\u5fd9\u6216\u8fbe\u52
 const PROXY_MESSAGE = "\u8054\u7f51\u8bf7\u6c42\u5931\u8d25\uff1a\u4ee3\u7406\u8ba4\u8bc1\u5931\u8d25\uff08407 Proxy Authentication Required\uff09\u3002\u8bf7\u68c0\u67e5 HTTP_PROXY / HTTPS_PROXY \u6216\u4ee3\u7406\u8ba4\u8bc1\u4fe1\u606f\u3002";
 const AUTH_MESSAGE = "\u6a21\u578b\u9274\u6743\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5 API Key \u548c\u6a21\u578b\u8bbe\u7f6e\u3002";
 const BILLING_MESSAGE = "\u6a21\u578b\u670d\u52a1\u989d\u5ea6\u6216\u8ba1\u8d39\u4e0d\u53ef\u7528\uff0c\u8bf7\u68c0\u67e5\u8d26\u6237\u72b6\u6001\u3002";
+const BLOCKED_MESSAGE = "模型请求被服务商或网关拦截，请检查模型、Base URL、网关规则或请求内容。";
 const NETWORK_MESSAGE = "\u6a21\u578b\u670d\u52a1\u7f51\u7edc\u8bf7\u6c42\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
 const PROTOCOL_MESSAGE = "\u6240\u9009 API \u683c\u5f0f\u65e0\u6cd5\u88ab\u5f53\u524d\u670d\u52a1\u5546\u6216\u7f51\u5173\u5904\u7406\uff0c\u8bf7\u68c0\u67e5 API \u683c\u5f0f\u4e0e Base URL\u3002MiniCode \u672a\u5207\u6362\u5230\u5176\u4ed6\u534f\u8bae\u3002";
 const GENERIC_MODEL_MESSAGE = "\u6a21\u578b\u8c03\u7528\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u6216\u5207\u6362\u6a21\u578b\u3002";
@@ -58,11 +66,7 @@ function providerDetailSuffix(text: string, includeTechnicalDetails = false): st
     parts.push(`provider=${provider}`);
   }
 
-  const statuses = new Set<string>();
-  for (const match of text.matchAll(/\bstatus=(\d{3})\b|\bHTTP\s*(\d{3})\b|\b(40[0-9]|429|50[0-9])\b/gi)) {
-    const status = match[1] || match[2] || match[3];
-    if (status) statuses.add(status);
-  }
+  const statuses = httpStatusCodes(text);
   for (const status of statuses) parts.push(`HTTP ${status}`);
 
   const code = text.match(/\bprovider_error_code=([A-Za-z0-9._:-]{1,80})/i)?.[1];
@@ -86,20 +90,40 @@ export function normalizeAgentErrorMessage(raw: string, options: NormalizeAgentE
   const suffix = options.includeProviderDetails === false
     ? ""
     : providerDetailSuffix(text, options.includeProviderDetails === true);
+  // Backend model failures are already user-facing. Keep their semantic
+  // classification rather than reclassifying their diagnostic HTTP suffix.
+  if (/^(?:模型|联网请求失败|所选 API|请求超出了模型|图片或 PDF)/.test(text)) {
+    return options.includeProviderDetails === true ? text : stripTechnicalErrorDetails(text);
+  }
+  const declaredKind = text.match(/\bprovider_error_type=([a-z_]+)\b/i)?.[1]?.toLowerCase();
+  switch (declaredKind) {
+    case "auth": return AUTH_MESSAGE + suffix;
+    case "billing": return BILLING_MESSAGE + suffix;
+    case "proxy": return PROXY_MESSAGE + suffix;
+    case "busy":
+    case "rate_limit": return RATE_LIMIT_MESSAGE + suffix;
+    case "network": return NETWORK_MESSAGE + suffix;
+    case "blocked": return BLOCKED_MESSAGE + suffix;
+    case "content_filter": return CONTENT_FILTER_MESSAGE + suffix;
+    case "unsupported_capability": return UNSUPPORTED_IMAGE_MESSAGE + suffix;
+    case "protocol": return PROTOCOL_MESSAGE + suffix;
+    case "model": return modelConfigMessage(text, options);
+  }
+  const statuses = httpStatusCodes(text);
   if (/backend connection is not ready|connection is offline|operation failed:\s*connection is offline/i.test(text)) {
     return "后端连接尚未就绪，请稍后重试。";
   }
-  if (/concurrency limit exceeded|rate limit|too many requests|retry later|provider_error_type=rate_limit|429/i.test(text)) {
+  if (/insufficient[_ ]balance|insufficient[_ ]quota|quota exceeded|billing|payment required/i.test(text) || statuses.has("402")) {
+    return BILLING_MESSAGE + suffix;
+  }
+  if (/concurrency limit exceeded|rate limit|too many requests|retry later/i.test(text) || statuses.has("429") || statuses.has("529")) {
     return RATE_LIMIT_MESSAGE + suffix;
   }
-  if (/407|proxy authentication required|proxy auth|provider_error_type=proxy|代理鉴权失败|代理认证失败/i.test(text)) {
+  if (/proxy authentication required|proxy auth|代理鉴权失败|代理认证失败/i.test(text) || statuses.has("407")) {
     return PROXY_MESSAGE + suffix;
   }
-  if (/invalid api key|incorrect api key|unauthorized|authentication|provider_error_type=auth|401/i.test(text)) {
+  if (/invalid api key|incorrect api key|unauthorized|authentication/i.test(text) || statuses.has("401")) {
     return AUTH_MESSAGE + suffix;
-  }
-  if (/insufficient balance|insufficient quota|quota exceeded|billing|payment required|provider_error_type=billing|402/i.test(text)) {
-    return BILLING_MESSAGE + suffix;
   }
   if (/provider_error_type=unsupported_capability|no endpoints found that support image input|does not support image input|image inputs? (?:is|are) not supported|unsupported image input/i.test(text)) {
     return UNSUPPORTED_IMAGE_MESSAGE + suffix;
@@ -107,8 +131,8 @@ export function normalizeAgentErrorMessage(raw: string, options: NormalizeAgentE
   if (/content exists risk|content_filter|provider_error_type=content_filter/i.test(text)) {
     return CONTENT_FILTER_MESSAGE + suffix;
   }
-  if (/your request was blocked|request was blocked|blocked by|waf|cloudflare|provider_error_type=blocked|403/i.test(text)) {
-    return "模型请求被服务商或网关拦截，请检查模型、Base URL、网关规则或请求内容。" + suffix;
+  if (/your request was blocked|request was blocked|blocked by|waf|cloudflare|provider_error_type=blocked/i.test(text) || statuses.has("403")) {
+    return BLOCKED_MESSAGE + suffix;
   }
   if (/provider_error_type=model|model_not_found|invalid_model|model does not exist|model\s+[A-Za-z0-9._:/-]+\s+does not exist|model .*not found|invalid model|unknown model|no such model/i.test(text)) {
     return modelConfigMessage(text, options);
@@ -116,7 +140,8 @@ export function normalizeAgentErrorMessage(raw: string, options: NormalizeAgentE
   if (/provider_error_type=protocol|provider_error_code=convert_request_failed|convert_request_failed|tool_schema_invalid/i.test(text)) {
     return PROTOCOL_MESSAGE + suffix;
   }
-  if (/timeout|timed out|connection reset|connection refused|connection error|bad gateway|service unavailable|gateway timeout|provider_error_type=network|500|503|502|504/i.test(text)) {
+  if (/timeout|timed out|connection reset|connection refused|connection error|bad gateway|service unavailable|gateway timeout/i.test(text)
+    || [...statuses].some((status) => status === "408" || (Number(status) >= 500 && Number(status) < 600))) {
     return NETWORK_MESSAGE + suffix;
   }
   if (/MiniCode Anthropic Messages 请求失败|LLM API 调用失败|LLM API request failed|model request failed/i.test(text)) {

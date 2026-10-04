@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from backend.permissions.context import PermissionContext, ToolExecutionContext
 import asyncio
 import os
 from pathlib import Path
@@ -10,7 +13,6 @@ from backend.agent.skill_activation import activate_turn_skills, implicit_skill_
 from backend.agent.state import AgentState
 from backend.agent.tool_batch_execution import _finalize_tool_result
 from backend.llm.base import ToolCallEvent
-from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.tools.base import ToolResult
 from backend.tools.registry import ToolRegistry
 from backend.skills.loader import SkillFull, SkillMeta
@@ -49,6 +51,10 @@ class _Loader:
 
     def list_metas(self):
         return [skill.meta for skill in self.skills]
+
+    def get_invocation_meta(self, name: str):
+        matches = self.get_metas(name)
+        return matches[0] if len(matches) == 1 else None
 
 
 def _manager(tmp_path: Path) -> tuple[SkillManager, Path]:
@@ -270,6 +276,10 @@ def test_shell_read_and_skill_script_are_implicit_skill_use(tmp_path) -> None:
     assert run is not None and run.name == "frontend-dev"
 
 
+async def _collect_control_events(router, tool_call):
+    return [event async for event in router.run(tool_call)]
+
+
 def test_ask_user_emits_pre_wait_event_before_awaiting_answer() -> None:
     async def approval_handler(tool_call_id: str) -> dict[str, str]:
         assert tool_call_id == "ask-1"
@@ -279,6 +289,7 @@ def test_ask_user_emits_pre_wait_event_before_awaiting_answer() -> None:
         state=AgentState(user_message="Confirm location"),
         approval_handler=approval_handler,
         skill_manager=None,
+        tool_context=ToolExecutionContext(permission=PermissionContext(mode="confirm")),
     )
     tool_call = ToolCallEvent(
         id="ask-1",
@@ -286,8 +297,7 @@ def test_ask_user_emits_pre_wait_event_before_awaiting_answer() -> None:
         arguments={"question": "Use this location?"},
     )
 
-    pre_events = router.pre_wait_events(tool_call)
-    result = asyncio.run(router.execute(tool_call))
+    *pre_events, result = asyncio.run(_collect_control_events(router, tool_call))
 
     assert len(pre_events) == 1
     assert pre_events[0].type == "ask_user"
@@ -300,8 +310,9 @@ def test_ask_user_emits_pre_wait_event_before_awaiting_answer() -> None:
 def test_ask_user_pre_wait_event_sanitizes_options() -> None:
     router = ControlToolRouter(
         state=AgentState(user_message="Clean files"),
-        approval_handler=lambda _tool_call_id: None,
+        approval_handler=AsyncMock(return_value={"answer": "Keep"}),
         skill_manager=None,
+        tool_context=ToolExecutionContext(permission=PermissionContext(mode="confirm")),
     )
     tool_call = ToolCallEvent(
         id="ask-2",
@@ -312,7 +323,7 @@ def test_ask_user_pre_wait_event_sanitizes_options() -> None:
         },
     )
 
-    [event] = router.pre_wait_events(tool_call)
+    event, _result = asyncio.run(_collect_control_events(router, tool_call))
 
     assert event.type == "ask_user"
     assert event.data["options"] == ["Delete", "Keep"]
@@ -322,6 +333,9 @@ def test_ask_user_triggers_elicitation_result_hook() -> None:
     class HookRecorder:
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
+
+        async def run_elicitation(self, *_args, **_kwargs):
+            return SimpleNamespace(blocked=False)
 
         async def run_elicitation_result(self, **kwargs):
             self.calls.append(dict(kwargs))
@@ -336,6 +350,7 @@ def test_ask_user_triggers_elicitation_result_hook() -> None:
         state=AgentState(user_message="Confirm location"),
         approval_handler=approval_handler,
         skill_manager=None,
+        tool_context=ToolExecutionContext(permission=PermissionContext(mode="confirm")),
         hook_manager=hook_manager,
     )
     tool_call = ToolCallEvent(
@@ -344,7 +359,7 @@ def test_ask_user_triggers_elicitation_result_hook() -> None:
         arguments={"question": "Use this location?"},
     )
 
-    result = asyncio.run(router.execute(tool_call))
+    _event, result = asyncio.run(_collect_control_events(router, tool_call))
 
     assert result is not None
     assert hook_manager.calls == [{

@@ -1,4 +1,4 @@
-import { apiBase, authHeaders, fetchWithTimeout } from "./api";
+import { ApiError, apiBase, authHeaders, fetchWithTimeout } from "./api";
 import { safeJsonParse } from "../lib/safe-parse";
 
 export interface WorkspaceFileResponse {
@@ -10,6 +10,18 @@ export interface WorkspaceFileResponse {
   modified_at?: string;
   language_hint?: string;
   mime?: string;
+}
+
+export interface WorkspaceProjectIndexFile extends WorkspaceFileResponse {
+  kind: "source" | "config" | "package" | "declaration";
+  content_hash: string;
+}
+
+export interface WorkspaceProjectIndex {
+  workspace_root: string;
+  files: WorkspaceProjectIndexFile[];
+  complete: boolean;
+  issues: Array<{ path: string; status_code: number; message: string }>;
 }
 
 export interface WorkspaceFilePreviewResponse {
@@ -82,12 +94,18 @@ const ws = (
   return url.toString();
 };
 
-export const readWorkspaceFile = async (path: string, workspaceRoot: string): Promise<WorkspaceFileResponse> => {
-  const r = await fetchWithTimeout(ws("/file", workspaceRoot, { path }), { headers: authHeaders() });
+export const readWorkspaceFile = async (path: string, workspaceRoot: string, signal?: AbortSignal): Promise<WorkspaceFileResponse> => {
+  const r = await fetchWithTimeout(ws("/file", workspaceRoot, { path }), { headers: authHeaders(), signal });
   if (!r.ok) {
-    throw new Error(await errorMessageFromWorkspaceResponse(r));
+    throw new ApiError(r.status, await errorMessageFromWorkspaceResponse(r));
   }
   return (await r.json()) as WorkspaceFileResponse;
+};
+
+export const readWorkspaceProjectIndex = async (workspaceRoot: string, includeDependencies = true, signal?: AbortSignal): Promise<WorkspaceProjectIndex> => {
+  const response = await fetchWithTimeout(ws("/project-index", workspaceRoot, { include_dependencies: includeDependencies }), { headers: authHeaders(), signal });
+  if (!response.ok) throw new Error(await errorMessageFromWorkspaceResponse(response));
+  return await response.json() as WorkspaceProjectIndex;
 };
 
 export const fetchWorkspaceFilePreview = async (
@@ -312,6 +330,7 @@ export const searchWorkspaceFiles = async (
 };
 
 export interface WorkspaceGitWorktreeResponse {
+  is_git_repo?: boolean | null;
   current_path: string;
   current_branch?: string | null;
   is_worktree?: boolean;
@@ -344,6 +363,7 @@ export const fetchWorkspaceGitWorktree = async (workspaceRoot: string, path = ""
 };
 
 export interface WorkspaceGitStatusResponse {
+  is_git_repo?: boolean;
   branch: string;
   modified: string[];
   staged: string[];
@@ -356,12 +376,12 @@ export const fetchWorkspaceGitStatus = async (workspaceRoot: string, path = ""):
   return readWorkspaceGitResponse<WorkspaceGitStatusResponse>(r);
 };
 
-export const fetchWorkspaceGitDiff = async (workspaceRoot: string, file = "", path = ""): Promise<{ diff: string; error?: string }> => {
+export const fetchWorkspaceGitDiff = async (workspaceRoot: string, file = "", path = ""): Promise<{ is_git_repo?: boolean; diff: string; error?: string }> => {
   const r = await fetchWithTimeout(
     ws("/git/diff", workspaceRoot, { file, path }),
     { headers: authHeaders() },
   );
-  return readWorkspaceGitResponse<{ diff: string; error?: string }>(r);
+  return readWorkspaceGitResponse<{ is_git_repo?: boolean; diff: string; error?: string }>(r);
 };
 
 export const switchWorkspaceGitWorktree = async (

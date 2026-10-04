@@ -8,6 +8,7 @@ import { ChatErrorFallback } from "../components/ChatErrorFallback";
 import { ChatContextCard } from "./ChatContextCard";
 import { TurnChangeSummary } from "./TurnChangeSummary";
 import { useAppStore } from "../stores";
+import { TranscriptSearchContext } from "./TranscriptSearchContext";
 
 export const ChatPane = () => {
   const [showSearch, setShowSearch] = useState(false);
@@ -25,8 +26,8 @@ export const ChatPane = () => {
   }, []);
 
   useEffect(() => {
-    if (pendingConversationSwitchId) setShowSearch(false);
-  }, [pendingConversationSwitchId]);
+    setShowSearch(false);
+  }, [conversationId, pendingConversationSwitchId]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -105,7 +106,9 @@ export const ChatPane = () => {
           )}
           <div ref={messageContainerRef} className="chat-pane-message-transition" data-hydrating={isHydrating ? "true" : "false"}>
             <SafeBoundary fallback={<ChatErrorFallback />}>
+              <TranscriptSearchContext.Provider value={showSearch}>
               <MessageList searchActive={showSearch} />
+              </TranscriptSearchContext.Provider>
             </SafeBoundary>
           </div>
           <div className="chat-pane-composer-region">

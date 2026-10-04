@@ -9,14 +9,19 @@ import type {
 } from "../protocol/events";
 import { pushToast } from "../overlays/ToastContainer";
 import { normalizeWorkspaceRoot } from "../lib/workspace-path";
+import { parseUnifiedDiffLines, unifiedDiffFilePaths } from "../lib/unified-diff";
 
-const toGitChange = (file: GitDiffFilePayload) => ({
-  path: file.path,
-  patch: file.patch,
-  additions: file.additions,
-  deletions: file.deletions,
-  isBinary: file.is_binary,
-});
+const toGitChange = (file: GitDiffFilePayload) => {
+  const { oldPath, newPath } = unifiedDiffFilePaths(parseUnifiedDiffLines(file.patch));
+  return {
+    path: file.path,
+    ...(oldPath && newPath && oldPath !== newPath && oldPath !== "/dev/null" && newPath !== "/dev/null" ? { oldPath } : {}),
+    patch: file.patch,
+    additions: file.additions,
+    deletions: file.deletions,
+    isBinary: file.is_binary,
+  };
+};
 
 const eventTargetsCurrentWorkspace = (event: {
   conversation_id?: string;
@@ -52,11 +57,16 @@ export const handleDiffEvent = (e: ServerEvent): boolean => {
       );
       if (!conversationId || threadId !== conversationId || !turnId || !matchingTurn) return true;
       const current = s.turnDiffs[conversationId];
+      if (current && current.turnId !== turnId) {
+        const incomingOwnerIndex = messages.findIndex((message) => message.role === "assistant" && message.turnId === turnId);
+        const currentOwnerIndex = messages.findIndex((message) => message.role === "assistant" && message.turnId === current.turnId);
+        if (currentOwnerIndex > incomingOwnerIndex) return true;
+      }
       if (
         current?.turnId === turnId
         && current.revision != null
         && ev.revision != null
-        && ev.revision < current.revision
+        && ev.revision <= current.revision
       ) return true;
       s.setTurnDiff(conversationId, {
         threadId,
@@ -75,6 +85,8 @@ export const handleDiffEvent = (e: ServerEvent): boolean => {
       if (!eventTargetsCurrentWorkspace(ev)) return true;
       if (s.gitChanges.workingTreeRequestId && ev.request_id !== s.gitChanges.workingTreeRequestId) return true;
       s.setGitChanges({
+        isGitRepo: ev.is_git_repo,
+        ...(ev.is_git_repo === false ? { staged: [] } : {}),
         workingTree: (ev.files ?? []).map(toGitChange),
         untracked: ev.untracked ?? [],
         loading: false,
@@ -86,6 +98,8 @@ export const handleDiffEvent = (e: ServerEvent): boolean => {
       if (!eventTargetsCurrentWorkspace(ev)) return true;
       if (s.gitChanges.stagedRequestId && ev.request_id !== s.gitChanges.stagedRequestId) return true;
       s.setGitChanges({
+        isGitRepo: ev.is_git_repo,
+        ...(ev.is_git_repo === false ? { workingTree: [], untracked: [] } : {}),
         staged: (ev.files ?? []).map(toGitChange),
         loading: false,
       });

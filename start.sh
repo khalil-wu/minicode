@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+PYTHON_COMMAND="${MINICODE_PYTHON:-python3}"
 
 echo "=========================================="
 echo "MiniCode dev launcher"
@@ -14,7 +17,7 @@ fi
 find_port() {
   local start="$1"
   local end="$2"
-  python - "$start" "$end" <<'PY'
+  "$PYTHON_COMMAND" - "$start" "$end" <<'PY'
 import socket
 import sys
 
@@ -46,7 +49,7 @@ export VITE_API_BASE_URL="$MINICODE_API_BASE_URL"
 export VITE_WS_BASE_URL="$MINICODE_WS_BASE_URL"
 
 echo "1. Starting backend on $MINICODE_API_BASE_URL"
-python -m backend > backend.log 2>&1 &
+"$PYTHON_COMMAND" -m backend > backend.log 2>&1 &
 BACKEND_PID=$!
 echo "   Backend PID: $BACKEND_PID"
 echo "   Backend log: backend.log"
@@ -55,7 +58,7 @@ echo
 echo "2. Starting frontend on $MINICODE_FRONTEND_URL"
 (
   cd frontend
-  npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" > ../frontend.log 2>&1
+  exec npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort > ../frontend.log 2>&1
 ) &
 FRONTEND_PID=$!
 echo "   Frontend PID: $FRONTEND_PID"
@@ -63,7 +66,7 @@ echo "   Frontend log: frontend.log"
 
 echo
 echo "=========================================="
-echo "MiniCode started"
+echo "MiniCode launch requested; inspect the owned service logs for startup results"
 echo "=========================================="
 echo "Backend:  $MINICODE_API_BASE_URL"
 echo "Frontend: $MINICODE_FRONTEND_URL"

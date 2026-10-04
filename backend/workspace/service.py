@@ -21,6 +21,7 @@ from .models import (
     WorkspaceDeleteResponse,
     WorkspaceFileResponse,
     WorkspacePathResponse,
+    WorkspaceProjectIndexResponse,
     WorkspaceTreeEntry,
     WorkspaceTreeResponse,
 )
@@ -131,6 +132,24 @@ class WorkspaceService:
             raise HTTPException(status_code=400, detail="Path must point to a file.")
         self.ensure_not_sensitive_file(target)
 
+        return self._read_file_snapshot(target, self.workspace_root_path(), path)
+
+    def read_indexed_file(
+        self,
+        path: Path,
+        *,
+        root: Path,
+        application_roots: tuple[Path, ...],
+    ) -> WorkspaceFileResponse:
+        """Recheck a scanned file's real target using this index request's roots."""
+        target = path.resolve()
+        if target != root and root not in target.parents:
+            raise HTTPException(status_code=400, detail="Path is outside workspace root.")
+        self.ensure_not_sensitive_file(path, application_roots=application_roots, resolved_path=target)
+        self.ensure_not_sensitive_file(target, application_roots=application_roots, resolved_path=target)
+        return self._read_file_snapshot(target, root, path.relative_to(root).as_posix())
+
+    def _read_file_snapshot(self, target: Path, root: Path, requested_path: str) -> WorkspaceFileResponse:
         try:
             with target.open("rb") as handle:
                 stat = os.fstat(handle.fileno())
@@ -147,11 +166,11 @@ class WorkspaceService:
         except UnicodeDecodeError as exc:
             raise HTTPException(status_code=400, detail="Only UTF-8 text files are supported.") from exc
         except PermissionError as exc:
-            raise HTTPException(status_code=403, detail=f"Permission denied: {path}") from exc
+            raise HTTPException(status_code=403, detail=f"Permission denied: {requested_path}") from exc
 
         return WorkspaceFileResponse(
-            workspace_root=str(self.workspace_root_path()),
-            path=self.to_workspace_relative(target),
+            workspace_root=str(root),
+            path=target.relative_to(root).as_posix(),
             name=target.name,
             content=content,
             content_hash=self.content_hash(content),
@@ -159,6 +178,11 @@ class WorkspaceService:
             modified_at=self.iso_timestamp(stat.st_mtime),
             language_hint=self.infer_language_hint(target),
         )
+
+    def project_index(self, *, include_dependencies: bool = True) -> WorkspaceProjectIndexResponse:
+        from .project_index import build_project_index
+
+        return build_project_index(self, include_dependencies=include_dependencies)
 
     def raw_file_response(self, path: str) -> FileResponse:
         self.ensure_not_sensitive_file(
@@ -540,8 +564,14 @@ class WorkspaceService:
             raise HTTPException(status_code=400, detail="Operation on workspace root is not allowed.")
 
     @staticmethod
-    def ensure_not_sensitive_file(path: Path, *, operation: str = "read") -> None:
-        if is_protected_write_path(path):
+    def ensure_not_sensitive_file(
+        path: Path,
+        *,
+        operation: str = "read",
+        application_roots: tuple[Path, ...] | None = None,
+        resolved_path: Path | None = None,
+    ) -> None:
+        if is_protected_write_path(path, application_roots=application_roots, resolved_path=resolved_path):
             raise HTTPException(
                 status_code=403,
                 detail=f"Refusing to {operation} protected path.",

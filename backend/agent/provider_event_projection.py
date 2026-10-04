@@ -181,10 +181,6 @@ async def project_non_text_provider_event(
                         )
         yield ProviderProjectionResult(True)
         return
-    if event.type != StreamEventType.TOOL_CALL:
-        yield ProviderProjectionResult(True)
-        return
-
     # The first typed tool frame proves any preceding unphased assistant text
     # was narration. Move it into the process buffer immediately so text that
     # arrives between non-final and final tool frames is appended in order.

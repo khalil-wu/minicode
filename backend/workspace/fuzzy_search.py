@@ -186,7 +186,7 @@ class FuzzySearchEngine:
         generation = self._generation
         files: list[_IndexedFile] = []
         for path, is_dir in iter_search_paths(self.workspace_root):
-            if not is_dir and not is_protected_write_path(path.relative_to(self.workspace_root)):
+            if not is_dir and not is_protected_write_path(path):
                 normalized = path.relative_to(self.workspace_root).as_posix()
                 files.append((path, normalized, frozenset(normalized.lower())))
         snapshot = tuple(files)

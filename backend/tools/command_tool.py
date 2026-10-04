@@ -8,32 +8,20 @@ PowerShell. Callers can select an explicit host shell only outside the sandbox.
 
 from __future__ import annotations
 
-import base64
 import asyncio
-from dataclasses import replace
-from fnmatch import fnmatchcase
 import logging
-import math
-import re
-import shutil
-import subprocess
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from backend.artifact.store import ArtifactStore
+from backend.async_cleanup import to_thread_cancel_safe
 from backend.terminal.task_output import preview_text_output
 from backend.tools.output_limits import TASK_OUTPUT_DEFAULT_CHARS, TASK_OUTPUT_MAX_CHARS
 from backend.agent.tool_result_persistence import persist_tool_result
-from backend.sandbox import SandboxPolicy, SandboxRunner
+from backend.sandbox import SandboxPolicy, SandboxResult, SandboxRunner
 from backend.sandbox.runner import cleanup_captured_output, read_captured_output
-from backend.terminal.shell_commands import (
-    normalize_windows_shell_command,
-)
 from backend.tools.base import (
-    TOOL_SIDE_EFFECT_DESTRUCTIVE,
     TOOL_SIDE_EFFECT_EXTERNAL,
-    TOOL_SIDE_EFFECT_WORKSPACE,
     MAX_TOOL_RESULT_BYTES,
     MAX_TOOL_RESULT_LINES,
     BaseTool,
@@ -50,7 +38,6 @@ from backend.tools.command_support import (
     _command_matches_patterns,
     _command_side_effect_kind,
     _host_shell_command,
-    _looks_like_sandbox_denial,
     _model_shell_description,
     _validated_env,
     _windows_command_portability_hint,
@@ -654,7 +641,6 @@ class RunCommandTool(BaseTool):
             if _is_bypass_mode(context) or escalated
             else base_policy
         )
-        sandbox_active = not policy.disable_os_sandbox
         runner = SandboxRunner(policy)
 
         cancel_event = getattr(context, "cancel_event", None) if context else None
@@ -681,6 +667,24 @@ class RunCommandTool(BaseTool):
             if result.cleanup_pending else {}
         )
 
+        return await to_thread_cancel_safe(
+            self._foreground_result, result, command, timeout, context, policy,
+            escalated, cleanup_receipt, max_chars,
+        )
+
+    def _foreground_result(
+        self,
+        result: SandboxResult,
+        command: str,
+        timeout: float | None,
+        context: Any,
+        policy: SandboxPolicy,
+        escalated: bool,
+        cleanup_receipt: dict[str, Any],
+        max_chars: int | None,
+    ) -> ToolResult:
+        """Read, retain and project the completed command's captured output."""
+        sandbox_active = not policy.disable_os_sandbox
         stdout = read_captured_output(result.stdout_path, result.stdout)
         stderr = read_captured_output(result.stderr_path, result.stderr)
         captured_paths = (result.stdout_path, result.stderr_path)

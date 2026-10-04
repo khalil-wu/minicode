@@ -27,38 +27,65 @@
        L is monotone non-decreasing across the 9 steps,
        adjacent ΔL ∈ [0.018, 0.035].
 
-     Dark-theme base/frame lifted slightly above the original 0.075–0.135 band
-     so the app frame reads closer to modern dark UIs (~0.16–0.22)
-     and panel boundaries stay distinguishable instead of near-black. ──── */
-  --surface-sunken:  oklch(0.095 0.002 250);
-  --surface-base:    oklch(0.115 0.002 250);
-  --surface-sidebar: oklch(0.130 0.003 250);
-  --surface-page:    oklch(0.165 0.003 250);
-  --surface-soft:    oklch(0.180 0.004 250);
-  --surface-panel:   oklch(0.200 0.004 250);
-  --surface-raised:  oklch(0.220 0.005 250);
-  --surface-hover:   oklch(0.275 0.005 250);
-  --surface-active:  oklch(0.315 0.006 250);
+     Neutral charcoal planes keep prose and the editor in one workbench. ──── */
+  --surface-sunken:  oklch(0.185 0.002 250);
+  --surface-base:    oklch(0.205 0.002 250);
+  --surface-sidebar: oklch(0.225 0.002 250);
+  --surface-page:    oklch(0.245 0.002 250);
+  --surface-soft:    oklch(0.265 0.003 250);
+  --surface-panel:   oklch(0.285 0.003 250);
+  --surface-raised:  oklch(0.305 0.004 250);
+  --surface-hover:   oklch(0.325 0.004 250);
+  --surface-active:  oklch(0.345 0.004 250);
 
   /* Workbench-only surfaces; settings retain the established palette. */
-  --workbench-sidebar: oklch(0.190 0.002 250);
-  --workbench-tool: oklch(0.235 0.002 250);
-  --workbench-hover: oklch(0.275 0.002 250);
-  --workbench-active: oklch(0.305 0.003 250);
+  --workbench-sidebar: oklch(0.205 0.002 250);
+  --workbench-tool: oklch(0.255 0.002 250);
+  --workbench-hover: oklch(0.285 0.002 250);
+  --workbench-active: oklch(0.315 0.003 250);
+
+  /* Code surfaces and syntax follow the app theme, independently of prose. */
+  --editor-background: #181818;
+  --editor-foreground: #d4d4d4;
+  --editor-line-number: #73777e;
+  --editor-line-number-active: #c5c7cc;
+  --editor-line-highlight: #222222;
+  --editor-selection: #364454;
+  --editor-selection-inactive: #2e333a;
+  --editor-indent-guide: #303033;
+  --editor-indent-guide-active: #56565c;
+  --editor-widget: #222222;
+  --editor-border: #36363a;
+  --editor-widget-selection: #34383f;
+  --editor-find-match: #76633866;
+  --editor-find-range: #76633833;
+  --editor-syntax-comment: #81878e;
+  --editor-syntax-keyword: #93b5a5;
+  --editor-syntax-string: #d7a6cd;
+  --editor-syntax-number: #d6bd82;
+  --editor-syntax-type: #a6bcc9;
+  --editor-syntax-function: #dcca92;
+  --editor-syntax-property: #b8b4d2;
+  --editor-syntax-tag: #a1bca9;
+  --editor-syntax-attribute: #b6b1cf;
+  --editor-syntax-punctuation: #a2a5ac;
+  --editor-bracket-1: #d6bd82;
+  --editor-bracket-2: #b8a2cc;
+  --editor-bracket-3: #8fb9ba;
 
   /* ── Text (4) — Pillar 1.2
      WCAG invariant (P1.3): primary/secondary ≥ 4.5:1 vs any surface,
      muted ≥ 3.0:1 (large text only). ────────────────────── */
-  --text-primary:   oklch(0.995 0.002 250);
-  --text-secondary: oklch(0.930 0.003 250);
-  --text-muted:     oklch(0.800 0.004 250);
-  --text-disabled:  oklch(0.995 0.002 250 / 0.48);
+  --text-primary:   oklch(0.930 0.002 250);
+  --text-secondary: oklch(0.800 0.003 250);
+  --text-muted:     oklch(0.680 0.004 250);
+  --text-disabled:  oklch(0.930 0.002 250 / 0.40);
   --text-on-accent: oklch(0.985 0.005 250);
 
   /* ── Border (4) — Pillar 1.3 ──────────────────────────── */
-  --border-subtle: oklch(0.870 0.006 250 / 0.17);
-  --border-soft:   oklch(0.870 0.006 250 / 0.22);
-  --border-strong: oklch(0.870 0.006 250 / 0.40);
+  --border-subtle: oklch(0.870 0.006 250 / 0.12);
+  --border-soft:   oklch(0.870 0.006 250 / 0.18);
+  --border-strong: oklch(0.870 0.006 250 / 0.30);
   --border-focus:  var(--accent-primary);
 
   /* ── Accent (7) — restrained cool blue for focused workbench actions. ── */
@@ -92,11 +119,14 @@
   /* Desktop-native typography: fast offline startup and stable CJK metrics. */
   --font-ui:    "Manrope", "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
   --font-mono:  "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", "Noto Sans SC", monospace;
+  --editor-font-family: Consolas, "SFMono-Regular", Menlo, "Liberation Mono", "Noto Sans SC", monospace;
   --font-cjk:   "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", "Source Han Sans SC", sans-serif;
   --font-prose: var(--font-ui);
   --app-text-scale: 1;
   --code-text-scale: 1;
   --code-font-size: calc(15px * var(--code-text-scale));
+  --editor-font-size: calc(14px * var(--code-text-scale));
+  --editor-line-height: calc(22px * var(--code-text-scale));
 
   /* ── Font sizes (11) — dense chrome, readable 15–16px prose.
      All sizes scale with the user's GeneralTab text-size preference. ── */
@@ -233,7 +263,7 @@
      Shell layout density (sidebar widths, chat axis, conversation rhythm
      --space-turn-gap / --space-cell-internal) is owned by shell/ shell.css —
      do not re-declare it here. ──────────────────────────────── */
-  --header-height:       44px;
+  --header-height:       40px;
   --dock-height:         280px;
   --app-text-scale:      1;
 
@@ -348,10 +378,38 @@ uses in its UI. The `--cjk-leading` and
   --surface-hover:   oklch(0.940 0.004 250);
   --surface-active:  oklch(0.915 0.005 250);
 
-  --workbench-sidebar: oklch(0.973 0.009 245);
+  --workbench-sidebar: oklch(0.973 0.003 245);
   --workbench-tool: oklch(0.978 0.001 250);
   --workbench-hover: oklch(0.958 0.004 245);
   --workbench-active: oklch(0.937 0.009 245);
+
+  --editor-background: #fafafa;
+  --editor-foreground: #30343b;
+  --editor-line-number: #92969e;
+  --editor-line-number-active: #4d5663;
+  --editor-line-highlight: #f0f1f3;
+  --editor-selection: #dce6f0;
+  --editor-selection-inactive: #e8ebef;
+  --editor-indent-guide: #e3e4e7;
+  --editor-indent-guide-active: #b6bac2;
+  --editor-widget: #ffffff;
+  --editor-border: #dcdde1;
+  --editor-widget-selection: #e9edf2;
+  --editor-find-match: #d7bd7a66;
+  --editor-find-range: #d7bd7a33;
+  --editor-syntax-comment: #6c7480;
+  --editor-syntax-keyword: #3e6b57;
+  --editor-syntax-string: #8f557b;
+  --editor-syntax-number: #927043;
+  --editor-syntax-type: #3c6477;
+  --editor-syntax-function: #83692f;
+  --editor-syntax-property: #635d82;
+  --editor-syntax-tag: #466a58;
+  --editor-syntax-attribute: #72658b;
+  --editor-syntax-punctuation: #616975;
+  --editor-bracket-1: #93713a;
+  --editor-bracket-2: #80628e;
+  --editor-bracket-3: #43767c;
 
   /* Separate reading text, secondary controls, and quiet process evidence. */
   --text-primary:   oklch(0.300 0.004 250);

@@ -4,11 +4,13 @@ import asyncio
 import re
 import time
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any, Awaitable, Callable, Iterable
 
 from backend.hooks.runners import HookExecutionError, HookExecutionResult
 
 from backend.hooks.policy import event_policy
+from backend.hooks.value_utils import parse_json_object
 
 
 _EXACT_MATCHER_RE = re.compile(r"^[A-Za-z0-9_|]+$")
@@ -88,6 +90,13 @@ class HookExecution:
     duration_ms: int
     execution_failed: bool = False
     backgrounded: bool = False
+    semantic_stdout: str | None = None
+
+    @cached_property
+    def json_output(self) -> dict[str, Any] | None:
+        return parse_json_object(
+            self.semantic_stdout if self.semantic_stdout is not None else self.stdout
+        )
 
 
 def select_handlers(
@@ -137,16 +146,18 @@ async def execute_handlers(
     async def run_one(
         configured_order: int,
         entry: Any,
-    ) -> tuple[int, Any, str, str, int, int, bool, bool]:
+    ) -> tuple[int, Any, str, str, int, int, bool, bool, str | None]:
         started = time.monotonic()
         execution_failed = False
         backgrounded = False
+        semantic_stdout = None
         try:
             result = await execute(entry)
             stdout = result.stdout
             stderr = result.stderr
             exit_code = result.exit_code
             backgrounded = result.backgrounded
+            semantic_stdout = result.semantic_stdout
         except asyncio.CancelledError:
             raise
         except HookExecutionError as exc:
@@ -164,6 +175,7 @@ async def execute_handlers(
             duration_ms,
             execution_failed,
             backgrounded,
+            semantic_stdout,
         )
 
     tasks = [
@@ -185,6 +197,7 @@ async def execute_handlers(
                 duration_ms,
                 execution_failed,
                 backgrounded,
+                semantic_stdout,
             ) = await future
             completed.append(
                 HookExecution(
@@ -197,6 +210,7 @@ async def execute_handlers(
                     duration_ms=duration_ms,
                     execution_failed=execution_failed,
                     backgrounded=backgrounded,
+                    semantic_stdout=semantic_stdout,
                 )
             )
             completion_order += 1

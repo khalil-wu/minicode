@@ -267,9 +267,12 @@ def _parse_uploaded_content(file_name: str, raw_content: bytes, depth: int = 0) 
         # cc sniffs the %PDF- magic before treating a file as a PDF (pdf.ts);
         # a renamed non-PDF must not poison the parse path with a 400 loop.
         if not raw_content.lstrip()[:5].startswith(b"%PDF"):
-            return _parse_binary_unknown_document(
-                file_name=file_name, raw_content=raw_content
-            )
+            if _looks_like_text(raw_content):
+                parsed = _parse_text_document(file_name=file_name, raw_content=raw_content)
+                parsed["media_type"] = "text/plain"
+                parsed["parse_warning"] = "The file is not a PDF; its text content is attached instead."
+                return parsed
+            return _parse_binary_unknown_document(file_name=file_name, raw_content=raw_content)
         return _parse_binary_document(file_name=file_name, raw_content=raw_content)
     if suffix == ".docx":
         return _parse_binary_document(file_name=file_name, raw_content=raw_content)
@@ -346,7 +349,7 @@ def _parse_text_document(file_name: str, raw_content: bytes) -> dict[str, Any]:
 
 def _parse_binary_unknown_document(file_name: str, raw_content: bytes) -> dict[str, Any]:
     """Represent an unsupported binary without leaking decoded garbage."""
-    media_type = _guess_media_type(file_name)
+    media_type = "application/octet-stream"
     size = len(raw_content)
     metadata = (
         f"Binary attachment: {Path(file_name).name}\n"

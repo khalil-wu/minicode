@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.commands.registry import CommandRegistry
+from backend.permissions.context import PermissionContext
 from backend.workspace.state import (
     clear_active_workspace_root,
     get_explicit_active_workspace_root,
@@ -32,6 +33,7 @@ class _Session:
         self.event_outbox = SimpleNamespace(client_command_id="")
         self.command_registry = CommandRegistry()
         self.skill_manager = None
+        self.permission_context = PermissionContext(mode="bypass")
         self.mcp_manager = None
         self.restarted: list[Path] = []
         self.events = []
@@ -61,7 +63,7 @@ class _Session:
         self.payloads.append(dict(payload))
         return True
 
-    def runtime_capabilities_payload(self, *, source: str = "session") -> dict:
+    def runtime_capabilities_payload(self, *, source: str = "session", skill_catalog=None) -> dict:
         return {
             "type": "runtime.capabilities",
             "session_id": self.session_id,

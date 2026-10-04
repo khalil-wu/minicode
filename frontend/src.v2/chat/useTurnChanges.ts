@@ -16,13 +16,15 @@ export function useTurnChanges() {
     if (!summary || !turnDiff) return;
     const selectedPath = summary.files[0].path;
     const store = useAppStore.getState();
+    if (store.conversationId !== turnDiff.threadId || store.turnDiffs[turnDiff.threadId] !== turnDiff) return;
+    useAppStore.setState({ gitReviewRequest: null });
     store.setDiffReviewState({
       requestId: `turn-summary-${turnDiff.turnId}`,
       conversationId: turnDiff.threadId,
       turnId: turnDiff.turnId,
       messageId: turnDiff.messageId,
       toolName: "本轮修改",
-      diff: initialDiffReviewPatch(summary.files, selectedPath),
+      diff: initialDiffReviewPatch(summary.files, selectedPath, store.workingDirectory),
       files: summary.files,
       selectedPath,
       status: "viewing",

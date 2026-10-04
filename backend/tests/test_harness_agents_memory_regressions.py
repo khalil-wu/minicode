@@ -311,7 +311,7 @@ async def test_scheduler_cancel_before_worker_start_finalizes_receipt(tmp_path, 
 
 def test_agent_editor_preserves_policy_frontmatter(tmp_path, monkeypatch):
     source = tmp_path / "agent.md"
-    original = loader.AgentDefinition(name="fixture", description="fixture", prompt="Inspect", source="project", source_path=source, permission_mode="plan", background=True, has_output_schema=True)
+    original = loader.AgentDefinition(name="fixture", description="fixture", prompt="Inspect", source="project", source_path=source, base_dir=tmp_path, permission_mode="plan", background=True, has_output_schema=True)
     source.write_text(loader._render_agent_markdown(original), encoding="utf-8")
     monkeypatch.setattr(loader, "discover_agent_definitions", lambda *_: [original])
     loader.save_custom_agent("fixture", description="updated", prompt="New prompt", workspace_root=tmp_path, source="project", source_path=source)

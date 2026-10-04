@@ -47,6 +47,16 @@ import { workspaceRootsEqual } from "../lib/workspace-path";
 import { diffFileDecisionForPath, diffFilePathsEqual } from "../chat/diffReviewState";
 import { openWebInBrowser } from "../chat/openWebInBrowser";
 
+const CLOSED_OVERLAYS = {
+  commandPaletteOpen: false,
+  settingsOpen: false,
+  shortcutsHelpOpen: false,
+  skillsMarketplaceOpen: false,
+  liveArtifactsOpen: false,
+  quickOpenVisible: false,
+  agentEditorOpen: false,
+};
+
 const initialRemoteImagePolicy = (): UISlice["remoteImagePolicy"] => {
   const stored = readLS(LS.remoteImagePolicy);
   return stored === "allow" || stored === "block" ? stored : "ask";
@@ -69,6 +79,7 @@ function cloneArtifactState(state: ArtifactContentState | null): ArtifactContent
 function emptyConversationWorkbenchState(): ConversationWorkbenchState {
   return {
     diffReview: null,
+    gitReviewRequest: null,
     previewArtifact: null,
     livePreviewUrl: null,
     previewServers: [],
@@ -79,6 +90,7 @@ function emptyConversationWorkbenchState(): ConversationWorkbenchState {
     activeTerminalSessionId: null,
     rightStackTab: "tasks",
     rightPanelOpen: false,
+    rightPanelExpanded: false,
     rightStackTabLocked: false,
     draft: "",
     attachments: [],
@@ -115,6 +127,7 @@ function cloneConversationWorkbenchState(state: ConversationWorkbenchState): Con
 function liveConversationWorkbenchState(s: AppStore): ConversationWorkbenchState {
   return {
     diffReview: cloneDiffReviewState(s.diffReview),
+    gitReviewRequest: s.gitReviewRequest,
     previewArtifact: cloneArtifactState(s.previewArtifact),
     livePreviewUrl: s.livePreviewUrl,
     previewServers: s.previewServers.map((server) => ({ ...server })),
@@ -131,6 +144,7 @@ function liveConversationWorkbenchState(s: AppStore): ConversationWorkbenchState
     activeTerminalSessionId: s.activeTerminalSessionId,
     rightStackTab: s.rightStackTab,
     rightPanelOpen: s.rightPanelOpen,
+    rightPanelExpanded: s.rightPanelExpanded,
     rightStackTabLocked: s.rightStackTabLocked,
     draft: s.draft,
     attachments: s.attachments.map((attachment) => ({ ...attachment })),
@@ -251,6 +265,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   followUpBehavior: initialFollowUpBehavior(),
   shortcutBindings: initialShortcutBindings(),
   appMode: "code" as const,
+  workbenchLayout: readLS(LS.layout.workbench) === "split" ? "split" : "tabs",
   rightStackTab: "tasks" as const,
   rightStackTabLocked: false,
   focusedSubagentId: null,
@@ -260,7 +275,6 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   commandPaletteOpen: false,
   settingsOpen: false,
   settingsTab: "general" as const,
-  automationsOpen: false,
   shortcutsHelpOpen: false,
   quickOpenVisible: false,
   quickOpenResults: [],
@@ -304,14 +318,8 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         return { agentEditorOpen: false };
       }
       return {
+        ...CLOSED_OVERLAYS,
         agentEditorOpen: true,
-        commandPaletteOpen: false,
-        settingsOpen: false,
-        automationsOpen: false,
-        shortcutsHelpOpen: false,
-        skillsMarketplaceOpen: false,
-        liveArtifactsOpen: false,
-        quickOpenVisible: false,
       };
     }),
   setThemeMode: (mode) => {
@@ -377,6 +385,10 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       if (layoutChanged) persistPanelSlots(panelSlots);
       return layoutChanged ? { appMode: m, panelSlots } : { appMode: m };
     }),
+  setWorkbenchLayout: (layout) => {
+    writeLS(LS.layout.workbench, layout);
+    set({ workbenchLayout: layout });
+  },
   ensureCodeLayout: () =>
     set((s) => {
       const panelSlots = ensureCodePanelSlots(s.panelSlots);
@@ -409,6 +421,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         ...(canonicalTab === "sidechat" ? { sideChatOpen: true } : {}),
         rightStackTabLocked: options?.automatic ? s.rightStackTabLocked : true,
         rightPanelOpen: true,
+        rightPanelExpanded: ["browser", "preview", "diff", "artifacts"].includes(canonicalTab) && s.rightPanelExpanded,
         rightSidebarWidth,
       };
     }),
@@ -433,14 +446,8 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       }
       // Close all other modals when opening command palette
       return {
+        ...CLOSED_OVERLAYS,
         commandPaletteOpen: true,
-        settingsOpen: false,
-        automationsOpen: false,
-        shortcutsHelpOpen: false,
-        skillsMarketplaceOpen: false,
-        liveArtifactsOpen: false,
-        quickOpenVisible: false,
-        agentEditorOpen: false,
       };
     }),
   toggleSettings: () =>
@@ -450,33 +457,11 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       }
       // Close all other modals when opening settings
       return {
+        ...CLOSED_OVERLAYS,
         settingsOpen: true,
-        commandPaletteOpen: false,
-        automationsOpen: false,
-        shortcutsHelpOpen: false,
-        skillsMarketplaceOpen: false,
-        liveArtifactsOpen: false,
-        quickOpenVisible: false,
-        agentEditorOpen: false,
       };
     }),
   setSettingsTab: (tab) => set({ settingsTab: tab }),
-  toggleAutomations: () =>
-    set((s) => {
-      if (s.automationsOpen) {
-        return { automationsOpen: false };
-      }
-      return {
-        automationsOpen: true,
-        commandPaletteOpen: false,
-        settingsOpen: false,
-        shortcutsHelpOpen: false,
-        skillsMarketplaceOpen: false,
-        liveArtifactsOpen: false,
-        quickOpenVisible: false,
-        agentEditorOpen: false,
-      };
-    }),
   toggleShortcutsHelp: () =>
     set((s) => {
       if (s.shortcutsHelpOpen) {
@@ -484,14 +469,8 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       }
       // Close all other modals when opening shortcuts help
       return {
+        ...CLOSED_OVERLAYS,
         shortcutsHelpOpen: true,
-        commandPaletteOpen: false,
-        settingsOpen: false,
-        automationsOpen: false,
-        skillsMarketplaceOpen: false,
-        liveArtifactsOpen: false,
-        quickOpenVisible: false,
-        agentEditorOpen: false,
       };
     }),
   toggleSkillsMarketplace: (returnTarget = "app", tab = "skills") =>
@@ -501,16 +480,10 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       }
       // Close all other modals when opening skills marketplace
       return {
+        ...CLOSED_OVERLAYS,
         skillsMarketplaceOpen: true,
         skillsMarketplaceTab: tab,
         skillsMarketplaceReturnTarget: returnTarget,
-        commandPaletteOpen: false,
-        settingsOpen: false,
-        automationsOpen: false,
-        shortcutsHelpOpen: false,
-        liveArtifactsOpen: false,
-        quickOpenVisible: false,
-        agentEditorOpen: false,
       };
     }),
   toggleLiveArtifacts: () =>
@@ -520,14 +493,8 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       }
       // Close all other modals when opening live artifacts
       return {
+        ...CLOSED_OVERLAYS,
         liveArtifactsOpen: true,
-        commandPaletteOpen: false,
-        settingsOpen: false,
-        automationsOpen: false,
-        shortcutsHelpOpen: false,
-        skillsMarketplaceOpen: false,
-        quickOpenVisible: false,
-        agentEditorOpen: false,
       };
     }),
   toggleQuickOpen: () =>
@@ -537,14 +504,8 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       }
       // Close all other modals when opening quick open
       return {
+        ...CLOSED_OVERLAYS,
         quickOpenVisible: true,
-        commandPaletteOpen: false,
-        settingsOpen: false,
-        automationsOpen: false,
-        shortcutsHelpOpen: false,
-        skillsMarketplaceOpen: false,
-        liveArtifactsOpen: false,
-        agentEditorOpen: false,
       };
     }),
   setCurrentModel: (m) => set({ currentModel: m }),
@@ -575,7 +536,15 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       return {
         ...(workspaceChanged ? editorStateForWorkspace(d) : {}),
         workingDirectory: d,
+        ...(workspaceChanged ? {
+          availableSkills: [], selectedSkills: [], selectedMentions: [], mentionResults: [],
+          slashCommands: [], runtimeCapabilities: null,
+          scheduledTasks: [], scheduledTaskRuns: [],
+          gitReviewRequest: null, rightPanelExpanded: false,
+        } : {}),
         workspaceGit: workspaceChanged ? null : s.workspaceGit,
+        ...(workspaceChanged ? { gitChanges: { workingTree: [], staged: [], untracked: [], loading: false, workspaceRoot: d } } : {}),
+        mcpServers: workspaceChanged ? [] : s.mcpServers,
       };
     });
     if (d) {
@@ -584,7 +553,10 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     }
   },
   setWorkspaceGit: (state) => set({ workspaceGit: state }),
-  setDiffReviewState: (state) => set({ diffReview: state }),
+  setDiffReviewState: (state) => set((current) => ({
+    diffReview: state,
+    ...(state && state.requestId !== current.diffReview?.requestId ? { gitReviewRequest: null } : {}),
+  })),
   snapshotWorkbenchState: (conversationId) =>
     set((s) => {
       const targetId = conversationId || s.conversationId || undefined;
@@ -613,6 +585,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       const activeTerminalSessionId = next.activeTerminalSessionId;
       return {
         diffReview: next.diffReview,
+        gitReviewRequest: next.gitReviewRequest ?? null,
         previewArtifact: next.previewArtifact,
         livePreviewUrl: next.livePreviewUrl,
         previewServers: next.previewServers,
@@ -624,6 +597,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         activeTerminalSessionId,
         rightStackTab: next.rightStackTab === "sidechat" && !s.sideChatOpen ? "tasks" : next.rightStackTab,
         rightPanelOpen: next.rightPanelOpen,
+        rightPanelExpanded: next.rightPanelExpanded ?? false,
         rightStackTabLocked: next.rightStackTabLocked,
         draft: next.draft,
         attachments: next.attachments,
@@ -946,7 +920,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   addFileChange: (change) =>
     set((s) => {
       const sequence = (s.fileChanges.at(-1)?.sequence ?? 0) + 1;
-      return { fileChanges: [...s.fileChanges.slice(-99), { ...change, sequence }] };
+      return { fileChanges: [...s.fileChanges.slice(-99), { ...change, sequence, workspaceRoot: s.workingDirectory }] };
     }),
   bumpFileTreeVersion: () =>
     set((s) => ({ fileTreeVersion: s.fileTreeVersion + 1 })),
@@ -963,6 +937,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
             id: `reveal-${Date.now().toString(36)}-${s.fileTreeRevealRequests.length}`,
             path,
             kind,
+            workspaceRoot: s.workingDirectory,
           },
         ],
       };
@@ -985,6 +960,8 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       set((s) => ({
         gitChanges: {
           ...s.gitChanges,
+          isGitRepo: undefined,
+          error: undefined,
           workingTree: [],
           staged: [],
           untracked: [],
@@ -1001,25 +978,27 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     set((s) => ({
       gitChanges: {
         ...s.gitChanges,
+        error: undefined,
         loading: true,
         workspaceRoot,
         workingTreeRequestId,
         stagedRequestId,
       },
     }));
-    sendClientCommand({
+    const workingTreeSent = sendClientCommand({
       type: "diff.git_working_tree",
       conversation_id: conversationId,
       workspace: workspaceRoot,
       request_id: workingTreeRequestId,
       client_command_id: workingTreeRequestId,
     }, { silent: true });
-    sendClientCommand({
+    const stagedSent = sendClientCommand({
       type: "diff.git_staged",
       conversation_id: conversationId,
       workspace: workspaceRoot,
       request_id: stagedRequestId,
       client_command_id: stagedRequestId,
     }, { silent: true });
+    if (!workingTreeSent || !stagedSent) get().setGitChangesLoading(false);
   },
 });

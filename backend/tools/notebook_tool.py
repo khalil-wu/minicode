@@ -9,14 +9,13 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from pathlib import Path
 from typing import Any
 
-from backend.atomic_io import canonical_path_mapping_key, file_mutation_locks, run_blocking_io
+from backend.atomic_io import atomic_write_text as _atomic_write_text, canonical_path_mapping_key, file_mutation_locks, run_blocking_io
 from backend.permissions.context import ToolExecutionContext
 from backend.security.sensitive_files import is_protected_write_path
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
-from backend.tools.file_tools_common import _atomic_write_text, _validate_expected_hash, content_hash, record_file_hash
+from backend.tools.file_tools_common import _validate_expected_hash, content_hash, record_file_hash
 from backend.tools.path_resolution import _is_bypass_mode, _resolve_path
 from backend.workspace.file_state_cache import get_global_file_cache
 
@@ -108,7 +107,7 @@ class NotebookEditTool(BaseTool):
         # Same write floor as write_file/edit_file: a notebook inside .git/ or
         # .minicode/ can execute on open, so it must not be a way around the
         # protected-path guard. This stays enforced even in bypass mode.
-        if is_protected_write_path(path):
+        if is_protected_write_path(path, state_roots=context.permission.protected_state_roots if context else ()):
             return self._error_result(
                 f"Refusing to write protected path: {raw_path}. "
                 "Repository and agent configuration files must be edited manually."
@@ -225,13 +224,7 @@ class NotebookEditTool(BaseTool):
 
                 # Keep cache publication inside the queue; the event/result can
                 # be emitted after release because it does not affect the file.
-                try:
-                    get_global_file_cache().invalidate(path)
-                    from backend.tools.file_tools_common import invalidate_workspace_file_caches
-
-                    invalidate_workspace_file_caches()
-                except Exception:
-                    pass
+                get_global_file_cache().invalidate(path)
         except Exception as exc:
             return self._error_result(f"Failed to write notebook: {exc}")
 

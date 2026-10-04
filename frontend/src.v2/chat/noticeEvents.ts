@@ -10,6 +10,7 @@ import { pushToast } from "../overlays/ToastContainer";
 import { isControlPlaneNotice } from "./controlPlaneNotices";
 import { addInspectorPayload } from "./inspectorEntries";
 import { stableTextHash } from "../lib/identity";
+import { incomingConversationMetaIsStale, normalizedConversationRevision } from "./activeConversation";
 
 const noticeText = (event: SystemNoticeEvent): string => {
   const title = String(event.title || "").trim();
@@ -110,14 +111,18 @@ export const handleNoticeEvent = (e: ServerEvent, conversationId?: string): bool
     }
     case "conversation.summary.updated": {
       const ev = e as ConversationSummaryUpdatedEvent;
+      const incomingRevision = normalizedConversationRevision(ev.revision);
       useAppStore.setState((state) => ({
         conversations: state.conversations.map((conversation) =>
-          conversation.id === ev.conversation_id
+          conversation.id === ev.conversation_id && !incomingConversationMetaIsStale({
+            revision: incomingRevision, updatedAt: ev.updated_at,
+          }, conversation)
             ? {
                 ...conversation,
                 summary: ev.summary,
                 title: ev.title,
                 updatedAt: ev.updated_at,
+                ...(incomingRevision !== undefined ? { revision: incomingRevision } : {}),
                 memoryMode: ev.memory_mode,
                 memoryPolluted: ev.memory_polluted,
                 memoryPollutionSources: [...ev.memory_pollution_sources],

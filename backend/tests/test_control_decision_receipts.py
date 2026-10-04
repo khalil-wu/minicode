@@ -46,7 +46,7 @@ async def session(tmp_path):
     session.turn_wait_state = TurnWaitState()
     session.approval_diff_cache = {}
     queue = DurableUserMessageQueue(session_id=session.session_id, root_dir=tmp_path / 'queue')
-    session.run_manager = SimpleNamespace(durable_queue=queue)
+    session.run_manager = SimpleNamespace(durable_queue=queue, durable_client_commands=queue)
     session.event_outbox = EventOutbox(
         session_id=session.session_id, websocket=ReceiptSocket(),
         replay_root=tmp_path / 'events', replay_limit=1000, cleanup_tasks=set(),
@@ -175,7 +175,7 @@ async def test_empty_control_response_returns_error(session):
 @pytest.mark.asyncio
 async def test_durable_ack_then_semantic_receipt_and_negative_ack_retry_close_the_loop(session, monkeypatch):
     future = register(session)
-    queue = session.run_manager.durable_queue
+    queue = session.run_manager.durable_client_commands
     persist = queue.persist_client_command
 
     def fail_write(_command):

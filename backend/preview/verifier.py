@@ -63,15 +63,16 @@ async def wait_until_ready(
     *,
     timeout: float | None = None,
     interval: float | None = None,
+    process: PreviewLaunchProcess | None = None,
 ) -> PreviewVerification:
     """Poll until the preview responds or the caller's deadline expires."""
     if timeout is None:
-        return await verify_preview_url(url, timeout=None)
+        return await verify_preview_url(url, timeout=None, process=process)
 
     total_timeout = max(0.0, float(timeout))
     poll_interval = max(0.0, float(interval)) if interval is not None else 1.0
     started = time.monotonic()
-    last = await verify_preview_url(url, timeout=total_timeout)
+    last = await verify_preview_url(url, timeout=total_timeout, process=process)
     while not last.ok:
         remaining = total_timeout - (time.monotonic() - started)
         if remaining <= 0:
@@ -80,7 +81,7 @@ async def wait_until_ready(
         remaining = total_timeout - (time.monotonic() - started)
         if remaining <= 0:
             return last
-        last = await verify_preview_url(url, timeout=remaining)
+        last = await verify_preview_url(url, timeout=remaining, process=process)
     return last
 
 

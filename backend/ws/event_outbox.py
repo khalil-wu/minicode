@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from backend.async_cleanup import to_thread_cancel_safe
+
 import asyncio
 from collections import deque
 from contextlib import contextmanager
@@ -103,6 +105,9 @@ class EventOutbox:
             f"ws_client_command_type_{session_id}",
             default="",
         )
+        self._client_command_owner: ContextVar[tuple[str, str] | None] = ContextVar(
+            f"ws_client_command_owner_{session_id}", default=None,
+        )
 
     @staticmethod
     def load_replay_state(
@@ -170,12 +175,16 @@ class EventOutbox:
         self.events_dropped_during_disconnect = False
 
     @contextmanager
-    def bind_client_command(self, command_id: str, command_type: str) -> Iterator[None]:
+    def bind_client_command(
+        self, command_id: str, command_type: str, *, owner: tuple[str, str] | None = None,
+    ) -> Iterator[None]:
         command_token = self._client_command_id.set(command_id)
         type_token = self._client_command_type.set(command_type)
+        owner_token = self._client_command_owner.set(owner)
         try:
             yield
         finally:
+            self._client_command_owner.reset(owner_token)
             self._client_command_type.reset(type_token)
             self._client_command_id.reset(command_token)
 
@@ -237,6 +246,11 @@ class EventOutbox:
             payload.setdefault("client_command_id", command_id)
         if command_type:
             payload.setdefault("client_command_type", command_type)
+        owner = self._client_command_owner.get()
+        if event_type == "command.result" and owner is not None:
+            details = payload.get("data") or {}
+            for key, value in zip(("conversation_id", "workspace_root"), owner):
+                payload.setdefault(key, details.get(key, value))
         try:
             validate_session_projection_payload(payload)
         except ValueError as exc:
@@ -427,14 +441,14 @@ class EventOutbox:
         try:
             if rewrite_events is not None:
                 repaired_events = rewrite_events
-                await asyncio.to_thread(self._store.rewrite, repaired_events)
+                await to_thread_cancel_safe(self._store.rewrite, repaired_events)
                 self._persistence_failed_seqs.difference_update(
                     seq
                     for event in repaired_events
                     if (seq := self._replay_seq_value(event)) is not None
                 )
             else:
-                await asyncio.to_thread(self._store.append_many, replay_payloads)
+                await to_thread_cancel_safe(self._store.append_many, replay_payloads)
                 for replay_payload in replay_payloads:
                     seq = self._replay_seq_value(replay_payload)
                     if seq is not None:
@@ -516,7 +530,7 @@ class EventOutbox:
                         f"Replay event {sequence} for conversation {owner} "
                         f"was staged but never persisted"
                     )
-            removed = await asyncio.to_thread(
+            removed = await to_thread_cancel_safe(
                 self._store.delete_for_conversation,
                 owner,
             )

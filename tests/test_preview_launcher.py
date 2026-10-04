@@ -282,7 +282,7 @@ def test_preview_list_and_stop_are_isolated_by_conversation_owner(monkeypatch, t
     launcher._RUNNING.clear()
 
 
-def test_preview_launcher_monitor_broadcasts_ready_and_crashed():
+def test_preview_launcher_monitor_broadcasts_ready_and_crashed(monkeypatch):
     class FakeStream:
         def __init__(self, lines):
             self.lines = [line.encode("utf-8") for line in lines]
@@ -330,6 +330,7 @@ def test_preview_launcher_monitor_broadcasts_ready_and_crashed():
         _sandbox_runner=SimpleNamespace(terminate=AsyncMock(return_value=True)),
     )
 
+    monkeypatch.setattr(launcher, "_RUNNING", {launched.id: launched})
     asyncio.run(launcher._monitor_process(launched, broadcast))
 
     output_events = [event for event in events if event["type"] == "preview.server.output"]
@@ -432,7 +433,7 @@ def test_static_preview_serves_assets_but_denies_workspace_secrets(tmp_path):
         pytest.skip(f"enforceable preview sandbox unavailable: {exc}")
 
 
-def test_static_monitor_does_not_replace_file_url_with_server_root():
+def test_static_monitor_does_not_replace_file_url_with_server_root(monkeypatch):
     class FakeStream:
         def __init__(self, lines):
             self.lines = [line.encode("utf-8") for line in lines]
@@ -478,6 +479,7 @@ def test_static_monitor_does_not_replace_file_url_with_server_root():
             launched.process.returncode = 0
             launched._exit_event.set()
 
+    monkeypatch.setattr(launcher, "_RUNNING", {launched.id: launched})
     asyncio.run(launcher._monitor_process(launched, broadcast))
 
     ready = next(event for event in events if event["type"] == "preview.server.ready")

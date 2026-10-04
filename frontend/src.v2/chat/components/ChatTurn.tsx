@@ -50,9 +50,9 @@ export const ChatTurn = memo(function ChatTurn({
   const processDetailMode = useAppStore((state) => state.viewMode);
   const stopActiveRun = useCallback(() => {
     const state = useAppStore.getState();
-    const command = buildInterruptCommand(state);
+    const command = buildInterruptCommand(state, conversationId);
     sendClientCommand(command);
-  }, []);
+  }, [conversationId]);
   const agentTurn = useMemo(
     () => projectChatTurnToAgentLoop(turn, committedCells, processDetailMode),
     [turn, committedCells, processDetailMode],
@@ -129,7 +129,7 @@ export const HistoryCellRenderer = memo(function HistoryCellRenderer({
       return <ThinkingCell cell={cell} isStreaming={cell.isStreaming || isActive} conversationId={conversationId} workspaceRoot={workspaceRoot} knownFilePaths={knownFilePaths} />;
 
     case "collaboration":
-      return <CollaborationCell cell={cell} />;
+      return <CollaborationCell cell={cell} conversationId={conversationId} />;
 
     case "activity":
       return <ActivityCell cell={cell} conversationId={conversationId} workspaceRoot={workspaceRoot} />;

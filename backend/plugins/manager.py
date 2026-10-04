@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from filelock import FileLock
+from backend.async_cleanup import to_thread_cancel_safe
 
 from .identity import normalize_plugin_id, parse_plugin_id, plugin_id
 from .layout import PLUGIN_MANIFEST_DIRECTORY, MARKETPLACE_MANIFEST_FILENAME
@@ -173,7 +174,7 @@ class PluginManager:
         from backend.plugins.policy import _plugin_policy_from_stack
         from backend.services.plugin_settings_service import import_plugin_from_path
 
-        policy = _plugin_policy_from_stack(self.config_stack)
+        policy = await to_thread_cancel_safe(_plugin_policy_from_stack, self.config_stack)
 
         result = await import_plugin_from_path(
             source_path,
@@ -211,10 +212,10 @@ class PluginManager:
         registry = MarketplaceRegistry()
         from backend.plugins.policy import _plugin_policy_from_stack
 
-        policy = _plugin_policy_from_stack(self.config_stack)
+        policy = await to_thread_cancel_safe(_plugin_policy_from_stack, self.config_stack)
         if refresh:
-            await asyncio.to_thread(registry.refresh, marketplace, policy=policy)
-        plugin, path = await asyncio.to_thread(
+            await to_thread_cancel_safe(registry.refresh, marketplace, policy=policy)
+        plugin, path = await to_thread_cancel_safe(
             registry.materialize_plugin,
             marketplace,
             plugin_name,
@@ -635,6 +636,7 @@ class MarketplaceRegistry:
                 raise ValueError(
                     f"Marketplace '{clean_name}' is already registered with a different source"
                 )
+            return existing
         record = {
             "name": clean_name,
             # Keep the caller's fields for UI round-tripping, but persist the

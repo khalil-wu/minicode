@@ -21,7 +21,7 @@ import sqliteIcon from "@iconify-icons/simple-icons/sqlite";
 import stripeIcon from "@iconify-icons/simple-icons/stripe";
 import supabaseIcon from "@iconify-icons/simple-icons/supabase";
 import { Blocks, BookOpenText, Globe2 } from "../lib/icons";
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import anthropicIcon from "@lobehub/icons-static-svg/icons/anthropic.svg?url";
 import claudeIcon from "@lobehub/icons-static-svg/icons/claude-color.svg?url";
 import deepseekIcon from "@lobehub/icons-static-svg/icons/deepseek-color.svg?url";
@@ -48,7 +48,7 @@ const BRAND_ASSETS: Array<[RegExp, BrandAsset]> = [
   [/notion/, { label: "Notion", asset: notionIcon }],
   [/vercel/, { label: "Vercel", asset: vercelIcon }],
   [/microsoft/, { label: "Microsoft", asset: microsoftIcon }],
-  [/\bgoogle\b/, { label: "Google", asset: googleIcon }],
+  [/\bgoogle\b(?![\s/_-]*drive)/, { label: "Google", asset: googleIcon }],
 ];
 
 const BRAND_ICONS: Array<[RegExp, { label: string; icon: IconifyIcon }]> = [
@@ -64,7 +64,7 @@ const BRAND_ICONS: Array<[RegExp, { label: string; icon: IconifyIcon }]> = [
   [/mongodb/, { label: "MongoDB", icon: mongodbIcon }],
   [/mysql/, { label: "MySQL", icon: mysqlIcon }],
   [/redis/, { label: "Redis", icon: redisIcon }],
-  [/google\s*drive|googledrive/, { label: "Google Drive", icon: googleDriveIcon }],
+  [/google[\s/_-]*drive|googledrive/, { label: "Google Drive", icon: googleDriveIcon }],
   [/dropbox/, { label: "Dropbox", icon: dropboxIcon }],
   [/(?:^|\s|[/@_-])npm(?:$|\s|[/@_-])/, { label: "npm", icon: npmIcon }],
   [/postgres(?:ql)?|\bpostgres\b/, { label: "PostgreSQL", icon: postgresqlIcon }],
@@ -140,9 +140,9 @@ export const BrandIcon = ({
   const brand = inferBrand ? resolveBrandIcon(value) : null;
   const remoteCandidates = resolveWebsiteIconCandidates(iconUrl, brand ? undefined : websiteUrl);
   const remoteCandidateKey = remoteCandidates.join("\n");
-  const [failedRemoteIcons, setFailedRemoteIcons] = useState<string[]>([]);
-  useEffect(() => setFailedRemoteIcons([]), [remoteCandidateKey]);
-  const remoteIcon = remoteCandidates.find((candidate) => !failedRemoteIcons.includes(candidate)) ?? "";
+  const [failedRemoteIcons, setFailedRemoteIcons] = useState<{ scope: string; urls: string[] }>({ scope: remoteCandidateKey, urls: [] });
+  const failures = failedRemoteIcons.scope === remoteCandidateKey ? failedRemoteIcons.urls : [];
+  const remoteIcon = remoteCandidates.find((candidate) => !failures.includes(candidate)) ?? "";
   // A bundle's declared icon is authoritative. Brand inference applies only
   // when that asset is absent or fails, and never overrides an extension logo.
   const showRemoteIcon = Boolean(remoteIcon);
@@ -153,12 +153,14 @@ export const BrandIcon = ({
     <span className={`brand-icon${className ? ` ${className}` : ""}`} style={style} title={accessibleTitle} aria-hidden="true" data-brand={showRemoteIcon ? "website" : brand?.label.toLowerCase() ?? "generic"}>
       {showRemoteIcon ? (
         <img
+          key={remoteIcon}
           src={remoteIcon}
           alt=""
           width={size}
           height={size}
           referrerPolicy="no-referrer"
-          onError={() => setFailedRemoteIcons((failed) => failed.includes(remoteIcon) ? failed : [...failed, remoteIcon])}
+          onError={() => setFailedRemoteIcons((failed) => ({ scope: remoteCandidateKey,
+            urls: [...(failed.scope === remoteCandidateKey ? failed.urls : []), remoteIcon] }))}
         />
       ) : brand && "asset" in brand ? (
         <img src={brand.asset} alt="" width={size} height={size} />

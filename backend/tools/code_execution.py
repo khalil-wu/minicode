@@ -94,7 +94,8 @@ class ToolExecTool(BaseTool):
             options = json.loads(first[len("// @exec:"):])
             args = {**args, **options, "code": args["code"]}
             error = validate_tool_input(self, args)
-            if error: return ToolResult(error, is_error=True, status="failed")
+            if error:
+                return ToolResult(error, is_error=True, status="failed")
         result = await context.run_context.code_execution.execute(args["code"], context, yield_time_ms=args.get("yield_time_ms", 10000))
         return await _present_result(result, context, args.get("max_chars", 8000))
 

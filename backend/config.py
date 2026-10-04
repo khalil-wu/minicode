@@ -23,6 +23,7 @@ from backend.llm.model_catalog import responses_model_catalog_entry
 from backend.llm.proxy_policy import normalize_provider_proxy_mode
 
 from backend.config_helpers import (
+    _CONFIG_CWD_UNSET,
     ContextWindowResolution,
     DATA_ROOT,
     LLMSettings,
@@ -92,6 +93,10 @@ from backend.config_helpers import (
 )
 from backend.config_providers import (
     _clear_runtime_api_key,
+    _clear_scoped_runtime_api_key,
+    _clear_scoped_runtime_image_api_key,
+    _commit_credential_changes,
+    _credential_deletions,
     _next_image_settings,
     _next_model_metadata,
     _set_runtime_api_key,
@@ -366,73 +371,6 @@ def _scoped_vault_name(provider: str, base_url: str) -> str:
     return f"{prefix}_{scope}"
 
 
-def _clear_scoped_runtime_image_api_key(provider: str, base_url: str) -> None:
-    names = _image_scoped_vault_names(provider, base_url)
-    for name in names:
-        os.environ.pop(name, None)
-    runtime_key = _normalize_provider(provider)
-    if _RUNTIME_IMAGE_API_KEY_SCOPES.get(runtime_key) == _provider_key_scope(base_url):
-        _RUNTIME_IMAGE_API_KEY_SCOPES.pop(runtime_key, None)
-    try:
-        from backend.vault import EnvVault
-
-        vault = EnvVault()
-        for name in names:
-            vault.delete(name)
-    except Exception as exc:
-        logger.debug("vault image API key clear failed for %s: %s", runtime_key, exc)
-
-
-def _clear_scoped_runtime_api_key(provider: str, base_url: str = "") -> None:
-    provider = _normalize_provider(provider)
-    scoped_names = _scoped_vault_names(provider, base_url)
-    if not scoped_names:
-        return
-    scoped_values = {
-        value
-        for scoped_name in scoped_names
-        if _is_api_key_replacement(
-            value := (
-                os.getenv(scoped_name, "").strip()
-                or _vault_api_key(scoped_name).strip()
-            )
-        )
-    }
-    global_name = {
-        "anthropic": "ANTHROPIC_API_KEY",
-        "custom": "CUSTOM_API_KEY",
-        "openai": "OPENAI_API_KEY",
-    }.get(_normalize_provider(provider), "OPENAI_API_KEY")
-    global_values = {
-        value
-        for value in (
-            os.getenv(global_name, "").strip(),
-            _vault_api_key(global_name).strip(),
-        )
-        if _is_api_key_replacement(value)
-    }
-    runtime_scope_matches = (
-        _RUNTIME_API_KEY_SCOPES.get(provider) == _provider_key_scope(base_url)
-    )
-    clear_global_alias = runtime_scope_matches or bool(scoped_values & global_values)
-    for scoped_name in scoped_names:
-        os.environ.pop(scoped_name, None)
-    if runtime_scope_matches:
-        _RUNTIME_API_KEY_SCOPES.pop(provider, None)
-    if clear_global_alias:
-        os.environ.pop(global_name, None)
-    try:
-        from backend.vault import EnvVault
-
-        vault = EnvVault()
-        for scoped_name in scoped_names:
-            vault.delete(scoped_name)
-        if clear_global_alias:
-            vault.delete(global_name)
-    except Exception as exc:
-        logger.debug("vault scoped API key clear failed for %s: %s", provider, exc)
-
-
 def _provider_api_key(provider: str) -> str:
     provider = _normalize_provider(provider)
     if provider == "anthropic":
@@ -569,7 +507,7 @@ def _history_entry_matches_delete(entry: dict[str, Any], target: dict[str, Any])
 
 
 @_serialized_settings_update
-def delete_llm_provider_history(payload: dict[str, Any]) -> dict[str, Any]:
+def delete_llm_provider_history(payload: dict[str, Any], *, after_publish: Callable[[], None] | None = None) -> dict[str, Any]:
     settings_data = _load_settings_json()
     llm_data = settings_data.setdefault("llm", {})
     raw_history = llm_data.get("provider_history", [])
@@ -606,17 +544,27 @@ def delete_llm_provider_history(payload: dict[str, Any]) -> dict[str, Any]:
         raise SettingsError("Saved provider configuration was not found.")
 
     llm_data["provider_history"] = next_history[:16]
+    credential_changes = {}
+    scope_changes = []
     if bool(payload.get("clear_api_key", True)):
+        retained_image_scopes = {
+            (_normalize_provider(str(entry.get("provider") or provider)), _provider_key_scope(str(entry["image_base_url"])))
+            for entry in next_history
+            if isinstance(entry, dict) and entry.get("image_base_url")
+        }
         for entry in removed:
             entry_provider = _normalize_provider(str(entry.get("provider") or provider))
             entry_base_url = str(entry.get("base_url") or base_url).strip()
-            _clear_scoped_runtime_api_key(entry_provider, entry_base_url)
+            changes, scopes = _credential_deletions(entry_provider, entry_base_url)
+            credential_changes.update(changes)
+            scope_changes.extend(scopes)
             image_base_url = str(entry.get("image_base_url") or "").strip()
-            if image_base_url:
-                _clear_scoped_runtime_image_api_key(entry_provider, image_base_url)
+            if image_base_url and (entry_provider, _provider_key_scope(image_base_url)) not in retained_image_scopes:
+                changes, scopes = _credential_deletions(entry_provider, image_base_url, image=True)
+                credential_changes.update(changes)
+                scope_changes.extend(scopes)
 
-    _write_settings_json(settings_data)
-    return get_llm_settings_payload(settings_data, include_api_keys=True)
+    return _commit_credential_changes(credential_changes, scope_changes, settings_data, after_publish)
 
 
 def resolve_provider_api_key_for_base_url(provider: str, base_url: str) -> str:
@@ -680,7 +628,7 @@ def add_permission_content_rule(rule: str, *, deny: bool = False) -> list[str]:
     return rules
 
 
-def load_config(*, cwd: Path | None = None) -> AppConfig:
+def load_config(*, cwd: Path | None | object = _CONFIG_CWD_UNSET) -> AppConfig:
     """Load the effective application config and retain its provenance stack."""
     config_layer_stack = load_config_layer_stack(cwd=cwd)
     settings_data = config_layer_stack.effective_config()

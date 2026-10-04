@@ -616,9 +616,9 @@ def test_commands_list_keeps_captured_owner_and_workspace_across_await(
         list_calls.append((root, resolve_active_workspace))
         return [{"name": "project-old", "command": "project-old", "source": "project"}]
 
-    import backend.services.skills_service as skills_service_module
+    import backend.commands.catalog as command_catalog_module
 
-    monkeypatch.setattr(skills_service_module, "list_commands", fake_list_commands)
+    monkeypatch.setattr(command_catalog_module, "get_enabled_composer_command_catalog", fake_list_commands)
 
     assert asyncio.run(handle_commands_list(session, {})) is True
     assert session.active_conversation_id == "conversation-new"
@@ -836,12 +836,14 @@ def test_handle_rejects_non_object_json_and_continues_to_ping(
 
     session = object.__new__(WebSocketSession)
     session.session_id = "session-non-object-json"
+    session.conversation_runtime = SimpleNamespace(active_conversation_id=None)
     session.event_outbox = SimpleNamespace(
         websocket=_WebSocket(),
         connection_generation=1,
         connected=True,
     )
     session.artifact_store = _ArtifactStore()
+    session.mcp_manager = None
     session.session_lifecycle = SessionLifecycle(session)
     session.session_lifecycle.ensure_workspace_context_task = lambda: None
     session.session_lifecycle.recover_orphaned_background_commands = AsyncMock()
@@ -874,7 +876,10 @@ def test_handle_rejects_non_object_json_and_continues_to_ping(
         "WebSocket message must be a JSON object",
     ]
     assert all(event["recoverable"] is True for event in errors)
-    assert payloads == [{"type": "pong"}]
+    assert payloads == [
+        {"type": "mcp_status", "servers": [], "conversation_id": "", "workspace_root": ""},
+        {"type": "pong"},
+    ]
     assert session.artifact_store.flushed is True
     assert session.artifact_store.cleared is True
 

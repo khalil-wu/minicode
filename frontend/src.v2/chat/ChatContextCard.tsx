@@ -7,6 +7,7 @@ import {
   ListChecks,
   Monitor,
   PanelRightOpen,
+  Terminal,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { useShallow } from "zustand/react/shallow";
@@ -30,10 +31,13 @@ import {
   artifactSummaryForRecord,
   canonicalArtifactKind,
   cleanArtifactLabel,
+  isExecutionResultArtifact,
+  isExecutionStatusLabel,
+  isExecutionOutputMediaType,
   normalizeArtifactPreview,
 } from "../lib/artifact-projection";
 import {
-  artifactImageResourceUrl,
+  artifactResourceUrl,
   inlineImageResourceUrl,
   withPreviewCacheBust,
 } from "../lib/artifact-resource";
@@ -43,15 +47,9 @@ import { getWebSocket } from "../hooks/useWebSocket";
 import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } from "./openAttachmentPreview";
 import { openWebTarget } from "./openWebTarget";
 import { useTurnChanges } from "./useTurnChanges";
+import { collectConversationSources, markdownSourceLabelKey } from "./conversationSources";
 import "./ChatContextCard.css";
 
-interface ContextSource {
-  id: string;
-  label: string;
-  url?: string;
-  detail: string;
-  messageId: string;
-}
 
 interface ContextAttachment {
   id: string;
@@ -65,6 +63,8 @@ interface ContextAttachment {
   mediaType?: string;
   previewUrl?: string;
   generated?: boolean;
+  executionResult?: boolean;
+  occurredAt?: number;
   /** Conversation that owns the artifact/attachment. */
   conversationId?: string;
   relatedCount: number;
@@ -87,33 +87,6 @@ const sourceLabel = (value: string): string => {
   }
 };
 
-const collectSources = (messages: ChatMessage[]): ContextSource[] => {
-  const items: ContextSource[] = [];
-  const seen = new Set<string>();
-  const push = (item: ContextSource) => {
-    if (!item.id || seen.has(item.id)) return;
-    seen.add(item.id);
-    items.push(item);
-  };
-
-  for (const message of messages) {
-    for (const citation of message.citations ?? []) {
-      const source = String(citation.url || citation.source || "").trim();
-      if (!source) continue;
-      const url = /^https?:\/\//i.test(source) ? source : undefined;
-      push({
-        id: `citation:${source}`,
-        label: citation.title || citation.label || (url ? sourceLabel(url) : "Provider location"),
-        ...(url ? { url } : {}),
-        detail: citation.label || (url ? sourceLabel(url) : source),
-        messageId: message.id,
-      });
-    }
-  }
-
-  return items.slice(-6).reverse();
-};
-
 export const collectAttachments = (
   messages: ChatMessage[],
   ownerConversationId?: string,
@@ -132,16 +105,23 @@ export const collectAttachments = (
     const mergedKind = existing.kind === "image" || item.kind === "image"
       ? "image"
       : existing.kind || item.kind;
+    const executionResult = mergedKind !== "image"
+      && isExecutionOutputMediaType(existing.mediaType || item.mediaType)
+      && Boolean(existing.executionResult || item.executionResult);
     items[existingIndex] = {
       ...existing,
       kind: mergedKind,
-      label: isPlaceholderAttachmentLabel(existing.label) ? item.label : existing.label,
+      label: (isPlaceholderAttachmentLabel(existing.label) || (item.executionResult && isExecutionStatusLabel(existing.label)))
+        && !(item.executionResult && !executionResult)
+        ? item.label : existing.label,
       artifactId: existing.artifactId || item.artifactId,
       docId: existing.docId || item.docId,
       path: existing.path || item.path,
       mediaType: existing.mediaType || item.mediaType,
       previewUrl: existing.previewUrl || item.previewUrl,
       generated: Boolean(existing.generated || item.generated),
+      executionResult,
+      occurredAt: executionResult ? existing.occurredAt ?? item.occurredAt : undefined,
       source: existing.source || item.source,
       conversationId: existing.conversationId || item.conversationId,
     };
@@ -220,6 +200,7 @@ const contextAttachmentFromToolRecord = (
   if (!artifactId) return null;
   const kind = canonicalArtifactKind(record.artifactKind, record.artifactMediaType, record);
   const mediaType = artifactMediaTypeForProjection(record.artifactMediaType, kind);
+  const executionResult = isExecutionResultArtifact(record);
   return {
     id: `artifact:${artifactId}`,
     label: artifactSummaryForRecord(record),
@@ -230,6 +211,8 @@ const contextAttachmentFromToolRecord = (
     mediaType,
     previewUrl: "",
     generated: true,
+    executionResult,
+    occurredAt: executionResult ? record.startedAt : undefined,
     conversationId: String(conversationId || "").trim() || undefined,
   };
 };
@@ -272,7 +255,7 @@ function ContextAttachmentThumbnail({ attachment }: { attachment: ContextAttachm
   const [loadState, setLoadState] = useState<"loading" | "loaded" | "error">("loading");
   const ownerScoped = attachment.source === "artifact" || attachment.source === "attachment";
   const baseUrl = useMemo(() => ownerScoped
-    ? artifactImageResourceUrl({
+    ? artifactResourceUrl({
         artifactId,
         conversationId: ownerConversationId,
         sessionId,
@@ -288,12 +271,13 @@ function ContextAttachmentThumbnail({ attachment }: { attachment: ContextAttachm
       ownerConversationId,
       ownerScoped,
       sessionId,
+      reloadNonce,
     ]);
 
   useEffect(() => {
     setReloadNonce(0);
     setLoadState("loading");
-  }, [artifactId, attachment.id, baseUrl, isConnected, ownerConversationId, sessionId]);
+  }, [artifactId, attachment.id, attachment.previewUrl, attachment.source, isConnected, ownerConversationId, sessionId]);
 
   const imageUrl = withPreviewCacheBust(baseUrl, reloadNonce);
 
@@ -354,7 +338,7 @@ function ContextAttachmentThumbnail({ attachment }: { attachment: ContextAttachm
 
 export const ChatContextCard = () => {
   const contextInputs = useAppStore(useShallow((state) => state.messages.flatMap((message) => [
-    message.id, message.citations, message.attachmentRefs, message.replyAttachments, message.artifacts,
+    message.id, message.isStreaming ? "" : markdownSourceLabelKey(message.content), message.citations, message.attachmentRefs, message.replyAttachments, message.artifacts,
     ...getToolCallsFromMessage(message),
   ])));
   const subagents = useAppStore((state) => state.subagents);
@@ -373,11 +357,10 @@ export const ChatContextCard = () => {
   );
   const previousRightPanelOpenRef = useRef(rightPanelOpen);
   const agentViews = useMemo(() => projectAgentViews(subagents), [subagents]);
-  // Text-only deltas do not change context. Keep collection and thumbnail
-  // rendering off that path while still responding to new artifacts/tools.
+  // Collect final Markdown link labels without recomputing on every stream delta.
   const { sources, attachments } = useMemo(() => {
     const messages = useAppStore.getState().messages;
-    return { sources: collectSources(messages), attachments: collectAttachments(messages, conversationId || undefined) };
+    return { sources: collectConversationSources(messages), attachments: collectAttachments(messages, conversationId || undefined) };
   }, [conversationId, contextInputs]);
 
   useEffect(() => {
@@ -465,6 +448,14 @@ export const ChatContextCard = () => {
   const contextCount = attachments.length + sources.length + browserTargets.length + agentViews.length + (hasBackgroundTasks ? 1 : 0) + (hasWorkspace ? 1 : 0) + (changes ? 1 : 0);
 
   const openPanel = (tab: RightStackTab) => setRightStackTab(tab);
+  const openSources = () => {
+    openPanel("tasks");
+    requestAnimationFrame(() => {
+      const section = document.getElementById("conversation-sources");
+      section?.scrollIntoView({ block: "start", behavior: "smooth" });
+      section?.focus({ preventScroll: true });
+    });
+  };
   const openAgent = (agentId?: string) => {
     setFocusedSubagentId(agentId ?? null);
     setRightStackTab("subagents");
@@ -599,7 +590,8 @@ export const ChatContextCard = () => {
 
         {[
           { label: "附件", items: attachments.filter((item) => item.source === "attachment") },
-          { label: "生成文件", items: attachments.filter((item) => item.source !== "attachment") },
+          { label: "生成文件", items: attachments.filter((item) => item.source !== "attachment" && !item.executionResult) },
+          { label: "执行结果", items: attachments.filter((item) => item.executionResult) },
         ].filter((group) => group.items.length > 0).map(({ label, items }) => (
           <section key={label} className="mc-chat-context-card-section" aria-label={`${label}摘要`}>
             <button type="button" className="mc-chat-context-section-title" onClick={() => openPanel("artifacts")}>
@@ -607,24 +599,31 @@ export const ChatContextCard = () => {
               <small>{items.length}</small>
             </button>
             {items.slice(0, 3).map((attachment) => {
+              const executionTime = attachment.executionResult && attachment.occurredAt
+                ? new Date(attachment.occurredAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+                : "";
               return (
                 <button
                   key={attachment.id}
                   type="button"
                   className="mc-chat-context-source"
-                  aria-label={`查看${label}：${attachment.label}`}
-                  title={attachment.label}
+                  aria-label={`查看${label}：${attachment.label}${executionTime ? ` · ${executionTime}` : ""}`}
+                  title={attachment.path || (attachment.occurredAt ? `${attachment.label} · ${new Date(attachment.occurredAt).toLocaleString()}` : attachment.label)}
                   onClick={() => openAttachment(attachment)}
                 >
                   <span>
                     {attachment.kind === "image" && attachment.source !== "workspace"
                       ? <ContextAttachmentThumbnail attachment={attachment} />
+                      : attachment.executionResult ? <Terminal size={16} aria-hidden="true" />
                       : fileIcon(attachment.label, { size: 16, className: "mc-chat-context-file-icon" })}
                   </span>
                   <span className="mc-chat-context-source-content">
                     <span>{attachment.label}</span>
                     <small>
-                      {attachment.relatedCount > 1
+                      {attachment.executionResult
+                        ? executionTime || "执行输出"
+                        : attachment.path ? attachment.path
+                        : attachment.relatedCount > 1
                         ? `同组 ${attachment.relatedCount} 项`
                         : attachment.source === "attachment" ? "用户提供" : "生成的文件"}
                     </small>
@@ -641,7 +640,7 @@ export const ChatContextCard = () => {
         ))}
 
         {sources.length > 0 && <section className="mc-chat-context-card-section" aria-label="来源摘要">
-          <button type="button" className="mc-chat-context-section-title" onClick={() => openPanel("tasks")}>
+          <button type="button" className="mc-chat-context-section-title" onClick={openSources}>
             <span>来源</span>
             <small>{sources.length}</small>
           </button>
@@ -682,7 +681,7 @@ export const ChatContextCard = () => {
             </div>
           ))}
           {sources.length > 3 && (
-            <button type="button" className="mc-chat-context-more" onClick={() => openPanel("tasks")}>
+            <button type="button" className="mc-chat-context-more" onClick={openSources}>
               还有 {sources.length - 3} 项 <ChevronRight size={14} />
             </button>
           )}

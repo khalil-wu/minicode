@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.agent.run_context import RunContext
+
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -140,7 +142,7 @@ async def test_cancelling_terminal_publication_finishes_the_same_transaction():
         assert release.wait(5)
 
     transaction = QueryTerminalTransaction(
-        turn_ctx=SimpleNamespace(state=AgentState(user_message="task", reply="done"), turn_kernel=None, metadata={}),
+        turn_ctx=SimpleNamespace(state=AgentState(user_message='task', reply='done'), turn_kernel=None, metadata={}, run_context=RunContext()),
         journal=SimpleNamespace(record_terminal_intent=intent,
                                 record_terminal=lambda event: recorded.append(("terminal", event.data["status"]))),
     )

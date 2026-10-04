@@ -2,14 +2,7 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
-
-_CITATION_BLOCK_RE = re.compile(
-    r"<minicode-memory-citation>.*?</minicode-memory-citation>",
-    re.DOTALL,
-)
-
 
 def parse_memory_citation(citations: list[str]) -> dict[str, Any] | None:
     entries: list[dict[str, Any]] = []
@@ -35,15 +28,13 @@ def parse_memory_citation(citations: list[str]) -> dict[str, Any] | None:
     return {"entries": entries, "rollout_ids": rollout_ids}
 
 
-def scrub_memory_citations(text: str) -> str:
-    return _CITATION_BLOCK_RE.sub("", text)
-
-
 def _extract_block(text: str, opening: str, closing: str) -> str | None:
-    try:
-        return text.split(opening, 1)[1].split(closing, 1)[0]
-    except (IndexError, ValueError):
+    start = text.find(opening)
+    if start < 0:
         return None
+    start += len(opening)
+    end = text.find(closing, start)
+    return text[start:end] if end >= 0 else None
 
 
 def _parse_entry(line: str) -> dict[str, Any] | None:
@@ -58,11 +49,11 @@ def _parse_entry(line: str) -> dict[str, Any] | None:
         return None
     line_start, line_end = line_range.split("-", 1)
     try:
-        return {
-            "path": path.strip(),
-            "line_start": int(line_start.strip()),
-            "line_end": int(line_end.strip()),
-            "note": note[:-1].strip(),
-        }
+        start = int(line_start.strip())
+        end = int(line_end.strip())
     except ValueError:
         return None
+    path = path.strip()
+    if not path or start < 1 or end < start:
+        return None
+    return {"path": path, "line_start": start, "line_end": end, "note": note[:-1].strip()}

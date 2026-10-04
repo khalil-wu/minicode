@@ -2075,10 +2075,9 @@ def test_main_responses_fails_closed_for_unknown_stream_event_without_payload_le
     assert [event.type for event in events] == [StreamEventType.ERROR]
     assert events[0].raw == {
         "provider": "openai_responses",
-        "provider_error_type": "protocol",
-        "error_type": "api",
-        "event_type": "response.future_event",
-        "protocol_error_code": "unknown_stream_event",
+        "provider_error_type": "network",
+        "event_type": "eof_without_terminal",
+        "provider_error_code": "eof_without_terminal",
     }
     assert "secret-provider-payload" not in str(events[0].raw)
 

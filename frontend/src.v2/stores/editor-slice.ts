@@ -190,6 +190,26 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
           ),
         };
       }),
+    adoptEditorModelChanges: (changes, workspaceRoot) => {
+      updateWorkspace(workspaceRoot, (state) => {
+        let editorTabs = state.editorTabs;
+        for (const change of changes) {
+          const path = normalizeEditorPath(change.path, workspaceRoot);
+          const existing = editorTabs.find((tab) => editorPathsEqual(tab.path, path, workspaceRoot));
+          if (existing) {
+            editorTabs = editorTabs.map((tab) => tab === existing ? { ...tab, content: change.content } : tab);
+          } else if (change.content !== change.original) {
+            editorTabs = [...editorTabs, {
+              id: uniqueMessageId("editor"), path, content: change.content, original: change.original,
+              contentHash: change.contentHash, sizeBytes: change.sizeBytes,
+              loading: false, error: null, externalChanged: false, readOnly: false, largeFile: false,
+            }];
+          }
+        }
+        persistEditorTabs(editorTabs, workspaceRoot);
+        return { editorTabs };
+      });
+    },
     markTabLoaded: (path, content, error, contentHash, meta) =>
       set((s) => {
         const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
@@ -235,21 +255,5 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
           }),
         };
       }),
-    insertIntoActiveEditor: (text) => {
-      const state = get();
-      const path = state.activeTabPath;
-      if (!path) return false;
-      const tab = state.editorTabs.find((t) => editorPathsEqual(t.path, path, state.workingDirectory));
-      if (!tab || tab.loading || tab.error || tab.largeFile || tab.readOnly) return false;
-      set((s) => ({
-        editorTabs: s.editorTabs.map((t) =>
-          editorPathsEqual(t.path, path, s.workingDirectory)
-            ? { ...t, content: t.content ? `${t.content}\n${text}` : text }
-            : t,
-        ),
-        activeEditorPath: path,
-      }));
-      return true;
-    },
   };
 };

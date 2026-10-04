@@ -17,7 +17,7 @@ export const shouldAttachPastedText = (
   selectionEnd: number,
 ): boolean => {
   if (!pastedText) return false;
-  const replacedLength = Math.max(0, selectionEnd - selectionStart);
+  const replacedLength = selectionEnd - selectionStart;
   return currentValue.length - replacedLength + pastedText.length > MAX_EDITABLE_PASTE_CHARS;
 };
 

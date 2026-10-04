@@ -18,9 +18,10 @@ export function addInspectorPayload(
 
 export function focusInspectorEntry(entry: InspectorEntry) {
   const state = useAppStore.getState();
-  state.setInspectorFocus({ kind: entry.targetKind, id: entry.targetId });
+  const rawOwner = entry.conversationId ?? entry.payload.conversation_id ?? entry.payload.conversationId;
+  const conversationId = typeof rawOwner === "string" ? rawOwner.trim() : "";
+  state.setInspectorFocus({ kind: entry.targetKind, id: entry.targetId, conversationId });
   if (entry.payload.diagnostics_deferred === true) {
-    const conversationId = String(state.conversationId || "").trim();
     if (!conversationId) return;
     const conversation = state.conversations.find((item) => item.id === conversationId);
     sendClientCommand({
@@ -28,7 +29,8 @@ export function focusInspectorEntry(entry: InspectorEntry) {
       target_kind: entry.targetKind,
       target_id: entry.targetId,
       conversation_id: conversationId,
-      workspace_root: conversation?.worktreePath || conversation?.workspaceRoot || state.workingDirectory || undefined,
+      workspace_root: conversation?.worktreePath || conversation?.workspaceRoot
+        || (conversationId === state.conversationId ? state.workingDirectory : undefined) || undefined,
     });
   }
 }

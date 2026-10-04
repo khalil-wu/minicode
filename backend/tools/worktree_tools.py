@@ -4,7 +4,11 @@ Git Worktree 工具（参考 Claude Code 的 worktree 支持）。
 
 from __future__ import annotations
 
+from backend.async_cleanup import to_thread_cancel_safe
+
 import asyncio
+import concurrent.futures
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -91,10 +95,7 @@ def _normalize_hook_worktree_path(raw_path: Any, *, requested_path: Path, contex
     if not candidate.is_absolute():
         root = getattr(context, "workspace_root", None) if context is not None else None
         candidate = Path(root or requested_path.parent) / candidate
-    try:
-        return candidate.resolve()
-    except OSError:
-        return candidate.absolute()
+    return candidate.resolve()
 
 
 class ListWorktreesTool(BaseTool):
@@ -131,7 +132,7 @@ class ListWorktreesTool(BaseTool):
         if manager is None:
             return self._error_result("当前目录不是 Git 仓库")
 
-        worktrees = await asyncio.to_thread(manager.list_worktrees)
+        worktrees = await to_thread_cancel_safe(manager.list_worktrees)
 
         if not worktrees:
             return self._success_result("没有找到 worktree")
@@ -262,7 +263,7 @@ class CreateWorktreeTool(BaseTool):
         except ValueError as exc:
             return self._error_result(str(exc))
 
-        success = await asyncio.to_thread(
+        success = await to_thread_cancel_safe(
             manager.create_worktree,
             path=path,
             branch=branch,
@@ -329,7 +330,7 @@ class RemoveWorktreeTool(BaseTool):
             return self._error_result("缺少 path 参数")
 
         requested_path = Path(path_str)
-        normalized_path = str(requested_path.expanduser().resolve())
+        normalized_path = str(_normalize_hook_worktree_path(path_str, requested_path=requested_path, context=context))
         hook_manager = (
             context.run_context.hook_manager
             if context is not None and context.run_context is not None
@@ -381,7 +382,7 @@ class RemoveWorktreeTool(BaseTool):
         except ValueError as exc:
             return self._error_result(str(exc))
 
-        success = await asyncio.to_thread(manager.remove_worktree, path=path, force=force)
+        success = await to_thread_cancel_safe(manager.remove_worktree, path=path, force=force)
 
         if success:
             return self._success_result(f"已删除 worktree: {path}")
@@ -393,16 +394,61 @@ class RemoveWorktreeTool(BaseTool):
 
 
 async def _resolve_worktree_manager(context: "ToolExecutionContext | None"):
-    """优先用当前工作区根构造 manager,回退到全局单例。非 Git 仓库返回 None。"""
-    from backend.workspace.worktree import WorktreeManager, get_global_worktree_manager
+    """Bind model-facing Git execution to the current workspace and sandbox."""
+    from backend.workspace.worktree import NotGitRepositoryError, WorktreeManager, get_global_worktree_manager
 
-    root = getattr(context, "workspace_root", None) if context else None
+    if context is None:
+        return await to_thread_cancel_safe(get_global_worktree_manager)
+    root = context.workspace_root
     if root:
+        from backend.sandbox.policy import (
+            AdditionalPermissionProfile, FileSystemAccessMode, FileSystemPath,
+            FileSystemPermissions, FileSystemSandboxEntry, sandbox_policy_for_permission_context,
+        )
+        from backend.tools.git_support import _run_git
+
+        workspace = Path(root).resolve()
+        captured_policy = context.sandbox_policy or sandbox_policy_for_permission_context(workspace, context.permission)
+        loop = asyncio.get_running_loop()
+
+        def git_runner(argv, *, cwd, env, check, index_file=None, text=False, encoding="utf-8", **options):
+            policy = captured_policy
+            if argv[1:3] in (["worktree", "add"], ["worktree", "remove"]):
+                target_index = 5 if argv[3] == "-b" else 4 if argv[3] in {"--detach", "--force"} else 3
+                target = Path(argv[target_index]).resolve()
+                # A fixed Git operation addresses the tool's owned path (or
+                # a repository-validated restore record). Reopen only the
+                # default metadata mask where this captured policy already
+                # grants write access; explicit readonly/denied paths stay so.
+                if policy.resolve(cwd=workspace).resolve_access(target) is FileSystemAccessMode.WRITE:
+                    policy = policy.with_additional_permissions(AdditionalPermissionProfile(
+                        file_system=FileSystemPermissions((FileSystemSandboxEntry(
+                            FileSystemPath.path(target), FileSystemAccessMode.WRITE,
+                        ),)),
+                    ))
+            read_only = argv[1] in {"rev-parse", "status"} or argv[1:3] in (["worktree", "list"], ["branch", "--show-current"])
+            operation = asyncio.run_coroutine_threadsafe(_run_git(
+                argv, root=workspace, cwd=Path(cwd), context=context,
+                sandbox_policy=policy, write_git_metadata=not read_only,
+                timeout=options["timeout"],
+                index_file=index_file,
+            ), loop)
+            try:
+                result = operation.result()
+            except concurrent.futures.CancelledError:
+                raise asyncio.CancelledError
+            if text:
+                result = subprocess.CompletedProcess(result.args, result.returncode,
+                    result.stdout.decode(encoding), result.stderr.decode(encoding))
+            if check and result.returncode:
+                raise subprocess.CalledProcessError(result.returncode, argv, output=result.stdout, stderr=result.stderr)
+            return result
+
         try:
-            return await asyncio.to_thread(WorktreeManager, Path(root))
-        except ValueError:
+            return await to_thread_cancel_safe(WorktreeManager, workspace, git_runner=git_runner)
+        except NotGitRepositoryError:
             return None
-    return await asyncio.to_thread(get_global_worktree_manager)
+    return None
 
 
 class SnapshotWorktreeTool(BaseTool):
@@ -454,9 +500,13 @@ class SnapshotWorktreeTool(BaseTool):
         if not path_str:
             return self._error_result("缺少 path 参数,且无法从上下文推断工作区")
 
-        record = await asyncio.to_thread(
+        snapshot_path = Path(path_str).expanduser()
+        if not snapshot_path.is_absolute():
+            snapshot_path = Path(context.workspace_root if context is not None else manager.repo_root) / snapshot_path
+        record = await to_thread_cancel_safe(
             manager.snapshot_worktree,
-            Path(path_str),
+            snapshot_path.resolve(),
+            conversation_id=context.conversation_id if context is not None else "",
             label=str(args.get("label", "")),
         )
         if record is None:
@@ -521,10 +571,14 @@ class RestoreWorktreeTool(BaseTool):
             return self._error_result("当前目录不是 Git 仓库")
 
         dest = args.get("dest")
-        result = await asyncio.to_thread(
+        if dest:
+            dest = Path(dest).expanduser()
+            if not dest.is_absolute():
+                dest = Path(context.workspace_root if context is not None else manager.repo_root) / dest
+        result = await to_thread_cancel_safe(
             manager.restore_snapshot,
             snapshot_id,
-            dest=Path(dest) if dest else None,
+            dest=dest.resolve() if dest else None,
         )
         if not result.restored:
             return self._error_result(f"恢复失败: {result.error or snapshot_id}")
@@ -575,7 +629,7 @@ class ListWorktreeSnapshotsTool(BaseTool):
             return self._error_result("当前目录不是 Git 仓库")
 
         conversation_id = str(args.get("conversation_id", "")).strip() or None
-        records = await asyncio.to_thread(manager.list_snapshots, conversation_id)
+        records = await to_thread_cancel_safe(manager.list_snapshots, conversation_id)
         if not records:
             return self._success_result("没有找到 worktree 快照")
 

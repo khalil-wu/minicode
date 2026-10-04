@@ -806,7 +806,7 @@ def test_control_approval_payload_omits_timeout_when_wait_is_unbounded() -> None
     assert "expires_at" not in payload
 
 
-def test_fenceless_interrupt_cancels_live_run_but_not_stale_replay() -> None:
+def test_interrupt_requires_current_identity_for_live_and_idle_sessions() -> None:
     class LiveSession:
         def __init__(self) -> None:
             self.active_conversation_id = "conv-stop"
@@ -826,10 +826,14 @@ def test_fenceless_interrupt_cancels_live_run_but_not_stale_replay() -> None:
             await handle_interrupt_command(session, {"conversation_id": "conv-stop"})
             is True
         )
+        assert session.cancel_calls == []
+        await handle_interrupt_command(session, {"conversation_id": "conv-stop", "task_id": "task-old"})
+        assert session.cancel_calls == []
+        await handle_interrupt_command(session, {"conversation_id": "conv-stop", "task_id": "task-live"})
         return session.cancel_calls
 
-    # cc's Esc always aborts the running turn, even before an assistant
-    # message exists to carry a fence.
+    # A current task identity also permits cancellation before an assistant
+    # message exists; a stale or missing identity never targets a newer turn.
     assert len(asyncio.run(live())) == 1
 
     class IdleSession(LiveSession):

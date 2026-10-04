@@ -263,11 +263,121 @@ describe("InlineAgentPrompt control protocol responses", () => {
     });
   });
 
-  it("renders ask-user options with A/B badges and sends the selected option", () => {
+  it("keeps short plans directly readable without an unnecessary disclosure control", () => {
+    useAppStore.setState({
+      pendingApproval: {
+        requestId: "short-plan",
+        conversationId: "conv-inline",
+        toolName: "exit_plan_mode",
+        args: { plan: "# Small change\n\nUpdate the button label." },
+      },
+    });
+
+    render(<InlineAgentPrompt />);
+    expect(screen.getByText("Update the button label.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "展开计划" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "收起计划" })).toBeNull();
+  });
+
+  it("expands and collapses a long plan while preserving its full content through edit and approval", () => {
+    const plan = `# Detailed plan\n\n${Array.from({ length: 18 }, (_, index) => `- Step ${index + 1}`).join("\n")}\n\nFinal exact text.  `;
+    useAppStore.setState({
+      pendingApproval: {
+        requestId: "long-plan",
+        conversationId: "conv-inline",
+        turnId: "plan-turn",
+        messageId: "plan-message",
+        toolName: "exit_plan_mode",
+        args: { plan },
+      },
+    });
+
+    render(<InlineAgentPrompt />);
+    expect(screen.getByRole("button", { name: "展开计划" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByText("Step 18")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "展开计划" }));
+    expect(screen.getByRole("button", { name: "收起计划" }).getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "收起计划" }));
+    expect(screen.getByRole("button", { name: "展开计划" }).getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑计划" }));
+    const editor = screen.getByRole("textbox", { name: "编辑计划" }) as HTMLTextAreaElement;
+    expect(editor.value).toBe(plan);
+    expect(screen.queryByRole("button", { name: "展开计划" })).toBeNull();
+    const editedPlan = `${plan}\n\nOne additional requirement.  `;
+    fireEvent.change(editor, { target: { value: editedPlan } });
+    fireEvent.click(screen.getByRole("button", { name: "预览计划" }));
+    expect(screen.getByText("One additional requirement.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "批准计划并开始实现" }));
+
+    expect(mocks.sendPromptResponseCommand).toHaveBeenCalledWith({
+      type: "control_response",
+      request_id: "long-plan",
+      conversation_id: "conv-inline",
+      turn_id: "plan-turn",
+      message_id: "plan-message",
+      response: { subtype: "success", response: { action: "approve", plan: editedPlan } },
+    });
+  });
+
+  it("starts a different long plan collapsed with its own original content", () => {
+    const plan = `# Current plan\n\n${"Detailed requirement.\n".repeat(18)}`;
+    const approval = {
+      requestId: "current-plan",
+      conversationId: "conv-inline",
+      toolName: "exit_plan_mode",
+      args: { plan },
+    };
+    useAppStore.setState({ pendingApproval: approval });
+    render(<InlineAgentPrompt />);
+    fireEvent.click(screen.getByRole("button", { name: "展开计划" }));
+    expect(screen.getByRole("button", { name: "收起计划" })).toBeTruthy();
+
+    const nextPlan = plan.replace("Current plan", "Next plan");
+    act(() => useAppStore.setState({
+      pendingApproval: { ...approval, requestId: "next-plan", args: { plan: nextPlan } },
+    }));
+    expect(screen.getByRole("button", { name: "展开计划" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("button", { name: "收起计划" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "编辑计划" }));
+    expect((screen.getByRole("textbox", { name: "编辑计划" }) as HTMLTextAreaElement).value).toBe(nextPlan);
+    expect(mocks.sendPromptResponseCommand).not.toHaveBeenCalled();
+  });
+
+  it.each(["", " \n "])("blocks approval of an empty teammate plan while retaining rejection", async (planContent) => {
+    useAppStore.setState({
+      pendingAskUser: {
+        requestId: "empty-teammate-plan",
+        conversationId: "conv-inline",
+        question: "Review the teammate plan",
+        planReview: { subagentId: "teammate-1", teammateName: "builder", planContent },
+      },
+    });
+
+    render(<InlineAgentPrompt />);
+    const approve = screen.getByRole("button", { name: "批准子智能体的计划" }) as HTMLButtonElement;
+    expect(approve.disabled).toBe(true);
+    fireEvent.click(approve);
+    expect(mocks.sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "拒绝子智能体的计划" }));
+
+    expect(mocks.sendClientCommandAwaitResult).toHaveBeenCalledWith({
+      type: "subagent.plan_review",
+      subagent_id: "teammate-1",
+      request_id: "empty-teammate-plan",
+      approved: false,
+      conversation_id: "conv-inline",
+    }, "subagent.plan_review");
+    await waitFor(() => expect(useAppStore.getState().pendingAskUser).toBeNull());
+  });
+
+  it("selects an ask-user option without sending and confirms its exact value with Continue", () => {
     useAppStore.setState({
       pendingAskUser: {
         requestId: "ctrl-choice",
         conversationId: "conv-inline",
+        turnId: "turn-choice",
+        messageId: "message-choice",
         question: "删除临时文件吗？",
         protocol: "control",
         options: [
@@ -284,18 +394,280 @@ describe("InlineAgentPrompt control protocol responses", () => {
     expect(screen.getByText("C")).toBeTruthy();
     expect(screen.getByText("自定义回答")).toBeTruthy();
     expect(screen.getByText("保留工作区中的临时文件")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "继续" }) as HTMLButtonElement).disabled).toBe(true);
 
-    fireEvent.click(screen.getByRole("button", { name: /不删除/ }));
+    const keepOption = screen.getByRole("radio", { name: /不删除/ });
+    fireEvent.click(keepOption);
+
+    expect(keepOption.getAttribute("aria-checked")).toBe("true");
+    expect(mocks.sendPromptResponseCommand).not.toHaveBeenCalled();
+    expect((screen.getByRole("button", { name: "继续" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
 
     expect(mocks.sendPromptResponseCommand).toHaveBeenCalledWith({
       type: "control_response",
       request_id: "ctrl-choice",
       conversation_id: "conv-inline",
+      turn_id: "turn-choice",
+      message_id: "message-choice",
       response: {
         subtype: "success",
         response: { answer: "keep" },
       },
     });
+  });
+
+  it("switches exclusively between options and custom input and submits custom text through the same form", () => {
+    useAppStore.setState({
+      pendingAskUser: {
+        requestId: "custom-choice",
+        conversationId: "conv-inline",
+        question: "Choose a direction",
+        options: [{ label: "Suggested direction", value: "suggested" }],
+      },
+    });
+
+    render(<InlineAgentPrompt />);
+    const option = screen.getByRole("radio", { name: /Suggested direction/ });
+    const input = screen.getByRole("textbox", { name: "回答 Agent 的问题" }) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "earlier custom answer" } });
+    fireEvent.click(option);
+    expect(input.value).toBe("");
+    expect(option.getAttribute("aria-checked")).toBe("true");
+
+    fireEvent.focus(input);
+    expect(option.getAttribute("aria-checked")).toBe("true");
+    expect((screen.getByRole("button", { name: "继续" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.change(input, { target: { value: "  My own direction  " } });
+    expect(option.getAttribute("aria-checked")).toBe("false");
+    expect(mocks.sendPromptResponseCommand).not.toHaveBeenCalled();
+    fireEvent.submit(input.form!);
+
+    expect(mocks.sendPromptResponseCommand).toHaveBeenCalledWith({
+      type: "control_response",
+      request_id: "custom-choice",
+      conversation_id: "conv-inline",
+      response: { subtype: "success", response: { answer: "  My own direction  " } },
+    });
+  });
+
+  it("preserves an option through empty-input focus and keyboard form confirmation", () => {
+    useAppStore.setState({
+      pendingAskUser: {
+        requestId: "keyboard-choice", conversationId: "conv-inline", question: "Choose an answer",
+        options: [{ label: "Keep this choice", value: "retained-option" }],
+      },
+    });
+    render(<InlineAgentPrompt />);
+    fireEvent.click(screen.getByRole("radio", { name: /Keep this choice/ }));
+    const input = screen.getByRole("textbox", { name: "回答 Agent 的问题" }) as HTMLInputElement;
+    fireEvent.focus(input);
+    fireEvent.submit(input.form!);
+    expect(mocks.sendPromptResponseCommand).toHaveBeenCalledWith({
+      type: "control_response", request_id: "keyboard-choice", conversation_id: "conv-inline",
+      response: { subtype: "success", response: { answer: "retained-option" } },
+    });
+  });
+
+  it.each(["refused", "failed"])("retains a selected option after a %s submission for an explicit retry", async (outcome) => {
+    if (outcome === "refused") {
+      mocks.sendPromptResponseCommand.mockResolvedValueOnce({
+        type: "command.result", command: "control_response", level: "error", message: "Answer was not accepted", data: {},
+      });
+    } else {
+      mocks.sendPromptResponseCommand.mockRejectedValueOnce(new Error("Answer was not accepted"));
+    }
+    useAppStore.setState({
+      pendingAskUser: {
+        requestId: "retry-choice",
+        conversationId: "conv-inline",
+        question: "Choose an answer",
+        allowCustom: false,
+        options: [{ label: "Displayed label", value: "actual-option-id" }],
+      },
+    });
+
+    render(<InlineAgentPrompt />);
+    fireEvent.click(screen.getByRole("radio", { name: /Displayed label/ }));
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    await screen.findByText("Answer was not accepted");
+    expect(screen.getByRole("radio", { name: /Displayed label/ }).getAttribute("aria-checked")).toBe("true");
+    expect((screen.getByRole("button", { name: "继续" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(useAppStore.getState().pendingAskUser?.requestId).toBe("retry-choice");
+    expect(mocks.sendPromptResponseCommand).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    await waitFor(() => expect(useAppStore.getState().pendingAskUser).toBeNull());
+    const expectedCommand = {
+      type: "control_response",
+      request_id: "retry-choice",
+      conversation_id: "conv-inline",
+      response: { subtype: "success", response: { answer: "actual-option-id" } },
+    };
+    expect(mocks.sendPromptResponseCommand).toHaveBeenNthCalledWith(1, expectedCommand);
+    expect(mocks.sendPromptResponseCommand).toHaveBeenNthCalledWith(2, expectedCommand);
+  });
+
+  it("moves through a single choice group with arrow and boundary keys without submitting", () => {
+    useAppStore.setState({
+      pendingAskUser: {
+        requestId: "keyboard-navigation", conversationId: "conv-inline", question: "选择一个方向",
+        options: [
+          { label: "界面", value: "ui" },
+          { label: "编辑器", value: "editor" },
+          { label: "预览", value: "preview" },
+        ],
+      },
+    });
+    render(<InlineAgentPrompt />);
+    expect(screen.getByRole("radiogroup", { name: "选择一个方向" })).toBeTruthy();
+    const choices = screen.getAllByRole("radio") as HTMLButtonElement[];
+    expect(choices.map((choice) => choice.tabIndex)).toEqual([0, -1, -1]);
+    choices[0].focus();
+    fireEvent.keyDown(choices[0], { key: "ArrowDown" });
+    expect(document.activeElement).toBe(choices[1]);
+    expect(choices[1].getAttribute("aria-checked")).toBe("true");
+    expect(choices.map((choice) => choice.tabIndex)).toEqual([-1, 0, -1]);
+    fireEvent.keyDown(choices[1], { key: "End" });
+    expect(document.activeElement).toBe(choices[2]);
+    fireEvent.keyDown(choices[2], { key: "ArrowRight" });
+    expect(document.activeElement).toBe(choices[0]);
+    fireEvent.keyDown(choices[0], { key: "ArrowUp" });
+    expect(document.activeElement).toBe(choices[2]);
+    fireEvent.keyDown(choices[2], { key: "Home" });
+    expect(document.activeElement).toBe(choices[0]);
+    expect(mocks.sendPromptResponseCommand).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    expect(mocks.sendPromptResponseCommand).toHaveBeenCalledWith(expect.objectContaining({
+      response: { subtype: "success", response: { answer: "ui" } },
+    }));
+  });
+
+  it.each([{ isComposing: true }, { keyCode: 229 }])("keeps Enter inside IME composition before explicit answer submission: %j", (composition) => {
+    useAppStore.setState({
+      pendingAskUser: { requestId: "ime-answer", conversationId: "conv-inline", question: "描述你的想法" },
+    });
+    render(<InlineAgentPrompt />);
+    const input = screen.getByRole("textbox", { name: "回答 Agent 的问题" }) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "继续完善编辑器" } });
+    const allowsDefaultSubmission = fireEvent.keyDown(input, { key: "Enter", ...composition });
+    expect(allowsDefaultSubmission).toBe(false);
+    expect(input.value).toBe("继续完善编辑器");
+    expect(mocks.sendPromptResponseCommand).not.toHaveBeenCalled();
+    expect(fireEvent.keyDown(input, { key: "Enter", isComposing: false })).toBe(true);
+    fireEvent.submit(input.form!);
+    expect(mocks.sendPromptResponseCommand).toHaveBeenCalledWith(expect.objectContaining({
+      response: { subtype: "success", response: { answer: "继续完善编辑器" } },
+    }));
+  });
+
+  it("shows pending submission and locks the selected answer until the result arrives", async () => {
+    let finish!: (result: { type: "command.result"; command: string; level: string; message: string; data: {} }) => void;
+    mocks.sendPromptResponseCommand.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    useAppStore.setState({
+      pendingAskUser: {
+        requestId: "pending-answer", conversationId: "conv-inline", question: "选择一个方向",
+        options: [{ label: "完善当前版本", value: "increment" }, { label: "重新设计", value: "redesign" }],
+      },
+    });
+    render(<InlineAgentPrompt />);
+    const choices = screen.getAllByRole("radio") as HTMLButtonElement[];
+    fireEvent.click(choices[0]);
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    expect(screen.getByRole("status").textContent).toBe("正在提交…");
+    expect(choices.every((choice) => choice.disabled)).toBe(true);
+    expect((screen.getByRole("textbox") as HTMLInputElement).disabled).toBe(true);
+    fireEvent.click(choices[1]);
+    expect(choices[0].getAttribute("aria-checked")).toBe("true");
+    expect(mocks.sendPromptResponseCommand).toHaveBeenCalledOnce();
+    await act(async () => finish({ type: "command.result", command: "control_response", level: "error", message: "连接中断，请重试", data: {} }));
+    expect(screen.getByRole("alert").textContent).toBe("连接中断，请重试");
+    expect(choices.every((choice) => !choice.disabled)).toBe(true);
+    expect(choices[0].getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("status").textContent).toBe("选好后点击继续");
+  });
+
+  it("keeps plan reading keyboard accessible and preserves edited content after a rejected submission", async () => {
+    let finish!: (result: { type: "command.result"; command: string; level: string; message: string; data: {} }) => void;
+    mocks.sendPromptResponseCommand.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const plan = `# 计划\n\n${"- 完善一个交互细节\n".repeat(18)}`;
+    useAppStore.setState({
+      pendingApproval: {
+        requestId: "readable-plan", conversationId: "conv-inline", toolName: "exit_plan_mode", args: { plan },
+      },
+    });
+    render(<InlineAgentPrompt />);
+    const document = screen.getByRole("region", { name: "计划内容" });
+    const expand = screen.getByRole("button", { name: "展开计划" });
+    expect(expand.getAttribute("aria-controls")).toBe(document.id);
+    expect(document.getAttribute("tabindex")).toBeNull();
+    fireEvent.click(expand);
+    expect(document.tabIndex).toBe(0);
+    fireEvent.click(screen.getByRole("button", { name: "编辑计划" }));
+    const editor = screen.getByRole("textbox", { name: "编辑计划" }) as HTMLTextAreaElement;
+    const revised = `${plan}\n- 保留现有动画`;
+    fireEvent.change(editor, { target: { value: revised } });
+    fireEvent.click(screen.getByRole("button", { name: "批准计划并开始实现" }));
+    expect(editor.disabled).toBe(true);
+    expect(screen.getByRole("status").textContent).toBe("正在提交计划…");
+    await act(async () => finish({ type: "command.result", command: "control_response", level: "error", message: "计划尚未接受", data: {} }));
+    expect(editor.disabled).toBe(false);
+    expect(editor.value).toBe(revised);
+    expect(screen.getByRole("alert").textContent).toBe("计划尚未接受");
+  });
+
+  it("keeps diagnostics behind a disclosure while preserving its inspector action", () => {
+    useAppStore.setState({
+      pendingAskUser: { requestId: "diagnostic-prompt", conversationId: "conv-inline", question: "继续吗？" },
+    });
+    render(<InlineAgentPrompt />);
+    const summary = screen.getByText("更多操作");
+    const details = summary.parentElement as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    fireEvent.click(summary);
+    expect(details.open).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "技术诊断" }));
+    expect(useAppStore.getState().inspectorFocus).toEqual({ kind: "permission", id: "prompt:diagnostic-prompt", conversationId: "conv-inline" });
+  });
+
+  it.each(["approval", "diff", "question"])("keeps %s diagnostics owned by the visible side prompt", (kind) => {
+    const owner = { requestId: "side-diagnostic", conversationId: "side-owner" };
+    useAppStore.setState({ conversationId: "parent-owner", inspectorEntries: [], inspectorFocus: null,
+      ...(kind === "approval" ? { pendingApproval: { ...owner, toolName: "read_file", args: { path: "side.ts" } } }
+        : kind === "diff" ? { pendingDiffReview: { ...owner, diff: "+side" } }
+        : { pendingAskUser: { ...owner, question: "Continue the side task?" } }) });
+    render(<InlineAgentPrompt conversationId="side-owner" />);
+    fireEvent.click(screen.getByText("更多操作"));
+    fireEvent.click(screen.getByRole("button", { name: "技术诊断" }));
+    const state = useAppStore.getState();
+    expect(state.inspectorFocus).toEqual({ kind: "permission", id: "prompt:side-diagnostic", conversationId: "side-owner" });
+    expect(state.inspectorEntries[0]).toMatchObject({ targetId: "prompt:side-diagnostic", conversationId: "side-owner", payload: { conversation_id: "side-owner" } });
+  });
+
+  it.each(["option", "custom"])("resets a local %s answer when switching to a different request", (answerMode) => {
+    const question = {
+      requestId: "previous-question",
+      conversationId: "conv-inline",
+      question: "Previous question",
+      options: [{ label: "Choose this", value: "chosen" }],
+    };
+    useAppStore.setState({ pendingAskUser: question });
+    render(<InlineAgentPrompt />);
+    if (answerMode === "option") {
+      fireEvent.click(screen.getByRole("radio", { name: /Choose this/ }));
+    } else {
+      fireEvent.change(screen.getByRole("textbox", { name: "回答 Agent 的问题" }), { target: { value: "Previous answer" } });
+    }
+    expect((screen.getByRole("button", { name: "继续" }) as HTMLButtonElement).disabled).toBe(false);
+
+    act(() => useAppStore.setState({
+      pendingAskUser: { ...question, requestId: "next-question", question: "Next question" },
+    }));
+    expect(screen.getByText("Next question")).toBeTruthy();
+    expect(screen.getByRole("radio", { name: /Choose this/ }).getAttribute("aria-checked")).toBe("false");
+    expect((screen.getByRole("textbox", { name: "回答 Agent 的问题" }) as HTMLInputElement).value).toBe("");
+    expect((screen.getByRole("button", { name: "继续" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(mocks.sendPromptResponseCommand).not.toHaveBeenCalled();
   });
 
   it("shows the provider and distinct prompt context for control elicitations", () => {
@@ -428,8 +800,12 @@ describe("InlineAgentPrompt control protocol responses", () => {
     expect(screen.getByText("Use a local callback page")).toBeTruthy();
     expect(screen.queryByText("自定义回答")).toBeNull();
     expect(screen.queryByRole("textbox")).toBeNull();
+    expect((screen.getByRole("button", { name: "继续" }) as HTMLButtonElement).disabled).toBe(true);
 
-    fireEvent.click(screen.getByRole("button", { name: /Device code login/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /Device code login/ }));
+    expect(mocks.sendPromptResponseCommand).not.toHaveBeenCalled();
+    expect(screen.getByRole("radio", { name: /Device code login/ }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
     expect(mocks.sendPromptResponseCommand).toHaveBeenCalledWith({
       type: "control_response",
       request_id: "provider-select",
@@ -453,9 +829,9 @@ describe("InlineAgentPrompt control protocol responses", () => {
 
     render(<InlineAgentPrompt />);
 
-    expect(screen.getByTitle("command: npm run build")).toBeTruthy();
+    expect(screen.getByText("npm run build")).toBeTruthy();
     expect(screen.getByTitle("url: https://example.com/noise")).toBeTruthy();
-    expect(screen.queryByTitle("cwd: frontend")).toBeNull();
+    expect(screen.queryByTitle("cwd: frontend")).toBeTruthy();
   });
 
   it("shows the server-owned approval deadline and highlights the last minute", () => {
@@ -512,7 +888,7 @@ describe("InlineAgentPrompt control protocol responses", () => {
 
     render(<InlineAgentPrompt />);
 
-    expect(screen.getByTitle("command: curl https://example.com")).toBeTruthy();
+    expect(screen.getByText("curl https://example.com")).toBeTruthy();
     expect(screen.getByTitle("url: https://docs.example.com/page")).toBeTruthy();
   });
 

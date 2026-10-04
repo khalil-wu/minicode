@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   Archive,
@@ -44,6 +44,9 @@ import { FeatureFlagsTab } from "./FeatureFlagsTab";
 import { PluginsTab } from "./PluginsTab";
 import { SkillsTab } from "./SkillsTab";
 import { formatSettingsLoadError } from "./settingsLoad";
+import { SETTINGS_OPTIONS } from "./settingsSearch";
+import { formatShortcut, SHORTCUT_DEFINITIONS } from "../lib/keyboard-shortcuts";
+import { FEATURE_FLAG_LABELS } from "./FeatureFlagsTab";
 
 export const SettingsCenter = () => {
   const settingsOpen = useAppStore((s) => s.settingsOpen);
@@ -56,6 +59,7 @@ export const SettingsCenter = () => {
   const setActiveTab = useAppStore((s) => s.setSettingsTab);
   const conversationId = useAppStore((s) => s.conversationId);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const shortcutBindings = useAppStore((s) => s.shortcutBindings);
   const [provider, setProvider] = useState<ProviderId>("custom");
   const [settingsPayload, setSettingsPayload] = useState<LLMSettingsPayload | null>(null);
   const settingsPayloadRef = useRef<LLMSettingsPayload | null>(null);
@@ -64,6 +68,39 @@ export const SettingsCenter = () => {
   const [settingsLoadError, setSettingsLoadError] = useState("");
   const [settingsQuery, setSettingsQuery] = useState("");
   const activeTabButtonRef = useRef<HTMLButtonElement>(null);
+  const contentRef = useRef<HTMLElement>(null);
+  const pagePositions = useRef(new Map<Tab, number>());
+  useLayoutEffect(() => {
+    if (contentRef.current) contentRef.current.scrollTop = pagePositions.current.get(activeTab) || 0;
+  }, [activeTab]);
+  const [visitedTabs, setVisitedTabs] = useState<Tab[]>([activeTab]);
+  const [searchTarget, setSearchTarget] = useState<{ tab: Tab; title: string } | null>(null);
+  useEffect(() => {
+    if (settingsOpen) setVisitedTabs((tabs) => tabs.includes(activeTab) ? tabs : [...tabs, activeTab]);
+  }, [activeTab, settingsOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen || !searchTarget || searchTarget.tab !== activeTab) return;
+    let highlighted: Element | undefined;
+    let clearHighlight: number;
+    const locate = () => {
+      const pane = pageRef.current?.querySelector(`[data-settings-tab="${activeTab}"]`);
+      const target = Array.from(pane?.querySelectorAll<HTMLElement>("h3, .settings-row-title, .settings-shortcut-action, .feature-flag-row span, [aria-label]") || [])
+        .find((element) => element.textContent?.trim() === searchTarget.title || element.getAttribute("aria-label") === searchTarget.title);
+      if (!target) return;
+      highlighted = target.closest(".settings-row, .settings-shortcut-row, .feature-flag-row, section") || target;
+      highlighted.classList.add("settings-search-highlight");
+      highlighted.scrollIntoView?.({ block: "center", behavior: "auto" });
+      const control = target.matches("input, textarea, select, button") ? target : highlighted.querySelector<HTMLElement>("input, textarea, select, button") || target;
+      control.focus({ preventScroll: true });
+      clearHighlight = window.setTimeout(() => highlighted?.classList.remove("settings-search-highlight"), 2200);
+      observer.disconnect();
+    };
+    const observer = new MutationObserver(locate);
+    observer.observe(pageRef.current!, { childList: true, subtree: true });
+    locate();
+    return () => { observer.disconnect(); window.clearTimeout(clearHighlight); highlighted?.classList.remove("settings-search-highlight"); };
+  }, [activeTab, searchTarget, settingsOpen, settingsLoadState, pageRef]);
 
   const loadSettings = () => {
     const epoch = ++settingsLoadEpochRef.current;
@@ -125,16 +162,6 @@ export const SettingsCenter = () => {
     if (settingsOpen && activeTab === "provider") {
       sendClientCommand({ type: "runtime.capabilities.inspect", source: "settings.provider" }, { silent: true });
     }
-    if (settingsOpen && activeTab === "advanced") {
-      sendClientCommand({ type: "env.list" }, { silent: true });
-    }
-    if (settingsOpen && activeTab === "scheduler") {
-      sendClientCommand({
-        type: "scheduler.list",
-        owner_conversation_id: conversationId ?? undefined,
-        workspace_root: workingDirectory || undefined,
-      }, { silent: true });
-    }
   }, [settingsOpen, activeTab, conversationId, workingDirectory]);
 
   useEffect(() => {
@@ -148,8 +175,6 @@ export const SettingsCenter = () => {
       inline: "center",
     });
   }, [activeTab, settingsOpen]);
-
-  if (!settingsOpen) return null;
 
   const tabs = [
     { id: "general" as const, group: "个人", label: "常规", description: "设置工作方式、消息跟进、过程展示与内容加载。", keywords: "协作 代码 远程 Markdown 图片", icon: <SlidersHorizontal /> },
@@ -173,15 +198,12 @@ export const SettingsCenter = () => {
     ? tabs.filter((tab) => `${tab.label} ${tab.group} ${tab.description} ${tab.keywords}`.toLowerCase().includes(normalizedSettingsQuery))
     : tabs;
 
-  const updateSettingsQuery = (value: string) => {
-    setSettingsQuery(value);
-    const query = value.trim().toLowerCase();
-    if (!query) return;
-    const matches = tabs.filter((tab) => `${tab.label} ${tab.group} ${tab.description} ${tab.keywords}`.toLowerCase().includes(query));
-    if (matches.length > 0 && !matches.some((tab) => tab.id === activeTab)) {
-      setActiveTab(matches[0].id);
-    }
-  };
+  const searchableOptions = [...SETTINGS_OPTIONS,
+    ...SHORTCUT_DEFINITIONS.map((shortcut) => ({ tab: "shortcuts" as const, title: shortcut.label, description: `快捷键绑定：${formatShortcut(shortcutBindings[shortcut.id]) || "未绑定"}`, keywords: `${shortcut.action} ${formatShortcut(shortcutBindings[shortcut.id])}` })),
+    ...Object.entries(FEATURE_FLAG_LABELS).map(([key, flag]) => ({ tab: "features" as const, title: flag.title, description: flag.description, keywords: key })),
+  ];
+  const matchingOptions = normalizedSettingsQuery ? searchableOptions.filter((option) =>
+    `${option.title} ${option.description} ${option.keywords}`.toLowerCase().includes(normalizedSettingsQuery)) : [];
 
   const handleProviderChange = (id: ProviderId) => {
     setProvider(id);
@@ -195,6 +217,7 @@ export const SettingsCenter = () => {
     <main
       ref={pageRef}
       className="settings-workspace settings-center"
+      hidden={!settingsOpen}
       aria-label="设置"
       tabIndex={-1}
       onKeyDown={(e) => {
@@ -212,9 +235,15 @@ export const SettingsCenter = () => {
         </button>
         <label className="settings-search">
           <Search size={15} aria-hidden="true" />
-          <input value={settingsQuery} onChange={(event) => updateSettingsQuery(event.target.value)} placeholder="搜索设置…" aria-label="搜索设置" />
+          <input value={settingsQuery} onChange={(event) => { setSettingsQuery(event.target.value); setSearchTarget(null); }} placeholder="搜索设置…" aria-label="搜索设置" />
         </label>
         <nav className="settings-center-tabs" aria-label="设置分类">
+          {matchingOptions.length > 0 && <div className="settings-search-results" aria-label="设置选项结果">
+            {matchingOptions.map((option) => <button key={`${option.tab}:${option.title}`} type="button"
+              className="settings-search-result" onClick={() => { setActiveTab(option.tab); setSearchTarget({ tab: option.tab, title: option.title }); }}>
+              <strong>{tabs.find((tab) => tab.id === option.tab)?.label} / {option.title}</strong><span>{option.description}</span>
+            </button>)}
+          </div>}
           {["个人", "集成", "编码", "已归档"].map((group) => {
             const groupTabs = visibleTabs.filter((tab) => tab.group === group);
             if (groupTabs.length === 0) return null;
@@ -229,7 +258,7 @@ export const SettingsCenter = () => {
                     ref={activeTab === tab.id ? activeTabButtonRef : undefined}
                     aria-label={tab.label}
                     aria-current={activeTab === tab.id ? "page" : undefined}
-                    onClick={() => setActiveTab(tab.id)}
+                    onClick={() => { setSearchTarget(null); setActiveTab(tab.id); }}
                   >
                     <span className="settings-center-tab-icon" aria-hidden="true">{tab.icon}</span>
                     <span className="settings-center-tab-label">{tab.label}</span>
@@ -238,30 +267,32 @@ export const SettingsCenter = () => {
               </div>
             );
           })}
-          {visibleTabs.length === 0 && <div className="settings-nav-empty">没有匹配的设置</div>}
+          {visibleTabs.length === 0 && matchingOptions.length === 0 && <div className="settings-nav-empty">没有匹配的设置</div>}
         </nav>
       </aside>
 
       <header className="settings-workspace-header" aria-hidden="true" />
 
-      <section className="settings-center-main" aria-labelledby="settings-page-title">
-          <div className="settings-center-content" key={activeTab}>
+      <section className="settings-center-main" ref={contentRef} onScroll={(event) => pagePositions.current.set(activeTab, event.currentTarget.scrollTop)} aria-labelledby="settings-page-title">
+          <div className="settings-center-content">
             <header className="settings-page-heading">
               <h2 id="settings-page-title">{activeTabMeta.label}</h2>
               <p>{activeTabMeta.description}</p>
             </header>
             <div className="settings-page-body">
-              {activeTab === "appearance" && <AppearanceTab />}
-              {activeTab === "personalization" && <PersonalizationTab />}
-              {activeTab === "shortcuts" && <ShortcutsTab />}
-              {activeTab === "general" && (
+              {Array.from(new Set([...visitedTabs, ...(settingsOpen ? [activeTab] : [])])).map((tab) => <div
+                className="settings-tab-pane" key={tab} data-settings-tab={tab} hidden={tab !== activeTab}>
+              {tab === "appearance" && <AppearanceTab />}
+              {tab === "personalization" && <PersonalizationTab active={settingsOpen && tab === activeTab} />}
+              {tab === "shortcuts" && <ShortcutsTab active={settingsOpen && tab === activeTab} searchTarget={searchTarget?.tab === "shortcuts" ? searchTarget.title : undefined} />}
+              {tab === "general" && (
                 <GeneralTab
                   remoteImagePolicy={remoteImagePolicy}
                   setRemoteImagePolicy={setRemoteImagePolicy}
                 />
               )}
-              {activeTab === "provider" && (
-                settingsLoadState === "error" ? (
+              {tab === "provider" && (
+                settingsLoadState === "error" && !settingsPayload ? (
                   <div className="settings-load-state" data-tone="danger" role="alert">
                     <span className="settings-load-state-icon" aria-hidden="true"><ServerOff /></span>
                     <div className="settings-load-state-copy">
@@ -271,28 +302,36 @@ export const SettingsCenter = () => {
                     </div>
                     <button type="button" className="settings-action-button" onClick={loadSettings}>重试</button>
                   </div>
-                ) : settingsLoadState !== "ready" ? (
+                ) : !settingsPayload ? (
                   <div className="settings-load-state" aria-live="polite">
                     <span className="settings-load-state-spinner" aria-hidden="true" />
                     <div className="settings-load-state-copy"><strong>正在加载模型设置</strong><span>正在读取提供商与模型配置。</span></div>
                   </div>
-                ) : <ProviderTab
+                ) : <>
+                  {settingsLoadState === "error" && <div className="settings-load-state" data-tone="danger" role="alert">
+                    <div className="settings-load-state-copy"><strong>模型设置刷新失败，编辑草稿已保留</strong><code>{settingsLoadError}</code></div>
+                    <button type="button" className="settings-action-button" onClick={loadSettings}>重试</button>
+                  </div>}
+                  <ProviderTab
                   selectedProvider={provider}
                   settingsPayload={settingsPayload}
                   settingsPayloadRef={settingsPayloadRef}
                   onProviderChange={handleProviderChange}
                   onSettingsPayloadChange={handleSettingsPayloadChange}
-                />
+                  searchTarget={searchTarget?.tab === "provider" ? searchTarget.title : undefined}
+                  isActive={settingsOpen && tab === activeTab}
+                /></>
               )}
-              {activeTab === "skills" && <SkillsTab onReturnToApp={toggleSettings} />}
-              {activeTab === "connectors" && <ConnectorsTab />}
-              {activeTab === "browser" && <BrowserIntegrationTab />}
-              {activeTab === "scheduler" && <SchedulerTab title="定时任务" description="自动运行的任务和最近结果。" />}
-              {activeTab === "workspaceGit" && <WorkspaceGitTab />}
-              {activeTab === "features" && <FeatureFlagsTab />}
-              {activeTab === "plugins" && <PluginsTab />}
-              {activeTab === "advanced" && <AdvancedTab />}
-              {activeTab === "archived" && <ArchivedTab />}
+              {tab === "skills" && <SkillsTab onReturnToApp={toggleSettings} />}
+              {tab === "connectors" && <ConnectorsTab />}
+              {tab === "browser" && <BrowserIntegrationTab active={settingsOpen && tab === activeTab} />}
+              {tab === "scheduler" && <SchedulerTab active={settingsOpen && tab === activeTab} title="定时任务" description="自动运行的任务和最近结果。" />}
+              {tab === "workspaceGit" && <WorkspaceGitTab active={settingsOpen && tab === activeTab} />}
+              {tab === "features" && <FeatureFlagsTab active={settingsOpen && tab === activeTab} searchTarget={searchTarget?.tab === "features" ? searchTarget.title : undefined} />}
+              {tab === "plugins" && <PluginsTab active={settingsOpen && tab === activeTab} searchTarget={searchTarget?.tab === "plugins" ? searchTarget.title : undefined} />}
+              {tab === "advanced" && <AdvancedTab active={settingsOpen && tab === activeTab} />}
+              {tab === "archived" && <ArchivedTab />}
+              </div>)}
             </div>
           </div>
       </section>

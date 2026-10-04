@@ -25,10 +25,6 @@ _MAX_OUTPUT_ERROR = (
     "The provider stopped because the output limit was reached and continuation "
     "recovery was exhausted."
 )
-_CONTEXT_WINDOW_ERROR = (
-    "The provider reached the model context window and emergency compaction "
-    "could not produce a resumable continuation."
-)
 
 
 def _context_window_failure_error() -> str:
@@ -187,9 +183,11 @@ async def recover_max_output(
                     state.reactive_compaction_attempted = True
                     full_compact = getattr(context_builder, "full_compact", None)
                     if callable(full_compact):
+                        from backend.agent.context import CompactionNoopError
+
                         try:
                             summary = await full_compact(restore_state=state)
-                        except Exception:
+                        except CompactionNoopError:
                             summary = ""
                         context_compacted = bool(summary)
                 if not context_compacted:
@@ -199,9 +197,7 @@ async def recover_max_output(
                         "recovered_emergency_compact",
                         finish_reason=normalized_reason,
                     )
-            if recovery_count >= _MAX_OUTPUT_RECOVERY_LIMIT:
-                boundary = object()
-            else:
+            if recovery_count < _MAX_OUTPUT_RECOVERY_LIMIT:
                 replay_items = _continuation_provider_items(provider_items)
                 if new_partial_text.strip() or replay_items:
                     append_assistant_history(

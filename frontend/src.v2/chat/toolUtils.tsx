@@ -23,7 +23,7 @@ export const ToolGlyph = ({
   size?: number;
   className?: string;
 }) => {
-  const normalized = String(kind || "").trim().toLowerCase();
+  const normalized = (kind ?? "").trim().toLowerCase();
   const props = { size, className: ["mc-tool-glyph", className].filter(Boolean).join(" ") };
   if (normalized === "websearch" || normalized === "search") return <Search {...props} />;
   if (normalized === "web") return <Globe {...props} />;
@@ -61,10 +61,4 @@ export const humanizeKey = (key: string) => key.replace(/_/g, " ");
 export function extractToolFilePath(args: Record<string, unknown>): string | null {
   const path = args.file_path ?? args.path ?? args.target ?? args.filename;
   return typeof path === "string" ? path : null;
-}
-
-export function shortToolPath(fullPath: string): string {
-  const parts = fullPath.replace(/\\/g, "/").split("/").filter(Boolean);
-  if (parts.length <= 3) return parts.join("/");
-  return `.../${parts.slice(-2).join("/")}`;
 }

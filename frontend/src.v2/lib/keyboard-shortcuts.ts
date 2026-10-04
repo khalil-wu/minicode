@@ -20,6 +20,7 @@ export const SHORTCUT_DEFINITIONS = [
   { id: "leftSidebar", label: "切换左侧栏", action: "Toggle left sidebar", defaultBinding: "Mod+B" },
   { id: "sideChat", label: "切换侧聊", action: "Toggle side chat", defaultBinding: "Mod+Semicolon" },
   { id: "saveFile", label: "保存文件", action: "Save editor file", defaultBinding: "Mod+S" },
+  { id: "saveAllFiles", label: "保存全部文件", action: "Save all editor files", defaultBinding: "Mod+Shift+S" },
   { id: "closeEditor", label: "关闭编辑器标签", action: "Close editor tab", defaultBinding: "Mod+W" },
   { id: "nextConversation", label: "切换下一个任务", action: "Next conversation", defaultBinding: "Mod+Tab" },
 ] as const;

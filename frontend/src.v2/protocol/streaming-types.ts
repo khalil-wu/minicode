@@ -10,7 +10,7 @@
  */
 
 import type { AgentCapabilitiesPayload } from "./capabilities";
-import type { InspectorTargetKind, ProviderRawMetadata } from "../stores/types";
+import type { ComposerQuote, InspectorTargetKind, MessageContextRef, ProviderRawMetadata } from "../stores/types";
 
 export const AGENT_PROGRESS_STAGES = [
   "status",
@@ -288,6 +288,8 @@ export interface ToolResultEvent {
   evidence_type?: "candidate" | "fetched" | "artifact" | "command" | "file" | string;
   status?: "success" | "failed" | "blocked" | "partial" | "timeout" | string;
   duration_ms?: number;
+  completed_at_ms?: number;
+  cleanup_receipt?: Record<string, unknown>;
   display_summary?: string;
   result_kind?: "web" | "command" | "file" | "edit" | "search" | "mcp" | "generic" | string;
   activity_kind?: string;
@@ -825,7 +827,12 @@ export interface RuntimeQueuedUserMessageSnapshot {
   message_id: string;
   user_message_id?: string;
   content?: string;
+  display_content?: string;
+  context_refs?: MessageContextRef[];
+  quoted_message?: ComposerQuote | null;
+  attachments?: Record<string, unknown>[];
   position?: number;
+  paused?: boolean;
 }
 
 export interface RuntimePendingTurnInputSnapshot {
@@ -835,6 +842,9 @@ export interface RuntimePendingTurnInputSnapshot {
   user_message_id?: string;
   target_message_id?: string;
   content?: string;
+  display_content?: string;
+  context_refs?: MessageContextRef[];
+  quoted_message?: ComposerQuote | null;
   attachments?: Record<string, unknown>[];
   position?: number;
   queued_at_ms?: number;

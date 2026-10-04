@@ -418,7 +418,6 @@ def _parse_value_matcher(value: Any, *, field: str) -> MCPValueMatcher:
     if operation == "regex":
         try:
             re.compile(candidate)
-            re.compile(rf"\A(?:{candidate})\Z")
         except re.error as exc:
             raise MCPPolicyError(f"MiniCode matcher {field} has invalid regex: {exc}") from exc
     return MCPValueMatcher(operation, candidate)

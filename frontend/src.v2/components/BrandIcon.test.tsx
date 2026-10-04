@@ -11,6 +11,8 @@ describe("BrandIcon", () => {
     ["github", "GitHub"],
     ["figma-desktop", "Figma"],
     ["@playwright/mcp", "Playwright"],
+    ["Google Drive", "Google Drive"],
+    ["google-drive", "Google Drive"],
   ])("uses the official icon for %s", (value, label) => {
     expect(resolveBrandIcon(value)?.label).toBe(label);
   });
@@ -67,5 +69,18 @@ describe("BrandIcon", () => {
     fireEvent.error(container.querySelector("img")!);
     rerender(<BrandIcon value="OpenAI Docs" iconUrl="/api/skills/asset?variant=large" />);
     expect(container.querySelector("img")?.getAttribute("src")).toContain("variant=large");
+  });
+
+  it("separates replaced resource elements and resets failures for the new resource scope", () => {
+    const view = render(<BrandIcon value="Unknown" iconUrl="https://example.com/old.svg" />);
+    const old = view.container.querySelector("img")!;
+    view.rerender(<BrandIcon value="Unknown" iconUrl="https://example.com/new.svg" />);
+    expect(view.container.querySelector("img")).not.toBe(old);
+    fireEvent.error(old);
+    expect(view.container.querySelector("img")?.getAttribute("src")).toBe("https://example.com/new.svg");
+    fireEvent.error(view.container.querySelector("img")!);
+    expect(view.container.querySelector('[data-brand="generic"]')).toBeTruthy();
+    view.rerender(<BrandIcon value="Unknown" iconUrl="https://example.com/old.svg" />);
+    expect(view.container.querySelector("img")?.getAttribute("src")).toBe("https://example.com/old.svg");
   });
 });

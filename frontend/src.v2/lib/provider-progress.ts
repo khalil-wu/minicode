@@ -129,31 +129,31 @@ export function providerProgressLabel(
   const providerState = progress?.providerState;
   const status = String(progress?.status || "").toLowerCase();
   const counter = providerRetryCounter(progress);
-  if (providerState === "connecting") return "正在连接提供商";
+  if (providerState === "connecting") return "Connecting";
   if (providerState === "reconnecting") {
-    return counter ? `正在重新连接 ${counter}` : "正在重新连接";
+    return counter ? `Reconnecting ${counter}` : "Reconnecting";
   }
-  if (providerState === "responding") return "模型正在响应";
+  if (providerState === "responding") return "Waiting for model";
   if (providerState === "failed") {
-    return counter ? `连接失败（重试 ${counter} 后）` : "连接失败";
+    return counter ? `Connection failed after ${counter} retries` : "Connection failed";
   }
   if (providerState === "interrupted") {
-    return counter ? `连接中断（重试 ${counter}）` : "连接中断";
+    return counter ? `Connection interrupted (${counter})` : "Connection interrupted";
   }
   if (providerState === "completed") {
-    return counter ? `提供商响应完成（重试 ${counter}）` : "提供商响应完成";
+    return counter ? `Response completed (${counter})` : "Response completed";
   }
   if (status === "running") {
-    return counter ? `正在重新连接 ${counter}` : "正在连接提供商";
+    return counter ? `Reconnecting ${counter}` : "Connecting";
   }
   if (status === "failed") {
-    return counter ? `连接失败（重试 ${counter} 后）` : "连接失败";
+    return counter ? `Connection failed after ${counter} retries` : "Connection failed";
   }
   if (status === "partial" || status === "cancelled" || status === "interrupted") {
-    return counter ? `连接中断（重试 ${counter}）` : "连接中断";
+    return counter ? `Connection interrupted (${counter})` : "Connection interrupted";
   }
   if (status === "completed" || status === "done" || status === "success") {
-    return counter ? `提供商已连接（重试 ${counter}）` : "提供商已连接";
+    return counter ? `Response completed (${counter})` : "Response completed";
   }
-  return counter ? `重新连接 ${counter}` : progress?.message || undefined;
+  return counter ? `Reconnecting ${counter}` : progress?.message || undefined;
 }

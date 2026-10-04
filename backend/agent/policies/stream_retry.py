@@ -9,8 +9,6 @@ import random
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
-from backend.llm.errors import is_fatal_llm_error, is_retryable_llm_error
-
 if TYPE_CHECKING:
     from backend.config import AgentSettings
 
@@ -144,7 +142,7 @@ class DefaultStreamRetryPolicy:
                 retry_state.consecutive_529_errors + 1 if is_529 else 0
             )
 
-        if is_fatal_llm_error(error_message):
+        if classification.fatal:
             return StreamRetryDecision(
                 should_retry=False,
                 delay_seconds=self._settings.stream_retry_delay_seconds,
@@ -175,7 +173,7 @@ class DefaultStreamRetryPolicy:
         has_budget = attempt_index < self._settings.stream_max_attempts
         should_retry = has_budget and (
             any(p in error_lower for p in self._settings.stream_retryable_substrings)
-            or is_retryable_llm_error(error_message)
+            or classification.retryable
         )
         # base = min(delay * 2**attempt, 32s), then
         # add uniform jitter of up to +25% of the base so retries don't stampede.

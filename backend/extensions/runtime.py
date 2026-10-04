@@ -22,6 +22,8 @@ from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any
 
+from backend.tools.base import BaseTool
+
 from .types import (
     Extension,
     ExtensionCommand,
@@ -339,6 +341,8 @@ class ExtensionRuntime:
                 return _call_with_signature(callback, kwargs, args)
         callback = self._actions.get(action_name)
         if callback is None:
+            if action_name == "exec":
+                raise PermissionError("extension exec requires a MiniCode host action")
             raise RuntimeError(f"Extension runtime action '{action_name}' is not bound")
         return _call_with_signature(callback, kwargs, args)
 
@@ -934,23 +938,11 @@ class ExtensionAPI:
     ) -> Any:
         self._assert()
         options = dict(options or {})
-        if self._runner.runtime._actions.get("exec") is None:
-            raise PermissionError(
-                "extension exec requires a MiniCode host action"
-            )
         return self._runner.runtime.action(
             "exec", command=command, args=list(args), options=options
         )
 
     events: Any
-
-
-try:  # Keep module importable for light-weight tooling outside MiniCode.
-    from backend.tools.base import BaseTool
-except Exception:  # pragma: no cover
-
-    class BaseTool:  # type: ignore[no-redef]
-        pass
 
 
 class ExtensionToolAdapter(BaseTool):
@@ -1003,10 +995,7 @@ class ExtensionToolAdapter(BaseTool):
         )
 
     def to_runtime_metadata(self) -> dict[str, Any]:
-        try:
-            metadata = dict(super().to_runtime_metadata())
-        except (AttributeError, TypeError):  # pragma: no cover - fallback BaseTool
-            metadata = {}
+        metadata = dict(super().to_runtime_metadata())
         metadata.update(dict(self.definition.metadata))
         metadata.update(
             {
@@ -1115,7 +1104,11 @@ class ExtensionToolAdapter(BaseTool):
                     text = _normalise_content(value)
                     if not text:
                         return
-                    callback_result = stream_callback(text, "stdout", tool_call_id)
+                    callback_result = _call_with_signature(
+                        stream_callback,
+                        {"output": text, "stream": "stdout", "tool_call_id": tool_call_id},
+                        (text, "stdout", tool_call_id),
+                    )
                     if inspect.isawaitable(callback_result):
                         await callback_result
 
@@ -1128,6 +1121,7 @@ class ExtensionToolAdapter(BaseTool):
             on_update=on_update,
             tool_context=context,
             raw_definition=self.definition,
+            apply_hooks=False,
         )
 
 
@@ -1805,7 +1799,14 @@ class ExtensionRunner:
         on_update: Callable[..., Any] | None = None,
         tool_context: Any = None,
         raw_definition: ExtensionToolDefinition | None = None,
+        apply_hooks: bool = True,
     ) -> Any:
+        """Execute directly, or run only the definition for the host adapter.
+
+        The host's canonical tool boundary owns its pre/post hooks. In
+        particular, its input hook must run before final authorization, so
+        the adapter cannot invoke that hook again with approved arguments.
+        """
         self.assert_active()
         definition = raw_definition
         if definition is None:
@@ -1819,7 +1820,7 @@ class ExtensionRunner:
             tool_call_id=tool_call_id, tool_name=tool_name, input=dict(params or {})
         )
         ctx = self.create_context(signal=signal, tool_context=tool_context)
-        decision = await self.emit_tool_call(event, context=ctx)
+        decision = await self.emit_tool_call(event, context=ctx) if apply_hooks else None
         if decision is not None and decision.block:
             result = _as_tool_result(
                 {
@@ -1841,6 +1842,9 @@ class ExtensionRunner:
             raw = await self._invoke_callback(definition.execute, values,
                 (tool_call_id, event.input, signal, on_update, ctx))
             result = _as_tool_result(raw)
+
+        if not apply_hooks:
+            return result
 
         # Build the extension result event while retaining MiniCode's compact
         # ToolResult object for the host.

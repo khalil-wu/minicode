@@ -2,6 +2,22 @@ import { describe, expect, it } from "vitest";
 import { normalizeAgentErrorMessage } from "./errorMessages";
 
 describe("normalizeAgentErrorMessage", () => {
+  it.each(["src/read500.ts does not exist", "Command exited with code 429"])("retains a non-HTTP numeric failure: %s", (raw) => {
+    expect(normalizeAgentErrorMessage(raw)).toBe(raw);
+  });
+
+  it("keeps typed billing and backend-localized quota failures from becoming rate-limit retries", () => {
+    const typed = normalizeAgentErrorMessage("insufficient_quota provider_error_type=billing status=429");
+    expect(typed).toContain("账户状态");
+    expect(typed).not.toContain("暂时繁忙");
+    const published = "模型服务额度或计费不可用，请检查账户状态。（HTTP 429）";
+    expect(normalizeAgentErrorMessage(published)).toBe(published);
+  });
+
+  it("keeps typed model and protocol failures ahead of misleading transport status", () => {
+    expect(normalizeAgentErrorMessage("model custom-model does not exist provider_error_type=model status=503")).toContain("custom-model");
+    expect(normalizeAgentErrorMessage("provider_error_type=protocol status=429")).toContain("API 格式");
+  });
   it("normalizes proxy auth failures into actionable guidance", () => {
     const message = normalizeAgentErrorMessage(
       "Error: hosted web search failed: 407 Proxy Authentication Required",

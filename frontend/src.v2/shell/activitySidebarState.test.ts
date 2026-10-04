@@ -172,7 +172,7 @@ describe("buildActivitySidebarState", () => {
       },
     ]);
     expect(state.sources).toMatchObject([
-      { url: "https://docs.example/used", label: "Docs", title: "Used docs" },
+      { url: "https://docs.example/used", label: "Used docs", title: "Used docs" },
     ]);
     expect(state.sources.map((item) => item.url)).not.toContain("https://candidate.example/not-cited");
   });

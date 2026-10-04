@@ -135,11 +135,6 @@ async function withFileMutationQueue(filePath, operation) {
   return withFileMutationQueues([filePath], operation);
 }
 
-async function atomicWriteText(filePath, content) {
-  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-  await writeFileAtomic(filePath, String(content), { encoding: "utf8", fsync: true });
-}
-
 function atomicWriteTextSync(filePath, content) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   writeFileAtomic.sync(filePath, String(content), { encoding: "utf8", fsync: true });
@@ -254,8 +249,6 @@ module.exports = {
   isProbablyTextBuffer,
   hashFileContent,
   withFileMutationQueue,
-  withFileMutationQueues,
-  atomicWriteText,
   atomicWriteTextSync,
   countDirEntries,
 

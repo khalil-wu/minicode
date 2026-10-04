@@ -911,6 +911,8 @@ class QueryEngine:
                 current_run_id=run_record.run_id,
                 skill_manager=skill_manager,
                 execution_journal=run_context.execution_journal,
+                connected_mcp_servers=run_context.connected_mcp_servers,
+                checkpoint_base_dir=run_context.agent_runtime.state_root,
             )
             if recovery.restored or metadata.get("_turn_admission_restored"):
                 turn_kernel.discard_scheduled_user_input()

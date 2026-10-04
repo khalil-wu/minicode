@@ -491,29 +491,45 @@ def _force_artifact_for_oversized_tool_result(
         return result
 
     artifact_store = _artifact_store_from_tool_context(tool_ctx)
-    if artifact_store is None or not hasattr(artifact_store, "save"):
-        return result
-
     content_hash = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
     original_bytes = len(content.encode("utf-8", errors="replace"))
     line_count = len(content.splitlines())
-    try:
-        artifact_id = artifact_store.save(
-            content=content,
-            source=f"{tc.name}({tc.id})",
-            type="tool_result",
+    artifact_id = ""
+    publication_error = ""
+    if artifact_store is not None:
+        try:
+            artifact_id = artifact_store.save(
+                content=content,
+                source=f"{tc.name}({tc.id})",
+                type="tool_result",
+                conversation_id=str(getattr(tool_ctx, "conversation_id", "") or ""),
+                workspace_root=artifact_owner_workspace_root(tool_ctx),
+            )
+        except (OSError, ValueError) as exc:
+            publication_error = f"Artifact publication failed ({type(exc).__name__}: {exc})."
+            logger.warning(
+                "large tool result artifact save failed tool=%s call_id=%s error=%r",
+                tc.name, tc.id, exc,
+            )
+
+    if not artifact_id:
+        from backend.agent.tool_result_persistence import persist_tool_result
+
+        persisted = persist_tool_result(
+            content, tc.id, tc.name, force=True,
             conversation_id=str(getattr(tool_ctx, "conversation_id", "") or ""),
             workspace_root=artifact_owner_workspace_root(tool_ctx),
         )
-    except Exception as exc:
-        logger.warning(
-            "large tool result artifact save failed tool=%s call_id=%s chars=%s error=%r",
-            tc.name,
-            tc.id,
-            len(content),
-            exc,
+        retention = (
+            "Full output retained in the owner-scoped tool result file."
+            if persisted is not None
+            else "Full output could not be retained; only the bounded preview is available."
         )
-        return result
+        return replace(
+            result,
+            content=persisted.preview if persisted is not None else content,
+            limitation=" ".join(part for part in (result.limitation, publication_error, retention) if part),
+        )
 
     summary = "\n".join(
         [
@@ -579,6 +595,9 @@ def _watch_cleanup_receipt_settlement(
         tool_ctx.cleanup_tasks_by_call.pop(tool_call_id, None)
         receipt = tool_ctx.cleanup_receipts.get(tool_call_id)
         if not isinstance(receipt, dict) or not receipt.get("pending"):
+            return
+        resource_cleanup = receipt.get("resource_cleanup")
+        if resource_cleanup and resource_cleanup.get("pending"):
             return
         receipt["pending"] = 0
         receipt["completed"] = True
@@ -1399,11 +1418,7 @@ async def _apply_pre_tool_hook_owned(
                 display_summary="PreToolUse hook failed",
             )
     lifecycle_runtime = _tool_lifecycle_runtime(tool_ctx)
-    if lifecycle_runtime is not None and not _active_tool_is_owned_by_lifecycle_runtime(
-        tc.name,
-        tool_ctx,
-        lifecycle_runtime,
-    ):
+    if lifecycle_runtime is not None:
         try:
             before_tool_call = getattr(lifecycle_runtime, "before_tool_call", None)
             if callable(before_tool_call):
@@ -1459,41 +1474,13 @@ def _tool_lifecycle_runtime(
     return runtime
 
 
-def _active_tool_is_owned_by_lifecycle_runtime(
-    tool_name: str,
-    tool_ctx: ToolExecutionContext,
-    lifecycle_runtime: Any,
-) -> bool:
-    """Avoid double interception for ExtensionToolAdapter executions.
-
-    Extension tools invoke their runtime inside the adapter so they receive the
-    extension context and update callback. Built-in/host tools are intercepted here.
-    Checking the active registry object (not merely the registered name) keeps
-    hooks enabled when a host tool won an explicit collision policy.
-    """
-
-    registry = tool_ctx.tool_registry
-    get_tool = getattr(registry, "get_tool", None)
-    if not callable(get_tool):
-        return False
-    try:
-        tool = get_tool(str(tool_name or ""))
-    except Exception:
-        return False
-    return getattr(tool, "_runner", None) is lifecycle_runtime
-
-
 async def _apply_extension_post_tool_hook(
     tc: ToolCallEvent,
     result: ToolResult,
     tool_ctx: ToolExecutionContext,
 ) -> ToolResult:
     lifecycle_runtime = _tool_lifecycle_runtime(tool_ctx)
-    if lifecycle_runtime is None or _active_tool_is_owned_by_lifecycle_runtime(
-        tc.name,
-        tool_ctx,
-        lifecycle_runtime,
-    ):
+    if lifecycle_runtime is None:
         return result
     after_tool_call = getattr(lifecycle_runtime, "after_tool_call", None)
     if not callable(after_tool_call):
@@ -1653,6 +1640,8 @@ async def run_tool_with_timeout(
                     "nested_cleanup": dict(nested_receipt),
                 }
             )
+            if nested_receipt.get("resource_cleanup"):
+                cleanup_evidence["resource_cleanup"] = nested_receipt["resource_cleanup"]
         cleanup_evidence.update(
             {
                 "side_effect_kind": _tool_side_effect_kind(
@@ -1701,6 +1690,8 @@ async def run_tool_with_timeout(
                     "nested_cleanup": dict(nested_receipt),
                 }
             )
+            if nested_receipt.get("resource_cleanup"):
+                cleanup_evidence["resource_cleanup"] = nested_receipt["resource_cleanup"]
         cleanup_evidence["side_effect_kind"] = _tool_side_effect_kind(
             tc.name,
             tool_registry,
@@ -2094,7 +2085,7 @@ def store_result(
             conversation_id=str(getattr(tool_ctx, "conversation_id", "") or ""),
             workspace_root=getattr(tool_ctx, "workspace_root", None),
         )
-    state.record_tool_call(
+    committed_record = state.record_tool_call(
         tc.name,
         tc.arguments,
         context_result.to_context_string(),
@@ -2124,6 +2115,7 @@ def store_result(
         command_id=str(truncated.runtime_metadata.get("command_id") or ""),
         output_cursor=truncated.runtime_metadata.get("next_cursor"),
         call_source=asdict(tool_ctx.source_for_call(tc.id)) if tool_ctx is not None and tool_ctx.source_for_call(tc.id).kind != "direct" else None,
+        tool_call_id=tc.id,
     )
     if tool_ctx is not None and tool_ctx.run_context is not None and tool_ctx.run_context.tool_execution_gate is not None:
         tool_ctx.run_context.tool_execution_gate.complete(tc.id)
@@ -2138,7 +2130,7 @@ def store_result(
                 tool_name=tc.name,
             )
         )
-    return AgentEvent.tool_result(
+    result_event = AgentEvent.tool_result(
         id=tc.id,
         summary=truncated.content,
         artifact_id=truncated.artifact_id,
@@ -2180,6 +2172,11 @@ def store_result(
         artifact_media_type=truncated.artifact_media_type or "",
         artifact_bytes=truncated.artifact_bytes,
     )
+    # Transport consumers add their own owner/envelope fields to event.data.
+    # Keep the completed observation independent before that mutable handoff.
+    result_event.data["completed_at_ms"] = int(time.time() * 1000)
+    committed_record.result_payload = deepcopy(result_event.data)
+    return result_event
 
 
 def store_result_events(

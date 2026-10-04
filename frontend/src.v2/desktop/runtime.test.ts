@@ -68,6 +68,12 @@ describe("desktop PTY owner normalization", () => {
     await expect(ptyList("   ")).resolves.toEqual([]);
   });
 
+  it("preserves signal termination without inventing a zero exit code", async () => {
+    snapshot.mockResolvedValue({ session_id: "term_owned", conversation_id: "conv_owned", shell: "pwsh", cwd: "C:/owned",
+      is_alive: false, exit_code: null, exit_signal: "SIGTERM", exited_at: 2500 });
+    expect(await ptySnapshot("term_owned", "conv_owned")).toMatchObject({ isAlive: false, exitCode: null, exitSignal: "SIGTERM", exitedAt: 2500 });
+  });
+
   it("rejects spawn and snapshot payloads whose owner does not match", async () => {
     spawn.mockResolvedValue({
       session_id: "term_other",

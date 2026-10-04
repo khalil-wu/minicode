@@ -118,27 +118,3 @@ class PermissionRuleMatcher:
         if rel_path is None:
             return False  # unclassifiable -> not allowed
         return any(fnmatch.fnmatch(rel_path, pattern.replace("\\", "/")) for pattern in self.allowed_paths)
-
-
-class SandboxValidator:
-    """Workspace boundary validator for filesystem operations."""
-
-    def __init__(self, workspace_root: Path) -> None:
-        self.workspace_root = workspace_root.resolve()
-        self.matcher = PermissionRuleMatcher(workspace_root)
-
-    def validate_file_operation(
-        self,
-        file_path: str | Path,
-        operation: Literal["read", "write", "execute"],
-        content: str | None = None,
-        *,
-        allow_workspace_escape: bool = False,
-    ) -> tuple[bool, str]:
-        allowed, reason = self.matcher.check_file_access(
-            file_path, operation, allow_workspace_escape=allow_workspace_escape,
-        )
-        if not allowed:
-            return False, reason
-
-        return True, ""

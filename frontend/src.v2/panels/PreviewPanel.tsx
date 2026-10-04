@@ -5,7 +5,7 @@ import { safeJsonParse } from "../lib/safe-parse";
 import { useAppStore } from "../stores";
 import { getWebSocket } from "../hooks/useWebSocket";
 import {
-  artifactImageResourceUrl,
+  artifactResourceUrl,
   inlineImageResourceUrl,
   isDisplayableImageMediaType,
   isInlineImageResourceUrl,
@@ -15,6 +15,7 @@ import { selectPreviewSurface } from "../lib/preview-projection";
 import { fetchArtifactOriginal, fetchAttachmentOriginal } from "../protocol/api";
 import { pushToast } from "../overlays/ToastContainer";
 import { kindForMediaType } from "../lib/media-types";
+import { copyText } from "../lib/clipboard";
 
 interface AttachmentDownloadTarget {
   artifactId: string;
@@ -83,7 +84,7 @@ const ArtifactView = () => {
   const name = previewArtifact.name || "生成文件";
   const downloadTarget = conversationId && (
     (previewArtifact.source === "attachment" && previewArtifact.hasNative)
-    || (previewArtifact.source === "artifact" && previewArtifact.url)
+    || previewArtifact.source === "artifact"
   )
     ? { artifactId: previewArtifact.artifactId, conversationId, name, source: previewArtifact.source as "attachment" | "artifact" }
     : undefined;
@@ -97,6 +98,8 @@ const ArtifactView = () => {
   const contentIsDiagnostic = Boolean(warning && rawContent.trim() === warning);
   const isOwnerScopedImage = isDisplayableImageMediaType(previewArtifact.mediaType)
     && (previewArtifact.source === "artifact" || previewArtifact.source === "attachment");
+  const isOwnerScopedPdf = normalizedMediaType === "application/pdf"
+    && (previewArtifact.source === "artifact" || (previewArtifact.source === "attachment" && previewArtifact.hasNative !== false));
   if (normalizedMediaType.startsWith("audio/") && (previewArtifact.source === "artifact" || previewArtifact.source === "attachment")) {
     return <ArtifactAudioView key={`${conversationId}:${previewArtifact.artifactId}:${isConnected}`}
       artifactId={previewArtifact.artifactId} conversationId={conversationId} name={name}
@@ -124,6 +127,9 @@ const ArtifactView = () => {
   // A failed attachment fetch is transport state, not the persisted image's
   // terminal state. Let the owner-scoped resource rebuild itself after restore.
   if (isOwnerScopedImage) return imageView;
+  if (isOwnerScopedPdf) return <ArtifactPdfView key={`${conversationId}:${previewArtifact.artifactId}`}
+    artifactId={previewArtifact.artifactId} conversationId={conversationId} name={name} sizeLabel={sizeLabel}
+    source={previewArtifact.source as "artifact" | "attachment"} isConnected={isConnected} downloadTarget={downloadTarget} />;
   if (previewArtifact.loading) {
     return <ArtifactFrame name={name} sizeLabel="加载中"><ArtifactState icon={<LoaderCircle size={18} className="animate-spin" />} label="正在加载附件预览" /></ArtifactFrame>;
   }
@@ -131,20 +137,17 @@ const ArtifactView = () => {
     return <ArtifactFrame name={name} sizeLabel="无法预览"><ArtifactState icon={<TriangleAlert size={18} />} label={previewArtifact.error} danger /></ArtifactFrame>;
   }
   if (imageView) return imageView;
-  if (previewArtifact.url && normalizedMediaType === "application/pdf" && isSafePreviewDocumentUrl(previewArtifact.url)) {
-    return (
-      <ArtifactFrame name={previewArtifact.name || "生成的 PDF"} sizeLabel={sizeLabel ? `PDF · ${sizeLabel}` : "PDF"} downloadTarget={downloadTarget}>
-        <Suspense fallback={<ArtifactState icon={<LoaderCircle size={18} className="animate-spin" />} label="正在准备 PDF 预览" />}>
-          <PdfAttachmentPreview key={previewArtifact.url} url={previewArtifact.url} name={previewArtifact.name || "生成的 PDF"} />
-        </Suspense>
-      </ArtifactFrame>
-    );
-  }
+  if (previewArtifact.url && normalizedMediaType === "application/pdf" && isSafePreviewDocumentUrl(previewArtifact.url)) return <ArtifactPdfView key={`${conversationId}:${previewArtifact.artifactId}`}
+    artifactId={previewArtifact.artifactId} conversationId={conversationId} name={name} sizeLabel={sizeLabel}
+    source={previewArtifact.source} url={previewArtifact.url} isConnected={isConnected} downloadTarget={downloadTarget} />;
 
   const content = prettyContent(rawContent);
   const richExtracted = isRichExtractedPreview(normalizedMediaType);
   const canCopy = hasContent && !isBinary && !contentIsDiagnostic;
-  const header = <ArtifactHeader artifactId={name} sizeLabel={previewTypeLabel(previewArtifact.mediaType, previewArtifact.kind, sizeLabel)} onCopy={canCopy ? () => void navigator.clipboard?.writeText(rawContent) : undefined} downloadTarget={downloadTarget} />;
+  const copy = async () => {
+    if (await copyText(rawContent, "文件内容")) pushToast("文件内容已复制。", "success", 1600);
+  };
+  const header = <ArtifactHeader artifactId={name} sizeLabel={previewTypeLabel(previewArtifact.mediaType, previewArtifact.kind, sizeLabel)} onCopy={canCopy ? () => void copy() : undefined} downloadTarget={downloadTarget} />;
 
   if (isBinary) {
     return <ArtifactFrame header={header}><ArtifactWarning message={warning} /><ArtifactState icon={<FileText size={18} />} label="不支持应用内预览。此文件是二进制文件，无法提取可显示文本。" /></ArtifactFrame>;
@@ -169,14 +172,31 @@ const ArtifactAudioView = ({ artifactId, conversationId, name, source, isConnect
 }) => {
   const [failed, setFailed] = useState(false);
   const sessionId = getWebSocket()?.sessionId?.trim() || "";
-  const url = artifactImageResourceUrl({ artifactId, conversationId, sessionId, source, isConnected });
+  const url = useMemo(() => artifactResourceUrl({ artifactId, conversationId, sessionId, source, isConnected }), [artifactId, conversationId, sessionId, source, isConnected]);
+  useEffect(() => setFailed(false), [url]);
   return <ArtifactFrame name={name} sizeLabel={sizeLabel ? `音频 · ${sizeLabel}` : "音频"}>
     {!url ? <ArtifactState icon={<FileText size={18} />} label="连接恢复并关联会话后可播放音频。" /> :
       <div style={stateStyle}>
         <audio key={url} controls preload="metadata" src={url} aria-label={name} onError={() => setFailed(true)} />
         {failed && <span role="status">此音频无法播放，请下载后使用本地播放器打开。</span>}
-        <a href={url} download={name}>下载音频</a>
+        <AttachmentDownloadButton target={{ artifactId, conversationId: conversationId!, name, source }} label="下载音频" />
       </div>}
+  </ArtifactFrame>;
+};
+
+const ArtifactPdfView = ({ artifactId, conversationId, name, sizeLabel, source, url, isConnected, downloadTarget }: {
+  artifactId: string; conversationId?: string; name: string; sizeLabel: string;
+  source?: "artifact" | "attachment" | "workspace" | "local"; url?: string; isConnected: boolean; downloadTarget?: AttachmentDownloadTarget;
+}) => {
+  const [retryNonce, setRetryNonce] = useState(0);
+  const sessionId = getWebSocket()?.sessionId?.trim() || "";
+  const freshUrl = useMemo(() => withPreviewCacheBust(artifactResourceUrl({
+    artifactId, conversationId, sessionId, source, originalUrl: url, isConnected,
+  }), retryNonce), [artifactId, conversationId, sessionId, source, url, isConnected, retryNonce]);
+  return <ArtifactFrame name={name} sizeLabel={sizeLabel ? `PDF · ${sizeLabel}` : "PDF"} downloadTarget={downloadTarget}>
+    {freshUrl ? <Suspense fallback={<ArtifactState icon={<LoaderCircle size={18} className="animate-spin" />} label="正在准备 PDF 预览" />}>
+      <PdfAttachmentPreview url={freshUrl} name={name} onRetry={source === "artifact" || source === "attachment" || source === "workspace" ? () => setRetryNonce((value) => value + 1) : undefined} />
+    </Suspense> : <ArtifactState icon={<FileText size={18} />} label={!conversationId ? "PDF 未关联到会话，暂时无法预览。" : "连接恢复并关联会话后可预览 PDF。"} />}
   </ArtifactFrame>;
 };
 
@@ -206,14 +226,14 @@ const ArtifactImageView = ({
   const sessionId = getWebSocket()?.sessionId?.trim() || "";
   const normalizedMediaType = String(mediaType || "").split(";", 1)[0].trim().toLowerCase();
   const inlineUrl = isInlineImageResourceUrl(url);
-  const freshUrl = useMemo(() => artifactImageResourceUrl({
+  const freshUrl = useMemo(() => artifactResourceUrl({
     artifactId,
     conversationId,
     sessionId,
     source,
     originalUrl: url,
     isConnected,
-  }), [artifactId, conversationId, isConnected, sessionId, source, url]);
+  }), [artifactId, conversationId, isConnected, sessionId, source, url, retryNonce]);
   const requiresConnection = !inlineUrl && (source === "artifact" || source === "attachment");
   useEffect(() => {
     setRetryNonce(0);
@@ -300,7 +320,7 @@ const ArtifactHeader = ({ artifactId, sizeLabel, onCopy, downloadTarget }: { art
   </div>
 );
 
-const AttachmentDownloadButton = ({ target }: { target: AttachmentDownloadTarget }) => {
+const AttachmentDownloadButton = ({ target, label = "下载原文件" }: { target: AttachmentDownloadTarget; label?: string }) => {
   const [downloading, setDownloading] = useState(false);
   const download = async () => {
     const sessionId = getWebSocket()?.sessionId?.trim() || "";
@@ -328,7 +348,7 @@ const AttachmentDownloadButton = ({ target }: { target: AttachmentDownloadTarget
     }
   };
   return (
-    <button type="button" title="下载原文件" aria-label="下载原文件" disabled={downloading}
+    <button type="button" title={label} aria-label={label} disabled={downloading}
       onClick={() => void download()} style={copyButtonStyle}>
       {downloading ? <LoaderCircle size={14} className="animate-spin" /> : <Download size={14} />}
     </button>

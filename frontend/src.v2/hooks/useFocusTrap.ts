@@ -127,6 +127,13 @@ export function useFocusTrap(isActive: boolean, fallbackFocusRef?: RefObject<HTM
       // UI and finally the stable application root instead of leaving focus on
       // document.body.
       const previous = previouslyFocusedRef.current;
+      const remainingTrap = activeFocusTraps.at(-1);
+      if (remainingTrap) {
+        restoreFocus(previous && remainingTrap.contains(previous)
+          ? previous
+          : focusableElements(remainingTrap)[0] ?? remainingTrap);
+        return;
+      }
       if (
         previous
         && previous !== document.body
@@ -170,35 +177,4 @@ export function useEscapeKey(callback: () => void, isActive = true, scopeRef?: R
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [callback, isActive, scopeRef]);
-}
-
-/**
- * usePreventScroll - Prevent body scrolling when active
- *
- * @param isActive - Whether to prevent scrolling
- *
- * Usage:
- * ```tsx
- * usePreventScroll(isModalOpen);
- * ```
- */
-export function usePreventScroll(isActive: boolean) {
-  useEffect(() => {
-    if (!isActive) return;
-
-    const previousOverflow = document.body.style.overflow;
-    const previousPaddingRight = document.body.style.paddingRight;
-
-    // Prevent scroll and compensate for scrollbar width
-    const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
-    document.body.style.overflow = 'hidden';
-    if (scrollbarWidth > 0) {
-      document.body.style.paddingRight = `${scrollbarWidth}px`;
-    }
-
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      document.body.style.paddingRight = previousPaddingRight;
-    };
-  }, [isActive]);
 }

@@ -6,7 +6,6 @@ const openMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("./openWebInBrowser", () => ({ openWebInBrowser: openMocks.browser }));
-vi.mock("./openWebInPreview", () => ({ openWebInPreview: openMocks.preview }));
 
 import { openWebTarget } from "./openWebTarget";
 

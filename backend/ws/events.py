@@ -303,6 +303,8 @@ ClientCommandType = Literal[
     # Scheduler
     "scheduler.list",
     "scheduler.add",
+    "scheduler.update",
+    "scheduler.history",
     "scheduler.remove",
     "scheduler.toggle",
     "scheduler.run_now",
@@ -360,6 +362,10 @@ class TurnDiffUpdatedData(TypedDict):
     conversation_id: str
     turn_id: str
     diff: str | None
+    revision: NotRequired[int]
+    tool_call_id: NotRequired[str]
+    message_id: NotRequired[str]
+    task_id: NotRequired[str]
 
 
 AgentProgressProviderState = Literal[
@@ -569,6 +575,11 @@ class ToolResultData(TypedDict, total=False):
     evidence_type: Literal["candidate", "fetched", "artifact", "command", "file"]
     status: str
     duration_ms: int
+    completed_at_ms: int
+    cleanup_receipt: dict[str, Any]
+    output_files: list[dict[str, Any]]
+    superseded_tool_call_ids: list[str]
+    removed_file_paths: list[str]
     display_summary: str
     result_kind: str
     activity_kind: str

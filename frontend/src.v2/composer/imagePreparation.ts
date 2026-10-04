@@ -44,8 +44,8 @@ export const prepareNativeImageFile = async (file: File): Promise<File> => {
   try {
     const initialScale = Math.min(
       1,
-      MAX_NATIVE_IMAGE_WIDTH / Math.max(1, bitmap.width),
-      MAX_NATIVE_IMAGE_HEIGHT / Math.max(1, bitmap.height),
+      MAX_NATIVE_IMAGE_WIDTH / bitmap.width,
+      MAX_NATIVE_IMAGE_HEIGHT / bitmap.height,
     );
     if (initialScale === 1 && file.size <= MAX_NATIVE_IMAGE_BYTES) return file;
 
@@ -78,7 +78,7 @@ export const prepareNativeImageFile = async (file: File): Promise<File> => {
       height = Math.max(1, Math.round(height * 0.82));
     }
   } finally {
-    bitmap.close?.();
+    bitmap.close();
   }
 
   throw new Error("图片压缩后仍超过 3.75 MB；请先降低分辨率后重试。");

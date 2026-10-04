@@ -2,10 +2,13 @@ import { CornerDownLeft, Copy, MoreHorizontal, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
+import type { ChatMessage } from "../stores/types";
+const NO_MESSAGES: ChatMessage[] = [];
 
-export const QueuedMessageList = ({ wide = false, minimal = false }: { wide?: boolean; minimal?: boolean }) => {
-  const messages = useAppStore((state) => state.messages);
-  const conversationId = useAppStore((state) => state.conversationId);
+export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { wide?: boolean; minimal?: boolean; ownerId?: string }) => {
+  const messages = useAppStore((state) => ownerId ? state.sideChats[ownerId]?.messages ?? NO_MESSAGES : state.messages);
+  const conversationId = useAppStore((state) => ownerId ?? state.conversationId);
+  const isStreaming = useAppStore((state) => ownerId ? state.sideChats[ownerId]?.isStreaming : state.isStreaming);
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const menuRootRef = useRef<HTMLDivElement>(null);
   const menuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -79,14 +82,15 @@ export const QueuedMessageList = ({ wide = false, minimal = false }: { wide?: bo
           <div className="queued-message-row" key={message.id}>
             <span className="queued-message-number" aria-label={`队列第 ${displayNumber} 项`}>{displayNumber}</span>
             <span className="queued-message-text" title={label}>{label}</span>
+            {message.queuePaused ? <span>已暂停</span> : null}
             <button
               type="button"
               className="queued-message-steer"
               onClick={() => sendQueueAction("user_message.queue.steer", message)}
-              title="下一步用这条消息引导当前任务"
+              title={message.queuePaused ? "发送这条消息并继续队列" : isStreaming ? "下一步用这条消息引导当前任务" : "发送这条消息"}
             >
               <CornerDownLeft size={14} aria-hidden="true" />
-              <span>引导</span>
+              <span>{message.queuePaused || !isStreaming ? "发送" : "引导"}</span>
             </button>
             <button
               type="button"

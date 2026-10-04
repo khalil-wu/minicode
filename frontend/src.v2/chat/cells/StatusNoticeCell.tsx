@@ -37,7 +37,7 @@ export function StatusNoticeCell({
 }: {
   cell: StatusNoticeCellState;
 }) {
-  const s = TONE_STYLES[cell.tone] ?? TONE_STYLES.info;
+  const s = TONE_STYLES[cell.tone];
   const NoticeIcon = s.icon;
 
   return (

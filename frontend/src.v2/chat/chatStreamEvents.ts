@@ -867,6 +867,9 @@ export const handleChatStreamEvent = (
       }
       addInspectorPayload("tool_call", e.id, {
         event: "tool_call",
+        conversation_id: conversationId,
+        message_id: messageId,
+        call_source: e.call_source,
         name: e.name,
         args: e.args ?? {},
         result_kind: e.result_kind,
@@ -1027,13 +1030,18 @@ export const handleChatStreamEvent = (
             if (e.iteration_id) updated.iterationId = e.iteration_id;
             if (e.step_id) updated.stepId = e.step_id;
           }
-          s.updateToolCall(e.id, updated, conversationId, resolution.matchScope, messageId);
+          s.updateToolCall(e.id, { ...updated, seq: e.seq }, conversationId, resolution.matchScope, messageId);
         }
       } else {
         recordToolProjectionRejection(e.id, e, resolution);
       }
       addInspectorPayload("tool_call", e.id, {
         event: "tool_result",
+        conversation_id: conversationId,
+        message_id: messageId,
+        name: toolCall?.name,
+        args: toolCall?.args,
+        call_source: e.call_source ?? toolCall?.callSource,
         status: e.status,
         is_error: e.is_error,
         summary: e.summary,
@@ -1048,6 +1056,8 @@ export const handleChatStreamEvent = (
         error_info: e.error_info,
         developer_detail: e.developer_detail,
         projection: e.projection,
+        cleanup_receipt: e.cleanup_receipt,
+        completed_at_ms: e.completed_at_ms,
         visibility: e.visibility,
         output_files: e.output_files,
         superseded_tool_call_ids: e.superseded_tool_call_ids,
@@ -1387,6 +1397,15 @@ export const handleChatStreamEvent = (
       const messageId = eventMessageId(e);
       const turnId = eventTurnId(e);
       const replayed = isReplayedChatEvent(e);
+      addInspectorPayload("message", `error:${conversationId || "session"}:${e.event_id || e.seq || messageId || turnId || "event"}`, {
+        ...e,
+        event: "error",
+        conversation_id: conversationId,
+        message_id: messageId,
+        turn_id: turnId,
+        replayed,
+        ...(replayed && !messageId && !turnId ? { projected: false } : {}),
+      });
       const switchErrorCode = (e as { error_code?: string }).error_code;
       if (
         !replayed && !messageId && !turnId
@@ -1419,22 +1438,6 @@ export const handleChatStreamEvent = (
         return true;
       }
       if (replayed && !messageId && !turnId) {
-        const replayError = e as unknown as {
-          message?: string;
-          error_type?: string;
-          error_code?: string;
-          recoverable?: boolean;
-        };
-        addInspectorPayload("message", `error:${conversationId}:${e.event_id || e.seq || "replay"}`, {
-          event: "error",
-          conversation_id: conversationId,
-          error_type: replayError.error_type,
-          error_code: replayError.error_code,
-          message: normalizeAgentErrorMessage(replayError.message ?? "An unexpected error occurred.", { includeProviderDetails: false }),
-          recoverable: replayError.recoverable,
-          replayed: true,
-          projected: false,
-        });
         return true;
       }
       if (consumeKnownStaleTurnEvent(conversationId, messageId)) return true;

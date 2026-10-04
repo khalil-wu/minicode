@@ -37,6 +37,8 @@ def normalize_project_import_path(
 ) -> Path:
     """Normalize imported project path from UI/websocket into an absolute local path."""
     sanitized = (raw_path or "").strip().strip('"').strip("'")
+    if not sanitized.strip():
+        raise ValueError("Project path is required")
     expanded = os.path.expanduser(sanitized)
 
     if _is_windows(platform_name):

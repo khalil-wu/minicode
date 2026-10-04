@@ -22,11 +22,12 @@ import re
 import tempfile
 from collections import deque
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from pathlib import Path
 from typing import BinaryIO
 
 from backend.agent.tool_result_persistence import TOOL_RESULT_DATA_DIR
+from backend.subprocesses import write_process_stdin
 from backend.atomic_io import (
     await_task_despite_cancellation as _await_task_despite_cancellation,
     run_blocking_io as _run_blocking,
@@ -71,6 +72,9 @@ class HookTaskOutput:
         self._stderr = bytearray()
         self._path: Path | None = None
         self._file: BinaryIO | None = None
+        self._semantic_stdout_path: Path | None = None
+        self._semantic_stdout_file: BinaryIO | None = None
+        self._stdout_is_structured: bool | None = None
         self._disk_bytes = 0
         self._disk_capped = False
         self._finished = False
@@ -96,6 +100,8 @@ class HookTaskOutput:
         return self._disk_capped
 
     async def write_stdout(self, data: bytes) -> None:
+        if self._stdout_is_structured is None and (prefix := data.lstrip()):
+            self._stdout_is_structured = prefix.startswith(b"{")
         await self._write(data, is_stderr=False)
 
     async def write_stderr(self, data: bytes) -> None:
@@ -171,6 +177,8 @@ class HookTaskOutput:
                     await _run_blocking(_write_all, handle, initial)
                     disk_bytes = len(initial)
 
+            await self._append_semantic_stdout(bytes(self._stdout))
+
             self._path = path
             self._file = handle
             self._disk_bytes = disk_bytes
@@ -180,10 +188,12 @@ class HookTaskOutput:
         except asyncio.CancelledError:
             if handle is not None and path is not None:
                 await _discard_unpublished_output(handle, path)
+            await self._discard_semantic_stdout()
             raise
         except Exception as exc:
             if handle is not None and path is not None:
                 await _discard_unpublished_output(handle, path)
+            await self._discard_semantic_stdout()
             raise HookOutputCaptureError(
                 f"failed to create hook output file under {TOOL_RESULT_DATA_DIR}: {exc}"
             ) from exc
@@ -191,6 +201,41 @@ class HookTaskOutput:
     async def _append_disk(self, data: bytes, *, is_stderr: bool) -> None:
         payload = b"[stderr] " + data if is_stderr else data
         await self._append_raw_disk(payload)
+        if not is_stderr and not self._disk_capped:
+            await self._append_semantic_stdout(data)
+
+    async def _append_semantic_stdout(self, data: bytes) -> None:
+        if not data or self._stdout_is_structured is not True:
+            return
+        if self._semantic_stdout_file is None:
+            self._semantic_stdout_path, self._semantic_stdout_file = await _open_hook_output_file(
+                _scope_output_directory(self.scope_id),
+                prefix=f"{self.task_id}-",
+                suffix=".stdout",
+            )
+        await _run_blocking(_write_all, self._semantic_stdout_file, data)
+
+    async def _discard_semantic_stdout(self) -> None:
+        handle, path = self._semantic_stdout_file, self._semantic_stdout_path
+        self._semantic_stdout_file = None
+        self._semantic_stdout_path = None
+        if handle is not None and path is not None:
+            await _discard_unpublished_output(handle, path)
+
+    async def semantic_stdout_text(self) -> str | None:
+        """Return complete structured stdout only when its display spilled."""
+        if self._disk_capped and self._stdout_is_structured:
+            raise HookOutputCaptureError(
+                f"structured hook stdout exceeded the {MAX_HOOK_OUTPUT_BYTES_DISPLAY} disk cap"
+            )
+        if self._semantic_stdout_path is None:
+            return None
+        try:
+            return await _run_blocking(self._semantic_stdout_path.read_text, encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise HookOutputCaptureError(
+                f"failed to read structured hook stdout at {self._semantic_stdout_path}: {exc}"
+            ) from exc
 
     async def _append_raw_disk(self, payload: bytes) -> None:
         if not payload or self._disk_capped:
@@ -220,20 +265,16 @@ class HookTaskOutput:
             self._finished = True
             self._flush_recent_fragment(is_stderr=False)
             self._flush_recent_fragment(is_stderr=True)
-            handle = self._file
+            handles = tuple(handle for handle in (self._file, self._semantic_stdout_file) if handle is not None)
             self._file = None
-            if handle is None:
+            self._semantic_stdout_file = None
+            if not handles:
                 return
             try:
-                await _run_blocking(handle.flush)
-                await _run_blocking(handle.close)
+                await _run_blocking(_finish_output_files, handles)
             except asyncio.CancelledError:
-                with suppress(asyncio.CancelledError, Exception):
-                    await _run_blocking(handle.close)
                 raise
             except Exception as exc:
-                with suppress(asyncio.CancelledError, Exception):
-                    await _run_blocking(handle.close)
                 raise HookOutputCaptureError(
                     f"failed to finalize hook output file {self.path}: {exc}"
                 ) from exc
@@ -291,7 +332,7 @@ async def drain_hook_process_output(
         name=f"hook-output:{capture.task_id}:stderr",
     )
     stdin_task = asyncio.create_task(
-        _write_stdin(proc, input_data),
+        write_process_stdin(proc, input_data),
         name=f"hook-output:{capture.task_id}:stdin",
     )
     wait_task = asyncio.create_task(
@@ -335,24 +376,6 @@ async def _drain_stream(
             else:
                 line_prefix.extend(chunk)
         await sink(chunk)
-
-
-async def _write_stdin(proc: asyncio.subprocess.Process, input_data: bytes) -> None:
-    stdin = proc.stdin
-    if stdin is None:
-        return
-    try:
-        if input_data:
-            stdin.write(input_data)
-            await stdin.drain()
-    except (BrokenPipeError, ConnectionResetError):
-        # ``Process.communicate`` treats an early-closing child the same way.
-        pass
-    finally:
-        with suppress(Exception):
-            stdin.close()
-        with suppress(Exception):
-            await stdin.wait_closed()
 
 
 async def _open_hook_output_file(
@@ -439,6 +462,14 @@ def _write_all(handle: BinaryIO, payload: bytes) -> None:
         if written is None or written <= 0:
             raise OSError("short write while preserving hook output")
         remaining = remaining[written:]
+
+
+def _finish_output_files(handles: tuple[BinaryIO, ...]) -> None:
+    with ExitStack() as files:
+        for handle in handles:
+            files.enter_context(handle)
+        for handle in handles:
+            handle.flush()
 
 
 def _scope_output_directory(scope_id: str) -> Path:

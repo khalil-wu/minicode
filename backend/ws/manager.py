@@ -55,25 +55,25 @@ async def _dispose_unadopted_connection_resources(
     its discarded objects here without touching the live session's objects.
     """
 
-    adopted_llm = getattr(adopted_session, "llm", None)
-    if llm is not adopted_llm:
-        close = getattr(llm, "aclose", None)
-        if callable(close):
-            try:
-                await close()
-            except Exception:
-                logger.exception("Failed to close an unadopted LLM adapter")
-
-    adopted_artifact_store = getattr(adopted_session, "artifact_store", None)
-    if artifact_store is adopted_artifact_store:
-        return
     try:
-        await artifact_store.flush()
-    except Exception:
-        logger.exception("Failed to flush an unadopted artifact store")
+        adopted_llm = getattr(adopted_session, "llm", None)
+        if llm is not adopted_llm:
+            close = getattr(llm, "aclose", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception:
+                    logger.exception("Failed to close an unadopted LLM adapter")
     finally:
-        artifact_store.shutdown()
-        artifact_store.clear()
+        adopted_artifact_store = getattr(adopted_session, "artifact_store", None)
+        if artifact_store is not adopted_artifact_store:
+            try:
+                await artifact_store.flush()
+            except Exception:
+                logger.exception("Failed to flush an unadopted artifact store")
+            finally:
+                artifact_store.shutdown()
+                artifact_store.clear()
 
 
 class WebSocketManager:

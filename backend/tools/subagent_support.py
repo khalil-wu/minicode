@@ -14,6 +14,7 @@ from backend.agent.context import ContextBuilder
 from backend.agent.run_context import RunContext
 from backend.agent.model_execution import ModelExecutionSnapshot
 from backend.agent.prompt_cache import prompt_cache_fork_diagnostic
+from backend.async_cleanup import to_thread_cancel_safe
 from backend.agents.loader import (
     discover_agents,
     get_custom_agent,
@@ -623,17 +624,21 @@ async def _resolve_subagent_llm(
     from backend.llm.model_registry import create_session_llm
 
     adapter = None
-    try:
-        # Provider/model resolution may execute configured command-backed
-        # values and construct a native adapter. Keep that synchronous work
-        # off the shared asyncio loop before publishing the child turn.
-        adapter = await asyncio.to_thread(
-            create_session_llm,
+    def create_owned_adapter() -> Any:
+        nonlocal adapter
+        adapter = create_session_llm(
             child_config,
             model_override=target_model,
             provider_override=target_provider,
             model_runtime=model_runtime,
         )
+        return adapter
+
+    try:
+        # Provider/model resolution may execute configured command-backed
+        # values and construct a native adapter. Keep that synchronous work
+        # off the shared asyncio loop before publishing the child turn.
+        adapter = await to_thread_cancel_safe(create_owned_adapter)
         if adapter is None:
             raise RuntimeError(
                 f"Unable to create subagent adapter for '{target_provider}/{target_model}'."
@@ -694,7 +699,7 @@ async def _resolve_subagent_llm(
                     ),
                 )
     except BaseException:
-        if adapter is not None:
+        if adapter is not None and adapter is not inherited_llm:
             with suppress(Exception):
                 await _close_subagent_llm(adapter)
         raise
@@ -704,7 +709,7 @@ async def _resolve_subagent_llm(
         provider=target_provider,
         model=target_model,
         effort=effective_effort,
-        owns_llm=True,
+        owns_llm=adapter is not inherited_llm,
     )
 
 
@@ -761,7 +766,7 @@ def _subagent_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         or ""
     ).strip()
     team_name = str(raw.get("team_name") or "").strip()
-    public_mode = str(raw.get("mode") or "").strip()
+    public_mode = str(raw.get("mode") or raw.get("_agent_permission_mode") or "").strip()
     internal_mode = _PUBLIC_PERMISSION_MODE_TO_INTERNAL.get(
         public_mode,
         public_mode if public_mode in _PUBLIC_PERMISSION_MODE_TO_INTERNAL.values() else "",

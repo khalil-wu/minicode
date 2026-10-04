@@ -44,7 +44,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
-  gap: 4px 8px;
+  gap: 4px 6px;
   min-width: 0;
   padding: 4px 4px 8px;
 }
@@ -53,15 +53,235 @@
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   max-width: 100%;
   overflow-x: auto;
-  padding: 0 4px 6px;
+  padding: 0 4px 8px;
   overscroll-behavior-inline: contain;
 }
 
 .composer-attachment-strip > * {
   flex-shrink: 0;
+}
+
+.composer-attachment-image {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--workbench-tool);
+}
+
+.composer-attachment-image[data-status="error"] {
+  border-color: var(--state-danger);
+}
+
+.composer-attachment-image-preview {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.composer-attachment-image-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.composer-attachment-image-upload {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: var(--backdrop-overlay);
+  color: var(--text-on-accent);
+  font-size: var(--text-xs);
+}
+
+.composer-attachment-image-progress {
+  width: 42px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  background: color-mix(in oklch, currentColor 28%, transparent);
+}
+
+.composer-attachment-image-progress > span,
+.composer-attachment-file-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: currentColor;
+  transition: width var(--transition-fast);
+}
+
+.composer-attachment-image-problem {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  left: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 18px;
+  padding: 1px 4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--backdrop-strong);
+  color: var(--state-warning);
+  font-size: var(--text-3xs);
+  font-weight: var(--fw-medium);
+  line-height: 14px;
+  cursor: default;
+}
+
+.composer-attachment-image[data-status="error"] .composer-attachment-image-problem {
+  color: var(--state-danger);
+}
+
+.composer-attachment-image-problem[data-retry="true"] {
+  cursor: pointer;
+}
+
+.composer-attachment-image-remove {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--backdrop-strong);
+  color: var(--text-on-accent);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity var(--transition-fast);
+}
+
+.composer-attachment-image:hover .composer-attachment-image-remove,
+.composer-attachment-image:focus-within .composer-attachment-image-remove {
+  opacity: 1;
+}
+
+.composer-attachment-file {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 260px;
+  min-width: 0;
+  min-height: 30px;
+  padding: 3px 3px 3px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--attachment-chip-bg);
+  color: var(--attachment-chip-fg);
+  font-size: var(--text-xs);
+}
+
+.composer-attachment-file[data-problem] {
+  max-width: 420px;
+}
+
+.composer-attachment-file[data-problem="error"] {
+  --composer-attachment-problem: var(--state-danger);
+}
+
+.composer-attachment-file[data-problem="warning"] {
+  --composer-attachment-problem: var(--state-warning);
+}
+
+.composer-attachment-file[data-status="uploading"] {
+  padding-bottom: 5px;
+}
+
+.composer-attachment-file-preview {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.composer-attachment-file-preview:disabled {
+  cursor: default;
+}
+
+.composer-attachment-file-preview > svg {
+  flex-shrink: 0;
+}
+
+.composer-attachment-name,
+.composer-attachment-problem-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-attachment-meta {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.composer-attachment-problem-icon,
+.composer-attachment-problem-text {
+  color: var(--composer-attachment-problem);
+}
+
+.composer-attachment-action {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.composer-attachment-action:hover {
+  background: var(--workbench-hover);
+  color: var(--text-primary);
+}
+
+.composer-attachment-file-progress {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  background: var(--surface-soft);
+  color: var(--accent-primary);
+}
+
+@media (hover: none) {
+  .composer-attachment-image-remove { opacity: 1; }
 }
 
 /* Tokens participate in the same flow as the editable text. */
@@ -140,7 +360,7 @@
   grid-template-columns: auto minmax(8px, 1fr) auto minmax(0, auto) auto auto;
   grid-template-areas: "primary spacer usage model stop send";
   align-items: center;
-  gap: 7px;
+  gap: 5px;
   margin-top: 1px;
 }
 
@@ -168,6 +388,9 @@
 
 .composer-model-picker {
   position: static;
+  display: flex;
+  align-items: center;
+  gap: 3px;
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -487,7 +710,7 @@
   background: var(--surface-raised);
   border-color: var(--border-subtle);
   border-radius: var(--radius-lg);
-  box-shadow: 0 14px 42px color-mix(in oklch, black 12%, transparent);
+  box-shadow: 0 8px 24px color-mix(in oklch, black 10%, transparent);
 }
 
 .composer-menu-list[data-skills-picker="true"] {
@@ -600,7 +823,7 @@
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   background: var(--surface-page);
-  box-shadow: var(--shadow-soft);
+  box-shadow: none;
 }
 
 .queued-message-row {

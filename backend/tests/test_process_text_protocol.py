@@ -942,12 +942,16 @@ def test_length_stop_rejects_complete_tool_batch_and_recovers_without_executing_
 
     # Pi's assistant-message boundary wins here: any call in a length-stopped
     # message may have silently truncated arguments, so it must never execute.
-    assert markers.count("tool_finished") == 0
-    assert not any(
-        getattr(event, "type", None) == "tool_result"
-        and event.data.get("id") == "truncated_tool"
+    assert markers == []
+    receipts = [
+        event
         for event in events
-    )
+        if getattr(event, "type", None) == "tool_result"
+        and event.data.get("id") == "truncated_tool"
+    ]
+    assert [(event.data["status"], event.data["error_kind"]) for event in receipts] == [
+        ("cancelled", "provider_truncated_before_tool_execution")
+    ]
     completed = [
         event
         for event in events
@@ -1234,12 +1238,18 @@ def test_non_final_tool_blocks_are_merged_until_final_batch():
 
 
 def test_non_final_tool_block_without_final_batch_is_not_executed():
-    events = _run(_NonFinalToolBlockThenDoneLLM())
+    markers: list[str] = []
+    events = _run(_NonFinalToolBlockThenDoneLLM(), tool=_InspectContextTool(markers))
 
+    assert markers == []
     assert not [
         event
         for event in events
-        if getattr(event, "type", None) in {"tool_call", "tool_result"}
+        if getattr(event, "type", None) == "tool_call"
+    ]
+    receipts = [event for event in events if getattr(event, "type", None) == "tool_result"]
+    assert [(event.data["id"], event.data["status"], event.data["error_kind"]) for event in receipts] == [
+        ("inspect_half", "cancelled", "provider_truncated_before_tool_execution")
     ]
     assert any(
         getattr(event, "type", None) == "error"
@@ -1249,18 +1259,24 @@ def test_non_final_tool_block_without_final_batch_is_not_executed():
 
 
 def test_length_stop_with_non_final_tool_block_continues_without_executing_it():
-    events = _run(_NonFinalToolBlockThenLengthLLM(), max_iterations=3)
+    markers: list[str] = []
+    events = _run(_NonFinalToolBlockThenLengthLLM(), max_iterations=3, tool=_InspectContextTool(markers))
 
+    assert markers == []
     assert not any(
         getattr(event, "type", None) == "error"
         and event.data.get("error_type") == "incomplete_tool_stream"
         for event in events
     )
-    assert not any(
-        getattr(event, "type", None) == "tool_result"
-        and event.data.get("id") == "inspect_truncated"
+    receipts = [
+        event
         for event in events
-    )
+        if getattr(event, "type", None) == "tool_result"
+        and event.data.get("id") == "inspect_truncated"
+    ]
+    assert [(event.data["status"], event.data["error_kind"]) for event in receipts] == [
+        ("cancelled", "provider_truncated_before_tool_execution")
+    ]
     completed = [
         event
         for event in events

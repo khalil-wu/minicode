@@ -36,7 +36,8 @@ class AgentRegistry:
             raise ValueError("agent_id is required")
         return clean_kind, clean_id
 
-    def register(self, record: Any, *, kind: str) -> AgentRegistration:
+    def prepare_registration(self, record: Any, *, kind: str) -> AgentRegistration:
+        """Validate one registration without publishing mutable lifecycle state."""
         agent_id = str(getattr(record, "run_id", None) or getattr(record, "subagent_id", "")).strip()
         key = self._key(kind, agent_id)
         path = str(getattr(record, "agent_path", "") or agent_id).strip() or agent_id
@@ -56,8 +57,14 @@ class AgentRegistry:
             mailbox_epoch=max(epoch, previous.mailbox_epoch if previous else 0),
             sealed=False,
         )
-        self._registrations[key] = registration
         return registration
+
+    def publish_registration(self, registration: AgentRegistration) -> AgentRegistration:
+        self._registrations[(registration.kind, registration.agent_id)] = registration
+        return registration
+
+    def register(self, record: Any, *, kind: str) -> AgentRegistration:
+        return self.publish_registration(self.prepare_registration(record, kind=kind))
 
     def get(self, agent_id: str, *, kind: str = "run") -> AgentRegistration | None:
         return self._registrations.get(self._key(kind, agent_id))

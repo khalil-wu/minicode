@@ -3,17 +3,10 @@
 from __future__ import annotations
 
 import re
+from backend.memory.citations import parse_memory_citation
 
 
-_THINKING_BLOCK_RE = re.compile(
-    r"<\s*(?:thinking|reasoning|internal|think)(?=[\s/>])[^>]*>.*?<\s*/\s*(?:thinking|reasoning|internal|think)\s*>",
-    re.DOTALL | re.IGNORECASE,
-)
-_THINKING_MARKER_RE = re.compile(
-    r"<\s*/?\s*(?:thinking|reasoning|internal|think)(?=[\s/>])[^>]*>",
-    re.IGNORECASE,
-)
-_SPECIAL_TOKEN_RE = re.compile(r"<\|[^|]*\|>")
+_VISIBLE_BOUNDARY_RE = re.compile(r"[<`~\\\n]")
 _REASONING_TAG_AT_START_RE = re.compile(
     r"^<\s*(/?)\s*(thinking|reasoning|internal|think)(?=[\s/>])[^>]*>",
     re.IGNORECASE,
@@ -42,17 +35,23 @@ _MEMORY_CITATION_CLOSE = "</minicode-memory-citation>"
 class ThinkingStreamSanitizer:
     """Remove reasoning tags without leaking tags split across chunks."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, hide_memory_citations: bool = True) -> None:
         self._pending = ""
         self._inside_reasoning = False
         self._inside_memory_citation = False
         self._memory_citation_body = ""
         self.citations: list[str] = []
+        # The Chat adapter must leave citations for the agent's usage recorder.
+        self._hide_memory_citations = hide_memory_citations
+        self._fence = ""
+        self._fence_closing = False
+        self._inline_ticks = 0
+        self._line_indent: int | None = 0
+        self._escaped = False
 
-    @staticmethod
-    def _looks_like_control_prefix(value: str) -> bool:
+    def _looks_like_control_prefix(self, value: str) -> bool:
         lowered = value.lower()
-        if _MEMORY_CITATION_OPEN.startswith(lowered):
+        if self._hide_memory_citations and _MEMORY_CITATION_OPEN.startswith(lowered):
             return True
         if re.fullmatch(r"<\|[^|>]*\|?", value):
             return True
@@ -92,6 +91,25 @@ class ThinkingStreamSanitizer:
         if not chunk:
             return ""
         self._pending += chunk
+        return self._drain()
+
+    def _emit_visible(self, visible: list[str], text: str) -> None:
+        visible.append(text)
+        if text == "\n":
+            if self._fence_closing:
+                self._fence = ""
+            self._fence_closing = False
+            self._line_indent = 0
+        else:
+            if text.strip(" \t\r"):
+                self._fence_closing = False
+            if self._line_indent is not None:
+                self._line_indent = (
+                    self._line_indent + len(text) if not text.strip(" ") else None
+                )
+        self._escaped = not self._escaped if text == "\\" else False
+
+    def _drain(self, *, final: bool = False) -> str:
         visible: list[str] = []
 
         while self._pending:
@@ -99,7 +117,10 @@ class ThinkingStreamSanitizer:
                 closing_index = self._pending.find(_MEMORY_CITATION_CLOSE)
                 if closing_index >= 0:
                     self._memory_citation_body += self._pending[:closing_index]
-                    self.citations.append(self._memory_citation_body)
+                    if parse_memory_citation([self._memory_citation_body]) is not None:
+                        self.citations.append(self._memory_citation_body)
+                    else:
+                        visible.append(_MEMORY_CITATION_OPEN + self._memory_citation_body + _MEMORY_CITATION_CLOSE)
                     self._memory_citation_body = ""
                     self._pending = self._pending[
                         closing_index + len(_MEMORY_CITATION_CLOSE):
@@ -130,14 +151,47 @@ class ThinkingStreamSanitizer:
                 self._inside_reasoning = False
                 continue
 
-            marker_index = self._pending.find("<")
-            if marker_index < 0:
-                visible.append(self._pending)
+            boundary = _VISIBLE_BOUNDARY_RE.search(self._pending)
+            if boundary is None:
+                self._emit_visible(visible, self._pending)
                 self._pending = ""
                 break
+            marker_index = boundary.start()
             if marker_index > 0:
-                visible.append(self._pending[:marker_index])
+                self._emit_visible(visible, self._pending[:marker_index])
                 self._pending = self._pending[marker_index:]
+
+            marker = self._pending[0]
+            if marker in "`~" and not (self._escaped and not self._fence and not self._inline_ticks):
+                length = len(self._pending) - len(self._pending.lstrip(marker))
+                if length == len(self._pending) and not final:
+                    # A delimiter run may be split across provider chunks.
+                    break
+                at_line_start = self._line_indent is not None and self._line_indent <= 3
+                delimiter = self._pending[:length]
+                closes_fence = bool(
+                    self._fence and at_line_start and marker == self._fence[0]
+                    and length >= len(self._fence)
+                )
+                if not self._fence:
+                    if self._inline_ticks:
+                        if marker == "`" and length == self._inline_ticks:
+                            self._inline_ticks = 0
+                    elif at_line_start and length >= 3:
+                        self._fence = delimiter
+                    elif marker == "`":
+                        self._inline_ticks = length
+                self._emit_visible(visible, delimiter)
+                if closes_fence:
+                    # A closing fence accepts only trailing whitespace to EOL.
+                    self._fence_closing = True
+                self._pending = self._pending[length:]
+                continue
+
+            if marker != "<" or self._fence or self._inline_ticks or self._escaped:
+                self._emit_visible(visible, marker)
+                self._pending = self._pending[1:]
+                continue
 
             tag = _REASONING_TAG_AT_START_RE.match(self._pending)
             if tag is not None:
@@ -150,7 +204,7 @@ class ThinkingStreamSanitizer:
                 self._pending = self._pending[special.end():]
                 continue
 
-            if self._pending.startswith(_MEMORY_CITATION_OPEN):
+            if self._hide_memory_citations and self._pending.startswith(_MEMORY_CITATION_OPEN):
                 self._pending = self._pending[len(_MEMORY_CITATION_OPEN):]
                 self._inside_memory_citation = True
                 self._memory_citation_body = ""
@@ -162,28 +216,33 @@ class ThinkingStreamSanitizer:
                 # would leak a valid opener split before its closing angle.
                 break
 
-            visible.append("<")
+            self._emit_visible(visible, "<")
             self._pending = self._pending[1:]
 
         return "".join(visible)
 
     def finish(self) -> str:
         """Release text held while waiting for a tag that never completed."""
-        tail = "" if self._inside_reasoning or self._inside_memory_citation else self._pending
+        visible = self._drain(final=True)
+        if self._inside_memory_citation:
+            tail = _MEMORY_CITATION_OPEN + self._memory_citation_body + self._pending
+        else:
+            tail = "" if self._inside_reasoning else self._pending
         self._pending = ""
         self._inside_reasoning = False
         self._inside_memory_citation = False
         self._memory_citation_body = ""
-        return tail
+        self._fence = ""
+        self._fence_closing = False
+        self._inline_ticks = 0
+        self._line_indent = 0
+        self._escaped = False
+        return visible + tail
 
 
 def scrub_thinking_tags(text: str) -> str:
     """Remove reasoning tags and special tokens from completed model text."""
     if not text or "<" not in text:
         return text
-    text = _THINKING_BLOCK_RE.sub("", text)
-    text = _THINKING_MARKER_RE.sub("", text)
-    text = _SPECIAL_TOKEN_RE.sub("", text)
-    from backend.memory.citations import scrub_memory_citations
-
-    return scrub_memory_citations(text)
+    sanitizer = ThinkingStreamSanitizer()
+    return sanitizer.feed(text) + sanitizer.finish()

@@ -12,7 +12,8 @@ from backend.agent.loop_runtime_helpers import epoch_ms
 from backend.agent.message import AgentEvent
 from backend.agent.response_utils import append_assistant_history
 from backend.agent.stream_sanitizer import ThinkingStreamSanitizer, scrub_thinking_tags
-from backend.agent.tool_events import abandoned_tool_announcement_events
+from backend.agent.provider_text_projection import finish_provider_text_item
+from backend.agent.tool_events import abandoned_tool_announcement_events, cancelled_pending_tool_events
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +33,9 @@ async def apply_provider_chunk_steer(
     turn_kernel: Any,
     context_builder: Any,
     stream_text: Any,
+    stream_state: Any,
+    visible_text_sanitizer: Any,
+    live_text_streaming: bool,
     state: Any,
     tool_tracker: Any,
     stream_iter: Any,
@@ -47,6 +51,14 @@ async def apply_provider_chunk_steer(
     if chunk_steer is None:
         yield ProviderSteerResult(False)
         return
+
+    async for projected in finish_provider_text_item(
+        stream_state=stream_state, stream_text=stream_text,
+        visible_text_sanitizer=visible_text_sanitizer,
+        live_text_streaming=live_text_streaming, awaiting_trailing_done=False,
+        process_event_factory=model_process_text_event,
+    ):
+        yield projected
 
     partial_text = scrub_thinking_tags(stream_text.full_text).strip()
     process_event = stream_text.flush_pending_process_text(
@@ -99,7 +111,6 @@ async def reset_for_provider_retry(
 ) -> AsyncIterator[AgentEvent | ProviderRetryReset]:
     """Discard speculative output before replaying on the same provider."""
 
-    tool_tracker.cancel_remaining()
     # A retry replaces the uncommitted attempt, including text items already
     # closed by a provider phase change. None of these items owns a tool effect.
     stream_text.cancel_active_agent_message()
@@ -122,6 +133,13 @@ async def reset_for_provider_retry(
         iteration_id=str(getattr(stream_text, "iteration_id", "") or ""),
     ):
         yield abandoned
+    for cancelled in cancelled_pending_tool_events(
+        stream_state, tool_tracker,
+        iteration_id=str(getattr(stream_text, "iteration_id", "") or ""),
+        reason="provider_retry",
+    ):
+        yield cancelled
+    tool_tracker.cancel_remaining()
     stream_text.reset_for_provider_retry()
     stream_state.reset_provider_payload()
     yield ProviderRetryReset(

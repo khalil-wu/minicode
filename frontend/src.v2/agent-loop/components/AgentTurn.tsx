@@ -3,8 +3,9 @@ import type React from "react";
 import type { HistoryCellState } from "../../chat/cells/cellTypes";
 import type { AgentLoopTurnProjection } from "../projection/project-turn";
 import { AgentProcessSummary } from "./AgentProcessSummary";
-import { AgentTimeline } from "./AgentTimeline";
+import { AgentTimeline, isProcessNarration } from "./AgentTimeline";
 import { FinalAnswer } from "./FinalAnswer";
+import { useTranscriptSearch } from "../../chat/TranscriptSearchContext";
 
 export type RenderAgentCellArgs = {
   key?: React.Key;
@@ -37,7 +38,9 @@ export const AgentTurn = memo(function AgentTurn({
   const initialProcessExpanded = !turn.hasCompleteFinalAnswer
     ? true
     : defaultProcessExpanded ?? turn.initialProcessExpanded;
-  const [processExpanded, setProcessExpanded] = useState(initialProcessExpanded);
+  const [processPreference, setProcessExpanded] = useState(initialProcessExpanded);
+  const searching = useTranscriptSearch();
+  const processExpanded = searching || processPreference;
   const previousTurnId = useRef(turn.id);
   const previousDetailMode = useRef(turn.processDetailMode);
   const previousDefaultProcessExpanded = useRef(defaultProcessExpanded);
@@ -96,6 +99,9 @@ export const AgentTurn = memo(function AgentTurn({
   // the reply so the user sees the complete change set at the end of the turn.
   const timelineCells = useMemo(() => turn.processCells.filter((cell) => cell.kind !== "diff"), [turn.processCells]);
   const diffCells = useMemo(() => turn.processCells.filter((cell) => cell.kind === "diff"), [turn.processCells]);
+  const visibleTimelineCells = useMemo(() => processExpanded
+    ? timelineCells
+    : timelineCells.filter(isProcessNarration), [processExpanded, timelineCells]);
   const hasTimelineItems = turn.processCells.length > 0 || Boolean(historyControl);
   const hasActiveTimelineItem = timelineCells.some((cell) => {
     if (cell.kind === "activity") return cell.status === "running";
@@ -113,10 +119,12 @@ export const AgentTurn = memo(function AgentTurn({
   const failureIsTimelineEvidence = turn.processCells.some((cell) => cell.kind === "error");
   const showProcessStack =
     turn.hasProcessContent &&
-    (timelineCells.length > 0 || diffCells.length > 0) &&
-    processExpanded;
+    visibleTimelineCells.length > 0;
   const summaryPosition = turn.status === "running" ? "bottom" : "top";
-  const processSummary = (
+  const standaloneNotice = !turn.userCell && turn.status === "completed"
+    && turn.processCells.length > 0
+    && turn.processCells.every((cell) => cell.kind === "status_notice");
+  const processSummary = standaloneNotice ? null : (
     <AgentProcessSummary
       status={turn.status}
       processExpanded={processExpanded}
@@ -139,6 +147,7 @@ export const AgentTurn = memo(function AgentTurn({
   return (
     <div
       className="chat-turn agent-loop-turn"
+      data-message-id={turn.id}
       data-status={turn.status}
       style={turnStyle(wide)}
     >
@@ -161,9 +170,10 @@ export const AgentTurn = memo(function AgentTurn({
           {showProcessStack && (
             <AgentTimeline
               loadedToolItems={loadedToolItems}
-              cells={timelineCells}
+              cells={visibleTimelineCells}
               renderCell={renderCell}
               isRunning={turn.status === "running"}
+              expandWorkGroups={userToggled.current}
               showAllOpenWork={turn.status !== "running" && !turn.hasCompleteFinalAnswer}
             />
           )}

@@ -68,6 +68,16 @@ describe("listWorkspaceTree", () => {
 
 describe("workspace request errors", () => {
   it.each(["fetchWorkspaceGitStatus", "fetchWorkspaceGitWorktree", "fetchWorkspaceGitDiff"] as const)(
+    "%s preserves a normal non-Git folder response",
+    async (operation) => {
+      const payload = { is_git_repo: false, branch: "", modified: [], staged: [], untracked: [], diff: "", current_path: "C:\\folder", worktrees: [] };
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), { status: 200 })));
+      const workspace = await loadWorkspace();
+      await expect(workspace[operation]("C:\\folder")).resolves.toEqual(payload);
+    },
+  );
+
+  it.each(["fetchWorkspaceGitStatus", "fetchWorkspaceGitWorktree", "fetchWorkspaceGitDiff"] as const)(
     "%s reports Git failures returned inside a successful HTTP response",
     async (operation) => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({

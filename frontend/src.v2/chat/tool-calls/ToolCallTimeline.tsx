@@ -184,7 +184,7 @@ export function buildRunTimelineItems(
 ): TimelineItem[] {
   const toolItems = messages.flatMap((message) =>
     getToolCallsFromMessage(message).map((tc) => ({
-      id: `tool:${tc.id}`,
+      id: `tool:${message.id}:${tc.id}`,
       phase: phaseForTool(tc.phase),
       label: readableToolLabel(tc.status === "running" || tc.status === "pending"
         ? tc.displayHint || tc.name || "工具"
@@ -274,7 +274,7 @@ export function buildRunReplaySummary(events: RunReplayEvent[]): RunReplaySummar
   }
   const phases = PHASE_ORDER.filter((phase) => events.some((event) => event.phase === phase));
   const timed = events.filter((event) => Number.isFinite(event.started_at) && (event.finished_at == null || Number.isFinite(event.finished_at))).length;
-  const failedOrBlocked = events.filter((event) => event.status === "failed" || event.status === "blocked" || event.status === "partial").length;
+  const failedOrBlocked = events.filter((event) => event.status === "failed" || event.status === "blocked" || event.status === "partial" || event.status === "cancelled").length;
   const running = events.filter((event) => event.status === "running").length;
   const firstStartedAt = Math.min(...events.map((event) => event.started_at));
   const finishedValues = events.map((event) => event.finished_at ?? event.started_at).filter((value) => Number.isFinite(value));

@@ -75,6 +75,9 @@ export function recordStreamingToolUpdate(previous: ChatMessage, next: ChatMessa
   // visibility, aggregate file diffs, or the kind/number of process rows.
   const kind = activityKindFromToolRecord(after.record);
   if (before.record.name !== after.record.name || before.record.visibility !== after.record.visibility
+    || before.record.groupId !== after.record.groupId || before.record.stepId !== after.record.stepId
+    || before.record.turnId !== after.record.turnId || before.record.iterationId !== after.record.iterationId
+    || before.record.taskId !== after.record.taskId || before.record.callSource !== after.record.callSource
     || before.record.temporaryRemoved !== after.record.temporaryRemoved
     || before.record.diff !== after.record.diff || kind === "fileChange"
     || kind !== activityKindFromToolRecord(before.record)) return;

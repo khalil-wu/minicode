@@ -5,7 +5,7 @@
 
 import type { ToolCallRecord } from "../../lib/tool-call-reducer";
 import type { TurnActivityKind } from "../../lib/turn-projection";
-import type { ArtifactPreview, ChatMessageSource, Citation, MessageUsage, ProgressContentBlock, ToolHistoryPage } from "../../stores/types";
+import type { ArtifactPreview, ChatMessageSource, Citation, ComposerQuote, MessageContextRef, MessageUsage, ProgressContentBlock, ToolHistoryPage } from "../../stores/types";
 
 // ── Diff File Change ────────────────────────────────────────────────
 
@@ -26,6 +26,8 @@ export interface UserMessageCellState {
   kind: "user_message";
   id: string;
   content: string;
+  contextRefs?: MessageContextRef[];
+  quotedMessage?: ComposerQuote | null;
   messageSource?: ChatMessageSource;
   attachments?: {
     id?: string;
@@ -100,6 +102,7 @@ export interface ExecCellState {
   stdoutFull?: string;
   stderrFull?: string;
   durationMs?: number;
+  cleanupReceipt?: ToolCallRecord["cleanupReceipt"];
   collapsed: boolean;
   needsApproval?: boolean;
   createdAt: number;
@@ -213,6 +216,7 @@ export interface CollaborationCellState {
   status: "running" | "success" | "failed" | "partial" | "cancelled";
   background?: boolean;
   entries: CollaborationCellEntry[];
+  error?: string;
   collapsed: boolean;
   createdAt: number;
   segment?: number;

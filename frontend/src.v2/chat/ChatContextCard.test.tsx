@@ -5,6 +5,7 @@ import { Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { ChatContextCard, collectAttachments } from "./ChatContextCard";
+import { hydrateMessages } from "./transcriptHydration";
 
 vi.mock("../hooks/useWebSocket", () => ({
   getWebSocket: () => ({ sessionId: "session-context-image" }),
@@ -34,7 +35,7 @@ describe("ChatContextCard", () => {
       messages: [{
         id: "assistant-1",
         role: "assistant",
-        content: "Done",
+        content: "Done [1]",
         timestamp: 1,
         artifacts: [],
         attachmentRefs: [{
@@ -83,7 +84,7 @@ describe("ChatContextCard", () => {
     onRender.mockClear();
     act(() => useAppStore.setState((state) => ({ messages: state.messages.map((message) => ({ ...message, content: message.content + " next" })) })));
     expect(onRender).not.toHaveBeenCalled();
-    act(() => useAppStore.setState((state) => ({ messages: state.messages.map((message) => ({ ...message, citations: [...(message.citations ?? []), { source: "https://example.com/new", url: "https://example.com/new", title: "New source", range: [0, 0] }] })) })));
+    act(() => useAppStore.setState((state) => ({ messages: state.messages.map((message) => ({ ...message, content: "Done [1] [2]", citations: [...(message.citations ?? []), { source: "https://example.com/new", url: "https://example.com/new", title: "New source", range: [0, 0] }] })) })));
     expect(screen.getByText("New source")).toBeTruthy();
     expect(onRender).toHaveBeenCalled();
   });
@@ -354,6 +355,90 @@ describe("ChatContextCard", () => {
       .toBe("attachment:shared-resource-id");
     expect(attachments.find((attachment) => attachment.source === "artifact")?.id)
       .toBe("artifact:shared-resource-id");
+  });
+
+  it("restores persisted execution outputs without presenting them as generated files", () => {
+    const firstAt = 1790857935157;
+    const secondAt = 1790857961877;
+    const messages = hydrateMessages([{
+      id: "assistant-audit",
+      role: "assistant",
+      content: "检查已完成。",
+      timestamp: firstAt,
+      artifacts: [{ artifactId: "output-first", kind: "file", summary: "Script completed" }],
+      tool_calls: [
+        { id: "script-first", name: "tool_exec", args: {}, status: "success", artifact_id: "output-first", display_summary: "Script completed", result_kind: "generic", started_at: firstAt },
+        { id: "script-second", name: "tool_exec", args: {}, status: "success", artifact_id: "output-second", display_summary: "Script completed", result_kind: "generic", started_at: secondAt },
+      ],
+    }]);
+    useAppStore.setState({ messages, subagents: [], backgroundTasks: [] });
+    const attachments = collectAttachments(messages, "conv-active");
+    expect(attachments).toHaveLength(2);
+    expect(attachments).toEqual([
+      expect.objectContaining({ artifactId: "output-second", label: "代码执行输出", executionResult: true, occurredAt: secondAt, conversationId: "conv-active" }),
+      expect.objectContaining({ artifactId: "output-first", label: "代码执行输出", executionResult: true, occurredAt: firstAt, conversationId: "conv-active" }),
+    ]);
+
+    const scrollIntoView = vi.fn();
+    const ownTarget = document.createElement("div");
+    ownTarget.dataset.artifactId = "output-second";
+    ownTarget.dataset.artifactConversationId = "conv-active";
+    ownTarget.scrollIntoView = scrollIntoView;
+    const otherTarget = document.createElement("div");
+    otherTarget.dataset.artifactId = "output-second";
+    otherTarget.dataset.artifactConversationId = "conv-other";
+    otherTarget.scrollIntoView = vi.fn();
+    document.body.append(otherTarget, ownTarget);
+
+    render(<ChatContextCard />);
+    expect(screen.getByRole("region", { name: "执行结果摘要" })).toBeTruthy();
+    expect(screen.queryByText("生成文件")).toBeNull();
+    expect(screen.queryByText("Script completed")).toBeNull();
+    const outputButtons = screen.getAllByRole("button", { name: /^查看执行结果：代码执行输出/ });
+    expect(outputButtons).toHaveLength(2);
+    expect(outputButtons[0].textContent).not.toBe(outputButtons[1].textContent);
+    fireEvent.click(outputButtons[0]);
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "center" });
+    expect(otherTarget.scrollIntoView).not.toHaveBeenCalled();
+    ownTarget.remove();
+    otherTarget.remove();
+  });
+
+  it("uses the actual output path while retaining the call's separate execution result", () => {
+    const messages = hydrateMessages([{
+      id: "assistant-deliverables",
+      role: "assistant",
+      content: "报告已生成。",
+      blocks: [{ type: "tool_call", record: {
+        id: "report-call", name: "tool_exec", args: {}, status: "success",
+        artifactId: "report-log", artifactKind: "text", displaySummary: "Script completed", startedAt: 1,
+        outputFiles: [{ path: "reports/audit.md", name: "Script completed", size: 120 }],
+      } }],
+      reply_attachments: [{ path: "reports/audit.md" }],
+    }]);
+    useAppStore.setState({ messages, subagents: [], backgroundTasks: [] });
+    const attachments = collectAttachments(messages, "conv-active");
+    expect(attachments).toHaveLength(2);
+    expect(attachments.find((item) => item.source === "workspace")).toMatchObject({
+      label: "audit.md", path: "reports/audit.md", conversationId: "conv-active",
+    });
+    render(<ChatContextCard />);
+    expect(screen.getByRole("button", { name: "查看生成文件：audit.md" }).getAttribute("title")).toBe("reports/audit.md");
+    expect(screen.getByText("reports/audit.md")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^查看执行结果：代码执行输出/ })).toBeTruthy();
+  });
+
+  it("preserves explicit image metadata when its execution record is sparse", () => {
+    const attachments = collectAttachments([{
+      id: "assistant-exec-image", role: "assistant", content: "图片已生成。", timestamp: 1,
+      artifacts: [{ artifactId: "exec-image", kind: "image", summary: "生成图片", mediaType: "image/png" }],
+      blocks: [{ type: "tool_call", record: {
+        id: "exec-image-call", name: "tool_exec", args: {}, status: "success",
+        artifactId: "exec-image", displaySummary: "Script completed", startedAt: 1,
+      } }],
+    }], "conv-active");
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]).toMatchObject({ kind: "image", label: "生成图片", executionResult: false, artifactId: "exec-image" });
   });
 
   it("opens a selected agent in the right sidebar", () => {

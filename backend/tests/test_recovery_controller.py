@@ -234,6 +234,7 @@ def test_provider_pause_turn_replays_native_content_without_user_nudge() -> None
 
     class _ToolExecutor:
         cancelled = False
+        tracked_tools = {}
 
         def cancel_remaining(self) -> None:
             self.cancelled = True
@@ -293,6 +294,7 @@ def test_provider_pause_turn_without_native_state_fails_closed() -> None:
 
     class _ToolExecutor:
         cancelled = False
+        tracked_tools = {}
 
         def cancel_remaining(self) -> None:
             self.cancelled = True
@@ -348,6 +350,8 @@ def test_provider_compaction_stop_replays_opaque_block_and_retries() -> None:
     stream_text = StreamTextState(iteration_id="iter:1")
 
     class _ToolExecutor:
+        tracked_tools = {}
+
         @staticmethod
         def cancel_remaining() -> None:
             return None

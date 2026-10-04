@@ -1,5 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { ChevronDown, ChevronUp, X } from "lucide-react";
+import { useAppStore } from "../stores";
+import { loadEarlierConversationMessages, loadEarlierToolItems } from "./historyPagination";
 
 interface SearchMatch {
   range: Range;
@@ -11,11 +13,16 @@ interface ChatSearchProps {
 }
 
 export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
+  const conversationId = useAppStore((state) => state.conversationId);
+  const historyPage = useAppStore((state) => conversationId ? state.conversationHistoryPages[conversationId] : undefined);
+  const unloadedToolMessageId = useAppStore((state) => state.messages.find((message) => (message.toolPage?.remaining ?? 0) > 0)?.id);
+  const [loadingTools, setLoadingTools] = useState(false);
   const [query, setQuery] = useState("");
   const [matchCount, setMatchCount] = useState(0);
   const [currentIndex, setCurrentIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const matchesRef = useRef<SearchMatch[]>([]);
+  const currentIndexRef = useRef(0);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -28,23 +35,27 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
     };
   }, []);
 
-  const selectMatch = useCallback((index: number) => {
+  const selectMatch = useCallback((index: number, scroll = true) => {
     const match = matchesRef.current[index];
     if (!match) return;
     const selection = window.getSelection();
     selection?.removeAllRanges();
     selection?.addRange(match.range);
     const target = match.range.startContainer.parentElement;
-    target?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+    if (scroll) target?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+    currentIndexRef.current = index + 1;
     setCurrentIndex(index + 1);
   }, []);
 
   const collectMatches = useCallback(
-    (text: string) => {
+    (text: string, resetSelection = true) => {
+      const selectedRange = matchesRef.current[currentIndexRef.current - 1]?.range;
       if (!text || !containerRef.current) {
         matchesRef.current = [];
+        currentIndexRef.current = 0;
         setMatchCount(0);
         setCurrentIndex(0);
+        window.getSelection()?.removeAllRanges();
         return;
       }
       const container = containerRef.current;
@@ -53,44 +64,62 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
         NodeFilter.SHOW_TEXT,
         {
           acceptNode(node) {
-            return node.parentElement?.closest("[aria-hidden='true'], button, input, textarea, [contenteditable='true']")
+            return node.parentElement?.closest("[hidden], [aria-hidden='true'], input, textarea, [contenteditable='true'], .cell-action-btn, .exec-cell-stop-button")
               ? NodeFilter.FILTER_REJECT
               : NodeFilter.FILTER_ACCEPT;
           },
         },
       );
-      const nodes: Text[] = [];
       let combined = "";
+      let previousBlock: Element | null | undefined;
       const spans: Array<{ node: Text; start: number; end: number }> = [];
       while (treeWalker.nextNode()) {
         const node = treeWalker.currentNode as Text;
         const value = node.data;
         if (!value) continue;
-        nodes.push(node);
+        const block = node.parentElement?.closest(
+          "p, li, pre, blockquote, h1, h2, h3, h4, h5, h6, td, th, .user-cell-bubble, .assistant-cell-content, .agent-loop-turn",
+        );
+        if (spans.length > 0 && block !== previousBlock) combined += "\n";
+        previousBlock = block;
         spans.push({ node, start: combined.length, end: combined.length + value.length });
         combined += value;
       }
-      const searchLower = text.toLowerCase();
-      const combinedLower = combined.toLowerCase();
+      // Case folding can change UTF-16 length (for example İ). Regex matches
+      // retain original offsets, which are the offsets DOM Range requires.
+      const pattern = new RegExp(text.replace(/[.*+?^\u0024{}()|[\]\\]/g, "\\$&"), "giu");
       const matches: SearchMatch[] = [];
-      let start = combinedLower.indexOf(searchLower);
-      while (start >= 0) {
-        const end = start + text.length;
-        const startSpan = spans.find((span) => start >= span.start && start < span.end);
-        const endSpan = [...spans].reverse().find((span) => end > span.start && end <= span.end);
-        if (startSpan && endSpan) {
+      let spanIndex = 0;
+      for (const match of combined.matchAll(pattern)) {
+        const start = match.index;
+        const end = start + match[0].length;
+        while (spanIndex < spans.length && start >= spans[spanIndex].end) spanIndex += 1;
+        const startSpan = spans[spanIndex];
+        let endSpanIndex = spanIndex;
+        while (endSpanIndex < spans.length && end > spans[endSpanIndex].end) endSpanIndex += 1;
+        const endSpan = spans[endSpanIndex];
+        if (startSpan && endSpan && start >= startSpan.start && end > endSpan.start) {
           const range = document.createRange();
           range.setStart(startSpan.node, start - startSpan.start);
           range.setEnd(endSpan.node, end - endSpan.start);
           matches.push({ range });
         }
-        start = combinedLower.indexOf(searchLower, start + Math.max(1, text.length));
+        spanIndex = endSpanIndex;
       }
+      const selectedIndex = !resetSelection && selectedRange
+        ? matches.findIndex(({ range }) => range.startContainer === selectedRange.startContainer
+          && range.startOffset === selectedRange.startOffset)
+        : -1;
+      const nextIndex = selectedIndex >= 0 ? selectedIndex
+        : Math.min(Math.max(0, resetSelection ? 0 : currentIndexRef.current - 1), matches.length - 1);
       matchesRef.current = matches;
       setMatchCount(matches.length);
-      setCurrentIndex(0);
-      window.getSelection()?.removeAllRanges();
-      if (matches.length > 0) selectMatch(0);
+      if (matches.length > 0) selectMatch(nextIndex, resetSelection);
+      else {
+        currentIndexRef.current = 0;
+        setCurrentIndex(0);
+        window.getSelection()?.removeAllRanges();
+      }
     },
     [containerRef, selectMatch],
   );
@@ -101,7 +130,7 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
     if (!container || !query) return;
     // The ref owns transcript DOM only, so updating the match label/selection
     // cannot feed this observer. Streams and history hydration update it.
-    const observer = new MutationObserver(() => collectMatches(query));
+    const observer = new MutationObserver(() => collectMatches(query, false));
     observer.observe(container, { childList: true, characterData: true, subtree: true });
     return () => observer.disconnect();
   }, [query, collectMatches]);
@@ -139,6 +168,7 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
       className="chat-pane-search"
       style={{
         display: "flex",
+        flexWrap: "wrap",
         alignItems: "center",
         gap: "8px",
         padding: "6px 12px",
@@ -191,6 +221,7 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
         onClick={() => findNext(true)}
         title="上一个匹配项（Shift + Enter）"
         aria-label="上一个匹配项"
+        disabled={matchCount === 0}
         style={btnStyle}
         onMouseEnter={(e) =>
           (e.currentTarget.style.background = "var(--surface-hover)")
@@ -206,6 +237,7 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
         onClick={() => findNext(false)}
         title="下一个匹配项（Enter）"
         aria-label="下一个匹配项"
+        disabled={matchCount === 0}
         style={btnStyle}
         onMouseEnter={(e) =>
           (e.currentTarget.style.background = "var(--surface-hover)")
@@ -231,6 +263,18 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
       >
         <X size={16} aria-hidden="true" />
       </button>
+      <div className="chat-search-scope" style={{ flexBasis: "100%", display: "flex", justifyContent: "space-between", gap: 10, fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>
+        <span>搜索已加载的正文与工具记录{historyPage?.hasMore || unloadedToolMessageId ? " · 还有更早历史未检索" : ""}</span>
+        {historyPage?.hasMore && conversationId && <button type="button" disabled={historyPage.loading}
+          onClick={() => void loadEarlierConversationMessages(conversationId)}
+          style={{ border: 0, background: "transparent", color: "var(--accent-primary)", padding: 0, whiteSpace: "nowrap" }}>
+          {historyPage.loading ? "正在加载…" : "载入更早历史继续搜索"}
+        </button>}
+        {unloadedToolMessageId && conversationId && <button type="button" disabled={loadingTools} onClick={() => {
+          setLoadingTools(true);
+          void loadEarlierToolItems(conversationId, unloadedToolMessageId).finally(() => setLoadingTools(false));
+        }} style={{ border: 0, background: "transparent", color: "var(--accent-primary)", padding: 0, whiteSpace: "nowrap" }}>{loadingTools ? "正在加载…" : "载入更早工具记录"}</button>}
+      </div>
     </div>
   );
 }

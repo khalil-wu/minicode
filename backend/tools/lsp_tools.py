@@ -88,7 +88,7 @@ class LSPGoToDefinitionTool(BaseTool):
                     "character": {
                         "type": "integer",
                         "minimum": 0,
-                        "description": "0-based character offset in the line.",
+                        "description": "0-based UTF-16 code-unit offset in the line (an emoji may use two units).",
                     },
                     "line_base": {
                         "type": "integer",
@@ -196,7 +196,7 @@ class LSPFindReferencesTool(BaseTool):
                 "properties": {
                     "file_path": {"type": "string", "description": "Source file path, absolute or relative to the current workspace."},
                     "line": {"type": "integer", "minimum": 0, "description": "Line number. Interpreted as 0-based unless line_base is 1."},
-                    "character": {"type": "integer", "minimum": 0, "description": "0-based character offset."},
+                    "character": {"type": "integer", "minimum": 0, "description": "0-based UTF-16 code-unit offset (an emoji may use two units)."},
                     "line_base": {
                         "type": "integer",
                         "enum": [0, 1],
@@ -297,7 +297,7 @@ class LSPHoverTool(BaseTool):
                 "properties": {
                     "file_path": {"type": "string", "description": "Source file path, absolute or relative to the current workspace."},
                     "line": {"type": "integer", "minimum": 0, "description": "Line number. Interpreted as 0-based unless line_base is 1."},
-                    "character": {"type": "integer", "minimum": 0, "description": "0-based character offset."},
+                    "character": {"type": "integer", "minimum": 0, "description": "0-based UTF-16 code-unit offset (an emoji may use two units)."},
                     "line_base": {
                         "type": "integer",
                         "enum": [0, 1],

@@ -1,9 +1,10 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
-import { FileCode2, MessagesSquare, Search } from "lucide-react";
+import { ArrowLeft, Columns2, FileCode2, Maximize2, MessagesSquare, Minimize2, Search } from "lucide-react";
 import { useAppStore } from "../stores";
 import type { PanelSlot } from "../stores/types";
 import { ChatPane } from "../chat/ChatPane";
+import { returnToBrowserPage } from "../chat/openWebInBrowser";
 import { PanelSkeleton } from "./PanelSkeleton";
 import { ChunkErrorBoundary, SafeBoundary } from "./ChunkErrorBoundary";
 import { PanelErrorFallback } from "../components/PanelErrorFallback";
@@ -14,10 +15,6 @@ const loadEditorPanel = () => import("../panels/EditorPanel").then((module) => (
 const LazyEditorPanel = lazy(loadEditorPanel);
 const COMPACT_MAIN_WIDTH = 900;
 
-const isCompactViewport = () => (
-  typeof window !== "undefined" && window.innerWidth < COMPACT_MAIN_WIDTH
-);
-
 interface MainSlotsProps {
   mode?: "split" | "tabs";
   forceChat?: boolean;
@@ -26,12 +23,18 @@ interface MainSlotsProps {
 export const MainSlots = ({ mode = "split", forceChat = false }: MainSlotsProps) => {
   const panelSlots = useAppStore((s) => s.panelSlots);
   const focusPanel = useAppStore((s) => s.focusPanel);
+  const togglePanelMaximized = useAppStore((s) => s.togglePanelMaximized);
   const resizePanel = useAppStore((s) => s.resizePanel);
   const setAppMode = useAppStore((s) => s.setAppMode);
+  const setWorkbenchLayout = useAppStore((s) => s.setWorkbenchLayout);
   const hasOpenEditor = useAppStore((s) => s.editorTabs.length > 0);
   const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId);
   const conversationTitle = useAppStore((s) => s.conversations.find((item) => item.id === (s.pendingConversationSwitchId || s.conversationId))?.title);
-  const [compact, setCompact] = useState(isCompactViewport);
+  const previewReturnTarget = useAppStore((s) => s.diffReview?.conversationId === s.conversationId
+    && s.diffReview?.previewReturnTarget?.conversationId === s.conversationId ? s.diffReview.previewReturnTarget : undefined);
+  const setRightStackTab = useAppStore((s) => s.setRightStackTab);
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const [compact, setCompact] = useState(false);
 
   const chatSlot = panelSlots.find((slot) => slot.kind === "chat") ?? { id: "main-chat", kind: "chat" as const, label: "对话" };
   const focusedSlot = panelSlots.find((slot) => slot.focused) ?? chatSlot;
@@ -52,25 +55,30 @@ export const MainSlots = ({ mode = "split", forceChat = false }: MainSlotsProps)
   // history, virtual-row measurements, composer state, and scroll position
   // then survive Cowork/Code and Chat/File switches instead of being rebuilt.
   const mountedSlots = useMemo(() => {
-    if (!tabbed) return visibleSlots;
-    if (!editorSlot || !hasOpenEditor) return visibleSlots;
-    return [chatSlot, editorSlot];
-  }, [chatSlot, editorSlot, hasOpenEditor, tabbed, visibleSlots]);
+    if (!editorSlot) return visibleSlots;
+    return hasOpenEditor || visibleSlots.some((slot) => slot.kind === "editor")
+      ? [chatSlot, editorSlot]
+      : [chatSlot];
+  }, [chatSlot, editorSlot, hasOpenEditor, visibleSlots]);
 
-  useEffect(() => {
-    const onResize = () => setCompact(isCompactViewport());
-    onResize();
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+  useLayoutEffect(() => {
+    const surface = surfaceRef.current!;
+    const updateWidth = () => setCompact(surface.getBoundingClientRect().width < COMPACT_MAIN_WIDTH);
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(surface);
+    return () => observer.disconnect();
   }, []);
 
   const focusWorkbenchPanel = (id: string) => {
     if (forceChat && editorSlot?.id === id) setAppMode("code");
-    focusPanel(id);
+    if (effectiveMaximizedSlot && effectiveMaximizedSlot.id !== id) togglePanelMaximized(id);
+    else focusPanel(id);
   };
 
   return (
     <div
+      ref={surfaceRef}
       className="mc-main-surface"
       style={{
         flex: 1,
@@ -83,7 +91,7 @@ export const MainSlots = ({ mode = "split", forceChat = false }: MainSlotsProps)
       }}
     >
       <main style={mainCanvasStyle}>
-        {(conversationTitle || (showSwitcher && (tabbed || compact || effectiveMaximizedSlot))) && (
+        {(conversationTitle || showSwitcher) && (
           <div className="mc-workbench-toolbar">
             {conversationTitle && <span className="mc-workbench-title" title={conversationTitle}>{conversationTitle}</span>}
             {conversationTitle && !pendingConversationSwitchId && activeSlot.kind === "chat" && (
@@ -102,6 +110,40 @@ export const MainSlots = ({ mode = "split", forceChat = false }: MainSlotsProps)
                 activeKind={activeSlot.kind === "editor" ? "editor" : "chat"}
                 onFocus={focusWorkbenchPanel}
               />
+            )}
+            {showSwitcher && !forceChat && (
+              <div className="mc-workbench-layout-actions" role="group" aria-label="工作区布局">
+                {activeSlot.kind === "editor" && previewReturnTarget && <button
+                  type="button"
+                  className="btn-ghost mc-icon-button"
+                  aria-label="返回预览"
+                  title={previewReturnTarget.url ? `返回预览 · ${previewReturnTarget.url}` : "返回预览"}
+                  onClick={() => {
+                    if (previewReturnTarget.tab === "browser" && previewReturnTarget.targetId && previewReturnTarget.url) {
+                      returnToBrowserPage({ conversationId: previewReturnTarget.conversationId, targetId: previewReturnTarget.targetId, url: previewReturnTarget.url });
+                    } else setRightStackTab(previewReturnTarget.tab);
+                  }}
+                ><ArrowLeft size={15} /></button>}
+                {!compact && <button
+                  type="button"
+                  className="btn-ghost mc-icon-button"
+                  aria-label={tabbed || effectiveMaximizedSlot ? "并排显示对话与文件" : "切换为单页显示"}
+                  title={tabbed || effectiveMaximizedSlot ? "并排显示对话与文件" : "切换为单页显示"}
+                  aria-pressed={!tabbed && !effectiveMaximizedSlot}
+                  onClick={() => {
+                    if (effectiveMaximizedSlot) togglePanelMaximized(effectiveMaximizedSlot.id);
+                    setWorkbenchLayout(tabbed || effectiveMaximizedSlot ? "split" : "tabs");
+                  }}
+                ><Columns2 size={15} /></button>}
+                <button
+                  type="button"
+                  className="btn-ghost mc-icon-button"
+                  aria-label={effectiveMaximizedSlot ? "退出专注模式" : "专注当前面板"}
+                  title={effectiveMaximizedSlot ? "退出专注模式" : "专注当前面板"}
+                  aria-pressed={Boolean(effectiveMaximizedSlot)}
+                  onClick={() => togglePanelMaximized(activeSlot.id)}
+                >{effectiveMaximizedSlot ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>
+              </div>
             )}
           </div>
         )}
@@ -125,6 +167,7 @@ export const MainSlots = ({ mode = "split", forceChat = false }: MainSlotsProps)
                     : "0",
                 }}
                 onMouseDown={() => focusPanel(slot.id)}
+                onFocusCapture={() => { if (!slot.focused) focusPanel(slot.id); }}
               >
                 <PanelContent slot={slot} />
                 {!tabbed && visible && visibleIndex < visibleSlots.length - 1 && (
@@ -155,10 +198,15 @@ const ResizeHandle = ({
   neighborSize: number;
   onResize: (id: string, delta: number) => void;
 }) => {
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => resizeCleanupRef.current?.(), []);
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
+    resizeCleanupRef.current?.();
     const handle = event.currentTarget;
     const pointerId = event.pointerId;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
     let lastX = event.clientX;
     const onMove = (moveEvent: PointerEvent) => {
       if (moveEvent.pointerId !== pointerId) return;
@@ -170,20 +218,24 @@ const ResizeHandle = ({
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
+      handle.removeEventListener("lostpointercapture", cleanup);
       if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      resizeCleanupRef.current = null;
     };
     const onUp = (upEvent: PointerEvent) => {
       if (upEvent.pointerId !== pointerId) return;
       cleanup();
     };
+    resizeCleanupRef.current = cleanup;
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     handle.setPointerCapture(pointerId);
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onUp);
+    handle.addEventListener("lostpointercapture", cleanup);
   };
   const totalSize = Math.max(currentSize + neighborSize, 0.9);
   const currentPercent = Math.round((currentSize / totalSize) * 100);

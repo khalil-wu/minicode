@@ -90,6 +90,37 @@ describe("SubagentsTab", () => {
     cleanup();
   });
 
+  it("keeps pending cleanup visible and offers another stop request", async () => {
+    useAppStore.setState({ subagents: [{ id: "pending-cleanup", role: "explore", status: "done", objective: "保留结果",
+      cleanupPending: true, cleanupReason: "runner is still alive", resultContent: "retained" }], focusedSubagentId: "pending-cleanup" });
+    render(<SubagentsTab />);
+    expect(screen.getByText("清理未完成")).toBeTruthy();
+    expect(screen.getByText("runner is still alive")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "停止子智能体" }));
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalledWith(expect.objectContaining({
+      type: "subagent.cancel", subagent_id: "pending-cleanup", conversation_id: "conversation-1",
+    }), "subagent.cancel"));
+  });
+
+  it("does not let an old stop response clear a reused child id's current pending action", async () => {
+    const finish: Array<(value: unknown) => void> = [];
+    sendClientCommandAwaitResultMock.mockImplementation((command: unknown) => {
+      if ((command as { type: string }).type === "subagent.cancel") return new Promise((resolve) => finish.push(resolve)) as never;
+      return Promise.resolve({ level: "success", data: { messages: [], seq: 0 } }) as never;
+    });
+    useAppStore.setState({ focusedSubagentId: "shared", subagents: [{ id: "shared", role: "explore", status: "running", objective: "Task A" }] });
+    render(<SubagentsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "停止子智能体" }));
+    act(() => useAppStore.setState({ conversationId: "conversation-b", workingDirectory: "C:/b", subagents: [
+      { id: "shared", role: "explore", status: "running", objective: "Task B" },
+    ] }));
+    fireEvent.click(screen.getByRole("button", { name: "停止子智能体" }));
+    await act(async () => finish[0]({ level: "success", data: {} }));
+    expect((screen.getByRole("button", { name: "正在停止子智能体" }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => finish[1]({ level: "success", data: {} }));
+    expect((screen.getByRole("button", { name: "停止子智能体" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("shows a calm empty state when there is no delegated work", () => {
     useAppStore.setState({ subagents: [] });
 
@@ -481,12 +512,12 @@ describe("SubagentsTab", () => {
     const { container } = render(<SubagentsTab />);
     fireEvent.click(screen.getByRole("button", { name: "打开子智能体任务：检查并修复实现" }));
 
-    expect(await screen.findByText("用时 6 秒")).toBeTruthy();
+    expect(await screen.findByText("Worked for 6s")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
-    fireEvent.click(screen.getByRole("button", { name: "读取了文件并搜索了内容并运行了命令并编辑了文件" }));
+    container.querySelectorAll<HTMLButtonElement>("button.agent-loop-timeline-group-title[aria-expanded=\"false\"]").forEach((button) => fireEvent.click(button));
 
-    const readCell = screen.getAllByText("读取文件", { selector: ".activity-cell-name" })[0]?.closest(".activity-cell");
-    const searchCell = screen.getAllByText("搜索文件", { selector: ".activity-cell-name" })[0]?.closest(".activity-cell");
+    const readCell = screen.getAllByText("Read", { selector: ".activity-cell-name" })[0]?.closest(".activity-cell");
+    const searchCell = screen.getAllByText("Search", { selector: ".activity-cell-name" })[0]?.closest(".activity-cell");
     expect(readCell).toBeTruthy();
     expect(searchCell).toBeTruthy();
     fireEvent.click(within(readCell as HTMLElement).getByRole("button", { name: "展开活动详情" }));
@@ -494,9 +525,9 @@ describe("SubagentsTab", () => {
     expect(within(readCell as HTMLElement).getAllByText("src/app.ts").length).toBeGreaterThan(0);
     expect(within(searchCell as HTMLElement).getByText("src/app.ts:1")).toBeTruthy();
 
-    expect(screen.getByText("已运行命令")).toBeTruthy();
+    expect(container.querySelector(".exec-cell")?.textContent).toContain("Run");
     expect(screen.getByText("npm test")).toBeTruthy();
-    expect(screen.getByText("已编辑", { exact: true })).toBeTruthy();
+    expect(screen.getByText("Edit", { exact: true })).toBeTruthy();
     expect(screen.getByText("修复完成")).toBeTruthy();
     expect(screen.getByText("已编辑 1 个文件")).toBeTruthy();
 

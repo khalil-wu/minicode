@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Archive,
+  ArrowLeft,
   Blocks,
   CheckCircle2,
   ChevronDown,
@@ -31,6 +32,7 @@ import { Section } from "./settingsShared";
 import { fetchJsonWithStartupRetry, formatSettingsLoadError } from "./settingsLoad";
 import { showConfirm } from "./DialogService";
 import "./PluginsTab.css";
+import { openSettings } from "../lib/settings-navigation";
 
 type PluginEntry = {
   id?: string;
@@ -69,6 +71,8 @@ type PluginEntry = {
   managed?: boolean;
   policy_managed?: boolean;
   managed_enabled?: boolean | null;
+  mcp_server_names?: string[];
+  enablement_source?: string;
 };
 
 type PluginValidation = {
@@ -109,6 +113,13 @@ type CatalogPlugin = {
   category?: string;
   load_error?: string;
   interface?: { displayName?: string; shortDescription?: string; developerName?: string };
+  version?: string;
+  longDescription?: string;
+  capabilities?: string[];
+  skills?: string | string[];
+  mcpServers?: Record<string, unknown>;
+  apps?: unknown[] | Record<string, unknown>;
+  hooks?: unknown[] | Record<string, unknown>;
 };
 type PluginMarketplace = { name: string; status: string; error?: string; source: Record<string, string>; plugins: CatalogPlugin[] };
 
@@ -148,8 +159,9 @@ const requireSuccessfulResponse = async (response: Response, fallback: string): 
   throw new Error(errorMessageFromResponseText(text, fallback || `HTTP ${response.status}`));
 };
 
-export const PluginsTab = ({ catalog = false, toolbarHost, active = true }: { catalog?: boolean; toolbarHost?: HTMLElement | null; active?: boolean }) => {
+export const PluginsTab = ({ catalog = false, toolbarHost, active = true, searchTarget }: { catalog?: boolean; toolbarHost?: HTMLElement | null; active?: boolean; searchTarget?: string }) => {
   const resolvedTheme = useAppStore((s) => s.resolvedTheme);
+  const mcpServers = useAppStore((s) => s.mcpServers);
   const [plugins, setPlugins] = useState<PluginEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -167,12 +179,20 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true }: { ca
   const [marketplaceError, setMarketplaceError] = useState("");
   const [query, setQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
-  const [managementOpen, setManagementOpen] = useState(!catalog);
+  const [managementOpen, setManagementOpen] = useState(false);
   const [sourceName, setSourceName] = useState("");
   const [sourceKind, setSourceKind] = useState("github");
   const [sourceLocator, setSourceLocator] = useState("");
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
   const marketplaceRequestRef = useRef<AbortController | null>(null);
+  const [detail, setDetail] = useState<{ id: string; installed?: PluginEntry; catalog?: CatalogPlugin; source?: PluginMarketplace } | null>(null);
+  const [runtimeWarnings, setRuntimeWarnings] = useState<string[]>([]);
+  const detailRef = useRef<HTMLElement>(null);
+  const detailTrigger = useRef<HTMLElement | null>(null);
+  const openDetail = (next: NonNullable<typeof detail>) => { detailTrigger.current = document.activeElement as HTMLElement; setDetail(next); };
+  const closeDetail = () => { setDetail(null); window.requestAnimationFrame(() => detailTrigger.current?.focus()); };
+  useEffect(() => { if (detail) detailRef.current?.focus(); }, [detail]);
+  useEffect(() => { if (searchTarget === "插件来源" || searchTarget === "插件开发") setManagementOpen(true); }, [searchTarget]);
 
   const loadMarketplaces = useCallback(async () => {
     marketplaceRequestRef.current?.abort();
@@ -216,6 +236,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true }: { ca
       }, { cacheKey: "settings.plugins" });
       if (loadSeqRef.current !== seq) return;
       setPlugins(normalizePlugins(payload.plugins));
+      setRuntimeWarnings(payload.runtime_refresh?.ok === false ? payload.runtime_refresh.warnings || ["运行时尚未完成插件加载，请刷新后查看组件状态。"] : []);
       if (options.showToast) pushToast("插件列表已刷新", "success");
     } catch (error) {
       if (loadSeqRef.current !== seq) return;
@@ -262,6 +283,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true }: { ca
       const payload = await response.json() as PluginSettingsPayload;
       const updatedPlugins = normalizePlugins(payload.plugins);
       setPlugins(updatedPlugins);
+      setRuntimeWarnings(payload.runtime_refresh?.ok === false ? payload.runtime_refresh.warnings || ["运行时尚未完成插件加载，请刷新后查看组件状态。"] : []);
       const runtimeReady = reportRuntimeRefresh(payload);
       sendClientCommand({ type: "skills.list" }, { silent: true });
       sendClientCommand({ type: "mcp.list" }, { silent: true });
@@ -308,6 +330,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true }: { ca
       await requireSuccessfulResponse(response, "卸载插件失败");
       const payload = await response.json() as PluginSettingsPayload;
       setPlugins(normalizePlugins(payload.plugins));
+      setRuntimeWarnings(payload.runtime_refresh?.ok === false ? payload.runtime_refresh.warnings || ["运行时尚未完成插件加载，请刷新后查看组件状态。"] : []);
       const runtimeReady = reportRuntimeRefresh(payload);
       sendClientCommand({ type: "skills.list" }, { silent: true });
       sendClientCommand({ type: "mcp.list" }, { silent: true });
@@ -458,6 +481,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true }: { ca
       await requireSuccessfulResponse(response, "安装插件失败");
       const payload = await response.json() as PluginSettingsPayload;
       setPlugins(normalizePlugins(payload.plugins));
+      setRuntimeWarnings(payload.runtime_refresh?.ok === false ? payload.runtime_refresh.warnings || ["运行时尚未完成插件加载，请刷新后查看组件状态。"] : []);
       const ready = reportRuntimeRefresh(payload);
       sendClientCommand({ type: "skills.list" }, { silent: true });
       sendClientCommand({ type: "mcp.list" }, { silent: true });
@@ -498,15 +522,62 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true }: { ca
         <button type="button" className="skills-icon-button" onClick={() => setManagementOpen(!managementOpen)} aria-label="管理插件与来源" aria-pressed={managementOpen} title="管理插件与来源"><Settings /></button>
         <button type="button" className="skills-create-button" disabled={busy} aria-haspopup="menu" aria-expanded={Boolean(addMenu)} onClick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setAddMenu({ x: rect.right - 200, y: rect.bottom + 4 }); }}>添加 <ChevronDown /></button>
       </>, toolbarHost)}
+      {detail && (() => {
+        const installed = plugins.find((plugin) => (plugin.id || plugin.name) === detail.id);
+        const entry = detail.catalog;
+        const name = installed?.displayName || entry?.interface?.displayName || installed?.name || entry?.name || detail.id;
+        const failures = installed?.load_errors || (entry?.load_error ? [entry.load_error] : []);
+        const componentMcp = mcpServers.filter((server) => installed?.mcp_server_names?.includes(server.name));
+        const observedNames = new Set(componentMcp.map((server) => server.name));
+        const missingMcp = (installed?.mcp_server_names || []).filter((name) => !observedNames.has(name));
+        const disconnected = componentMcp.filter((server) => !['connected', 'disabled'].includes(server.phase || server.status));
+        const status = failures.length ? "加载失败" : !installed ? "尚未安装" : !installed.enabled ? "已安装 · 已停用" : disconnected.length ? "需要连接或登录" : missingMcp.length ? "组件状态待同步" : "已启用";
+        const openConfiguration = (tab: "connectors" | "skills") => { useAppStore.setState({ skillsMarketplaceOpen: false }); openSettings(tab); };
+        return <section ref={detailRef} tabIndex={-1} className="plugin-detail-page" aria-label="插件详情" onKeyDown={(event) => {
+          if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeDetail(); }
+        }}>
+          <button type="button" className="plugin-detail-back" onClick={closeDetail}><ArrowLeft size={16} />返回插件列表</button>
+          <div className="plugin-detail-heading">{installed ? pluginLogo(installed, 40) : <BrandIcon value={name} inferBrand={false} fallback="plugin" size={40} />}<div><h2>{name}</h2><span>{status}{installed?.version || entry?.version ? ` · ${installed?.version || entry?.version}` : ""}</span></div></div>
+          <p className="plugin-detail-description">{installed?.longDescription || entry?.longDescription || installed?.description || entry?.description || installed?.shortDescription || entry?.interface?.shortDescription || "此来源未提供用途说明。"}</p>
+          <dl className="plugin-detail-meta">
+            <div><dt>开发者</dt><dd>{installed?.developerName || entry?.interface?.developerName || "来源未提供"}</dd></div>
+            <div><dt>来源</dt><dd>{installed?.marketplace || detail.source?.name || "本地导入"}</dd></div>
+            {detail.source && <div><dt>来源地址</dt><dd>{detail.source.source.repo || detail.source.source.url || detail.source.source.path}</dd></div>}
+            <div><dt>安装范围</dt><dd>{installed?.policy_managed ? "由组织策略管理" : "用户级插件配置"}</dd></div>
+            <div><dt>标识</dt><dd><code>{detail.id}</code></dd></div>
+          </dl>
+          {(failures.length > 0 || runtimeWarnings.length > 0) && <div className="plugin-detail-issues" role="status"><strong>需要处理</strong>
+            {failures.map((failure) => <p key={failure}>{failure === "dependency-unsatisfied" ? `插件依赖尚未满足：${installed?.dependencies?.join("、") || "查看插件清单中的依赖"}` : failure}</p>)}
+            {runtimeWarnings.map((warning) => <p key={warning}>{warning}</p>)}
+            <button type="button" className="skills-text-button" onClick={() => void refresh({ showToast: true })} disabled={busy}>刷新加载状态</button>
+          </div>}
+          <section className="plugin-detail-components" aria-label="插件组件"><h3>包含的组件</h3>
+            {installed ? <>
+              <div><span>技能 · {installed.skill_count || 0} 项</span>{Boolean(installed.skill_count) && <button type="button" className="skills-text-button" onClick={() => openConfiguration("skills")}>查看技能</button>}</div>
+              <div><span>MCP · {installed.mcp_server_count || 0} 项{installed.mcp_server_names?.length ? ` · ${installed.mcp_server_names.join("、")}` : ""}</span>{Boolean(installed.mcp_server_count) && <button type="button" className="skills-text-button" onClick={() => openConfiguration("connectors")}>配置 MCP 服务</button>}</div>
+              {componentMcp.map((server) => <p className="plugin-component-status" key={server.name}>{server.name} · {server.phase === "auth_required" || server.phase === "expired" ? "需要登录" : (server.phase || server.status) === "connected" ? "已连接" : "尚未连接"}{server.lastError ? ` · ${server.lastError}` : ""}</p>)}
+              {missingMcp.map((name) => <p className="plugin-component-status" key={name}>{name} · 状态未知（待同步）</p>)}
+              <div><span>App · {installed.app_count || 0} 项{installed.runtime_support?.apps === false && installed.app_count ? "（仅清单，当前未执行）" : ""}</span></div>
+              <div><span>Hook · {installed.hook_count || 0} 项{installed.runtime_support?.hooks === false && installed.hook_count ? "（当前未执行）" : ""}</span></div>
+            </> : <p>{entry?.capabilities?.length ? entry.capabilities.join("、") : "来源尚未提供完整组件清单，安装后可查看技能、MCP、App 和 Hook 的实际状态。"}</p>}
+          </section>
+          <div className="plugin-detail-actions">{!installed && entry && detail.source ? <button type="button" className="plugin-primary-button" disabled={busy || Boolean(entry.load_error)} onClick={() => void installPlugin(entry, detail.source!.name)}>{savingName === entry.id ? "安装中…" : "安装到用户级配置"}</button>
+            : installed && !installed.policy_managed ? <button type="button" className="skills-text-button" disabled={busy} onClick={() => void setPluginEnabled(installed, !installed.enabled)}>{installed.enabled ? "停用插件" : "启用插件"}</button> : null}
+          </div>
+          {installed && <details className="plugin-detail-location"><summary>本地文件</summary><code>{installed.path}</code>{installed.manifest_path && <code>{installed.manifest_path}</code>}</details>}
+        </section>;
+      })()}
+      <div className="plugin-list-page" hidden={Boolean(detail)}>
+      {!catalog && <div className="plugin-settings-toolbar"><button type="button" className="settings-action-button" aria-expanded={managementOpen} onClick={() => setManagementOpen(!managementOpen)}>管理来源与本地导入</button></div>}
       {catalog && <label className="skills-search"><Search aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索插件" aria-label="搜索插件" /></label>}
       <Section title="已安装插件" description="能力包；启用后加载技能、MCP、App 和 Hook。">
-        <div className="plugin-summary">
+        {plugins.length > 0 && <div className="plugin-summary">
           <div className="plugin-summary-item"><strong>{counts.enabled}</strong><span>已启用</span></div>
           <div className="plugin-summary-item"><strong>{plugins.length}</strong><span>已安装</span></div>
           <div className="plugin-summary-item"><strong>{counts.skills}</strong><span>技能</span></div>
           <div className="plugin-summary-item"><strong>{counts.mcpServers}</strong><span>MCP</span></div>
           <button type="button" onClick={() => void refresh({ showToast: true })} disabled={busy} className="plugin-icon-button" title="刷新插件" aria-label="刷新插件"><RefreshCw className={loading ? "settings-spin" : undefined} /></button>
-        </div>
+        </div>}
 
         {loadError && (
           <div className="plugin-load-error" role="alert">
@@ -518,7 +589,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true }: { ca
         {catalog && !managementOpen && plugins.length > 0 ? <div className="plugin-installed-strip" aria-label="已安装插件">
           {filteredPlugins.map((plugin) => <button type="button" key={plugin.id || plugin.name} className="plugin-installed-tile" disabled={busy}
             data-enabled={plugin.enabled} title={`${plugin.displayName || plugin.name} · ${plugin.enabled ? "已启用" : "已停用"}`}
-            aria-label={`管理插件 ${plugin.id || plugin.name}`} onClick={() => setManagementOpen(true)}>
+            aria-label={`管理插件 ${plugin.id || plugin.name}`} onClick={() => openDetail({ id: plugin.id || plugin.name, installed: plugin })}>
             {pluginLogo(plugin, 32)}
           </button>)}
           {filteredPlugins.length === 0 && <p className="plugin-section-description">没有匹配的已安装插件。</p>}
@@ -540,10 +611,11 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true }: { ca
                 </span>
                 <div className="plugin-local-copy">
                   <div className="plugin-local-title">
-                    <strong>{displayName}</strong>
+                    <button type="button" className="plugin-detail-link" aria-label={`查看插件详情 ${pluginKey}`} onClick={() => openDetail({ id: pluginKey, installed: plugin })}>{displayName}</button>
                     <span className="plugin-local-state">
                       {saving
                         ? activeOperation === "remove" ? "正在卸载…" : "正在更新…"
+                        : plugin.load_errors?.length ? "加载失败"
                         : plugin.policy_managed
                           ? plugin.enabled ? "策略启用" : "策略停用"
                           : plugin.enabled ? "已启用" : "已停用"}
@@ -569,7 +641,6 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true }: { ca
                       ...(plugin.capabilities ?? []).slice(0, 3),
                     ].filter(Boolean).join(" · ")}</small>
                   )}
-                  <code title={plugin.path}>{plugin.path}</code>
                 </div>
                 <label className="plugin-switch">
                   <input
@@ -601,7 +672,8 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true }: { ca
             <div className="plugin-empty">
               <span className="plugin-empty-icon"><Blocks aria-hidden="true" /></span>
               <strong>还没有本地插件</strong>
-              <p>导入插件文件夹或 Zip。</p>
+              <p>添加来源浏览插件，或导入本地文件夹、Zip。</p>
+              {marketplaces.length === 0 && <button type="button" className="plugin-primary-button" onClick={() => setManagementOpen(true)}>添加插件来源</button>}
               <button
                 type="button"
                 onClick={() => {
@@ -618,7 +690,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true }: { ca
         </div>}
       </Section>
 
-      <section className="plugin-marketplace-catalog" aria-label="插件目录">
+      {(marketplaces.length > 0 || plugins.length > 0 || marketplaceError) && <section className="plugin-marketplace-catalog" aria-label="插件目录">
         <div className="plugin-catalog-heading"><h2>插件目录</h2><select aria-label="插件来源" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}><option value="">全部来源</option>{marketplaces.map((source) => <option key={source.name} value={source.name}>{source.name}</option>)}</select></div>
         {marketplaceError && <div className="plugin-load-error" role="alert" aria-label="插件来源加载失败"><span>{marketplaceError}</span><button type="button" onClick={() => void loadMarketplaces()}>重试来源</button></div>}
         {marketplaces.filter((source) => !sourceFilter || source.name === sourceFilter).map((source) => {
@@ -630,7 +702,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true }: { ca
               const installed = plugins.some((item) => item.id === plugin.id);
               const title = plugin.interface?.displayName || plugin.name;
               return <article className="plugin-discover-row" key={plugin.id}><span className="plugin-local-icon"><BrandIcon value={title} inferBrand={false} fallback="plugin" size={28} /></span>
-                <div className="plugin-local-copy"><strong>{title}</strong><p title={plugin.load_error || plugin.description}>{plugin.load_error || plugin.interface?.shortDescription || plugin.description || source.name}</p>{plugin.category && <small>{plugin.category}</small>}</div>
+                <div className="plugin-local-copy"><button type="button" className="plugin-detail-link" aria-label={`查看插件详情 ${plugin.id}`} onClick={() => openDetail({ id: plugin.id, catalog: plugin, source })}>{title}</button><p title={plugin.load_error || plugin.description}>{plugin.load_error || plugin.interface?.shortDescription || plugin.description || source.name}</p>{plugin.category && <small>{plugin.category}</small>}</div>
                 <button type="button" className="skills-text-button" disabled={busy || installed || Boolean(plugin.load_error)} onClick={() => void installPlugin(plugin, source.name)} aria-label={`安装插件 ${plugin.id}`}>{savingName === plugin.id ? "安装中…" : installed ? "已安装" : "安装"}</button>
               </article>;
             })}</div>
@@ -638,7 +710,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true }: { ca
           </section>;
         })}
         {!marketplaceError && marketplaces.length === 0 && <div className="plugin-empty"><Blocks /><strong>尚未添加插件来源</strong><p>添加 GitHub 仓库、Git 地址或本地插件市场。</p><button type="button" onClick={() => setManagementOpen(true)}>添加插件来源</button></div>}
-      </section>
+      </section>}
 
       {managementOpen && <>
       <Section title="插件来源" description="来源名称需与市场清单中的名称一致。">
@@ -688,6 +760,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true }: { ca
         { label: "导入本地插件", icon: <FolderOpen />, onClick: () => { setManagementOpen(true); window.requestAnimationFrame(() => importInputRef.current?.focus()); } },
         { label: "添加插件来源", icon: <Blocks />, onClick: () => setManagementOpen(true) },
       ]} />}
+      </div>
     </div>
   );
 };

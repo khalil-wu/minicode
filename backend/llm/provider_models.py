@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from backend.async_cleanup import to_thread_cancel_safe
+
 import asyncio
 import json
 from collections.abc import Callable, Mapping
@@ -107,7 +109,7 @@ class ProviderModelsStorage:
     async def write(self, provider_id: str, entry: Any, *, assert_current: Callable[[], None] | None = None, mutation_lock: Any = None) -> None:
         clean_id = _provider_id(provider_id)
         cloned = _clone_entry(entry)
-        await asyncio.to_thread(self._write, clean_id, cloned, assert_current=assert_current, mutation_lock=mutation_lock)
+        await to_thread_cancel_safe(self._write, clean_id, cloned, assert_current=assert_current, mutation_lock=mutation_lock)
 
     def _delete(self, provider_id: str, *, assert_current: Callable[[], None] | None = None, mutation_lock: Any = None) -> None:
         with file_mutation_locks([self._path]):
@@ -122,7 +124,7 @@ class ProviderModelsStorage:
 
     async def delete(self, provider_id: str, *, assert_current: Callable[[], None] | None = None, mutation_lock: Any = None) -> None:
         clean_id = _provider_id(provider_id)
-        await asyncio.to_thread(self._delete, clean_id, assert_current=assert_current, mutation_lock=mutation_lock)
+        await to_thread_cancel_safe(self._delete, clean_id, assert_current=assert_current, mutation_lock=mutation_lock)
 
 
 __all__ = ["PROVIDER_MODELS_FILE", "ProviderModelsStorage"]

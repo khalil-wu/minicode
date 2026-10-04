@@ -506,6 +506,8 @@ class MCPClient:
     async def connect(self) -> None:
         if self._connected:
             return
+        if self._cleanup_pending:
+            raise RuntimeError(f"MCP server '{self.server_name}' still owns pending cleanup")
         self._closing = False
         self._disconnect_notified = False
         self._loop = asyncio.get_running_loop()
@@ -523,10 +525,14 @@ class MCPClient:
         except BaseException:
             self._closing = True
             self._close_event.set()
-            if self._lifecycle_task and not self._lifecycle_task.done():
-                self._lifecycle_task.cancel()
-            await asyncio.gather(self._lifecycle_task, return_exceptions=True)
-            self._lifecycle_task = None
+            receipt = await cancel_and_drain_receipt(
+                [self._lifecycle_task], timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label=f"MCP {self.server_name} startup lifecycle",
+            )
+            self._cleanup_pending = not receipt.completed
+            self._cleanup_reason = "startup_lifecycle_pending" if receipt.pending else ""
+            if receipt.completed:
+                self._lifecycle_task = None
             raise
 
     async def _run_sdk_lifecycle(
@@ -1286,12 +1292,8 @@ class MCPClient:
             self._close_event.set()
         task = self._lifecycle_task
         if task is not None:
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(task),
-                    timeout=max(self._request_timeout, 3.0),
-                )
-            except asyncio.TimeoutError:
+            done, _ = await asyncio.wait({task}, timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS)
+            if not done:
                 receipt = await cancel_and_drain_receipt(
                     [task],
                     timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
@@ -1301,6 +1303,8 @@ class MCPClient:
                     self._cleanup_pending = True
                     self._cleanup_reason = "lifecycle_pending"
                     return False
+            elif not task.cancelled():
+                task.result()
         if not await self._close_oauth_callback():
             return False
         self._lifecycle_task = None
@@ -1315,4 +1319,6 @@ class MCPClient:
         request_tasks = set(self._active_request_tasks)
         if request_tasks:
             await asyncio.gather(*request_tasks, return_exceptions=True)
+        if self._lifecycle_task is not None:
+            await asyncio.gather(self._lifecycle_task, return_exceptions=True)
         return await self.close()

@@ -178,7 +178,7 @@
   vertical-align: middle;
 }
 
-.md-prose .md-web-link {
+.md-body .md-web-link {
   color: var(--accent-primary);
   font-weight: var(--fw-medium);
   text-decoration: none;
@@ -186,8 +186,8 @@
   overflow-wrap: anywhere;
 }
 
-.md-prose .md-web-link:hover,
-.md-prose .md-web-link:focus-visible {
+.md-body .md-web-link:hover,
+.md-body .md-web-link:focus-visible {
   text-decoration: underline;
 }
 
@@ -203,15 +203,15 @@
   text-decoration: underline;
 }
 
-.md-prose .md-web-link:focus-visible {
+.md-body .md-web-link:focus-visible {
   border-radius: 3px;
   outline: 2px solid var(--accent-primary);
   outline-offset: 2px;
 }
 
-.md-prose .md-web-link-icon {
+.md-body .md-web-link-icon {
   margin-inline-end: 0.45em;
-  vertical-align: -0.07em;
+  vertical-align: middle;
   box-sizing: content-box;
   padding: 1px;
   border-radius: 3px;
@@ -219,11 +219,11 @@
   box-shadow: 0 0 0 1px color-mix(in oklch, var(--border-subtle) 76%, transparent);
 }
 
-.md-prose .md-web-link-icon > img {
+.md-body .md-web-link-icon > img {
   filter: drop-shadow(0 0 0.8px rgb(24 24 27 / 0.72));
 }
 
-html[data-theme="dark"] .md-prose .md-web-link-icon > img {
+html[data-theme="dark"] .md-body .md-web-link-icon > img {
   filter: drop-shadow(0 0 0.8px rgb(255 255 255 / 0.68));
 }
 
@@ -263,7 +263,7 @@ html[data-theme="dark"] .md-prose .md-web-link-icon > img {
   overflow-wrap: anywhere;
 }
 
-.md-prose .md-file-chip {
+.md-body .md-file-chip {
   --md-file-chip-accent: oklch(0.58 0.12 248);
   --md-file-chip-bg: color-mix(in oklch, var(--surface-raised) 82%, var(--surface-soft));
   --md-file-chip-border: color-mix(in oklch, var(--border-subtle) 78%, var(--md-file-chip-accent));
@@ -289,16 +289,16 @@ html[data-theme="dark"] .md-prose .md-web-link-icon > img {
   transition: color var(--transition-fast), background-color var(--transition-fast);
 }
 
-.md-prose .md-file-chip:hover {
+.md-body .md-file-chip:hover {
   background: var(--surface-soft);
   color: var(--text-primary);
 }
 
-.md-prose .md-file-chip:focus-visible {
+.md-body .md-file-chip:focus-visible {
   outline-offset: 2px;
 }
 
-.md-prose .md-file-chip-badge {
+.md-body .md-file-chip-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -316,7 +316,7 @@ html[data-theme="dark"] .md-prose .md-web-link-icon > img {
   letter-spacing: 0;
 }
 
-.md-prose .md-file-chip-label {
+.md-body .md-file-chip-label {
   display: inline-flex;
   align-items: baseline;
   gap: 0.15em;
@@ -329,43 +329,42 @@ html[data-theme="dark"] .md-prose .md-web-link-icon > img {
 
 /* The text participates in the inline flex baseline; the icon centers itself
    separately so it cannot set the baseline for adjacent paragraph text. */
-.md-prose .md-file-chip {
+.md-body .md-file-chip {
   vertical-align: baseline;
 }
 
-.md-prose .md-file-reference-wrap {
+.md-body .md-file-reference-wrap {
   vertical-align: baseline;
   line-height: inherit;
 }
 
-.md-prose .md-file-chip-directory {
+.md-body .md-file-chip-directory {
   color: var(--text-muted);
   font-weight: var(--fw-regular);
 }
 
-.md-prose .md-file-chip-name {
+.md-body .md-file-chip-name {
   color: inherit;
   font-weight: var(--fw-medium);
 }
 
-.md-prose .md-file-chip-meta {
+.md-body .md-file-chip-meta {
   margin-left: 0.35em;
   color: var(--text-muted);
   font-weight: var(--fw-medium);
 }
 
-.md-prose .md-folder-chip {
+.md-body .md-folder-chip {
   --md-file-chip-accent: var(--accent-primary);
   --md-file-chip-name: color-mix(in oklch, var(--accent-primary) 82%, var(--text-primary));
 }
 
-.md-prose .md-folder-chip-icon {
-  flex: none;
-  align-self: center;
+.md-body .md-folder-chip-icon {
   color: var(--text-muted);
 }
 
-.md-prose .md-official-file-icon {
+.md-body .md-folder-chip-icon,
+.md-body .md-official-file-icon {
   display: inline-flex;
   width: 1em;
   height: 1em;
@@ -376,44 +375,44 @@ html[data-theme="dark"] .md-prose .md-web-link-icon > img {
   line-height: 0;
 }
 
-.md-prose .md-official-file-icon > svg {
+.md-body .md-folder-chip-icon > img,
+.md-body .md-official-file-icon > svg {
   display: block;
   width: 100%;
   height: 100%;
-  transform: translateY(-1.5px);
 }
 
-.md-prose .md-file-chip[data-ext="ts"],
-.md-prose .md-file-chip[data-ext="tsx"] {
+.md-body .md-file-chip[data-ext="ts"],
+.md-body .md-file-chip[data-ext="tsx"] {
   --md-file-chip-accent: oklch(0.56 0.16 255);
 }
 
 /* JS/JSX 的 badge 底色偏亮（浅色主题蓝、暗色主题黄），白字读不出来，
    故单独用深色前景；用 OKLCH 表达，与本文件其余色值同一色空间。 */
-.md-prose .md-file-chip[data-ext="js"],
-.md-prose .md-file-chip[data-ext="jsx"] {
+.md-body .md-file-chip[data-ext="js"],
+.md-body .md-file-chip[data-ext="jsx"] {
   --md-file-chip-accent: oklch(0.64 0.15 255);
   --md-file-type-fg: oklch(0.25 0.008 60);
 }
 
-.md-prose .md-file-chip[data-ext="py"] {
+.md-body .md-file-chip[data-ext="py"] {
   --md-file-chip-accent: oklch(0.61 0.13 145);
 }
 
 
-.md-prose .md-file-chip[data-ext="json"],
-.md-prose .md-file-chip[data-ext="toml"],
-.md-prose .md-file-chip[data-ext="yaml"],
-.md-prose .md-file-chip[data-ext="yml"] {
+.md-body .md-file-chip[data-ext="json"],
+.md-body .md-file-chip[data-ext="toml"],
+.md-body .md-file-chip[data-ext="yaml"],
+.md-body .md-file-chip[data-ext="yml"] {
   --md-file-chip-accent: oklch(0.60 0.14 275);
 }
 
-.md-prose .md-file-chip[data-ext="md"],
-.md-prose .md-file-chip[data-ext="mdx"] {
+.md-body .md-file-chip[data-ext="md"],
+.md-body .md-file-chip[data-ext="mdx"] {
   --md-file-chip-accent: oklch(0.53 0.08 260);
 }
 
-html[data-theme="dark"] .md-prose .md-file-chip {
+html[data-theme="dark"] .md-body .md-file-chip {
   --md-file-chip-bg: color-mix(in oklch, var(--surface-raised) 74%, var(--surface-base));
   --md-file-chip-border: color-mix(in oklch, var(--border-subtle) 72%, var(--md-file-chip-accent));
   --md-file-chip-hover-bg: color-mix(in oklch, var(--surface-raised) 72%, var(--md-file-chip-accent));
@@ -423,46 +422,49 @@ html[data-theme="dark"] .md-prose .md-file-chip {
   box-shadow: none;
 }
 
-html[data-theme="dark"] .md-prose .md-file-chip[data-ext="ts"],
-html[data-theme="dark"] .md-prose .md-file-chip[data-ext="tsx"] {
+html[data-theme="dark"] .md-body .md-file-chip[data-ext="ts"],
+html[data-theme="dark"] .md-body .md-file-chip[data-ext="tsx"] {
   --md-file-chip-accent: oklch(0.73 0.13 250);
 }
 
-html[data-theme="dark"] .md-prose .md-file-chip[data-ext="js"],
-html[data-theme="dark"] .md-prose .md-file-chip[data-ext="jsx"] {
+html[data-theme="dark"] .md-body .md-file-chip[data-ext="js"],
+html[data-theme="dark"] .md-body .md-file-chip[data-ext="jsx"] {
   --md-file-chip-accent: oklch(0.82 0.13 94);
   --md-file-type-fg: oklch(0.20 0.006 60);
 }
 
-html[data-theme="dark"] .md-prose .md-file-chip[data-ext="py"] {
+html[data-theme="dark"] .md-body .md-file-chip[data-ext="py"] {
   --md-file-chip-accent: oklch(0.76 0.12 145);
 }
 
-html[data-theme="dark"] .md-prose .md-file-chip[data-ext="json"],
-html[data-theme="dark"] .md-prose .md-file-chip[data-ext="toml"],
-html[data-theme="dark"] .md-prose .md-file-chip[data-ext="yaml"],
-html[data-theme="dark"] .md-prose .md-file-chip[data-ext="yml"] {
+html[data-theme="dark"] .md-body .md-file-chip[data-ext="json"],
+html[data-theme="dark"] .md-body .md-file-chip[data-ext="toml"],
+html[data-theme="dark"] .md-body .md-file-chip[data-ext="yaml"],
+html[data-theme="dark"] .md-body .md-file-chip[data-ext="yml"] {
   --md-file-chip-accent: oklch(0.74 0.14 275);
 }
 
-html[data-theme="dark"] .md-prose .md-file-chip[data-ext="md"],
-html[data-theme="dark"] .md-prose .md-file-chip[data-ext="mdx"] {
+html[data-theme="dark"] .md-body .md-file-chip[data-ext="md"],
+html[data-theme="dark"] .md-body .md-file-chip[data-ext="mdx"] {
   --md-file-chip-accent: oklch(0.75 0.08 260);
 }
 
-html[data-theme="dark"] .md-prose .md-folder-chip {
+html[data-theme="dark"] .md-body .md-folder-chip {
   --md-file-chip-name: color-mix(in oklch, var(--accent-primary) 64%, white);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .md-prose .md-file-chip {
+  .md-body .md-file-chip {
     transition: none;
   }
 }
 
 .md-prose h1,
 .md-prose h2,
-.md-prose h3 {
+.md-prose h3,
+.md-prose h4,
+.md-prose h5,
+.md-prose h6 {
   font-family: var(--font-prose);
   letter-spacing: 0;
   line-height: var(--leading-snug);
@@ -551,7 +553,10 @@ html[data-theme="dark"] .md-prose .md-folder-chip {
 /* Headings with CJK: tighter, bold weight allowed */
 .md-prose h1,
 .md-prose h2,
-.md-prose h3 {
+.md-prose h3,
+.md-prose h4,
+.md-prose h5,
+.md-prose h6 {
   font-variant-east-asian: proportional-width;
   font-synthesis-weight: auto;  /* Allow weight synthesis for headings */
 }

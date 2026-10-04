@@ -956,6 +956,7 @@ export const providerTracePayloadFromExport = (value: unknown): Record<string, u
     model: typeof item.model === "string" ? item.model : "",
     finish_reason: typeof item.finish_reason === "string" ? item.finish_reason : "",
     event_type: typeof item.event_type === "string" ? item.event_type : "",
+    request_id: typeof item.request_id === "string" ? item.request_id : undefined,
     usage: item.usage && typeof item.usage === "object" ? item.usage : {},
     output_items: Array.isArray(item.output_items) ? item.output_items : [],
     provider_timeline: Array.isArray(item.provider_timeline) ? item.provider_timeline : [],

@@ -35,7 +35,7 @@ vi.mock("./SidebarRight", () => ({
 
 vi.mock("./MainSlots", () => ({
   MainSlots: ({ forceChat }: { forceChat?: boolean }) => (
-    <main>{forceChat ? "Chat" : "Code workspace"}</main>
+    <main>{forceChat ? "Chat" : "Code workspace"}<textarea data-composer-input aria-label="主对话输入" /></main>
   ),
 }));
 vi.mock("../panels/SideChatPanel", () => ({ SideChatPanel: () => null }));
@@ -62,6 +62,7 @@ describe("WorkbenchShell narrow navigation", () => {
       themeMode: "dark",
       leftSidebarWidth: 320,
       rightPanelOpen: true,
+      rightPanelExpanded: false,
       rightStackTab: "tasks",
       previewArtifact: null,
       dockCollapsed: true,
@@ -79,6 +80,35 @@ describe("WorkbenchShell narrow navigation", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("uses the existing side panel as the primary workspace and releases it for composer focus", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
+    useAppStore.setState({ rightStackTab: "browser" });
+    const { container } = render(<WorkbenchShell />);
+    const workspace = screen.getByText("Code workspace");
+    const sidebar = screen.getByTestId("right-sidebar");
+    act(() => useAppStore.getState().setRightPanelExpanded(true));
+    expect(container.querySelector<HTMLElement>(".workbench-primary")!.style.display).toBe("none");
+    expect(workspace.isConnected).toBe(true);
+    expect(screen.getByTestId("right-sidebar")).toBe(sidebar);
+    expect(sidebar.getAttribute("data-visible")).toBe("true");
+    act(() => window.dispatchEvent(new Event("composer:focus")));
+    expect(useAppStore.getState().rightPanelExpanded).toBe(false);
+    expect(container.querySelector<HTMLElement>(".workbench-primary")!.style.display).toBe("flex");
+    expect(screen.getByText("Code workspace")).toBe(workspace);
+  });
+
+  it("expands a narrow drawer into the workspace without retaining a modal focus trap", () => {
+    useAppStore.setState({ rightStackTab: "browser" });
+    render(<WorkbenchShell />);
+    fireEvent.click(screen.getByRole("button", { name: "打开右侧栏" }));
+    expect(screen.getByRole("dialog", { name: "右侧面板" })).toBeTruthy();
+    act(() => useAppStore.getState().setRightPanelExpanded(true));
+    expect(screen.queryByRole("dialog", { name: "右侧面板" })).toBeNull();
+    expect(screen.getByTestId("right-sidebar").getAttribute("data-visible")).toBe("true");
+    act(() => useAppStore.getState().setRightPanelExpanded(false));
+    expect(screen.getByRole("dialog", { name: "右侧面板" })).toBeTruthy();
   });
 
   it("preserves the workbench and sidebars while visiting plugins and skills", async () => {
@@ -111,6 +141,41 @@ describe("WorkbenchShell narrow navigation", () => {
     fireEvent.click(screen.getByRole("button", { name: "打开右侧栏" }));
     expect(screen.getByRole("dialog", { name: "右侧面板" })).toBeTruthy();
     expect(screen.getByTestId("right-sidebar")).toBeTruthy();
+  });
+
+  it("releases the compact drawer when review or preview context returns to the composer", () => {
+    useAppStore.setState({ rightStackTab: "diff" });
+    render(<WorkbenchShell />);
+    fireEvent.click(screen.getByRole("button", { name: "打开右侧栏" }));
+    const sidebar = screen.getByTestId("right-sidebar");
+    expect(screen.getByRole("dialog", { name: "右侧面板" })).toBeTruthy();
+
+    act(() => window.dispatchEvent(new Event("composer:focus")));
+
+    expect(screen.queryByRole("dialog", { name: "右侧面板" })).toBeNull();
+    expect(sidebar.isConnected).toBe(true);
+    expect(sidebar.dataset.visible).toBe("false");
+    expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: true, rightStackTab: "diff" });
+    const composer = screen.getByRole("textbox", { name: "主对话输入" });
+    composer.focus();
+    const tab = new KeyboardEvent("keydown", { key: "Tab", cancelable: true, bubbles: true });
+    composer.dispatchEvent(tab);
+    expect(tab.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(composer);
+    fireEvent.click(screen.getByRole("button", { name: "打开右侧栏" }));
+    expect(screen.getByTestId("right-sidebar")).toBe(sidebar);
+    expect(sidebar.dataset.visible).toBe("true");
+  });
+
+  it("keeps the wide review visible when context is added to the composer", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1600 });
+    useAppStore.setState({ rightStackTab: "diff" });
+    render(<WorkbenchShell />);
+    const sidebar = screen.getByTestId("right-sidebar");
+    act(() => window.dispatchEvent(new Event("composer:focus")));
+    expect(screen.getByTestId("right-sidebar")).toBe(sidebar);
+    expect(sidebar.dataset.visible).toBe("true");
+    expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: true, rightStackTab: "diff" });
   });
 
   it("uses semantic header icons and keeps the healthy connection status icon-only", () => {

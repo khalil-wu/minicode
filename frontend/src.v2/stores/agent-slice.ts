@@ -407,14 +407,12 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
       const existing = targetState.subagents.find((sa) => sa.id === id);
       const terminalStatuses = new Set(["done", "partial", "cancelled", "error"]);
       const incomingStatus = patch.status;
-      const safePatch = existing
+      if (existing
         && terminalStatuses.has(existing.status)
         && incomingStatus
-        && !terminalStatuses.has(incomingStatus)
-        ? { ...patch, status: existing.status }
-        : patch;
+        && !terminalStatuses.has(incomingStatus)) return s;
       const subagents = existing
-        ? targetState.subagents.map((sa) => (sa.id === id ? { ...sa, ...safePatch } : sa))
+        ? targetState.subagents.map((sa) => (sa.id === id ? { ...sa, ...patch } : sa))
         : upsertSubagentStable(targetState.subagents, {
             id,
             role: patch.role || "subagent",

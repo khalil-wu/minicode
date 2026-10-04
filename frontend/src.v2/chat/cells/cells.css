@@ -267,11 +267,11 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 26px;
+  min-height: 28px;
   line-height: 1.2;
   vertical-align: middle;
-  padding: 4px 10px;
-  border: 1px solid var(--border-subtle);
+  padding: 4px 8px;
+  border: 0;
   border-radius: var(--radius-sm);
   background: var(--attachment-chip-bg);
   color: var(--attachment-chip-fg);
@@ -507,7 +507,7 @@
 .assistant-cell-artifact-card:hover {
   border-color: var(--border-soft);
   background: var(--surface-hover);
-  transform: translateY(-1px);
+  transform: none;
 }
 
 .assistant-cell-artifact-card:focus-visible {
@@ -691,7 +691,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px;
+  padding: 10px 12px;
 }
 
 .assistant-cell-artifact-card > span {
@@ -705,6 +705,11 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.assistant-cell-artifact-card strong {
+  font-size: var(--text-sm);
+  font-weight: var(--fw-medium);
 }
 
 .assistant-cell-artifact-card small {
@@ -819,7 +824,7 @@
   min-height: 24px;
   max-width: 210px;
   padding: 2px 8px 2px 6px;
-  border: 1px solid var(--border-subtle);
+  border: 0;
   border-radius: var(--radius-full);
   background: var(--surface-soft);
   color: var(--text-secondary);
@@ -847,9 +852,9 @@
   width: 14px;
   height: 14px;
   overflow: hidden;
-  border: 1px solid var(--border-subtle);
-  border-radius: 50%;
-  background: var(--surface-raised);
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
   color: var(--text-muted);
   font-size: 8px;
   font-weight: var(--fw-semibold);
@@ -1075,16 +1080,16 @@
   white-space: pre-wrap;
 }
 
-/* Every tool uses the same disclosure surface: the timeline row stays flat,
-   while bounded evidence is mounted in a rounded panel only after expansion. */
+/* Expanded evidence follows the transcript axis with one quiet left edge. */
 .activity-cell-tool-expanded,
 .activity-cell-file-change-expanded {
   gap: 7px;
   margin: 6px 0 7px 22px;
-  padding: 8px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: var(--surface-base);
+  padding: 6px 10px;
+  border: 0;
+  border-left: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: transparent;
   box-shadow: none;
   animation: expand-detail var(--duration-fast) cubic-bezier(0.2, 0.8, 0.2, 1);
 }
@@ -1093,9 +1098,9 @@
 .activity-cell-change-card {
   min-width: 0;
   overflow: hidden;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--surface-raised);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   box-shadow: none;
 }
 
@@ -1470,6 +1475,17 @@
   margin-bottom: 8px;
 }
 
+.browser-record-notice {
+  padding-left: 24px;
+}
+
+.browser-record-notice .error-cell-message,
+.browser-record-notice .error-cell-suggestion {
+  padding-left: 0;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
 .activity-cell-error-label {
   margin-bottom: 4px;
   color: var(--state-danger);
@@ -1647,6 +1663,26 @@
   animation: spin 1s linear infinite;
 }
 
+.exec-cell-source-details,
+.collaboration-cell-agent-details {
+  min-width: 0;
+  margin: 4px 0;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.exec-cell-source-details > summary,
+.collaboration-cell-agent-details > summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.exec-cell-source-details[open] > summary,
+.collaboration-cell-agent-details[open] > summary {
+  margin-bottom: 4px;
+}
+
 .exec-cell-toggle {
   display: inline-flex;
   align-items: center;
@@ -1753,15 +1789,15 @@
 }
 
 .agent-loop-diff-area .diff-cell-header-row {
-  min-height: 68px;
-  padding: 12px 14px;
+  min-height: 56px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--border-subtle);
 }
 
 .agent-loop-diff-area .diff-cell-icon-tile {
-  width: 40px;
-  height: 40px;
-  border-radius: var(--radius-md);
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
   background: var(--surface-soft);
 }
 
@@ -1798,7 +1834,7 @@
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: 6px;
+  gap: 4px;
 }
 
 .diff-cell-action-button {
@@ -1876,7 +1912,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--text-secondary);
-  font-weight: var(--fw-semibold);
+  font-weight: var(--fw-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1905,7 +1941,7 @@
 .diff-cell-files {
   display: grid;
   gap: 0;
-  margin: 8px 0 0;
+  margin: 4px 0 0;
   border-top: 0;
 }
 
@@ -1916,7 +1952,8 @@
   justify-self: start;
   width: 100%;
   margin: 0;
-  padding: 10px 16px;
+  min-height: 32px;
+  padding: 6px 12px;
   border: 0;
   background: transparent;
   color: var(--text-secondary);
@@ -1943,8 +1980,8 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
-  min-height: 38px;
-  padding: 7px 16px;
+  min-height: 34px;
+  padding: 6px 12px;
   border-bottom: 0;
   background: transparent;
 }
@@ -2198,10 +2235,16 @@ button.diff-cell-file-path:hover {
 }
 
 .error-cell-suggestion {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   padding-left: 22px;
   color: var(--text-muted);
   font-size: var(--text-xs);
-  font-style: italic;
+}
+
+.error-cell-suggestion > svg {
+  flex-shrink: 0;
 }
 
 .error-cell-details {
@@ -2339,7 +2382,7 @@ button.diff-cell-file-path:hover {
   text-decoration-color: var(--border-strong);
 }
 
-.md-prose img {
+.md-body .md-content-image {
   max-width: 100%;
   height: auto;
   margin: 1em 0;
@@ -2404,36 +2447,6 @@ html[data-theme="dark"] .error-cell-raw-error {
   }
 }
 
-/* Approval prompts keep their full context on desktop and move actions below
-   the request on narrow/touch layouts instead of squeezing the title. */
-.inline-approval-bar {
-  grid-template-columns: 26px minmax(0, 1fr) auto;
-}
-
-.inline-approval-actions {
-  min-width: max-content;
-}
-
-@media (max-width: 640px), (hover: none) and (pointer: coarse) {
-  .inline-approval-bar {
-    grid-template-columns: 26px minmax(0, 1fr);
-    align-items: start;
-  }
-
-  .inline-approval-actions {
-    grid-column: 1 / -1;
-    justify-content: flex-start;
-    flex-wrap: wrap;
-    min-width: 0;
-    padding-left: 35px;
-  }
-
-  .inline-approval-actions button,
-  .inline-prompt-actions button {
-    min-height: 44px;
-  }
-}
-
 /* Touch: hover-revealed actions stay visible and get larger targets. */
 @media (hover: none), (pointer: coarse) {
   .user-cell-actions,
@@ -2492,14 +2505,15 @@ html[data-theme="dark"] .error-cell-raw-error {
 
 .collaboration-cell-details {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 5px;
   min-width: 0;
   padding: 2px 0 4px 22px;
 }
 
 .collaboration-cell-detail {
-  display: flex;
-  align-items: baseline;
+  /* Inline text flow keeps a long task from shrinking the name into a column. */
+  display: block;
   min-width: 0;
   color: var(--text-muted);
   line-height: 1.55;
@@ -2511,16 +2525,15 @@ html[data-theme="dark"] .error-cell-raw-error {
 }
 
 .collaboration-cell-detail strong {
-  flex: 0 0 auto;
   color: var(--text-secondary);
   font-weight: 600;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .collaboration-cell-message {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 640px) {
@@ -2528,15 +2541,17 @@ html[data-theme="dark"] .error-cell-raw-error {
     padding-left: 0;
   }
 
-  .collaboration-cell-detail {
-    display: block;
-  }
+}
+.chat-message-reveal-target {
+  outline: 2px solid color-mix(in srgb, var(--accent-primary) 45%, transparent);
+  outline-offset: 8px;
+  border-radius: var(--radius-sm);
+}
 
-  .collaboration-cell-message {
-    display: -webkit-box;
-    overflow: hidden;
-    white-space: normal;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
-  }
+.chat-reveal-status {
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  color: var(--text-secondary);
+  background: var(--surface-soft);
+  font-size: var(--text-xs);
 }

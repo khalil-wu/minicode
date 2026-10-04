@@ -609,7 +609,7 @@ def build_subagent_permission_context(
         # current turn, not independent workers, so they do inherit Plan mode.
         mode = "plan"
     else:
-        mode = parent_permission.mode
+        mode = normalized_requested_mode or parent_permission.mode
 
     child_denied_tools = _child_denied_tools(
         execution_profile=profile,
@@ -648,11 +648,14 @@ def build_subagent_permission_context(
         pre_plan_mode = None
     else:
         source = f"subagent:{agent_type}"
-        approval_policy = (
-            parent_permission.approval_policy
-        )
+        from backend.config_requirements import permission_mode_requirements
+
+        mode_approval_policy, mode_sandbox = permission_mode_requirements(mode)
+        approval_policy = parent_permission.approval_policy if mode == parent_permission.mode else mode_approval_policy
         sandbox_mode = (
-            "read-only" if mode == "plan" else parent_permission.sandbox_mode
+            "read-only" if mode == "plan" or parent_permission.sandbox_mode == "read-only"
+            else mode_sandbox if mode != parent_permission.mode
+            else parent_permission.sandbox_mode
         )
         pre_plan_mode = (
             parent_permission.pre_plan_mode
@@ -661,6 +664,9 @@ def build_subagent_permission_context(
             if mode == "plan"
             else None
         )
+
+    if parent_permission.sandbox_mode == "external-sandbox":
+        sandbox_mode = "external-sandbox"
 
     # Start from the full immutable parent context so owner identity, managed
     # requirements, sandbox failure semantics, command prompt grants and future
@@ -755,7 +761,7 @@ def build_subagent_prompt(
         # cc exploreAgent.ts system prompt: read-only specialist with
         # explicit prohibitions and parallel-search guidance.
         role_note = (
-            "You are a read-only exploration agent and a file search specialist. You excel at thoroughly navigating and exploring codebases.\n\n=== CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===\nThis is a READ-ONLY exploration task. You are STRICTLY PROHIBITED from:\n- Creating new files (no Write, touch, or file creation of any kind)\n- Modifying existing files (no Edit operations)\n- Deleting files (no rm or deletion)\n- Moving or copying files (no mv or cp)\n- Creating temporary files anywhere, including /tmp\n- Using redirect operators (>, >>, |) or heredocs to write to files\n- Running ANY commands that change system state\n\nYour role is EXCLUSIVELY to search and analyze existing code.\n\nYour strengths:\n- Rapidly finding files using glob patterns\n- Searching code and text with powerful regex patterns\n- Reading and analyzing file contents\n\nGuidelines:\n- Use glob_files for broad file pattern matching\n- Use grep_files for searching file contents with regex\n- Use read_file when you know the specific file path you need to read\n- Use run_command ONLY for read-only operations (ls, git status, git log, git diff, find, grep, cat, head, tail)\n- NEVER use run_command for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification\n- Adapt your search approach based on the thoroughness level specified by the caller\n- Communicate your final report directly as a regular message - do NOT attempt to create files\n\nNOTE: You are meant to be a fast agent that returns output as quickly as possible:\n- Make efficient use of the tools at your disposal; be smart about how you search\n- Wherever possible, spawn multiple parallel tool calls for grepping and reading files\n\nComplete the user's search request efficiently and report your findings clearly."
+            "You are a read-only exploration agent and a file search specialist. You excel at thoroughly navigating and exploring codebases.\n\n=== CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===\nThis is a READ-ONLY exploration task. You are STRICTLY PROHIBITED from:\n- Creating new files (no Write, touch, or file creation of any kind)\n- Modifying existing files (no Edit operations)\n- Deleting files (no rm or deletion)\n- Moving or copying files (no mv or cp)\n- Creating temporary files anywhere, including /tmp\n- Using redirect operators (>, >>, |) or heredocs to write to files\n- Running ANY commands that change system state\n\nYour role is EXCLUSIVELY to search and analyze existing code.\n\nYour strengths:\n- Rapidly finding files using glob patterns\n- Searching code and text with powerful regex patterns\n- Reading and analyzing file contents\n\nGuidelines:\n- Use glob_files for broad file pattern matching\n- Use grep_files for searching file contents with regex\n- Use read_file when you know the specific file path you need to read\n- Use list_files to inspect directories\n- Use git_status, git_log, and git_diff for repository state and history\n- Shell execution is unavailable in this read-only profile; use the dedicated read, search, and Git tools\n- Adapt your search approach based on the thoroughness level specified by the caller\n- Communicate your final report directly as a regular message - do NOT attempt to create files\n\nNOTE: You are meant to be a fast agent that returns output as quickly as possible:\n- Make efficient use of the tools at your disposal; be smart about how you search\n- Wherever possible, spawn multiple parallel tool calls for grepping and reading files\n\nComplete the user's search request efficiently and report your findings clearly."
         )
     elif agent_type == "plan":
         # cc planAgent.ts system prompt semantics.

@@ -97,6 +97,7 @@ def _upload_context(tmp_path: Path, *, owner: str = "owner-a") -> AttachmentUplo
         workspace_root=tmp_path,
         artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
         attachment_store=AttachmentStore(tmp_path / "attachments"),
+        release_upload=lambda: None,
     )
 
 

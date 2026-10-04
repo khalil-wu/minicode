@@ -21,6 +21,7 @@ from backend.agent.provider_stream_control import (
 )
 from backend.agent.provider_text_projection import (
     ProviderTextProjectionResult,
+    finish_provider_text_item,
     project_provider_text_chunk,
 )
 from backend.llm.base import StreamEventType
@@ -130,6 +131,9 @@ async def dispatch_provider_event(
             context_builder=context_builder,
             stream_text=stream_text,
             state=state,
+            stream_state=stream_state,
+            visible_text_sanitizer=visible_text_sanitizer,
+            live_text_streaming=settings.live_text_streaming,
             tool_tracker=tool_tracker,
             stream_iter=stream_iter,
             provider_attempt=provider_attempt,
@@ -161,6 +165,15 @@ async def dispatch_provider_event(
         StreamEventType.TOOL_CALL_DELTA,
         StreamEventType.TOOL_CALL,
     }:
+        if event.type in {StreamEventType.TOOL_CALL_START, StreamEventType.TOOL_CALL_DELTA, StreamEventType.TOOL_CALL}:
+            async for projected in finish_provider_text_item(
+                stream_state=stream_state, stream_text=stream_text,
+                visible_text_sanitizer=visible_text_sanitizer,
+                live_text_streaming=settings.live_text_streaming,
+                awaiting_trailing_done=awaiting_trailing_tool_done,
+                process_event_factory=model_process_text_event,
+            ):
+                yield projected
         if event.type == StreamEventType.THINKING_CHUNK:
             previous_thinking_chars = thinking_chars
             thinking_chars += len(event.content or "")
@@ -195,6 +208,15 @@ async def dispatch_provider_event(
         return
 
     if event.type == StreamEventType.DONE:
+        async for projected in finish_provider_text_item(
+            stream_state=stream_state, stream_text=stream_text,
+            visible_text_sanitizer=visible_text_sanitizer,
+            live_text_streaming=settings.live_text_streaming,
+            awaiting_trailing_done=awaiting_trailing_tool_done,
+            process_event_factory=model_process_text_event,
+            terminal_phase=str(event.phase or event.raw.get("response_message_phase") or "").strip().lower(),
+        ):
+            yield projected
         completion = await provider_completion.settle(
             event,
             stream_state=stream_state,

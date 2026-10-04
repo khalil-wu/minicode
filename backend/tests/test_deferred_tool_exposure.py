@@ -102,9 +102,9 @@ def test_code_mode_catalog_lists_nested_tools_without_disabled_capabilities(tmp_
     tool_exec = next(schema for schema in schemas if schema["function"]["name"] == "tool_exec")
 
     assert "read_file" not in names
-    assert "- read_file(" in tool_exec["function"]["description"]
-    assert "- run_command(" not in tool_exec["function"]["description"]
-    assert "- read_file(" in tool_exec["_minicode_freeform"]["description"]
+    assert "- tools.read_file(" in tool_exec["function"]["description"]
+    assert "- tools.run_command(" not in tool_exec["function"]["description"]
+    assert "- tools.read_file(" in tool_exec["_minicode_freeform"]["description"]
 
 
 def test_model_tool_modes_choose_distinct_direct_surfaces(tmp_path) -> None:

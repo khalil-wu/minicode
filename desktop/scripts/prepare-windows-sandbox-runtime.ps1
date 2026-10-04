@@ -28,7 +28,10 @@ function FileSha256([string]$file) {
 
 if (Test-Path -LiteralPath $manifestPath) {
     $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-    $ready = $manifest.identity -eq "minicode" -and $manifest.upstream_version -eq $version -and $manifest.patch_version -eq 3 -and $manifest.input_sha256 -eq $sourceFingerprint
+    $ready = $manifest.identity -eq "minicode" -and $manifest.upstream_version -eq $version -and $manifest.patch_version -eq 3 -and $manifest.input_sha256 -eq $sourceFingerprint -and $manifest.source_sha256 -eq $archiveHash -and $manifest.owner_namespace -eq "windows-sid+canonical-home-v3" -and $manifest.reported_version -eq "minicode-windows-sandbox $version owner-v3" -and $null -eq $manifest.offline_account -and $null -eq $manifest.online_account
+    foreach ($name in @("LICENSE.openai-codex", "NOTICE.openai-codex")) {
+        $ready = $ready -and (Test-Path -LiteralPath (Join-Path $destinationRoot $name) -PathType Leaf)
+    }
     foreach ($name in $runtimeFiles) {
         $file = Join-Path $destinationRoot $name
         $expected = $manifest.files.$name
@@ -87,6 +90,16 @@ $outputs = @{
     "codex.exe" = "minicode-sandbox-launcher.exe"
     "codex-command-runner.exe" = "codex-command-runner.exe"
     "codex-windows-sandbox-setup.exe" = "codex-windows-sandbox-setup.exe"
+}
+foreach ($name in $runtimeFiles) {
+    if (-not (Test-Path -LiteralPath (Join-Path $releaseDir $outputs[$name]) -PathType Leaf)) {
+        throw "Native sandbox build did not produce $name"
+    }
+}
+foreach ($name in @("LICENSE", "NOTICE")) {
+    if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot $name) -PathType Leaf)) {
+        throw "Pinned native sandbox source is missing $name"
+    }
 }
 foreach ($name in $runtimeFiles) {
     Copy-Item -LiteralPath (Join-Path $releaseDir $outputs[$name]) -Destination (Join-Path $destinationRoot $name) -Force

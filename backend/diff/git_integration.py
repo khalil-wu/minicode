@@ -86,10 +86,13 @@ def _parse_diff_output(output: str) -> StructuredDiff:
         deletions = 0
 
         if not is_binary:
+            in_hunk = False
             for line in chunk.split("\n"):
-                if line.startswith("+") and not line.startswith("+++"):
+                if line.startswith("@@"):
+                    in_hunk = True
+                elif in_hunk and line.startswith("+"):
                     additions += 1
-                elif line.startswith("-") and not line.startswith("---"):
+                elif in_hunk and line.startswith("-"):
                     deletions += 1
 
         files.append(FileDiff(
@@ -146,6 +149,20 @@ async def _run_git_ok(workspace_root: str, *args: str, input_data: bytes | None 
 # textconv filters: a repo-configured diff driver is arbitrary code execution
 # triggered by reading a diff.
 _GIT_DIFF_SAFETY_FLAGS = ("--no-textconv", "--no-ext-diff")
+
+
+def is_not_git_repository(exit_code: int | None, stderr: str) -> bool:
+    return exit_code == 128 and stderr.startswith("fatal: not a git repository (or any")
+
+
+async def is_git_worktree(workspace_root: str) -> bool:
+    try:
+        result = await _run_git(workspace_root, "rev-parse", "--is-inside-work-tree")
+    except GitCommandError as exc:
+        if is_not_git_repository(exc.exit_code, exc.stderr):
+            return False
+        raise
+    return result.strip() == "true"
 
 
 async def get_working_tree_diff(workspace_root: str) -> StructuredDiff:

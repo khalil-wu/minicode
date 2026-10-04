@@ -63,7 +63,19 @@ _SENSITIVE_FIELD_NAMES = frozenset(
 )
 
 
-def redact_secrets(value: str) -> str:
+def redact_secrets(value: str, *, preserve_length: bool = False) -> str:
+    if preserve_length:
+        # Terminal cursors count UTF-16 code units, so masking must preserve
+        # those positions even when a match contains a non-BMP character.
+        redacted = str(value or "")
+        for pattern in (_BEARER_TOKEN_RE, _OPENAI_KEY_RE, _UNDERSCORE_GATEWAY_KEY_RE,
+                        _AWS_ACCESS_KEY_RE, _SECRET_ASSIGNMENT_RE, _JSON_SECRET_FIELD_RE):
+            redacted = pattern.sub(
+                lambda match: "".join(char if char.isspace() else "*" * (2 if ord(char) > 0xFFFF else 1)
+                                      for char in match.group()),
+                redacted,
+            )
+        return redacted
     redacted = _BEARER_TOKEN_RE.sub("Bearer [REDACTED_SECRET]", str(value or ""))
     redacted = _OPENAI_KEY_RE.sub("[REDACTED_SECRET]", redacted)
     redacted = _UNDERSCORE_GATEWAY_KEY_RE.sub("[REDACTED_SECRET]", redacted)

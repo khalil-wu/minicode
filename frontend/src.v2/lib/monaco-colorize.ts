@@ -1,4 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { useAppStore } from "../stores";
+import { defineMiniCodeMonacoTheme, miniCodeMonacoThemeName } from "../panels/monacoTheme";
+export { extractFilePathFromDiff } from "./unified-diff";
 
 type Monaco = typeof import("monaco-editor/editor/editor.api.js");
 
@@ -73,16 +76,6 @@ export function guessLanguageFromPath(path: string): string {
   return EXT_TO_LANG[ext] ?? "plaintext";
 }
 
-export function extractFilePathFromDiff(lines: { kind: string; text: string }[]): string {
-  for (const line of lines) {
-    if (line.kind === "meta") {
-      const match = line.text.match(/^\+\+\+ b\/(.+)$/) ?? line.text.match(/^--- a\/(.+)$/);
-      if (match) return match[1];
-    }
-  }
-  return "";
-}
-
 export function sanitizeColorizedHtml(rawHtml: string): string {
   if (!rawHtml) return "";
   const template = document.createElement("template");
@@ -131,50 +124,51 @@ export function useColorizedLines(
   lines: { kind: string; text: string }[],
   language: string,
 ): string[] | null {
-  const [colorized, setColorized] = useState<string[] | null>(null);
-  const versionRef = useRef(0);
+  const [result, setResult] = useState<{ lines: typeof lines; language: string; theme: string; html: string[] } | null>(null);
+  const theme = useAppStore((state) => state.resolvedTheme);
 
   useEffect(() => {
     if (language === "plaintext" || lines.length === 0) {
-      setColorized(null);
+      setResult(null);
       return;
     }
 
-    const version = ++versionRef.current;
+    let canceled = false;
     const codeLines = lines
       .filter((l) => l.kind === "add" || l.kind === "del" || l.kind === "context")
       .map((l) => l.text);
 
     if (codeLines.length === 0) {
-      setColorized(null);
+      setResult(null);
       return;
     }
 
     const code = codeLines.join("\n");
 
     getMonaco(language).then((monaco) => {
-      if (versionRef.current !== version) return;
-      monaco.editor.colorize(code, language, { tabSize: 2 }).then((html) => {
-        if (versionRef.current !== version) return;
-        const htmlLines = html.split("<br/>");
-        const result: string[] = [];
+      if (canceled) return null;
+      defineMiniCodeMonacoTheme(monaco, theme);
+      monaco.editor.setTheme(miniCodeMonacoThemeName(theme));
+      return monaco.editor.colorize(code, language, { tabSize: 2 });
+    }).then((html) => {
+        if (canceled) return;
+        const htmlLines = html!.split("<br/>");
+        const htmlByLine: string[] = [];
         let codeIdx = 0;
         for (const line of lines) {
           if (line.kind === "add" || line.kind === "del" || line.kind === "context") {
-            result.push(sanitizeColorizedHtml(htmlLines[codeIdx] ?? ""));
+            htmlByLine.push(sanitizeColorizedHtml(htmlLines[codeIdx] ?? ""));
             codeIdx++;
           } else {
-            result.push("");
+            htmlByLine.push("");
           }
         }
-        setColorized(result);
-      }).catch(() => {
-        if (versionRef.current === version) setColorized(null);
-      });
+        setResult({ lines, language, theme, html: htmlByLine });
     }).catch(() => {
-      if (versionRef.current === version) setColorized(null);
+      if (!canceled) setResult(null);
     });
-  }, [lines, language]);
+    return () => { canceled = true; };
+  }, [lines, language, theme]);
 
-  return colorized;
+  return result?.lines === lines && result.language === language && result.theme === theme ? result.html : null;
 }

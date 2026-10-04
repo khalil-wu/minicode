@@ -36,9 +36,7 @@ async def commit_accepted_final_answer(
         provider_raw={**provider_raw_final_text, **provider_raw_done},
         degraded_reason=degraded_reason,
     )
-    for event in projection.text_events:
-        yield event
-    yield answer_committer.commit_answer(
+    terminal_projection = answer_committer.commit_answer(
         projection=projection,
         final_text=candidate_text,
         provider_phase=provider_phase,
@@ -47,3 +45,6 @@ async def commit_accepted_final_answer(
         provider_raw=provider_raw_done,
         finish_reason=finish_reason,
     )
+    for event in projection.text_events:
+        yield event
+    yield terminal_projection

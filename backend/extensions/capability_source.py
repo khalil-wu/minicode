@@ -34,6 +34,7 @@ class LoadedLifecycleCapability:
     def discard(self, reason: str) -> None:
         if self.runtime is not None:
             self.runtime.invalidate(reason)
+        self.loader.clear_cache()
         self.model_runtime.retire()
 
 
@@ -72,8 +73,7 @@ class ExtensionCapabilitySource:
             return ""
 
     def fingerprint(self) -> str:
-        cwd = self.workspace_root or Path.cwd()
-        config_stack = load_config_layer_stack(cwd=cwd)
+        config_stack = load_config_layer_stack(cwd=self.workspace_root)
         snapshot = get_plugin_snapshot(config_stack=config_stack)
         self._config_stack = config_stack
         self._plugin_snapshot = dict(snapshot)
@@ -90,7 +90,7 @@ class ExtensionCapabilitySource:
         config_stack = self._config_stack
         plugin_snapshot = self._plugin_snapshot
         if config_stack is None or plugin_snapshot is None:
-            config_stack = load_config_layer_stack(cwd=loader_cwd)
+            config_stack = load_config_layer_stack(cwd=self.workspace_root)
             plugin_snapshot = dict(get_plugin_snapshot(config_stack=config_stack))
             self._config_stack = config_stack
             self._plugin_snapshot = plugin_snapshot
@@ -166,7 +166,9 @@ class ExtensionCapabilitySource:
             additional_managed_roots=managed_roots,
         )
         if clear_cache:
-            loader.clear_cache()
+            # A fresh generation stops reusing factories immediately. The
+            # previous loader releases its modules after its callbacks finish.
+            loader.clear_cache(preserve_modules=True)
         standard_paths = loader.discover(
             project_root=self.workspace_root or loader_cwd,
         )
@@ -197,6 +199,7 @@ class ExtensionCapabilitySource:
                 bind_provider_sink=model_registry,
             )
         except BaseException:
+            loader.clear_cache()
             model_runtime.retire()
             raise
         result.errors.extend(source_errors)

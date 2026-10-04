@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { ExternalLink, GitBranch, GitCompare, RefreshCw, Trash2 } from "lucide-react";
 import { useAppStore } from "../stores";
 import {
-  fetchWorkspaceGitDiff,
   fetchWorkspaceGitStatus,
   fetchWorkspaceGitWorktree,
   removeWorkspaceGitWorktree,
@@ -11,9 +10,11 @@ import {
 import { branchDisplayName, workspaceDisplayName } from "../lib/workspace-display";
 import { normalizeWorkspaceRoot, workspaceFilePathsEqual, workspaceRootsEqual } from "../lib/workspace-path";
 import { activateWorkspaceFolder } from "../workspace/openWorkspaceFolder";
-import { parseUnifiedDiffLines } from "../lib/unified-diff";
+import { EmptyState } from "../components/EmptyState";
+import "./GitPanel.css";
 
 interface GitStatus {
+  is_git_repo?: boolean;
   branch: string;
   modified: string[];
   staged: string[];
@@ -24,43 +25,31 @@ interface GitStatus {
 const toFileRows = (status: GitStatus | null) => {
   if (!status) return [];
   return [
-    ...status.staged.map((path) => ({ path, group: "已暂存", color: "var(--state-success)" })),
-    ...status.modified.map((path) => ({ path, group: "已修改", color: "var(--state-warning)" })),
-    ...status.untracked.map((path) => ({ path, group: "未跟踪", color: "var(--text-muted)" })),
+    ...status.staged.map((path) => ({ path, section: "staged" as const, group: "已暂存", color: "var(--state-success)" })),
+    ...status.modified.map((path) => ({ path, section: "working" as const, group: "已修改", color: "var(--state-warning)" })),
+    ...status.untracked.map((path) => ({ path, section: "untracked" as const, group: "未跟踪", color: "var(--text-muted)" })),
   ];
 };
 
-const DIFF_TONE_STYLE: Record<string, { background?: string; color: string }> = {
-  add: { background: "var(--diff-add-bg)", color: "var(--diff-add-text)" },
-  del: { background: "var(--diff-del-bg)", color: "var(--diff-del-text)" },
-  hunk: { color: "var(--accent-primary)" },
-  meta: { color: "var(--text-muted)" },
-  marker: { color: "var(--text-muted)" },
-  context: { color: "var(--text-secondary)" },
-};
-
-export const GitPanel = () => {
+export const GitPanel = ({ onEditorOpened, active = true }: { onEditorOpened?: () => void; active?: boolean } = {}) => {
   const workingDirectory = useAppStore((s) => s.workingDirectory);
-  return <WorkspaceGitPanel key={normalizeWorkspaceRoot(workingDirectory)} workingDirectory={workingDirectory} />;
+  return <WorkspaceGitPanel key={normalizeWorkspaceRoot(workingDirectory)} workingDirectory={workingDirectory} onEditorOpened={onEditorOpened} active={active} />;
 };
 
-const WorkspaceGitPanel = ({ workingDirectory }: { workingDirectory: string }) => {
+const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { workingDirectory: string; onEditorOpened?: () => void; active: boolean }) => {
   const activeBottomTab = useAppStore((s) => s.activeBottomTab);
   const workspaceGit = useAppStore((s) => s.workspaceGit);
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [worktree, setWorktree] = useState<WorkspaceGitWorktreeResponse | null>(null);
-  const [selectedFile, setSelectedFile] = useState("");
-  const [diff, setDiff] = useState("");
+  const [selected, setSelected] = useState<{ path: string; section: "staged" | "working" | "untracked"; group: string } | null>(null);
   const [loading, setLoading] = useState(false);
-  const [diffLoading, setDiffLoading] = useState(false);
   const [repoError, setRepoError] = useState("");
-  const [diffError, setDiffError] = useState("");
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [worktreeAction, setWorktreeAction] = useState("");
   const refresh = () => setRefreshVersion((version) => version + 1);
 
   useEffect(() => {
-    if (!workingDirectory) return;
+    if (!active || !workingDirectory) return;
     let cancelled = false;
     const isCurrent = () => !cancelled && workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory);
     setLoading(true);
@@ -72,38 +61,30 @@ const WorkspaceGitPanel = ({ workingDirectory }: { workingDirectory: string }) =
       if (!isCurrent()) return;
       setStatus(nextStatus);
       setWorktree(nextWorktree);
-      setSelectedFile((file) => toFileRows(nextStatus).some((row) => workspaceFilePathsEqual(file, row.path, workingDirectory)) ? file : "");
+      setSelected((file) => file && toFileRows(nextStatus).some((row) => row.section === file.section && workspaceFilePathsEqual(file.path, row.path, workingDirectory)) ? file : null);
     }).catch((error: unknown) => {
       if (!isCurrent()) return;
       setStatus(null);
       setWorktree(null);
-      setSelectedFile("");
+      setSelected(null);
       setRepoError(error instanceof Error ? error.message : "无法读取 Git 仓库状态。");
     }).finally(() => {
       if (isCurrent()) setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [workingDirectory, refreshVersion, activeBottomTab]);
-
-  useEffect(() => {
-    if (!workingDirectory) return;
-    let cancelled = false;
-    const isCurrent = () => !cancelled && workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory);
-    setDiff("");
-    setDiffError("");
-    setDiffLoading(true);
-    void fetchWorkspaceGitDiff(workingDirectory, selectedFile).then((result) => {
-      if (isCurrent()) setDiff(result.diff);
-    }).catch((error: unknown) => {
-      if (isCurrent()) setDiffError(error instanceof Error ? error.message : "无法读取 Git 差异。");
-    }).finally(() => {
-      if (isCurrent()) setDiffLoading(false);
-    });
-    return () => { cancelled = true; };
-  }, [selectedFile, workingDirectory, refreshVersion, activeBottomTab]);
+  }, [workingDirectory, refreshVersion, activeBottomTab, active]);
 
   const fileRows = useMemo(() => toFileRows(status), [status]);
   const branch = branchDisplayName(status?.branch || workspaceGit?.branch) || "无分支";
+  const openReview = (file: NonNullable<typeof selected>) => {
+    setSelected(file);
+    useAppStore.getState().openGitReview({
+      path: file.path,
+      section: file.section,
+      workspaceRoot: workingDirectory,
+      conversationId: useAppStore.getState().conversationId,
+    });
+  };
 
   const switchWorktree = async (path: string) => {
     setWorktreeAction(path);
@@ -140,8 +121,21 @@ const WorkspaceGitPanel = ({ workingDirectory }: { workingDirectory: string }) =
     }
   };
 
+  if (!loading && status?.is_git_repo === false && !repoError) {
+    return (
+      <div className="h-full grid place-items-center p-4">
+        <EmptyState
+          icon={<GitBranch size={20} />}
+          title="当前文件夹未启用 Git"
+          hint="可以继续使用文件编辑和聊天功能。"
+          action={<button type="button" onClick={refresh}>刷新 Git 状态</button>}
+        />
+      </div>
+    );
+  }
+
   return (
-    <div className="h-full grid min-h-0" style={{ gridTemplateColumns: "minmax(220px, 320px) 1fr" }}>
+    <div className="mc-git-overview h-full grid min-h-0" style={{ gridTemplateColumns: "minmax(220px, 320px) minmax(0, 1fr)" }}>
       <aside className="border-r overflow-auto p-2.5" style={{ borderColor: "var(--border-subtle)", fontSize: "var(--text-sm)" }}>
         <div className="flex items-center gap-2 mb-2.5">
           <GitBranch size={15} color="var(--accent-primary)" />
@@ -154,11 +148,9 @@ const WorkspaceGitPanel = ({ workingDirectory }: { workingDirectory: string }) =
         </div>
 
         {status?.error && (
-          <div className="mb-2.5" style={{ color: "var(--state-warning)", fontSize: "var(--text-xs)" }}>
-            {status.error}
-          </div>
+          <GitErrorDetails message={status.error} />
         )}
-        {repoError && <div role="alert" className="mb-2.5" style={{ color: "var(--state-danger)", fontSize: "var(--text-xs)" }}>{repoError}</div>}
+        {repoError && <GitErrorDetails message={repoError} />}
 
         <SectionTitle label="变更" count={fileRows.length} />
         {fileRows.length === 0 ? (
@@ -170,12 +162,13 @@ const WorkspaceGitPanel = ({ workingDirectory }: { workingDirectory: string }) =
             {fileRows.map((row) => (
               <button
                 key={`${row.group}:${row.path}`}
-                onClick={() => setSelectedFile(row.path)}
+                onClick={() => openReview(row)}
+                aria-label={`${row.group} ${row.path}`}
                 title={`${row.group}: ${row.path}`}
                 className="border-0 bg-transparent cursor-pointer overflow-hidden p-1 px-1.5 text-left truncate whitespace-nowrap"
                 style={{
                   borderRadius: "var(--radius-sm, 4px)",
-                    background: workspaceFilePathsEqual(selectedFile, row.path, workingDirectory)
+                    background: selected?.section === row.section && workspaceFilePathsEqual(selected.path, row.path, workingDirectory)
                       ? "var(--surface-active)"
                       : "transparent",
                   color: row.color,
@@ -183,7 +176,7 @@ const WorkspaceGitPanel = ({ workingDirectory }: { workingDirectory: string }) =
                   fontSize: "var(--text-xs)",
                 }}
               >
-                {row.path}
+                <span style={{ marginRight: 8, fontFamily: "var(--font-ui)", color: "var(--text-muted)" }}>{row.group}</span>{row.path}
               </button>
             ))}
           </div>
@@ -270,11 +263,14 @@ const WorkspaceGitPanel = ({ workingDirectory }: { workingDirectory: string }) =
         >
           <GitCompare size={14} color="var(--text-muted)" />
           <span className="flex-1 min-w-0 overflow-hidden truncate whitespace-nowrap font-mono" style={{ color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}>
-            {selectedFile || "完整工作树差异"}
+            {selected ? `${selected.group} · ${selected.path}` : "工作区审阅"}
           </span>
-          {selectedFile && (
+          {selected && (
             <button
-              onClick={() => useAppStore.getState().openEditorFile(selectedFile, selectedFile.split(/[/\\]/).pop(), { exact: true })}
+              onClick={() => {
+                useAppStore.getState().openEditorFile(selected.path, selected.path.split(/[/\\]/).pop(), { exact: true });
+                onEditorOpened?.();
+              }}
               title="在编辑器中打开文件"
               aria-label="在编辑器中打开文件"
               className="w-6 h-6 border rounded inline-flex items-center justify-center p-0 bg-transparent cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm)", color: "var(--text-muted)" }}
@@ -282,34 +278,15 @@ const WorkspaceGitPanel = ({ workingDirectory }: { workingDirectory: string }) =
               <ExternalLink size={14} />
             </button>
           )}
-          {selectedFile && (
-            <button onClick={() => setSelectedFile("")} className="bg-transparent border rounded cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm)", color: "var(--text-muted)", fontSize: "var(--text-xs)", padding: "2px 8px" }}>
-              显示全部
+          {selected && (
+            <button onClick={() => openReview(selected)} className="bg-transparent border rounded cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm)", color: "var(--text-muted)", fontSize: "var(--text-xs)", padding: "2px 8px" }}>
+              返回审阅
             </button>
           )}
         </div>
-        <pre
-          className="flex-1 min-h-0 m-0 overflow-auto p-3 whitespace-pre-wrap break-words"
-          style={{
-            background: "var(--surface-base)",
-            color: "var(--text-muted)",
-            fontFamily: "var(--font-mono)",
-            fontSize: "var(--text-xs)",
-            lineHeight: 1.55,
-          }}
-        >
-          {diff && !diffError
-            ? parseUnifiedDiffLines(diff).map((line, index) => (
-                <span
-                  key={`${index}-${line.text}`}
-                  style={{ display: "block", ...DIFF_TONE_STYLE[line.kind] }}
-                >
-                  {line.text || " "}
-                </span>
-              ))
-            : diffError ? <span role="alert">{diffError}</span>
-            : diffLoading ? "正在加载差异…" : "当前选择没有差异。"}
-        </pre>
+        <div className="flex-1 min-h-0 grid place-items-center p-4">
+          <EmptyState compact icon={<GitCompare size={20} />} title={selected ? `${selected.group}差异已在审阅中打开` : "选择文件开始审阅"} hint="在审阅中查看真实行号、切换行内或分栏，并把代码行加入对话。" />
+        </div>
       </main>
     </div>
   );
@@ -328,6 +305,11 @@ const SectionTitle = ({ label, count }: { label: string; count: number }) => (
     {label} ({count})
   </div>
 );
+
+const GitErrorDetails = ({ message }: { message: string }) => <div role="alert" className="mb-2.5" style={{ color: "var(--state-danger)", fontSize: "var(--text-xs)" }}>
+  <div>无法读取 Git 状态。刷新后可以重新检查当前工作区。</div>
+  <details style={{ marginTop: 5 }}><summary style={{ cursor: "pointer" }}>错误详情</summary><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: "6px 0", fontSize: "var(--text-xxs)" }}>{message}</pre></details>
+</div>;
 
 const badgeStyle = (color: string): React.CSSProperties => ({
   border: "1px solid var(--border-subtle)",

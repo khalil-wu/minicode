@@ -14,7 +14,7 @@ describe("providerProgressLabel", () => {
       retryAttempt: 1,
       maxRetries: 5,
       message: "连接失败，正在重连",
-    })).toBe("正在重新连接 1/5");
+    })).toBe("Reconnecting 1/5");
 
     expect(providerProgressLabel({
       id: "provider:connection:run:iteration",
@@ -23,7 +23,7 @@ describe("providerProgressLabel", () => {
       retryAttempt: 1,
       maxRetries: 5,
       message: "已连接，模型正在响应",
-    })).toBe("模型正在响应");
+    })).toBe("Waiting for model");
   });
 
   it("renders typed terminal provider states", () => {
@@ -34,7 +34,7 @@ describe("providerProgressLabel", () => {
       retryAttempt: 2,
       maxRetries: 5,
       message: "提供商响应完成",
-    })).toBe("提供商响应完成（重试 2/5）");
+    })).toBe("Response completed (2/5)");
     expect(providerProgressLabel({
       id: "provider:connection:run:iteration",
       status: "partial",
@@ -42,7 +42,7 @@ describe("providerProgressLabel", () => {
       retryAttempt: 2,
       maxRetries: 5,
       message: "提供商请求已取消",
-    })).toBe("连接中断（重试 2/5）");
+    })).toBe("Connection interrupted (2/5)");
   });
 
   it("identifies successful provider completion as internal lifecycle data", () => {
@@ -52,7 +52,7 @@ describe("providerProgressLabel", () => {
       providerState: "responding",
       retryAttempt: 0,
       maxRetries: 5,
-      message: "模型正在响应",
+      message: "Waiting for model",
     })).toBe(true);
     expect(isProviderCompletionProgress({
       id: "provider:connection:run:iteration",

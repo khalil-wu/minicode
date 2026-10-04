@@ -5,12 +5,13 @@ import { EventBus, LinkTarget, PDFLinkService, PDFViewer } from "pdfjs-dist/web/
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import "pdfjs-dist/web/pdf_viewer.css";
 import "./PdfAttachmentPreview.css";
+import { withPreviewCacheBust } from "../lib/artifact-resource";
 
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 type PdfStatus = "loading" | "ready" | "error";
 
-export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string }) => {
+export const PdfAttachmentPreview = ({ url, name, onRetry }: { url: string; name: string; onRetry?: () => void }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
   const pdfViewerRef = useRef<PDFViewer | null>(null);
@@ -20,11 +21,11 @@ export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string 
   const [pageInput, setPageInput] = useState("1");
   const [pageCount, setPageCount] = useState(0);
   const [scale, setScale] = useState("page-width");
+  const [retryNonce, setRetryNonce] = useState(0);
 
   useEffect(() => {
-    const container = containerRef.current;
-    const viewerElement = viewerRef.current;
-    if (!container || !viewerElement || !url) return undefined;
+    const container = containerRef.current!;
+    const viewerElement = viewerRef.current!;
 
     setStatus("loading");
     setError("");
@@ -34,7 +35,6 @@ export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string 
     setScale("page-width");
 
     let disposed = false;
-    let loadingTask: ReturnType<typeof pdfjs.getDocument> | undefined;
     const viewerLifetime = new AbortController();
     const eventBus = new EventBus();
     const linkService = new PDFLinkService({
@@ -91,7 +91,7 @@ export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string 
     eventBus.on("pagechanging", handlePageChanging);
     eventBus.on("scalechanging", handleScaleChanging);
 
-    loadingTask = pdfjs.getDocument({ url, rangeChunkSize: 64 * 1024, disableAutoFetch: false });
+    const loadingTask = pdfjs.getDocument({ url: withPreviewCacheBust(url, retryNonce), rangeChunkSize: 64 * 1024, disableAutoFetch: false });
     loadingTask.promise
       .then((loadedDocument) => {
         if (disposed) return;
@@ -116,9 +116,9 @@ export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string 
       pdfViewer.setDocument(undefined as never);
       linkService.setDocument(null);
       pdfViewerRef.current = null;
-      if (loadingTask) void loadingTask.destroy();
+      void loadingTask.destroy();
     };
-  }, [url]);
+  }, [url, retryNonce]);
 
   const setViewerScale = (next: string) => {
     const viewer = pdfViewerRef.current;
@@ -145,7 +145,7 @@ export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string 
   return (
     <div className="mc-pdf-preview" aria-label={`PDF 预览 ${name}`}>
       <div className="mc-pdf-toolbar">
-        <button type="button" className="mc-pdf-icon-button" title="上一页" aria-label="上一页" onClick={() => goToPage(pageNumber - 1)} disabled={pageNumber <= 1}>
+        <button type="button" className="mc-pdf-icon-button" title="上一页" aria-label="上一页" onClick={() => goToPage(pageNumber - 1)} disabled={status !== "ready" || pageNumber <= 1}>
           <ChevronLeft size={15} />
         </button>
         <label className="mc-pdf-page-control">
@@ -158,7 +158,7 @@ export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string 
             }} inputMode="numeric" disabled={status !== "ready"} />
           <span>/ {pageCount || "--"}</span>
         </label>
-        <button type="button" className="mc-pdf-icon-button" title="下一页" aria-label="下一页" onClick={() => goToPage(pageNumber + 1)} disabled={pageCount === 0 || pageNumber >= pageCount}>
+        <button type="button" className="mc-pdf-icon-button" title="下一页" aria-label="下一页" onClick={() => goToPage(pageNumber + 1)} disabled={status !== "ready" || pageCount === 0 || pageNumber >= pageCount}>
           <ChevronRight size={15} />
         </button>
         <span className="mc-pdf-toolbar-spacer" />
@@ -183,6 +183,7 @@ export const PdfAttachmentPreview = ({ url, name }: { url: string; name: string 
         <div className="mc-pdf-state mc-pdf-error" role="alert">
           <TriangleAlert size={18} />
           <span>{error || "无法加载 PDF 文件。"}</span>
+          <button type="button" className="mc-pdf-scale" onClick={() => onRetry ? onRetry() : setRetryNonce((value) => value + 1)}>重试 PDF 预览</button>
         </div>
       )}
       {status === "loading" && <div className="mc-pdf-state">正在加载 PDF 预览...</div>}

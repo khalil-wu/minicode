@@ -144,16 +144,11 @@ def test_worktree_fallback_agent_keeps_project_source_identity(
         main_agent.name,
         "---\nname: fallback\ndescription: main repo fallback\n---\nRun.\n",
     )
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "user-claude"))
+    monkeypatch.setenv("MINICODE_CONFIG_DIR", str(tmp_path / "user-minicode"))
     monkeypatch.setattr(
         agents_loader,
         "_get_managed_minicode_dir",
         lambda: tmp_path / "managed",
-    )
-    monkeypatch.setattr(
-        agents_loader,
-        "get_explicit_active_workspace_root",
-        lambda: worktree,
     )
 
     definitions = agents_loader.discover_agent_definitions(worktree)
@@ -187,10 +182,12 @@ def test_plugin_only_agent_policy_keeps_managed_filesystem_scope(
 
 
 def test_task_tool_schema_exposes_discovered_custom_agent(monkeypatch):
+    from backend.tools import agent_tools
+
     monkeypatch.setattr(
-        subagent_support,
+        agent_tools,
         "discover_agents",
-        lambda: {"reviewer": object(), "docs-writer": object()},
+        lambda root: {"reviewer": object(), "docs-writer": object()},
     )
 
     schema = TaskTool(artifact_store=object()).get_schema()

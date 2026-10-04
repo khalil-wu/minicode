@@ -21,11 +21,7 @@ const slotFor = (conversationId?: string): string =>
 
 const revokeObjectUrl = (url?: string): void => {
   if (!url) return;
-  try {
-    URL.revokeObjectURL(url);
-  } catch {
-    // The URL may belong to a test environment without a full browser API.
-  }
+  URL.revokeObjectURL(url);
 };
 
 export const beginPreviewRequest = (

@@ -175,28 +175,9 @@ def test_search_tool_model_schemas_expose_named_search_parameters() -> None:
     # object, so a parameter missing from the model-facing schema is rejected
     # rather than ignored. The model sees named fields while the executor also
     # accepts the historical short flag aliases.
-    assert set(glob_schema.parameters["properties"].keys()) == {
-        "pattern",
-        "path",
-        "head_limit",
-        "offset",
-    }
+    assert set(glob_schema.parameters["properties"].keys()) == {'pattern', 'path', 'head_limit', 'offset'}
     assert glob_schema.parameters["required"] == ["pattern"]
-    assert set(grep_schema.parameters["properties"].keys()) == {
-        "pattern",
-        "path",
-        "glob",
-        "type",
-        "output_mode",
-        "case_insensitive",
-        "line_numbers",
-        "after_context",
-        "before_context",
-        "context",
-        "multiline",
-        "head_limit",
-        "offset",
-    }
+    assert set(grep_schema.parameters["properties"].keys()) == {'pattern', 'path', 'glob', 'type', 'output_mode', 'case_insensitive', 'line_numbers', 'after_context', 'before_context', 'context', 'multiline', 'head_limit', 'offset', 'fixed_strings'}
     assert grep_schema.parameters["required"] == ["pattern"]
 
 

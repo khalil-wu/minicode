@@ -9,6 +9,7 @@ agent can call them like built-in tools. Tool names follow:
 from __future__ import annotations
 
 import base64
+import copy
 import logging
 import json
 import re
@@ -72,6 +73,9 @@ class MCPToolProxy(BaseTool):
         manager: Any | None = None,
     ) -> None:
         self._server_name = server_name
+        # Model schema and permission hints must describe the same admitted
+        # catalog, even when the manager's next refresh changes nested fields.
+        tool_def = copy.deepcopy(tool_def)
         self._tool_def = tool_def
         self._artifact_store = artifact_store
 
@@ -168,7 +172,7 @@ class MCPToolProxy(BaseTool):
         """Build a ToolSchema from the MCP tool definition."""
         params = self._tool_def.input_schema or {"type": "object", "properties": {}}
         description = (
-            f"[MCP:{self._server_name}] {self._tool_def.description}\n"
+            f"[MCP:{self._server_name}] {self.description}\n"
             f"Original tool: {self._tool_def.name}"
         )
         return ToolSchema(
@@ -403,8 +407,6 @@ class MCPToolRegistry:
         self._mcp_manager = mcp_manager
         self._server_tools: dict[str, list[str]] = {}
         self._wire_name_owner: dict[str, str] = {}
-        # Cache for tool lists: server_name -> (version, tools_list)
-        self._tool_list_cache: dict[str, tuple[int, list]] = {}
         self._version = mcp_manager.registry_version if mcp_manager is not None else 0
         tool_registry.mcp_tool_registry = self
 

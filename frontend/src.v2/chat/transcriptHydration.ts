@@ -14,6 +14,7 @@ import {
 import type {
   ArtifactPreview,
   ChatMessage,
+  ComposerQuote,
   Citation,
   ContentBlock,
   MessageAttachmentRef,
@@ -27,6 +28,8 @@ export type BackendTranscriptMessage = {
   turn_id?: unknown;
   role?: unknown;
   content?: unknown;
+  display_content?: unknown;
+  quoted_message?: unknown;
   thinking?: unknown;
   blocks?: unknown;
   tool_page?: unknown;
@@ -79,15 +82,6 @@ const toTimestamp = (value: unknown, fallback = 0): number => {
 const toRole = (value: unknown): ChatMessage["role"] => {
   if (value === "user") return "user";
   if (value === "assistant" || value === "system") return value;
-  if (
-    value === "tool"
-    || value === "tool_result"
-    || value === "toolResult"
-    || value === "bashExecution"
-    || value === "custom"
-    || value === "branchSummary"
-    || value === "compactionSummary"
-  ) return "system";
   return "system";
 };
 
@@ -435,7 +429,8 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
         : undefined,
     phase: typeof tool.phase === "string" ? tool.phase : undefined,
     startedAt: toTimestamp(tool.startedAt ?? tool.started_at),
-    finishedAt: tool.finishedAt != null || tool.finished_at != null
+    finishedAt: typeof tool.completed_at_ms === "number" ? tool.completed_at_ms
+      : tool.finishedAt != null || tool.finished_at != null
       ? toTimestamp(tool.finishedAt ?? tool.finished_at)
       : undefined,
     outputPreview: typeof tool.outputPreview === "string"
@@ -595,7 +590,7 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
             const keepExistingTerminal = terminal.has(existing.record.status) && !terminal.has(record.status);
             if (!keepExistingTerminal) {
               blocks[existingIndex] = {
-                type: "tool_call",
+                ...existing,
                 record: {
                   ...existing.record,
                   ...record,
@@ -690,9 +685,7 @@ const legacyBlocksFor = (
   return blocks.length ? blocks : undefined;
 };
 
-const normalizeText = (value: string): string => value.trim().replace(/\s+/g, " ");
-
-const toAttachmentRefs = (value: unknown): MessageAttachmentRef[] => {
+export const normalizeTranscriptAttachmentRefs = (value: unknown): MessageAttachmentRef[] => {
   const items = toArray<Record<string, unknown>>(value);
   return items.flatMap((item) => {
     const name = String(item.file_name ?? item.name ?? "").trim();
@@ -716,23 +709,58 @@ const toAttachmentRefs = (value: unknown): MessageAttachmentRef[] => {
   });
 };
 
-const toContextRefs = (value: unknown): MessageContextRef[] => {
+export const normalizeMessageContextRefs = (value: unknown): MessageContextRef[] => {
   return toArray<Record<string, unknown>>(value).reduce<MessageContextRef[]>((refs, item) => {
     const kind = String(item.kind ?? "").trim();
     const name = String(item.name ?? "").trim();
     const path = String(item.path ?? "").trim();
+    if ((kind === "file" || kind === "folder" || kind === "url") && name && path) {
+      const range = item.range as { startLineNumber?: number; startColumn?: number; endLineNumber?: number; endColumn?: number } | undefined;
+      const coordinates = range ? [range.startLineNumber, range.startColumn, range.endLineNumber, range.endColumn] : [];
+      refs.push({ kind, name, path,
+        ...(coordinates.length === 4 && coordinates.every((value) => Number.isInteger(value) && Number(value) > 0)
+          ? { range: { startLineNumber: range!.startLineNumber!, startColumn: range!.startColumn!, endLineNumber: range!.endLineNumber!, endColumn: range!.endColumn! } } : {}),
+        ...(typeof item.text === "string" ? { text: item.text } : {}),
+        ...(typeof item.workspaceRoot === "string" ? { workspaceRoot: item.workspaceRoot } : {}),
+      });
+      return refs;
+    }
+    if (kind === "browser_annotation" && name && path
+      && typeof item.url === "string" && typeof item.note === "string") {
+      refs.push({
+        kind, name, path, url: item.url, note: item.note,
+        selector: stringValue(item.selector),
+        targetId: stringValue(item.targetId ?? item.target_id),
+        xPercent: numberValue(item.xPercent ?? item.x_percent),
+        yPercent: numberValue(item.yPercent ?? item.y_percent),
+        widthPercent: numberValue(item.widthPercent ?? item.width_percent),
+        heightPercent: numberValue(item.heightPercent ?? item.height_percent),
+        viewportWidth: numberValue(item.viewportWidth ?? item.viewport_width),
+        viewportHeight: numberValue(item.viewportHeight ?? item.viewport_height),
+      });
+      return refs;
+    }
     if (kind === "skill" && name) {
-      refs.push({ kind, name, path: path || undefined });
+      refs.push({ kind, name, path: path || undefined, description: stringValue(item.description),
+        sourceLevel: stringValue(item.sourceLevel ?? item.source_level) });
       return refs;
     }
     if (kind === "plugin") {
       const configName = String(item.configName ?? item.config_name ?? name).trim();
       if (configName && path.startsWith("plugin://")) {
-        refs.push({ kind, name: name || configName, configName, path });
+        refs.push({ kind, name: name || configName, configName, path, description: stringValue(item.description) });
       }
     }
     return refs;
   }, []);
+};
+
+export const normalizeQuotedMessage = (value: unknown): ComposerQuote | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const quote = value as Record<string, unknown>;
+  if (typeof quote.id !== "string" || typeof quote.content !== "string"
+    || (quote.role !== "user" && quote.role !== "assistant" && quote.role !== "system")) return null;
+  return { id: quote.id, role: quote.role, content: quote.content };
 };
 
 const toReplyAttachments = (value: unknown): ChatMessage["replyAttachments"] => {
@@ -798,7 +826,9 @@ export const hydrateMessages = (
 ): ChatMessage[] => {
   const hydrated = (messages ?? []).map((message, index) => {
     const role = toRole(message.role);
-    const content = transcriptContent(message);
+    const backendContent = transcriptContent(message);
+    const hasDisplayContent = role === "user" && typeof message.display_content === "string";
+    const content = hasDisplayContent ? message.display_content as string : backendContent;
     const parsedBlocks = normalizeContentBlocks(message.blocks);
     const rawPage = message.tool_page as Record<string, unknown> | undefined;
     const toolPage = rawPage && [rawPage.before, rawPage.remaining, rawPage.total].every((value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
@@ -811,7 +841,9 @@ export const hydrateMessages = (
     // Structured transcripts are authoritative: hydration never infers a
     // final answer from message.content or block position.
     // Only the pre-block legacy schema is upgraded at this compatibility edge.
-    const blocks = parsedBlocks ?? legacyBlocksFor(message, role, fallbackToolCalls);
+    const blocks = Array.isArray(message.blocks)
+      ? parsedBlocks ?? []
+      : legacyBlocksFor({ ...message, content }, role, fallbackToolCalls);
     const timestamp = toTimestamp(message.timestamp, index);
     return {
       toolPage,
@@ -819,11 +851,13 @@ export const hydrateMessages = (
       turnId: stringValue(message.turnId ?? message.turn_id),
       role,
       content,
+      ...(hasDisplayContent ? { backendContent } : {}),
+      ...(role === "user" ? { quotedMessage: normalizeQuotedMessage(message.quoted_message) } : {}),
       messageSource: toMessageSource(message.metadata),
       blocks,
       artifacts: toArray<ArtifactPreview>(message.artifacts),
-      attachmentRefs: toAttachmentRefs(message.attachmentRefs ?? message.attachments),
-      contextRefs: toContextRefs(message.contextRefs ?? message.context_refs),
+      attachmentRefs: normalizeTranscriptAttachmentRefs(message.attachmentRefs ?? message.attachments),
+      contextRefs: normalizeMessageContextRefs(message.contextRefs ?? message.context_refs),
       replyAttachments: toReplyAttachments(message.replyAttachments ?? message.reply_attachments),
       citations: toArray<Citation>(message.citations),
       usage: toUsage(message.usage),
@@ -889,12 +923,13 @@ export const hydrateMessages = (
       if (merged) continue;
       if (callId) {
         const projectedIndex = projected.length;
+        const output = message.content;
         const toolName = String(source.name ?? source.toolName ?? "tool").trim() || "tool";
         message.content = message.content ? `${toolName}: ${message.content}` : `${toolName} completed`;
         message.role = "system";
         projected.push(message);
         pendingToolResults.set(callId, {
-          content: message.content,
+          content: output,
           failed: source.is_error === true || source.isError === true,
           timestamp: message.timestamp,
           projectedIndex,
@@ -917,18 +952,18 @@ export const hydrateMessages = (
       pendingToolResults.delete(block.record.id);
     }
     // An assistant record that ended without producing anything is still a
-    // turn the user saw end: a failure with its message, or an interruption.
-    // Dropping the interrupted record here left the user message rendered as
-    // an unanswered turn after reload while the live view had shown it as
-    // stopped.
+    // turn whose durable status belongs in history, even when no answer text
+    // was produced. Dropping it changes partial/failed/interrupted into a
+    // completed user-only turn after reload.
     if (
       !message.content
       && !(message.blocks?.length)
       && !message.artifacts.length
       && !message.attachmentRefs?.length
       && !message.replyAttachments?.length
-      && !(message.terminalStatus === "failed" && message.failureMessage)
-      && message.terminalStatus !== "interrupted"
+      && !message.contextRefs?.length
+      && !message.quotedMessage
+      && !(message.role === "assistant" && message.terminalStatus)
     ) continue;
     projected.push(message);
   }

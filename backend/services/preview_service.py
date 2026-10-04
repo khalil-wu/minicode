@@ -49,8 +49,8 @@ def preview_launch_detected_event(process: Any) -> AgentEvent:
     return AgentEvent(
         type="preview.server.detected",
         data={
-            "port": process.config.port,
-            "url": process.config.url,
+            "port": process.effective_port,
+            "url": process.effective_url,
             "name": process.config.name,
             "framework": "launch",
         },

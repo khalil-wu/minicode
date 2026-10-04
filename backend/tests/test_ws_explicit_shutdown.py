@@ -195,7 +195,7 @@ async def test_closing_session_cannot_admit_more_transport_input(
         await asyncio.wait_for(reader, 2)
         assert not session.command_dispatcher.command_tasks
         assert not session.command_dispatcher.recent_client_command_id_set
-        assert not session.run_manager.durable_queue.has_client_command("old-input-command")
+        assert not session.run_manager.durable_client_commands.has_client_command("old-input-command")
         assert session.conversation_repo.get_conversation("conv_old_input") is None
         assert not sent_ack.is_set()
         assert session.event_outbox.current_replay_seq == 0

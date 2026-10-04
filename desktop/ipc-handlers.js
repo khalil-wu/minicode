@@ -9,9 +9,7 @@ const {
   isHttpUrl,
   isProbablyTextBuffer,
   hashFileContent,
-  atomicWriteText,
   withFileMutationQueue,
-  withFileMutationQueues,
   countDirEntries,
   isSamePath,
 } = require("./utils");
@@ -649,122 +647,6 @@ function registerIpcHandlers() {
       language_hint: path.extname(fullPath).slice(1) || "text",
       read_only: !isWithinTrustedWorkspace(fullPath),
     };
-  }));
-
-  ipcMain.handle("minicode:fs:writeFile", withMainSender("minicode:fs:writeFile", async (_event, targetPath, content) => {
-    const fullPath = assertMutableTrustedPath(targetPath, "File");
-    return withFileMutationQueue(fullPath, async () => {
-    // Atomically claim the path with an exclusive create ("wx"). An access()
-    // check followed by a write leaves a window where another writer can create
-    // the file in between, letting this handler silently clobber it despite the
-    // no-overwrite contract below.
-    await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
-    let handle;
-    try {
-      handle = await fs.promises.open(fullPath, "wx");
-    } catch (error) {
-      if (error?.code === "EEXIST") {
-        throw new Error("Direct writeFile cannot overwrite existing files. Use compareWriteFile with an expected hash.");
-      }
-      throw error;
-    }
-    try {
-      await handle.writeFile(String(content), "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    const stat = await fs.promises.stat(fullPath);
-    return {
-      workspace_root: path.dirname(fullPath),
-      path: fullPath,
-      name: path.basename(fullPath),
-      content,
-      content_hash: hashFileContent(content),
-      size_bytes: stat.size,
-      modified_at: stat.mtime.toISOString(),
-      language_hint: path.extname(fullPath).slice(1) || "text",
-    };
-    });
-  }));
-
-  ipcMain.handle("minicode:fs:compareWriteFile", withMainSender("minicode:fs:compareWriteFile", async (_event, targetPath, expectedHash, content) => {
-    const fullPath = assertMutableTrustedPath(targetPath, "File");
-    return withFileMutationQueue(fullPath, async () => {
-    let currentStat = null;
-    try {
-      currentStat = await fs.promises.stat(fullPath);
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
-    if (currentStat?.isDirectory()) {
-      throw new Error("Cannot write content into a directory path.");
-    }
-
-    let currentHash = "";
-    if (currentStat) {
-      const raw = await fs.promises.readFile(fullPath);
-      if (!isProbablyTextBuffer(raw, fullPath)) {
-        throw new Error("Only UTF-8 text files are supported.");
-      }
-      currentHash = hashFileContent(raw.toString("utf8"));
-    }
-
-    const normalizedExpected = String(expectedHash || "").trim().toLowerCase();
-    if (currentHash !== normalizedExpected) {
-      const error = new Error("File has changed on disk.");
-      error.code = "ERR_FILE_CHANGED";
-      error.expectedHash = normalizedExpected;
-      error.actualHash = currentHash;
-      throw error;
-    }
-
-    await atomicWriteText(fullPath, content);
-    const stat = await fs.promises.stat(fullPath);
-    return {
-      workspace_root: path.dirname(fullPath),
-      path: fullPath,
-      name: path.basename(fullPath),
-      content,
-      content_hash: hashFileContent(content),
-      size_bytes: stat.size,
-      modified_at: stat.mtime.toISOString(),
-      language_hint: path.extname(fullPath).slice(1) || "text",
-    };
-    });
-  }));
-
-  ipcMain.handle("minicode:fs:createDirectory", withMainSender("minicode:fs:createDirectory", async (_event, targetPath) => {
-    const fullPath = assertMutableTrustedPath(targetPath, "Directory");
-    return withFileMutationQueue(fullPath, async () => {
-    await fs.promises.mkdir(fullPath, { recursive: true });
-    const stat = await fs.promises.stat(fullPath);
-    return {
-      workspace_root: path.dirname(fullPath),
-      path: fullPath,
-      name: path.basename(fullPath),
-      is_dir: true,
-      size_bytes: null,
-      modified_at: stat.mtime.toISOString(),
-    };
-    });
-  }));
-
-  ipcMain.handle("minicode:fs:renamePath", withMainSender("minicode:fs:renamePath", async (_event, oldPath, newPath) => {
-    const fullOldPath = assertMutableTrustedPath(oldPath, "Source path");
-    const fullNewPath = assertMutableTrustedPath(newPath, "Destination path");
-    return withFileMutationQueues([fullOldPath, fullNewPath], async () => {
-    await fs.promises.rename(fullOldPath, fullNewPath);
-    const stat = await fs.promises.stat(fullNewPath);
-    return {
-      workspace_root: path.dirname(fullNewPath),
-      path: fullNewPath,
-      name: path.basename(fullNewPath),
-      is_dir: stat.isDirectory(),
-      size_bytes: stat.isFile() ? stat.size : null,
-      modified_at: stat.mtime.toISOString(),
-    };
-    });
   }));
 
   ipcMain.handle("minicode:fs:deletePath", withMainSender("minicode:fs:deletePath", async (_event, targetPath, recursive, confirm) => {

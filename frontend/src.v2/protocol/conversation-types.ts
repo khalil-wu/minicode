@@ -14,6 +14,7 @@
 // ──────────────────────────────────────────────────────────────────
 
 import type { RuntimeSessionSnapshot } from "./streaming-types";
+import type { ComposerQuote, MessageContextRef } from "../stores/types";
 
 export type ConversationServerEventType =
   // Context lifecycle
@@ -212,6 +213,7 @@ export interface ConversationSummaryUpdatedEvent {
   summary: string;
   title: string;
   updated_at: string;
+  revision?: number;
   memory_mode: "enabled" | "disabled" | "polluted";
   memory_polluted: boolean;
   memory_pollution_sources: string[];
@@ -336,6 +338,7 @@ export interface UserMessageQueueUpdatedEvent {
   message_id: string;
   user_message_id?: string;
   position?: number;
+  paused?: boolean;
   reason?: string;
   target_message_id?: string;
   turn_mode?: "follow_up" | "steer";
@@ -344,10 +347,13 @@ export interface UserMessageQueueUpdatedEvent {
 export interface UserMessageCommand {
   type: "user_message";
   content: string;
+  display_content?: string;
+  context_refs?: MessageContextRef[];
+  quoted_message?: ComposerQuote | null;
   conversation_id?: string;
   workspace_root?: string;
-  primaryFile?: string;
-  activeTabPath?: string;
+  primary_file?: string;
+  active_tab_path?: string;
   permission_mode?: "plan" | "confirm" | "bypass" | "auto";
   agent_mode?: "build" | "plan" | "review" | "explore" | "subagent" | string;
   attachments?: Record<string, unknown>[];
@@ -452,6 +458,8 @@ export interface ConversationExportCommand {
  */
 export interface ContextForkCommand {
   type: "context.fork";
+  conversation_id?: string;
+  workspace_root?: string;
   message_id?: string;
   message_index?: number;
   create_branch?: boolean;

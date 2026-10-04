@@ -111,6 +111,32 @@ describe("FileTree directory request ownership", () => {
     });
   });
 
+  it("keeps one keyboard tab stop and navigates visible siblings and parents", async () => {
+    mocks.listWorkspaceTree.mockResolvedValue({ name: "workspace-a", path: ".", is_dir: true, children: [
+      { name: "src", path: "src", is_dir: true, children: [{ name: "main.ts", path: "src/main.ts", is_dir: false }] },
+      { name: "README.md", path: "README.md", is_dir: false },
+    ] });
+    render(<FileTree />);
+    const folder = await screen.findByRole("treeitem", { name: /src/ });
+    const readme = screen.getByRole("treeitem", { name: /README.md/ });
+    expect(folder.tabIndex).toBe(0);
+    expect(readme.tabIndex).toBe(-1);
+    act(() => folder.focus());
+    fireEvent.keyDown(folder, { key: "ArrowRight" });
+    const file = screen.getByRole("treeitem", { name: /main.ts/ });
+    fireEvent.keyDown(folder, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(file);
+    expect(file.tabIndex).toBe(0);
+    expect(folder.tabIndex).toBe(-1);
+    fireEvent.keyDown(file, { key: "ArrowLeft" });
+    expect(document.activeElement).toBe(folder);
+    fireEvent.keyDown(folder, { key: "End" });
+    expect(document.activeElement).toBe(readme);
+    fireEvent.keyDown(readme, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(file);
+    expect(screen.getAllByRole("treeitem").filter((row) => row.tabIndex === 0)).toHaveLength(1);
+  });
+
   it("offers workspace removal on the root title without a file deletion action", async () => {
     mocks.listWorkspaceTree.mockResolvedValue(rootNode("workspace-a"));
     render(<FileTree />);

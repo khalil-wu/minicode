@@ -12,67 +12,53 @@ from backend.agent.stream_sanitizer import (
     scrub_thinking_tags as _scrub_thinking_tags,
 )
 from backend.llm.base import StreamEventType
-from backend.llm.openai_adapter import (
-    _ReasoningSplitter,
-    _splitter_events,
-    _strip_special_tokens,
-)
 
 
 def _feed_all(splitter, deltas):
-    """Feed all deltas then flush, returning concatenated (text, reasoning)."""
-    text_parts: list[str] = []
-    reasoning_parts: list[str] = []
-    for delta in deltas:
-        for kind, segment in splitter.feed(delta):
-            (reasoning_parts if kind == "reasoning" else text_parts).append(segment)
-    for kind, segment in splitter.flush():
-        (reasoning_parts if kind == "reasoning" else text_parts).append(segment)
-    return "".join(text_parts), "".join(reasoning_parts)
+    return "".join(splitter.feed(delta) for delta in deltas) + splitter.finish(), ""
 
 
 # ---------------------------------------------------------------- _ReasoningSplitter
 
 
 def test_splitter_no_tags_passes_through_as_text():
-    text, reasoning = _feed_all(_ReasoningSplitter(), ["Hello, world"])
+    text, reasoning = _feed_all(_ThinkingStreamSanitizer(), ["Hello, world"])
     assert reasoning == ""
     assert text == "Hello, world"
 
 
 def test_splitter_think_tag_split_across_deltas():
     deltas = ["<thi", "nk>reasoning here</th", "ink>answer"]
-    text, reasoning = _feed_all(_ReasoningSplitter(), deltas)
-    assert reasoning == "reasoning here"
+    text, reasoning = _feed_all(_ThinkingStreamSanitizer(), deltas)
+    assert reasoning == ""
     assert text == "answer"
 
 
 def test_splitter_reasoning_then_answer_in_one_delta():
-    text, reasoning = _feed_all(_ReasoningSplitter(), ["<think>rm</think>answer"])
-    assert reasoning == "rm"
+    text, reasoning = _feed_all(_ThinkingStreamSanitizer(), ["<think>rm</think>answer"])
+    assert reasoning == ""
     assert text == "answer"
 
 
 def test_splitter_multiple_think_blocks():
     deltas = ["<think>a</think>mid<think>b</think>"]
-    text, reasoning = _feed_all(_ReasoningSplitter(), deltas)
-    assert reasoning == "ab"
+    text, reasoning = _feed_all(_ThinkingStreamSanitizer(), deltas)
+    assert reasoning == ""
     assert text == "mid"
 
 
 def test_splitter_flush_emits_held_remainder():
-    # "abc" is shorter than the hold-back window, so it stays buffered until flush.
-    splitter = _ReasoningSplitter()
-    assert splitter.feed("abc") == []
+    splitter = _ThinkingStreamSanitizer()
+    assert splitter.feed("abc<th") == "abc"
     text, reasoning = _feed_all(splitter, [])
-    assert text == "abc"
+    assert text == "<th"
     assert reasoning == ""
 
 
 def test_splitter_close_tag_split_across_deltas():
     deltas = ["<think>reasoning</thi", "nk>tail"]
-    text, reasoning = _feed_all(_ReasoningSplitter(), deltas)
-    assert reasoning == "reasoning"
+    text, reasoning = _feed_all(_ThinkingStreamSanitizer(), deltas)
+    assert reasoning == ""
     assert text == "tail"
 
 
@@ -97,7 +83,7 @@ def test_scrub_strips_orphan_markers():
     # Unpaired markers (no matching open/close) are stripped individually.
     result = _scrub_thinking_tags("answer <think> more")
     assert "<think>" not in result
-    assert "answer" in result and "more" in result
+    assert result == "answer "
 
     result = _scrub_thinking_tags("reasoning </think> tail")
     assert "</think>" not in result
@@ -128,27 +114,15 @@ def test_stream_sanitizer_does_not_leak_reasoning_tags_split_across_chunks():
 
 
 def test_strip_special_tokens():
-    assert _strip_special_tokens("a<|im_start|>b<|endoftext|>c") == "abc"
-    assert _strip_special_tokens("<|user|>\n<|assistant|>") == "\n"
-    assert _strip_special_tokens("no tokens here") == "no tokens here"
-
-
-def test_splitter_events_maps_kinds_to_event_types():
-    events = _splitter_events([("text", "hi"), ("reasoning", "rm"), ("text", "")])
-    assert len(events) == 1  # empty and raw-reasoning segments are dropped
-    assert events[0].type == StreamEventType.TEXT_CHUNK
-    assert events[0].content == "hi"
+    assert _scrub_thinking_tags("a<|im_start|>b<|endoftext|>c") == "abc"
+    assert _scrub_thinking_tags("<|user|>\n<|assistant|>") == "\n"
+    assert _scrub_thinking_tags("no tokens here") == "no tokens here"
 
 
 def test_adapter_flow_strips_inline_raw_thinking_from_visible_events():
     """Chat-compatible inline CoT stays out of both answer and timeline."""
-    splitter = _ReasoningSplitter()
-    events = _splitter_events(splitter.feed("<think>r</think>a"))
-    events += _splitter_events(splitter.flush())
-    reasoning = "".join(e.content for e in events if e.type == StreamEventType.THINKING_CHUNK)
-    text = "".join(e.content for e in events if e.type == StreamEventType.TEXT_CHUNK)
-    assert reasoning == ""
-    assert text == "a"
+    sanitizer = _ThinkingStreamSanitizer(hide_memory_citations=False)
+    assert sanitizer.feed("<think>r</think>a") + sanitizer.finish() == "a"
 
 
 # ------------------------------------------- adapter HTTP path (end-to-end wiring)
@@ -267,6 +241,26 @@ def test_http_path_strips_special_tokens_from_content():
     _, text = _reasoning_and_text(asyncio.run(_collect_http(lines)))
     assert text == "Hello world"
     assert "<|" not in text
+
+
+def test_chat_adapter_preserves_code_examples_and_leaves_actual_citations_for_agent_recorder():
+    from backend.memory.citations import parse_memory_citation
+
+    body = "<citation_entries>MEMORY.md:1-2|note=[actual]</citation_entries>"
+    citation = f"<minicode-memory-citation>{body}</minicode-memory-citation>"
+    example = f"```xml\n<think>literal</think><|im_start|>{citation}\n```\n"
+    content = example + "<think>hidden</think>answer" + citation
+    for chunks in ([content], list(content)):
+        lines = [_sse({"choices": [{"delta": {"content": chunk}, "finish_reason": None}]}) for chunk in chunks]
+        lines += [_sse({"choices": [{"delta": {}, "finish_reason": "stop"}]}), "data: [DONE]"]
+        events = asyncio.run(_collect_http(lines))
+        _, adapter_text = _reasoning_and_text(events)
+        assert adapter_text == example + "answer" + citation
+        sanitizer = _ThinkingStreamSanitizer()
+        visible = "".join(sanitizer.feed(e.content) for e in events if e.type == StreamEventType.TEXT_CHUNK) + sanitizer.finish()
+        assert visible == example + "answer"
+        assert sanitizer.citations == [body]
+        assert parse_memory_citation(sanitizer.citations)["entries"][0]["note"] == "actual"
 
 
 # --------------------------------------------- adapter Responses API path (GPT)

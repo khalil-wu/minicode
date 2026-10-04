@@ -15,13 +15,11 @@ def resolve_tool_timeout(
     tool = tool_registry.get_tool(name)
     resolver = getattr(tool, "resolve_timeout", None) if tool is not None else None
     if callable(resolver):
-        try:
-            resolved = resolver(args or {})
-            if resolved is not None:
-                value = float(resolved)
-                return value if value > 0 else None
-        except (TypeError, ValueError):
-            pass
+        resolved = resolver(args or {})
+        if resolved is None:
+            return None
+        value = float(resolved)
+        return value if value > 0 else None
     declared = getattr(tool, "timeout_seconds", None) if tool is not None else None
     if declared is not None:
         value = float(declared)
@@ -35,15 +33,9 @@ def tool_mutates(
     args: dict[str, object] | None = None,
 ) -> bool:
     """Whether a tool call mutates state according to tool-owned metadata."""
-    if tool_registry is not None:
-        tool = tool_registry.get_tool(name)
-        if tool is not None:
-            # The default BaseTool implementation already maps legacy
-            # mutates_* flags. Do not re-apply those flags after an
-            # argument-sensitive override classified this invocation.
-            side_effect_kind = tool_side_effect_kind(name, tool_registry, args)
-            return side_effect_kind in {"workspace", "external", "destructive"}
-    return False
+    return tool_side_effect_kind(name, tool_registry, args) in {
+        "workspace", "external", "destructive"
+    }
 
 
 def tool_side_effect_kind(
@@ -55,19 +47,7 @@ def tool_side_effect_kind(
     if tool_registry is not None:
         tool = tool_registry.get_tool(name)
         if tool is not None:
-            get_kind = getattr(tool, "get_side_effect_kind", None)
-            if callable(get_kind):
-                try:
-                    return str(get_kind(args)).strip().lower() or "none"
-                except Exception:
-                    pass
-            if getattr(tool, "destructive", False):
-                return "destructive"
-            if getattr(tool, "mutates_external_state", False):
-                return "external"
-            if getattr(tool, "mutates_workspace", False):
-                return "workspace"
-            return "none"
+            return tool.get_side_effect_kind(args)
     return "none"
 
 
@@ -80,10 +60,4 @@ def tool_is_idempotent(
     tool = tool_registry.get_tool(name)
     if tool is None:
         return False
-    is_idempotent = getattr(tool, "is_idempotent", None)
-    if callable(is_idempotent):
-        try:
-            return bool(is_idempotent(args))
-        except Exception:
-            return bool(getattr(tool, "read_only", False)) and not tool_mutates(name, tool_registry, args)
-    return bool(getattr(tool, "read_only", False)) and not tool_mutates(name, tool_registry, args)
+    return tool.is_idempotent(args)

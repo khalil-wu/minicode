@@ -2,18 +2,8 @@
 from __future__ import annotations
 
 import difflib
-import asyncio
-import os
-import tempfile
-import time
-import hashlib
-from collections import OrderedDict
-from dataclasses import dataclass
-from pathlib import Path
-from threading import Lock
 from typing import Any
 
-from backend.artifact.store import ArtifactStore
 from backend.atomic_io import (
     atomic_write_bytes,
     file_mutation_locks,
@@ -26,7 +16,6 @@ from backend.security.sensitive_files import is_protected_write_path
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.path_resolution import PathTraversalError, _is_bypass_mode, _resolve_path
 from backend.workspace.file_state_cache import get_global_file_cache
-from backend.workspace.path_filters import is_windows_reserved_path
 
 
 from backend.tools.file_tools_common import (
@@ -509,7 +498,7 @@ class EditFileTool(BaseTool):
             return self._error_result(str(exc))
 
         # Protected paths stay guarded even in bypass mode.
-        if is_protected_write_path(path):
+        if is_protected_write_path(path, state_roots=context.permission.protected_state_roots if context else ()):
             return self._error_result(
                 f"Refusing to edit protected path: {file_path}. "
                 "Repository and agent configuration files must be edited manually."

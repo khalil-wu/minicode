@@ -36,6 +36,19 @@ const workspaceImportedEvent = (overrides: Record<string, unknown> = {}) => ({
 });
 
 describe("handleNoticeEvent", () => {
+  it("rejects a delayed terminal summary after a newer rename and memory setting", () => {
+    useAppStore.setState({ conversations: [{ id: "conv-active", title: "User renamed", updatedAt: "2026-10-03T11:00:00Z",
+      revision: 8, memoryMode: "disabled", memoryPolluted: false }] });
+    handleNoticeEvent({ type: "conversation.summary.updated", conversation_id: "conv-active", revision: 7,
+      title: "Old title", summary: "Old summary", updated_at: "2026-10-03T11:00:00Z",
+      memory_mode: "enabled", memory_polluted: true, memory_pollution_sources: ["old"] } as ServerEvent);
+    expect(useAppStore.getState().conversations[0]).toMatchObject({ title: "User renamed", revision: 8,
+      memoryMode: "disabled", memoryPolluted: false });
+    handleNoticeEvent({ type: "conversation.summary.updated", conversation_id: "conv-active", revision: 9,
+      title: "Current title", summary: "Current summary", updated_at: "2026-10-03T11:01:00Z",
+      memory_mode: "disabled", memory_polluted: false, memory_pollution_sources: [] } as ServerEvent);
+    expect(useAppStore.getState().conversations[0]).toMatchObject({ title: "Current title", revision: 9, summary: "Current summary" });
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     useAppStore.setState({
@@ -454,6 +467,7 @@ describe("handleNoticeEvent", () => {
         event: "modified",
         timestamp: Date.parse("2026-08-09T08:00:00Z"),
         sequence: 1,
+        workspaceRoot: "C:\\repo",
       }]);
       // Bursts of file.changed collapse into one trailing git refresh.
       expect(requestGitChanges).not.toHaveBeenCalled();

@@ -55,7 +55,6 @@ const hasPendingUserAction = (): boolean => {
         ...state.askUserQueue,
       ],
       activeConversationId,
-      state.conversationId,
     ) ||
     hasRuntimePending,
   );

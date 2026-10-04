@@ -3,19 +3,16 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-import re
 import sys
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def project_version() -> str:
-    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
-    if not match:
-        raise RuntimeError("[project].version is missing from pyproject.toml")
-    return match.group(1)
+    with (ROOT / "pyproject.toml").open("rb") as stream:
+        return tomllib.load(stream)["project"]["version"]
 
 
 def update_json(path: Path, version: str, *, write: bool) -> bool:

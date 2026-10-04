@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 import subprocess
 from typing import Any
 
 from fastapi import HTTPException
 
+from backend.diff.git_integration import is_not_git_repository
 from backend.services.workspace_service import readonly_git_host_path, readonly_git_policy, run_readonly_git
 from backend.sandbox import SandboxPolicy
 from backend.sandbox.runner import SandboxUnavailableError
@@ -100,7 +100,6 @@ async def import_project_payload(raw_path: str) -> dict[str, Any]:
     normalized_path = normalize_project_import_path(raw_path)
     workspace_ctx = WorkspaceContext(normalized_path)
     metadata = await workspace_ctx.initialize()
-    set_active_workspace_root(metadata.root_path)
 
     store = RecentProjectStore()
     store.add(
@@ -108,6 +107,7 @@ async def import_project_payload(raw_path: str) -> dict[str, Any]:
         name=metadata.name,
         project_type=metadata.project_type,
     )
+    set_active_workspace_root(metadata.root_path)
 
     return {
         "success": True,
@@ -120,7 +120,10 @@ async def import_project_payload(raw_path: str) -> dict[str, Any]:
 def validate_project_path_payload(raw_path: str) -> dict[str, Any]:
     from backend.workspace.path_utils import build_missing_path_hint, normalize_project_import_path
 
-    path = normalize_project_import_path(raw_path)
+    try:
+        path = normalize_project_import_path(raw_path)
+    except ValueError as exc:
+        return {"valid": False, "error": str(exc)}
     if not path.exists():
         payload: dict[str, Any] = {
             "valid": False,
@@ -208,8 +211,10 @@ def workspace_git_status_payload(root: Path, *, workspace_root: Path | None = No
         # subdirectory. The workspace API and file buttons use workspace paths.
         for field in ("modified", "staged", "untracked"):
             status[field] = [path.removeprefix(prefix) for path in status[field]]
-        return status
+        return {"is_git_repo": True, **status}
     except (OSError, subprocess.SubprocessError, SandboxUnavailableError) as exc:
+        if isinstance(exc, subprocess.CalledProcessError) and is_not_git_repository(exc.returncode, exc.stderr or ""):
+            return {"is_git_repo": False, "branch": "", "modified": [], "staged": [], "untracked": []}
         return {"branch": "", "modified": [], "staged": [], "untracked": [], "error": str(getattr(exc, "stderr", None) or exc).strip()}
 
 
@@ -262,8 +267,10 @@ def workspace_git_diff_payload(root: Path, file: str, *, workspace_root: Path | 
                 if exc.returncode != 1:  # --no-index returns 1 when there are differences.
                     raise
                 patches.append(exc.stdout)
-        return {"diff": "".join(patches)}
+        return {"is_git_repo": True, "diff": "".join(patches)}
     except (OSError, subprocess.SubprocessError, SandboxUnavailableError) as exc:
+        if isinstance(exc, subprocess.CalledProcessError) and is_not_git_repository(exc.returncode, exc.stderr or ""):
+            return {"is_git_repo": False, "diff": ""}
         return {"diff": "", "error": str(getattr(exc, "stderr", None) or exc).strip()}
 
 
@@ -294,6 +301,7 @@ def workspace_git_worktree_payload(root: Path, *, workspace_root: Path | None = 
             )
 
         return {
+            "is_git_repo": True,
             "is_worktree": status.is_worktree,
             "current_path": str(status.current_path),
             "main_repo_path": str(status.main_repo_path) if status.main_repo_path else None,
@@ -303,6 +311,8 @@ def workspace_git_worktree_payload(root: Path, *, workspace_root: Path | None = 
             "worktrees": entries,
         }
     except Exception as exc:
+        if isinstance(exc, subprocess.CalledProcessError) and is_not_git_repository(exc.returncode, exc.stderr or ""):
+            return {"is_git_repo": False, "current_path": str(root), "worktrees": []}
         return {"current_path": str(root), "error": str(exc)}
 
 
@@ -337,7 +347,6 @@ async def switch_workspace_git_worktree_payload(current_root: Path, target_path:
 
         workspace_ctx = WorkspaceContext(target)
         metadata = await workspace_ctx.initialize()
-        set_active_workspace_root(metadata.root_path)
 
         store = RecentProjectStore()
         store.add(
@@ -345,6 +354,7 @@ async def switch_workspace_git_worktree_payload(current_root: Path, target_path:
             name=metadata.name,
             project_type=metadata.project_type,
         )
+        set_active_workspace_root(metadata.root_path)
 
         return {
             "success": True,

@@ -788,6 +788,7 @@ describe("providerTrace helpers", () => {
       provider: "openai_responses",
       model: "gpt-5.5",
       finish_reason: "stop",
+      request_id: "req-export-roundtrip",
       usage: { input_tokens: 4, output_tokens: 2 },
       output_items: [{ type: "message", index: 0, phase: "final_answer" }],
       provider_timeline: [{ event: "response.completed", output_items_len: 1 }],
@@ -800,6 +801,7 @@ describe("providerTrace helpers", () => {
       provider: "openai_responses",
       model: "gpt-5.5",
       finish_reason: "stop",
+      request_id: "req-export-roundtrip",
       request_summary: { instructions_hash: "prompt-hash" },
     });
     expect(providerTracePayloadFromExport({ kind: "unknown" })).toBeNull();

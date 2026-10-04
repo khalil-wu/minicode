@@ -16,7 +16,7 @@ from backend.agent.nested_tool_events import publish_tool_event
 from backend.agent.state import AgentState
 from backend.agent.tool_batch_runner import ToolBatchRunner
 from backend.agent.turn_kernel import TurnKernel
-from backend.async_cleanup import CANCELLATION_DRAIN_TIMEOUT_SECONDS, cancel_and_drain_receipt, to_thread_cancel_safe
+from backend.async_cleanup import CANCELLATION_DRAIN_TIMEOUT_SECONDS, cancel_and_drain_receipt
 from backend.llm.base import ToolCallEvent
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import ToolCallSource, ToolExecutionContext
@@ -217,11 +217,17 @@ class CodeExecutionRuntime:
                     if request["kind"] == "timer":
                         timers[request["id"]] = asyncio.create_task(timer(request))
                     elif request["kind"] == "cancel_timer" and request["id"] in timers:
-                        timers[request["id"]].cancel()
+                        cancelled_timer = timers.pop(request["id"])
+                        cancelled_timer.cancel()
+                        await asyncio.gather(cancelled_timer, return_exceptions=True)
                 for task in list(jobs):
                     if task.done():
                         task.result()
                         jobs.remove(task)
+                for timer_id, task in list(timers.items()):
+                    if task.done():
+                        task.result()
+                        del timers[timer_id]
                 if packet["more_jobs"]:
                     packet = await vm.step()
                     continue
@@ -235,14 +241,16 @@ class CodeExecutionRuntime:
                         if waiting in done:
                             replies = [waiting.result()]
                         else:
-                            for task in done: task.result()
+                            for task in done:
+                                task.result()
                             replies = []
                     finally:
                         waiting.cancel()
                         await asyncio.gather(waiting, return_exceptions=True)
                 else:
                     replies = []
-                while not cell.replies.empty(): replies.append(cell.replies.get_nowait())
+                while not cell.replies.empty():
+                    replies.append(cell.replies.get_nowait())
                 packet = await vm.step("deliver", replies)
         except asyncio.CancelledError:
             terminal_status = "cancelled"
@@ -260,7 +268,8 @@ class CodeExecutionRuntime:
                     terminal_status = "failed"
                     cell.error = "Nested tool cleanup remains pending; inspect execution evidence before retrying."
             finally:
-                if vm is not None: vm.close()
+                if vm is not None:
+                    vm.close()
                 cell.status = terminal_status
                 self.store.receipts[cell.id] = CodeCellReceipt(cell.id, cell.status, cell.error, cell.output, cell.hook_context, cell.discarded_calls)
                 cell.changed.set()

@@ -4,6 +4,7 @@ import logging
 import os
 from collections.abc import Mapping
 from dataclasses import replace
+from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from backend.config import (
@@ -212,7 +213,7 @@ def build_provider_adapter(
         if spec.small_fast_model and spec.small_fast_model != model_id:
             cost_models.append(model_runtime.get_model(normalized, spec.small_fast_model))
         adapter._request_model_costs = {
-            model.id: dict(model.cost)
+            model.id: deepcopy(dict(model.cost))
             for model in cost_models if model is not None and model.cost
         }
         return adapter

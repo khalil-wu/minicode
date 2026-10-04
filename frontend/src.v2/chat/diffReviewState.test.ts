@@ -11,12 +11,12 @@ describe("initialDiffReviewPatch", () => {
     expect(initialDiffReviewPatch(files, "b.ts")).toBe("patch-b");
   });
 
-  it("falls back to the first available patch", () => {
+  it("keeps an empty selected-file patch instead of showing another file", () => {
     const files = [
       { path: "a.ts", patch: "" },
       { path: "b.ts", patch: "patch-b" },
     ];
 
-    expect(initialDiffReviewPatch(files, "a.ts")).toBe("patch-b");
+    expect(initialDiffReviewPatch(files, "a.ts")).toBe("");
   });
 });

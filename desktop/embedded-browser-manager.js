@@ -19,6 +19,7 @@ let isOwnedPreviewUrl = () => false;
 let lookupHostAddresses = (host) => dns.lookup(host, { all: true, verbatim: true });
 let views = new Map();
 let activeViewId = null;
+const pendingNavigations = new Map();
 const configuredSessions = new WeakSet();
 const entriesByWebContentsId = new Map();
 const DOWNLOAD_POLICIES = new Set(["block", "ask", "allow"]);
@@ -592,12 +593,15 @@ function recentLogsWithin(entries, maxChars) {
 }
 
 async function waitForSelector(entry, selector, timeoutMs) {
-  const deadline = Date.now() + Math.max(0, Math.min(Number(timeoutMs) || 5000, 30000));
-  while (Date.now() <= deadline) {
+  const timeout = timeoutMs == null ? 5000 : Number(timeoutMs);
+  if (!Number.isFinite(timeout)) throw new Error("timeout_ms must be a finite number");
+  const deadline = Date.now() + Math.max(0, Math.min(timeout, 30000));
+  while (true) {
     if (await evaluateInEntry(entry, `Boolean(document.querySelector(${scriptValue(selector)}))`)) return true;
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(150, remaining)));
   }
-  return false;
 }
 
 const ELEMENT_PICKER_SCRIPT = `new Promise((resolve) => {
@@ -839,53 +843,61 @@ async function create(payload = {}) {
   const conversationId = conversationIdFrom(payload);
   const requestedId = assertViewId(id);
   let entry = views.get(requestedId);
-  if (entry && entry.conversationId !== conversationId) {
+  const claimedOwner = entry?.conversationId || pendingNavigations.get(requestedId)?.conversationId;
+  if (claimedOwner && claimedOwner !== conversationId) {
     throw new Error("Embedded browser tab id belongs to another conversation.");
   }
-  const navigation = await confirmNavigationUrl(url, conversationId, entry);
-  const requestedUrl = navigation.url;
-  // Approval/DNS can yield while another create claims this id or closes it.
-  entry = views.get(requestedId);
-  if (entry && entry.conversationId !== conversationId) {
-    throw new Error("Embedded browser tab id belongs to another conversation.");
+  const request = { conversationId };
+  pendingNavigations.set(requestedId, request);
+  const assertCurrent = () => {
+    if (pendingNavigations.get(requestedId) !== request) throw new Error("Browser navigation was cancelled.");
+  };
+  try {
+    const navigation = await confirmNavigationUrl(url, conversationId, entry);
+    assertCurrent();
+    const requestedUrl = navigation.url;
+    // Approval/DNS can yield; only this still-owned request may publish a view.
+    entry = views.get(requestedId);
+    if (!entry) {
+      const mainWindow = getMainWindow();
+      if (!mainWindow || mainWindow.isDestroyed()) throw new Error("Main window is unavailable.");
+      const view = new WebContentsView({
+        webPreferences: {
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+          partition: DEFAULT_PARTITION,
+          spellcheck: true,
+        },
+      });
+      const approvedPrivateOrigins = new Set();
+      entry = {
+        id: requestedId,
+        conversationId,
+        view,
+        url: requestedUrl,
+        title: "新标签页",
+        faviconUrl: "",
+        consoleLogs: [],
+        networkLogs: [],
+        approvedPrivateOrigins,
+        pendingNavigationApprovals: new Set(),
+      };
+      views.set(requestedId, entry);
+      entriesByWebContentsId.set(view.webContents.id, entry);
+      configureGuestSession(view.webContents.session);
+      attachViewEvents(entry);
+      mainWindow.contentView.addChildView(view);
+    }
+    if (navigation.privateNetworkApproved) {
+      entry.approvedPrivateOrigins.add(normalizeOrigin(requestedUrl));
+    }
+    await entry.view.webContents.loadURL(requestedUrl);
+    assertCurrent();
+    return navigationState(entry, "updated");
+  } finally {
+    if (pendingNavigations.get(requestedId) === request) pendingNavigations.delete(requestedId);
   }
-  if (!entry) {
-    const mainWindow = getMainWindow();
-    if (!mainWindow || mainWindow.isDestroyed()) throw new Error("Main window is unavailable.");
-    const view = new WebContentsView({
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        partition: DEFAULT_PARTITION,
-        spellcheck: true,
-      },
-    });
-    const approvedPrivateOrigins = new Set();
-    entry = {
-      id: requestedId,
-      conversationId,
-      view,
-      url: requestedUrl,
-      title: "新标签页",
-      faviconUrl: "",
-      consoleLogs: [],
-      networkLogs: [],
-      approvedPrivateOrigins,
-      pendingNavigationApprovals: new Set(),
-    };
-    views.set(requestedId, entry);
-    entriesByWebContentsId.set(view.webContents.id, entry);
-    configureGuestSession(view.webContents.session);
-    attachViewEvents(entry);
-    mainWindow.contentView.addChildView(view);
-  }
-  if (navigation.privateNetworkApproved) {
-    entry.approvedPrivateOrigins.add(normalizeOrigin(requestedUrl));
-  }
-  activate(requestedId, conversationId);
-  await entry.view.webContents.loadURL(requestedUrl);
-  return navigationState(entry, "updated");
 }
 
 function setBounds(payload = {}) {
@@ -904,18 +916,7 @@ function setBounds(payload = {}) {
   return true;
 }
 
-async function navigate(payload = {}) {
-  const { id, url } = payload;
-  const conversationId = conversationIdFrom(payload);
-  const requestedId = assertViewId(id);
-  const entry = views.get(requestedId);
-  if (!entry) return create({ id: requestedId, url, conversation_id: conversationId });
-  if (entry.conversationId !== conversationId) throw new Error("Embedded browser tab belongs to another conversation.");
-  const { url: requestedUrl } = await confirmNavigationUrl(url, conversationId, entry);
-  activate(requestedId, conversationId);
-  await entry.view.webContents.loadURL(requestedUrl);
-  return navigationState(entry, "updated");
-}
+const navigate = create;
 
 async function clearSiteData(payload = {}) {
   const entry = selectEntry(payload.id, conversationIdFrom(payload));
@@ -988,8 +989,11 @@ async function executeControlCommand(payload = {}) {
   }
   if (action === "get_console_logs") return { ok: true, action, target: targetState(entry), value: recentLogsWithin(entry.consoleLogs, payload.max_chars) };
   if (action === "get_network_logs") return { ok: true, action, target: targetState(entry), value: recentLogsWithin(entry.networkLogs, payload.max_chars) };
-  if (action === "pick_element") return { ok: true, action, target: targetState(entry), value: await evaluateInEntry(entry, ELEMENT_PICKER_SCRIPT) };
-  if (action === "pick_region") return { ok: true, action, target: targetState(entry), value: await evaluateInEntry(entry, REGION_PICKER_SCRIPT) };
+  if (action === "pick_element" || action === "pick_region") {
+    webContents.focus();
+    const value = await evaluateInEntry(entry, action === "pick_element" ? ELEMENT_PICKER_SCRIPT : REGION_PICKER_SCRIPT);
+    return { ok: true, action, target: targetState(entry), value };
+  }
   if (action === "click") {
     const selector = String(payload.selector || "").trim();
     if (selector) {
@@ -1046,6 +1050,7 @@ function runNavigationAction(payload = {}) {
 
 function closeEntry(entry) {
   const requestedId = entry.id;
+  pendingNavigations.delete(requestedId);
   const mainWindow = getMainWindow();
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.contentView.removeChildView(entry.view); } catch { /* already detached */ }
@@ -1058,12 +1063,23 @@ function closeEntry(entry) {
 }
 
 function close(payload = {}) {
-  const entry = selectEntry(payload.id, conversationIdFrom(payload));
+  const owner = conversationIdFrom(payload);
+  const id = assertViewId(payload.id);
+  const pending = pendingNavigations.get(id);
+  if (pending && !views.has(id)) {
+    if (pending.conversationId !== owner) throw new Error("Embedded browser tab belongs to another conversation.");
+    pendingNavigations.delete(id);
+    return true;
+  }
+  const entry = selectEntry(id, owner);
   return closeEntry(entry);
 }
 
 function closeConversation(conversationId) {
   const owner = requireConversationId(conversationId);
+  for (const [id, request] of pendingNavigations) {
+    if (request.conversationId === owner) pendingNavigations.delete(id);
+  }
   let closed = 0;
   for (const entry of Array.from(views.values())) {
     if (entry.conversationId !== owner) continue;
@@ -1073,6 +1089,7 @@ function closeConversation(conversationId) {
 }
 
 function disposeAll() {
+  pendingNavigations.clear();
   for (const entry of Array.from(views.values())) closeEntry(entry);
   activeViewId = null;
 }

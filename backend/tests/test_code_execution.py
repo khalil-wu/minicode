@@ -132,7 +132,7 @@ async def run_model(tmp_path, model, tools=(), *, mode="bypass", approval=None, 
     session = session or AgentSession(llm=model, tool_registry=registry, artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
         permission_checker=PermissionChecker(PermissionSettings(require_confirm=[tool.name for tool in tools if not tool.read_only]), tmp_path),
         agent_settings=settings, token_budget=budget, context_builder=builder, approval_handler=approval)
-    runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", swarm_store_dir=tmp_path / "swarm", enable_lease_heartbeat=False)
+    runtime = AgentRuntime(metrics_file=tmp_path / "runtime/metrics.jsonl", swarm_store_dir=tmp_path / "runtime/swarm", enable_lease_heartbeat=False)
     journal = ExecutionJournal("code", base_dir=tmp_path / "journals")
     run_context = RunContext(agent_runtime=runtime, execution_journal=journal)
     state = AgentState(user_message="Complete the fixture", conversation_id="code-conv", workspace_root=tmp_path)
@@ -149,6 +149,20 @@ async def run_model(tmp_path, model, tools=(), *, mode="bypass", approval=None, 
         session.artifact_store.shutdown()
         runtime.close(release_lease=True)
     return state, builder, journal, events, run_context
+
+
+def test_clear_timeout_keeps_awaited_tool_running(tmp_path):
+    async def scenario():
+        tool = FixtureTool(delay=.01, count=1)
+        model = ScriptModel("const timer = setTimeout(() => text('unexpected timer'), 10000); clearTimeout(timer); const result = await tools.rows({}); text(result.structured_content.rows.length);")
+        state, _, _, _, _ = await run_model(tmp_path, model, [tool])
+        assert state.terminal_status == "completed", model.reports
+        assert model.reports[-1]["status"] == "completed", model.reports
+        assert model.reports[-1]["output"] == ["1"]
+        assert tool.executions == 1
+        assert tool.finished.is_set()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("streamed", [False, True])

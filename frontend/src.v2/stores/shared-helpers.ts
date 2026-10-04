@@ -46,6 +46,7 @@ export const LS = {
     dockCollapsed: "minicode.layout.dock-collapsed",
     dockTab: "minicode.layout.dock-tab",
     panelSlots: "minicode.layout.panel-slots",
+    workbench: "minicode.layout.workbench",
   },
   permissionMode: "minicode.composer.permissionMode",
   agentMode: "minicode.composer.agentMode",
@@ -739,6 +740,7 @@ export const mergeResumeToolCalls = (
 export function conversationResetPayload(): Record<string, unknown> {
   return {
     diffReview: null,
+    gitChanges: { workingTree: [], staged: [], untracked: [], loading: false },
     previewArtifact: null,
     livePreviewUrl: null,
     previewServers: [],
@@ -747,6 +749,7 @@ export function conversationResetPayload(): Record<string, unknown> {
     previewVerification: null,
     previewOwnerConversationId: null,
     terminalSessions: [],
+    mcpServers: [],
     activeTerminalSessionId: null,
     rightStackTab: "tasks",
     rightPanelOpen: false,

@@ -6,6 +6,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from backend.agent.provider_protocol import provider_raw_for_projection
+from backend.agent.state import ToolCallRecord
 from backend.conversations.public_projection import project_public_tool_call
 from backend.secret_redaction import redact_secrets
 
@@ -587,6 +588,8 @@ class AgentTurnState:
             updated_record['errorInfo'] = data.get('error_info')
         if isinstance(data.get('recoverable'), bool):
             updated_record['recoverable'] = data.get('recoverable')
+        if isinstance(data.get('cleanup_receipt'), dict):
+            updated_record['cleanupReceipt'] = dict(data['cleanup_receipt'])
         for source_key, target_key in (
             ('source_url', 'sourceUrl'),
             ('extraction_status', 'extractionStatus'),
@@ -595,7 +598,7 @@ class AgentTurnState:
         ):
             if data.get(source_key):
                 updated_record[target_key] = data.get(source_key)
-        updated_record['finishedAt'] = self._now_ms()
+        updated_record['finishedAt'] = data.get('completed_at_ms') or self._now_ms()
         self._replace_tool_call_record(project_public_tool_call(updated_record))
 
         superseded_ids = {
@@ -639,6 +642,20 @@ class AgentTurnState:
         }
         self._citations.append(citation)
         return citation
+
+    def reconcile_committed_tool_results(self, records: list[ToolCallRecord]) -> None:
+        """Complete only this turn's known pending IDs from actual execution receipts."""
+        for committed in records:
+            if not committed.tool_call_id or not committed.result_payload:
+                continue
+            existing = self._find_tool_call_record(committed.tool_call_id)
+            if existing is None or existing.get('status') not in {'running', 'pending'}:
+                continue
+            if (existing.get('name') != committed.tool_name
+                    or not existing.get('turnId') or existing['turnId'] != committed.turn_id
+                    or existing.get('iterationId', '') != committed.iteration_id):
+                continue
+            self.record_tool_result(committed.result_payload)
 
     def record_provider_citations(self, value: Any) -> list[dict[str, Any]]:
         """Promote already-sanitized provider locations to durable citations."""

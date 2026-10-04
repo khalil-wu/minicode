@@ -14,9 +14,7 @@ Web 工具（DESIGN.md §8.2）。
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
-import os
 import re
 import time
 import urllib.parse
@@ -29,9 +27,7 @@ from typing import Any
 from backend.artifact.store import ArtifactStore
 from backend.permissions.context import ToolExecutionContext
 from backend.permissions.network import (
-    actual_peer_network_error as _network_actual_peer_network_error,
     assess_network_url,
-    connected_peer_ip,
     snapshot_response_extensions,
 )
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
@@ -40,6 +36,20 @@ from backend.llm.errors import (
     classify_llm_error,
     llm_error_raw,
     sanitize_llm_error_message,
+)
+from backend.tools.web_support import (
+    public_http_transport,
+    _actual_peer_network_error,
+    _assert_response_length_within_limit,
+    _decoded_response_headers,
+    _detect_proxy,
+    _is_hostile_fetch_url,
+    _is_permitted_redirect,
+    _normalize_domain_list,
+    _strip_www,
+    _url_has_credentials,
+    _wrap_untrusted_content,
+    _read_response_bytes,
 )
 logger = logging.getLogger(__name__)
 
@@ -59,21 +69,6 @@ class _WebFetchCacheEntry:
     stored_at: float
     size_bytes: int
 
-
-from backend.tools.web_support import (
-    public_http_transport,
-    _actual_peer_network_error,
-    _assert_response_length_within_limit,
-    _decoded_response_headers,
-    _detect_proxy,
-    _is_hostile_fetch_url,
-    _is_permitted_redirect,
-    _normalize_domain_list,
-    _strip_www,
-    _url_has_credentials,
-    _wrap_untrusted_content,
-
-    _read_response_bytes,)
 
 class WebFetchTool(BaseTool):
     """抓取 URL 内容，返回清洗后正文 + 来源元数据。"""
@@ -118,7 +113,7 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
         self._client = None
         self._unrestricted_client = None
         self._proxy_url: str | None = None
-        self._url_cache: OrderedDict[str, _WebFetchCacheEntry] = OrderedDict()
+        self._url_cache: OrderedDict[tuple[str, bool], _WebFetchCacheEntry] = OrderedDict()
         self._url_cache_size_bytes = 0
 
     async def _extract_with_prompt(self, text: str, prompt: str, context) -> str:
@@ -162,15 +157,16 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
             )
         return await llm.simple_chat(messages)
 
-    def _cached_content(self, url: str) -> _WebFetchCacheEntry | None:
-        entry = self._url_cache.get(url)
+    def _cached_content(self, url: str, *, enforce_network: bool) -> _WebFetchCacheEntry | None:
+        key = (url, enforce_network)
+        entry = self._url_cache.get(key)
         if entry is None:
             return None
         if time.monotonic() - entry.stored_at >= WEB_FETCH_CACHE_TTL_SECONDS:
-            self._url_cache.pop(url, None)
+            self._url_cache.pop(key)
             self._url_cache_size_bytes -= entry.size_bytes
             return None
-        self._url_cache.move_to_end(url)
+        self._url_cache.move_to_end(key)
         return entry
 
     def _cache_content(
@@ -180,12 +176,14 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
         content: str,
         extraction_status: str,
         artifact_type: str,
+        enforce_network: bool,
     ) -> None:
-        previous = self._url_cache.pop(url, None)
+        key = (url, enforce_network)
+        previous = self._url_cache.pop(key, None)
         if previous is not None:
             self._url_cache_size_bytes -= previous.size_bytes
         size_bytes = max(1, len(content.encode("utf-8")))
-        self._url_cache[url] = _WebFetchCacheEntry(
+        self._url_cache[key] = _WebFetchCacheEntry(
             content=content,
             extraction_status=extraction_status,
             artifact_type=artifact_type,
@@ -193,7 +191,7 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
             size_bytes=size_bytes,
         )
         self._url_cache_size_bytes += size_bytes
-        self._url_cache.move_to_end(url)
+        self._url_cache.move_to_end(key)
         while self._url_cache_size_bytes > WEB_FETCH_CACHE_MAX_BYTES:
             _, evicted = self._url_cache.popitem(last=False)
             self._url_cache_size_bytes -= evicted.size_bytes
@@ -363,20 +361,20 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
                 "URL must not embed credentials (username:password). Remove them and retry."
             )
 
-        permission = getattr(context, "permission", None)
-        if getattr(permission, "mode", None) != "bypass":
+        enforce_network = context is None or context.permission.mode != "bypass"
+        if enforce_network:
             assessment = assess_network_url(url)
             if not assessment.allowed:
                 return self._error_result(
                     f"Network target requires approval or is blocked: {assessment.reason}"
                 )
 
-        cached = self._cached_content(url)
+        cached = self._cached_content(url, enforce_network=enforce_network)
         if cached is None:
             try:
                 resp, redirect_url = await self._get_with_permitted_redirects(
                     url,
-                    enforce_network=getattr(permission, "mode", None) != "bypass",
+                    enforce_network=enforce_network,
                 )
                 if resp is None:
                     # Cross-host redirect: return the target for the model to re-fetch
@@ -444,6 +442,7 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
                 content=cleaned,
                 extraction_status=status,
                 artifact_type=artifact_type,
+                enforce_network=enforce_network,
             )
         else:
             cleaned = cached.content

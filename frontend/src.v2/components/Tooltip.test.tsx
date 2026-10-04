@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { Tip } from "./Tooltip";
 
@@ -14,7 +14,7 @@ it("escapes a clipping pane, stays in the viewport and follows its trigger on re
   });
   render(<div style={{ overflow: "hidden", width: 24 }}><Tip content="完整提示"><button>主题</button></Tip></div>);
   const trigger = screen.getByRole("button", { name: "主题" });
-  fireEvent.focus(trigger);
+  act(() => trigger.focus());
   const hint = screen.getByText("完整提示");
   expect(hint.parentElement).toBe(document.body);
   expect(Number.parseFloat(hint.style.left) + 140).toBeLessThanOrEqual(window.innerWidth - 8);
@@ -36,5 +36,17 @@ it("dismisses a pointer hint with Escape without consuming the enclosing surface
   expect(screen.queryByText("关闭提示")).not.toBeNull();
   fireEvent.keyDown(trigger, { key: "Escape" });
   expect(screen.queryByText("关闭提示")).toBeNull();
+  expect(escape).toHaveBeenCalledOnce();
+});
+it("dismisses a keyboard hint first while keeping focus and the enclosing drawer open", () => {
+  const escape = vi.fn();
+  render(<div onKeyDown={escape}><Tip content="Keyboard hint"><button>Action</button></Tip></div>);
+  const trigger = screen.getByRole("button", { name: "Action" });
+  act(() => trigger.focus());
+  fireEvent.keyDown(trigger, { key: "Escape" });
+  expect(screen.queryByText("Keyboard hint")).toBeNull();
+  expect(escape).not.toHaveBeenCalled();
+  expect(document.activeElement).toBe(trigger);
+  fireEvent.keyDown(trigger, { key: "Escape" });
   expect(escape).toHaveBeenCalledOnce();
 });

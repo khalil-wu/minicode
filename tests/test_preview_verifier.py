@@ -27,7 +27,7 @@ async def test_preview_verifier_reports_connection_error():
 async def test_wait_until_ready_polls_until_success(monkeypatch):
     calls = 0
 
-    async def fake_verify(url: str, timeout: float = 8.0):
+    async def fake_verify(url: str, timeout: float = 8.0, *, process=None):
         nonlocal calls
         calls += 1
         return PreviewVerification(

@@ -7,18 +7,20 @@ import { fsReadFileInfo, fsSearchFiles, isDesktop } from "../desktop/runtime";
 import { compareWriteWorkspaceFile, readWorkspaceFile, searchWorkspaceFiles } from "../protocol/workspace";
 import { pushToast } from "../overlays/ToastContainer";
 import { useAppStore } from "../stores";
-import { clearEditorWorkspaceBufferCacheForTests, persistEditorTabs } from "../stores/shared-helpers";
+import { clearEditorWorkspaceBufferCacheForTests, editorStateForWorkspace, persistEditorTabs } from "../stores/shared-helpers";
 import { EditorPanel } from "./EditorPanel";
+import type { CodeSelectionRange } from "../stores/types";
 
 const editorMocks = vi.hoisted(() => ({
   actions: [] as Array<{ run: (editor: unknown) => void }>,
   showConfirm: vi.fn(),
+  editOperations: [] as string[],
 }));
 
 vi.mock("../overlays/DialogService", () => ({ showConfirm: editorMocks.showConfirm }));
 vi.mock("./PdfAttachmentPreview", () => ({
-  PdfAttachmentPreview: ({ url, name }: { url: string; name: string }) => (
-    <div data-testid="pdf-preview" data-url={url} aria-label={`PDF 预览 ${name}`} />
+  PdfAttachmentPreview: ({ url, name, onRetry }: { url: string; name: string; onRetry?: () => void }) => (
+    <div data-testid="pdf-preview" data-url={url} aria-label={`PDF 预览 ${name}`}>{onRetry && <button onClick={onRetry}>重试 PDF 预览</button>}</div>
   ),
 }));
 
@@ -50,24 +52,89 @@ vi.mock("@monaco-editor/react", async () => {
       onMount: (editor: unknown) => void;
       options?: { readOnly?: boolean };
     }) {
+      const inputRef = ReactModule.useRef<HTMLTextAreaElement>(null);
+      const propsRef = ReactModule.useRef({ value, path });
+      propsRef.current = { value, path };
+      const selections = ReactModule.useRef(new Map<string, { start: number; end: number }>());
+      const listeners = ReactModule.useRef({ selection: () => {}, model: () => {}, content: () => {} });
+      const positionAt = (offset: number) => {
+        const before = propsRef.current.value.slice(0, offset).split("\n");
+        return { lineNumber: before.length, column: before[before.length - 1].length + 1 };
+      };
+      const offsetAt = (lineNumber: number, column: number) => propsRef.current.value.split("\n")
+        .slice(0, lineNumber - 1).reduce((offset, line) => offset + line.length + 1, 0) + column - 1;
       ReactModule.useEffect(() => {
         let dispose: () => void;
         onMount({
           addAction: (action: { run: (editor: unknown) => void }) => editorMocks.actions.push(action),
           focus: vi.fn(),
+          pushUndoStop: () => editorMocks.editOperations.push("stop"),
+          executeEdits: (source: string, edits: Array<{ range: CodeSelectionRange; text: string }>) => {
+            editorMocks.editOperations.push(source);
+            const edit = edits[0];
+            onChange?.(propsRef.current.value.slice(0, offsetAt(edit.range.startLineNumber, edit.range.startColumn)) + edit.text
+              + propsRef.current.value.slice(offsetAt(edit.range.endLineNumber, edit.range.endColumn)));
+          },
+          getSelection: () => {
+            const start = positionAt(inputRef.current!.selectionStart);
+            const end = positionAt(inputRef.current!.selectionEnd);
+            return { startLineNumber: start.lineNumber, startColumn: start.column, endLineNumber: end.lineNumber, endColumn: end.column };
+          },
+          setSelection: (range: CodeSelectionRange) => inputRef.current!.setSelectionRange(offsetAt(range.startLineNumber, range.startColumn), offsetAt(range.endLineNumber, range.endColumn)),
+          getPosition: () => {
+            const before = propsRef.current.value.slice(0, inputRef.current!.selectionEnd).split("\n");
+            return { lineNumber: before.length, column: before[before.length - 1].length + 1 };
+          },
+          getModel: () => ({
+            uri: { path: decodeURIComponent(new URL(propsRef.current.path).pathname) },
+            getValueInRange: (range: CodeSelectionRange) => propsRef.current.value.slice(offsetAt(range.startLineNumber, range.startColumn), offsetAt(range.endLineNumber, range.endColumn)),
+            getLineCount: () => propsRef.current.value.split("\n").length,
+            getLineMaxColumn: (line: number) => propsRef.current.value.split("\n")[line - 1].length + 1,
+            getEOL: () => "\n",
+          }),
           onDidChangeCursorPosition: vi.fn(),
+          onDidChangeCursorSelection: (listener: () => void) => { listeners.current.selection = listener; },
+          onDidChangeModel: (listener: () => void) => { listeners.current.model = listener; },
+          onDidChangeModelContent: (listener: () => void) => { listeners.current.content = listener; },
           onDidDispose: (listener: () => void) => { dispose = listener; },
         });
         return () => dispose?.();
       }, []);
+      ReactModule.useEffect(() => {
+        const selection = selections.current.get(path) ?? { start: 0, end: 0 };
+        inputRef.current!.setSelectionRange(selection.start, selection.end);
+        listeners.current.model();
+      }, [path]);
+      ReactModule.useEffect(() => { listeners.current.content(); }, [value]);
       return ReactModule.createElement("textarea", {
+        ref: inputRef,
         "data-testid": "monaco-editor",
         "data-model-path": path,
         value,
         readOnly: options?.readOnly,
         onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => onChange?.(event.currentTarget.value),
+        onSelect: (event: React.SyntheticEvent<HTMLTextAreaElement>) => {
+          selections.current.set(path, { start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd });
+          listeners.current.selection();
+        },
       });
     },
+  };
+});
+
+vi.mock("./LiveMarkdownEditor", async () => {
+  const ReactMarkdown = (await import("react-markdown")).default;
+  const remarkGfm = (await import("remark-gfm")).default;
+  const Monaco = (await import("@monaco-editor/react")).default;
+  return {
+    LiveMarkdownEditor: (props: {
+      documentId: string; value: string; readOnly: boolean;
+      components: import("react-markdown").Components; urlTransform: (url: string) => string;
+      onChange: (value: string) => void; onMount: (editor: unknown) => void;
+    }) => <div data-testid="live-markdown-editor">
+      <Monaco value={props.value} path={`minicode-editor://buffer/${props.documentId}`} onChange={props.onChange} onMount={props.onMount} options={{ readOnly: props.readOnly }} />
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={props.components} urlTransform={props.urlTransform}>{props.value}</ReactMarkdown>
+    </div>,
   };
 });
 
@@ -83,6 +150,12 @@ vi.mock("monaco-editor/languages/definitions/css/register.js", () => ({}));
 vi.mock("monaco-editor/languages/definitions/html/register.js", () => ({}));
 vi.mock("monaco-editor/languages/definitions/markdown/register.js", () => ({}));
 vi.mock("monaco-editor/languages/definitions/python/register.js", () => ({}));
+vi.mock("./monacoLanguageServices", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./monacoLanguageServices")>(),
+  configureMiniCodeMonacoWorkers: vi.fn(),
+  loadMiniCodeLanguageServices: vi.fn(async () => {}),
+  registerMiniCodeEditorOpener: vi.fn(() => ({ dispose: vi.fn() })),
+}));
 
 vi.mock("../desktop/runtime", () => ({
   desktop: vi.fn(() => null),
@@ -104,6 +177,7 @@ describe("EditorPanel", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     editorMocks.actions.length = 0;
+    editorMocks.editOperations.length = 0;
     clearEditorWorkspaceBufferCacheForTests();
     localStorage.clear();
     vi.mocked(isDesktop).mockReturnValue(false);
@@ -122,12 +196,28 @@ describe("EditorPanel", () => {
       panelSlots: [{ id: "editor", kind: "editor", label: "Editor", focused: true }],
       editorTabs: [],
       activeTabPath: null,
+      sideChatOpen: false,
+      sideChatPendingContext: null,
+      sideChats: {},
     });
   });
 
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+  });
+
+  it("isolates chat insertion from neighboring editor input with native undo stops", async () => {
+    vi.mocked(readWorkspaceFile).mockResolvedValue({ path: "main.ts", content: "before after", content_hash: "original" });
+    useAppStore.getState().openEditorFile("main.ts", "main.ts", { exact: true });
+    render(<EditorPanel />);
+    const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    editor.setSelectionRange(7, 7);
+    const event = new CustomEvent("editor:insert-text", { detail: { text: "INSERT " } });
+    act(() => window.dispatchEvent(event));
+    expect(editor.value).toBe("before INSERT after");
+    expect(editorMocks.editOperations).toEqual(["stop", "chat-code-insert", "stop"]);
+    expect(event.detail.handled).toBe(true);
   });
 
   it("reports basename resolution failures and can open the file when the service recovers", async () => {
@@ -179,7 +269,7 @@ describe("EditorPanel", () => {
     expect(screen.getByText("从左侧项目文件或搜索中打开工作区文件。")).toBeTruthy();
   });
 
-  it("opens Markdown files in edit mode by default and renders through the Markdown mode switch", async () => {
+  it("opens Markdown as a single live editing surface without an edit/preview mode switch", async () => {
     useAppStore.setState({
       editorTabs: [{
         id: "editor-fixture-1",
@@ -196,17 +286,17 @@ describe("EditorPanel", () => {
     render(<EditorPanel />);
 
     expect(await screen.findByTestId("monaco-editor")).toBeTruthy();
-    expect(screen.getByRole("tablist", { name: "Markdown 视图模式" })).toBeTruthy();
+    expect(screen.getByTestId("live-markdown-editor")).toBeTruthy();
+    expect(screen.queryByRole("tablist", { name: "Markdown 视图模式" })).toBeNull();
+    const path = screen.getByRole("navigation", { name: "文件路径" });
+    expect(path.getAttribute("title")).toBe("docs/README.md");
 
-    fireEvent.click(screen.getByRole("tab", { name: "预览" }));
 
     expect(screen.getByRole("heading", { name: "Hello" })).toBeTruthy();
     const image = screen.getByRole("img", { name: "Logo" });
     expect(image.getAttribute("loading")).toBe("lazy");
     expect(image.getAttribute("src")).toContain("docs%2Fassets%2Flogo.svg");
     expect(new URL(image.getAttribute("src")!).searchParams.get("workspace_root")).toBe("C:\\projects\\demo");
-    expect(screen.getByRole("tab", { name: "编辑" }).getAttribute("aria-selected")).toBe("false");
-    expect(screen.getByRole("tab", { name: "预览" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("keeps malformed percent-encoded Markdown fragments renderable in preview", async () => {
@@ -224,7 +314,7 @@ describe("EditorPanel", () => {
     });
 
     render(<EditorPanel />);
-    fireEvent.click(await screen.findByRole("tab", { name: "预览" }));
+    await screen.findByTestId("live-markdown-editor");
 
     expect(screen.getByRole("heading", { name: "Broken%fragment" })).toBeTruthy();
     expect(screen.getByRole("link", { name: "Jump" }).getAttribute("href")).toContain("brokenfragment");
@@ -245,7 +335,7 @@ describe("EditorPanel", () => {
     });
 
     render(<EditorPanel />);
-    fireEvent.click(await screen.findByRole("tab", { name: "预览" }));
+    await screen.findByTestId("live-markdown-editor");
 
     const image = screen.getByRole("img", { name: "Logo" });
     expect(image.getAttribute("src")).toContain("docs%2Fassets%2Flogo.svg");
@@ -418,7 +508,7 @@ describe("EditorPanel", () => {
     expect(useAppStore.getState().editorTabs.find((tab) => tab.path === path)?.content).toBe("persisted web result");
   });
 
-  it("skips image-heavy Markdown previews instead of mounting every image", () => {
+  it("opens image-heavy Markdown directly in its live editable buffer", () => {
     const imageHeavyMarkdown = Array.from({ length: 90 }, (_, index) => `![image ${index}](./img-${index}.png)`).join("\n");
     useAppStore.setState({
       editorTabs: [{
@@ -435,14 +525,10 @@ describe("EditorPanel", () => {
 
     render(<EditorPanel />);
 
-    fireEvent.click(screen.getByRole("tab", { name: "预览" }));
 
-    expect(screen.getByText("已跳过 Markdown 预览")).toBeTruthy();
-    expect(screen.queryAllByRole("img")).toHaveLength(0);
-
-    fireEvent.click(screen.getByRole("button", { name: "编辑 Markdown" }));
-
-    expect(screen.getByTestId("monaco-editor")).toBeTruthy();
+    expect(screen.getByTestId("live-markdown-editor")).toBeTruthy();
+    expect((screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value).toBe(imageHeavyMarkdown);
+    expect(screen.queryByText("已跳过 Markdown 预览")).toBeNull();
   });
 
   it("opens PDF files with the shared PDF.js preview in the editor pane", async () => {
@@ -730,7 +816,7 @@ describe("EditorPanel", () => {
     });
     render(<EditorPanel />);
 
-    act(() => useAppStore.setState({ fileChanges: [{ path: "growing.txt", event: "modify", sequence: 1, timestamp: 1 }] }));
+    act(() => useAppStore.setState({ fileChanges: [{ path: "growing.txt", event: "modify", sequence: 1, timestamp: 1, workspaceRoot: useAppStore.getState().workingDirectory }] }));
 
     await screen.findByText("文件未加载到编辑器");
     expect(screen.queryByTestId("monaco-editor")).toBeNull();
@@ -822,6 +908,69 @@ describe("EditorPanel", () => {
     expect(useAppStore.getState().editorTabs[0]).toMatchObject({ path: "renamed/main.ts", content: "current", loading: false });
   });
 
+  it("navigates file tabs with arrow, Home and End keys while retaining their buffers", async () => {
+    const paths = ["first.ts", "second.ts", "third.ts"];
+    useAppStore.setState({
+      editorTabs: paths.map((path) => ({ id: path, path, content: path, original: path, loading: false })),
+      activeTabPath: paths[0],
+    });
+    render(<EditorPanel />);
+    await screen.findByTestId("monaco-editor");
+    expect(screen.getByRole("tablist", { name: "打开的文件" })).toBeTruthy();
+    const tab = (index: number) => screen.getByRole("tab", { name: paths[index], exact: true });
+    expect(tab(0).getAttribute("tabindex")).toBe("0");
+    expect(tab(1).getAttribute("tabindex")).toBe("-1");
+
+    fireEvent.keyDown(tab(0), { key: "ArrowLeft" });
+    expect(useAppStore.getState().activeTabPath).toBe(paths[2]);
+    expect(document.activeElement).toBe(tab(2));
+    fireEvent.keyDown(tab(2), { key: "ArrowRight" });
+    expect(document.activeElement).toBe(tab(0));
+    fireEvent.keyDown(tab(0), { key: "End" });
+    expect(tab(2).getAttribute("aria-selected")).toBe("true");
+    fireEvent.keyDown(tab(2), { key: "Home" });
+    expect(useAppStore.getState().activeTabPath).toBe(paths[0]);
+    expect(useAppStore.getState().editorTabs.map((item) => item.content)).toEqual(paths);
+  });
+
+  it("keeps unsaved content when middle-click close is cancelled and closes it only after confirmation", async () => {
+    useAppStore.setState({
+      editorTabs: [{ id: "dirty-tab", path: "draft.ts", content: "unsaved edit", original: "original", loading: false }],
+      activeTabPath: "draft.ts",
+    });
+    editorMocks.showConfirm.mockResolvedValue(false);
+    render(<EditorPanel />);
+    await screen.findByTestId("monaco-editor");
+    const tab = screen.getByRole("tab", { name: "draft.ts" });
+    expect(tab.getAttribute("aria-description")).toContain("未保存");
+    fireEvent(tab, new MouseEvent("auxclick", { button: 1, bubbles: true }));
+    await waitFor(() => expect(editorMocks.showConfirm).toHaveBeenCalledTimes(1));
+    expect(useAppStore.getState().editorTabs[0].content).toBe("unsaved edit");
+
+    editorMocks.showConfirm.mockResolvedValue(true);
+    fireEvent(tab, new MouseEvent("auxclick", { button: 1, bubbles: true }));
+    await waitFor(() => expect(useAppStore.getState().editorTabs).toHaveLength(0));
+  });
+
+  it("shows restored cursor positions for each model and hides them for media", async () => {
+    const content = "first line\nsecond line\nthird line";
+    useAppStore.setState({
+      editorTabs: ["first.ts", "second.ts", "image.png"].map((path) => ({ id: path, path, content, original: content, loading: false })),
+      activeTabPath: "first.ts",
+    });
+    render(<EditorPanel />);
+    const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    act(() => editor.focus());
+    fireEvent.select(editor, { target: { selectionStart: 13, selectionEnd: 13 } });
+    expect(screen.getByText("第 2 行，第 3 列")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "second.ts" }));
+    expect(screen.getByText("第 1 行，第 1 列")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "first.ts" }));
+    await waitFor(() => expect(screen.getByText("第 2 行，第 3 列")).toBeTruthy());
+    fireEvent.click(screen.getByRole("tab", { name: "image.png" }));
+    expect(screen.queryByText(/第 \d+ 行，第 \d+ 列/)).toBeNull();
+  });
+
   it("uses the currently selected file when the mounted Monaco action opens side chat", async () => {
     useAppStore.setState({
       editorTabs: ["first.ts", "second.ts"].map((path) => ({ id: path, path, content: "code", original: "code", loading: false })),
@@ -829,12 +978,126 @@ describe("EditorPanel", () => {
     });
     render(<EditorPanel />);
     await screen.findByTestId("monaco-editor");
-    fireEvent.click(screen.getByRole("button", { name: "second.ts", exact: true }));
+    fireEvent.click(screen.getByRole("tab", { name: "second.ts", exact: true }));
     act(() => editorMocks.actions[0].run({
-      getSelection: () => ({}),
+      getSelection: () => ({ startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 14 }),
       getModel: () => ({ getValueInRange: () => "selected code" }),
     }));
     expect(useAppStore.getState().sideChatPendingContext).toMatchObject({ text: "selected code", source: "second.ts" });
+  });
+
+  it("shows the workspace-relative path for a code file without exposing the workspace root", async () => {
+    const path = "C:\\projects\\demo\\src\\components\\App.tsx";
+    useAppStore.setState({
+      editorTabs: [{ id: "path-fixture", path, content: "export const App = () => null;", original: "export const App = () => null;", loading: false }],
+      activeTabPath: path,
+    });
+    render(<EditorPanel chrome="minimal" />);
+
+    await screen.findByTestId("monaco-editor");
+    const breadcrumb = screen.getByRole("navigation", { name: "文件路径" });
+    expect(breadcrumb.getAttribute("title")).toBe("src/components/App.tsx");
+    expect(breadcrumb.textContent).toBe("srccomponentsApp.tsx");
+    expect(breadcrumb.textContent).not.toContain("projects");
+  });
+
+  it("offers selection chat only for nonempty code and reads the current selection when clicked", async () => {
+    const code = "  const answer = 42;  ";
+    useAppStore.setState({
+      editorTabs: [{ id: "selection-fixture", path: "src/answer.ts", content: code, original: code, loading: false }],
+      activeTabPath: "src/answer.ts",
+    });
+    render(<EditorPanel />);
+    const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    expect(screen.queryByRole("button", { name: "询问选区" })).toBeNull();
+
+    act(() => editor.focus());
+    fireEvent.select(editor, { target: { selectionStart: 0, selectionEnd: 2 } });
+    expect(screen.queryByRole("button", { name: "询问选区" })).toBeNull();
+    fireEvent.select(editor, { target: { selectionStart: 2, selectionEnd: 7 } });
+    const ask = screen.getByRole("button", { name: "询问选区" });
+    editor.setSelectionRange(0, code.length);
+    fireEvent.click(ask);
+
+    expect(useAppStore.getState().sideChatPendingContext).toEqual({ text: code, source: "src/answer.ts", workspaceRoot: "C:\\projects\\demo",
+      range: { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: code.length + 1 } });
+    expect(useAppStore.getState().rightStackTab).toBe("sidechat");
+    expect(useAppStore.getState().editorTabs[0].content).toBe(code);
+    expect(useAppStore.getState().sideChats).toEqual({});
+  });
+
+  it("includes the complete last line when returning to a manually typed line-range reference", async () => {
+    const code = "first\nsecond\nthird\nfourth";
+    useAppStore.setState({ editorTabs: [{ id: "range-reference", path: "src/range.ts", content: code, original: code, loading: false }], activeTabPath: "src/range.ts" });
+    render(<EditorPanel />);
+    const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    act(() => useAppStore.getState().openEditorFile("src/range.ts", "range.ts", { exact: true, line: 2, endLine: 4 }));
+    await waitFor(() => expect([editor.selectionStart, editor.selectionEnd]).toEqual([code.indexOf("second"), code.length]));
+    expect(code.slice(editor.selectionStart, editor.selectionEnd)).toBe("second\nthird\nfourth");
+  });
+
+  it("follows selection changes across models without reusing the previous file's selection", async () => {
+    useAppStore.setState({
+      editorTabs: ["first.ts", "second.ts"].map((path) => ({ id: path, path, content: `const ${path.split(".")[0]} = 1;`, original: `const ${path.split(".")[0]} = 1;`, loading: false })),
+      activeTabPath: "first.ts",
+    });
+    render(<EditorPanel />);
+    const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    act(() => editor.focus());
+    fireEvent.select(editor, { target: { selectionStart: 0, selectionEnd: editor.value.length } });
+    expect(screen.getByRole("button", { name: "询问选区" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: "second.ts", exact: true }));
+    expect(screen.queryByRole("button", { name: "询问选区" })).toBeNull();
+    act(() => editor.focus());
+    fireEvent.select(editor, { target: { selectionStart: 0, selectionEnd: editor.value.length } });
+    fireEvent.click(screen.getByRole("button", { name: "询问选区" }));
+    expect(useAppStore.getState().sideChatPendingContext).toEqual({ text: "const second = 1;", source: "second.ts", workspaceRoot: "C:\\projects\\demo",
+      range: { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 18 } });
+
+    fireEvent.click(screen.getByRole("tab", { name: "first.ts", exact: true }));
+    expect(screen.getByRole("button", { name: "询问选区" })).toBeTruthy();
+    act(() => editor.focus());
+    fireEvent.select(editor, { target: { selectionStart: 0, selectionEnd: 0 } });
+    expect(screen.queryByRole("button", { name: "询问选区" })).toBeNull();
+  });
+
+  it("keeps generated tool results read-only while allowing search and selection questions", async () => {
+    const tab = { id: "readonly-selection-fixture", path: ".minicode/tool-result.txt", content: "generated output", original: "generated output", loading: false, readOnly: true };
+    useAppStore.setState({ editorTabs: [tab], activeTabPath: tab.path });
+    render(<EditorPanel />);
+    const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+
+    act(() => editor.focus());
+    fireEvent.select(editor, { target: { selectionStart: 0, selectionEnd: editor.value.length } });
+    expect(editor.readOnly).toBe(true);
+    expect(screen.getByRole("button", { name: "询问选区" })).toBeTruthy();
+    expect(screen.getByRole("navigation", { name: "文件路径" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "查找" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "询问选区" }));
+    expect(useAppStore.getState().sideChatPendingContext).toEqual({ text: "generated output", source: tab.path, workspaceRoot: "C:\\projects\\demo",
+      range: { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 17 } });
+    expect(useAppStore.getState().editorTabs[0].readOnly).toBe(true);
+  });
+
+  it("saves live Markdown source and reuses its selection in side chat", async () => {
+    const source = "# Title\n\nOriginal paragraph";
+    const updated = "# Updated\n\nChanged **paragraph**";
+    const tab = { id: "live-md-save", path: "docs/readme.md", content: source, original: source, loading: false, contentHash: "before" };
+    useAppStore.setState({ editorTabs: [tab], activeTabPath: tab.path });
+    vi.mocked(compareWriteWorkspaceFile).mockResolvedValue({ ok: true, file: { content: updated, content_hash: "after" } });
+    render(<EditorPanel />);
+    const input = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: updated } });
+    act(() => window.dispatchEvent(new Event("editor:save")));
+    await waitFor(() => expect(compareWriteWorkspaceFile).toHaveBeenCalledWith(tab.path, "before", updated, "C:\\projects\\demo"));
+    await waitFor(() => expect(useAppStore.getState().editorTabs[0].original).toBe(updated));
+    act(() => input.focus());
+    fireEvent.select(input, { target: { selectionStart: updated.indexOf("Changed"), selectionEnd: updated.length } });
+    fireEvent.click(screen.getByRole("button", { name: "询问选区" }));
+    expect(useAppStore.getState().sideChatPendingContext).toEqual({ text: "Changed **paragraph**", source: tab.path, workspaceRoot: "C:\\projects\\demo",
+      range: { startLineNumber: 3, startColumn: 1, endLineNumber: 3, endColumn: 22 } });
+    expect(screen.queryByRole("tablist", { name: "Markdown 视图模式" })).toBeNull();
   });
 
   it("uses distinct Monaco models for the same relative path in different workspaces", async () => {
@@ -878,7 +1141,7 @@ describe("EditorPanel", () => {
     useAppStore.setState({
       editorTabs: [{ id: "editor-fixture-29", path: "renamed.txt", content: "draft", original: "disk", contentHash: "old hash", loading: false, externalChanged: true }],
       activeTabPath: "renamed.txt",
-      fileChanges: [{ path: "renamed.txt", event: "create", sequence: 1, timestamp: 1 }],
+      fileChanges: [{ path: "renamed.txt", event: "create", sequence: 1, timestamp: 1, workspaceRoot: useAppStore.getState().workingDirectory }],
     });
     render(<EditorPanel />);
     await waitFor(() => expect(useAppStore.getState().editorTabs[0].externalChanged).toBe(false));
@@ -957,10 +1220,122 @@ describe("EditorPanel", () => {
     expect(readWorkspaceFile).not.toHaveBeenCalled();
     await act(async () => resolveSave({ ok: true, file: { path: "before.txt", content: "first edit", content_hash: "saved hash" } }));
     expect(useAppStore.getState().editorTabs[0]).toMatchObject({ id: "buffer-being-renamed", path: "renamed.txt", content: "second edit", original: "first edit", contentHash: "saved hash", externalChanged: false });
-    expect(screen.getByTestId("monaco-editor").getAttribute("data-model-path")).toBe(modelPath);
+    const renamedModelPath = screen.getByTestId("monaco-editor").getAttribute("data-model-path")!;
+    expect(renamedModelPath).not.toBe(modelPath);
+    expect(decodeURIComponent(new URL(renamedModelPath).pathname)).toBe("/C:/projects/demo/renamed.txt");
     await act(async () => { window.dispatchEvent(new Event("editor:save")); });
     expect(compareWriteWorkspaceFile).toHaveBeenLastCalledWith("renamed.txt", "saved hash", "second edit", "C:\\projects\\demo");
     expect(useAppStore.getState().editorTabs[0]).toMatchObject({ content: "second edit", original: "second edit", contentHash: "second hash" });
+  });
+
+  it("adopts multi-file model edits without loading or writing files until Save All", async () => {
+    useAppStore.setState({
+      editorTabs: [{ id: "model-source", path: "src/active.ts", content: "old active", original: "old active", contentHash: "active-hash", loading: false }],
+      activeTabPath: "src/active.ts",
+    });
+    render(<EditorPanel />);
+    await screen.findByTestId("monaco-editor");
+    act(() => useAppStore.getState().adoptEditorModelChanges([
+      { path: "src/active.ts", content: "new active", original: "old active", contentHash: "active-hash" },
+      { path: "src/closed.ts", content: "new closed", original: "old closed", contentHash: "closed-hash" },
+    ], "C:/projects/demo"));
+    expect(useAppStore.getState().activeTabPath).toBe("src/active.ts");
+    expect(useAppStore.getState().editorTabs[1]).toMatchObject({ path: "src/closed.ts", content: "new closed", original: "old closed", loading: false });
+    expect(readWorkspaceFile).not.toHaveBeenCalled();
+    expect(compareWriteWorkspaceFile).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "更多编辑器操作" }));
+    const saveAll = screen.getByRole("menuitem", { name: /保存全部（2）/ });
+    vi.mocked(compareWriteWorkspaceFile).mockImplementation(async (path, _hash, content) => ({ ok: true, file: { path, content, content_hash: `${path}-saved` } }));
+    fireEvent.click(saveAll);
+    await waitFor(() => expect(compareWriteWorkspaceFile).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(useAppStore.getState().editorTabs.every((tab) => tab.content === tab.original)).toBe(true));
+    expect(useAppStore.getState().activeTabPath).toBe("src/active.ts");
+  });
+
+  it("saves unaffected files while retaining conflicting and failed drafts with their full paths", async () => {
+    useAppStore.setState({
+      editorTabs: ["src/ok.ts", "docs/shared.ts", "src/shared.ts", "readonly.txt"].map((path, index) => ({ id: path, path, content: `draft-${index}`, original: `disk-${index}`, contentHash: `hash-${index}`, loading: false, readOnly: index === 3 })),
+      activeTabPath: "src/ok.ts",
+    });
+    vi.mocked(compareWriteWorkspaceFile).mockImplementation(async (path, _hash, content) => {
+      if (path === "docs/shared.ts") return { ok: false, conflict: true, message: "Changed on disk" };
+      if (path === "src/shared.ts") return { ok: false, conflict: false, message: "Write unavailable" };
+      return { ok: true, file: { path, content, content_hash: "saved-hash" } };
+    });
+    render(<EditorPanel />);
+    await screen.findByTestId("monaco-editor");
+    act(() => window.dispatchEvent(new Event("editor:save-all")));
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith("已保存 1 个文件；磁盘冲突：docs/shared.ts；保存失败：src/shared.ts", "error", 6000));
+    expect(compareWriteWorkspaceFile).toHaveBeenCalledTimes(3);
+    expect(compareWriteWorkspaceFile).toHaveBeenCalledWith("docs/shared.ts", "hash-1", "draft-1", "C:\\projects\\demo");
+    const tabs = useAppStore.getState().editorTabs;
+    expect(tabs[0]).toMatchObject({ content: "draft-0", original: "draft-0", contentHash: "saved-hash" });
+    expect(tabs[1]).toMatchObject({ content: "draft-1", original: "disk-1", contentHash: "hash-1", externalChanged: true });
+    expect(tabs[2]).toMatchObject({ content: "draft-2", original: "disk-2", contentHash: "hash-2" });
+    expect(tabs[3]).toMatchObject({ content: "draft-3", original: "disk-3", readOnly: true });
+  });
+
+  it("keeps Save All attached to stable buffers during a pending directory rename and newer edits", async () => {
+    let resolveFirst!: (result: Awaited<ReturnType<typeof compareWriteWorkspaceFile>>) => void;
+    useAppStore.setState({
+      editorTabs: ["a", "b"].map((name) => ({ id: name, path: `src/${name}.ts`, content: `${name}-draft`, original: `${name}-disk`, contentHash: `${name}-hash`, loading: false })),
+      activeTabPath: "src/a.ts",
+    });
+    vi.mocked(compareWriteWorkspaceFile).mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockImplementationOnce(async (path, _hash, content) => ({ ok: true, file: { path, content, content_hash: "b-saved" } }));
+    render(<EditorPanel />);
+    await screen.findByTestId("monaco-editor");
+    act(() => window.dispatchEvent(new Event("editor:save-all")));
+    expect(compareWriteWorkspaceFile).toHaveBeenCalledWith("src/a.ts", "a-hash", "a-draft", "C:\\projects\\demo");
+    act(() => {
+      useAppStore.getState().updateTabContent("src/a.ts", "a-newer");
+      useAppStore.getState().renameEditorPath("src", "lib", "C:/projects/demo");
+    });
+    await act(async () => resolveFirst({ ok: true, file: { path: "src/a.ts", content: "a-draft", content_hash: "a-saved" } }));
+    await waitFor(() => expect(compareWriteWorkspaceFile).toHaveBeenLastCalledWith("lib/b.ts", "b-hash", "b-draft", "C:\\projects\\demo"));
+    await waitFor(() => expect(useAppStore.getState().editorTabs[1].original).toBe("b-draft"));
+    expect(useAppStore.getState().editorTabs[0]).toMatchObject({ id: "a", path: "lib/a.ts", content: "a-newer", original: "a-draft", contentHash: "a-saved" });
+    expect(useAppStore.getState().activeTabPath).toBe("lib/a.ts");
+  });
+
+  it("finishes Save All in its original workspace after switching away", async () => {
+    let resolveFirst!: (result: Awaited<ReturnType<typeof compareWriteWorkspaceFile>>) => void;
+    useAppStore.setState({
+      editorTabs: ["a", "b"].map((name) => ({ id: name, path: `src/${name}.ts`, content: `${name}-draft`, original: `${name}-disk`, contentHash: `${name}-hash`, loading: false })),
+      activeTabPath: "src/a.ts",
+    });
+    vi.mocked(compareWriteWorkspaceFile).mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockImplementationOnce(async (path, _hash, content) => ({ ok: true, file: { path, content, content_hash: "b-saved" } }));
+    render(<EditorPanel />);
+    await screen.findByTestId("monaco-editor");
+    act(() => window.dispatchEvent(new Event("editor:save-all")));
+    act(() => useAppStore.getState().setWorkingDirectory("C:/other"));
+    await act(async () => resolveFirst({ ok: true, file: { path: "src/a.ts", content: "a-draft", content_hash: "a-saved" } }));
+    await waitFor(() => expect(compareWriteWorkspaceFile).toHaveBeenLastCalledWith("src/b.ts", "b-hash", "b-draft", "C:\\projects\\demo"));
+    await waitFor(() => expect(editorStateForWorkspace("C:/projects/demo").editorTabs[1].original).toBe("b-draft"));
+    expect(useAppStore.getState().workingDirectory).toBe("C:/other");
+    expect(useAppStore.getState().editorTabs).toEqual([]);
+    expect(editorStateForWorkspace("C:/projects/demo").editorTabs[0]).toMatchObject({ id: "a", original: "a-draft", contentHash: "a-saved" });
+  });
+
+  it("waits for an existing single-file save before saving that buffer's newer draft", async () => {
+    let resolveFirst!: (result: Awaited<ReturnType<typeof compareWriteWorkspaceFile>>) => void;
+    useAppStore.setState({
+      editorTabs: [{ id: "pending-single", path: "src/a.ts", content: "first draft", original: "disk", contentHash: "old-hash", loading: false }],
+      activeTabPath: "src/a.ts",
+    });
+    vi.mocked(compareWriteWorkspaceFile).mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockImplementationOnce(async (path, _hash, content) => ({ ok: true, file: { path, content, content_hash: "latest-hash" } }));
+    render(<EditorPanel />);
+    await screen.findByTestId("monaco-editor");
+    act(() => window.dispatchEvent(new Event("editor:save")));
+    act(() => useAppStore.getState().updateTabContent("src/a.ts", "newer draft"));
+    act(() => window.dispatchEvent(new Event("editor:save-all")));
+    expect(compareWriteWorkspaceFile).toHaveBeenCalledTimes(1);
+    await act(async () => resolveFirst({ ok: true, file: { path: "src/a.ts", content: "first draft", content_hash: "first-hash" } }));
+    await waitFor(() => expect(compareWriteWorkspaceFile).toHaveBeenLastCalledWith("src/a.ts", "first-hash", "newer draft", "C:\\projects\\demo"));
+    await waitFor(() => expect(useAppStore.getState().editorTabs[0]).toMatchObject({ id: "pending-single", content: "newer draft", original: "newer draft", contentHash: "latest-hash" }));
+    expect(compareWriteWorkspaceFile).toHaveBeenCalledTimes(2);
   });
 
   it("does not apply an old save to a closed and reopened buffer at the same path", async () => {
@@ -1081,7 +1456,6 @@ describe("EditorPanel", () => {
     ].join("\n\n");
     useAppStore.setState({ editorTabs: [{ id: "markdown-resources", path: "docs/readme.md", content, original: content, loading: false }], activeTabPath: "docs/readme.md" });
     render(<EditorPanel />);
-    fireEvent.click(screen.getByRole("tab", { name: "预览" }));
     for (const [name, path] of [["Space", "docs/assets/space logo.svg"], ["Percent", "docs/assets/literal%20.svg"], ["File URI", "docs/assets/logo.svg"]]) {
       const url = new URL(screen.getByRole("img", { name }).getAttribute("src")!);
       expect(url.searchParams.get("path")).toBe(path);
@@ -1098,7 +1472,6 @@ describe("EditorPanel", () => {
     const content = "![Logo](../assets/logo.svg)";
     useAppStore.setState({ workingDirectory: root, editorTabs: [{ id: "absolute-owner", path: `${root}/docs/readme.md`, content, original: content, loading: false }], activeTabPath: `${root}/docs/readme.md` });
     render(<EditorPanel />);
-    fireEvent.click(screen.getByRole("tab", { name: "预览" }));
     const url = new URL(screen.getByRole("img", { name: "Logo" }).getAttribute("src")!);
     expect(url.searchParams.get("path")).toBe("assets/logo.svg");
     expect(url.searchParams.get("workspace_root")).toBe(root);
@@ -1110,7 +1483,7 @@ describe("EditorPanel", () => {
     const content = kind === "markdown" ? "![Logo](./assets/literal%2520.svg)" : "";
     useAppStore.setState({ editorTabs: [{ id: "media-buffer", path, content, original: content, loading: false }], activeTabPath: path });
     render(<EditorPanel />);
-    if (kind === "markdown") fireEvent.click(screen.getByRole("tab", { name: "预览" }));
+    if (kind === "markdown") await screen.findByTestId("live-markdown-editor");
     if (kind === "pdf") await screen.findByTestId("pdf-preview");
     const resourceUrl = () => kind === "pdf"
       ? screen.getByTestId("pdf-preview").getAttribute("data-url")!
@@ -1124,5 +1497,47 @@ describe("EditorPanel", () => {
     expect(after).not.toBe(before);
     expect(new URL(after).searchParams.get("path")).toBe(asset);
     expect(readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it.each(["image", "pdf"])("retries a workspace %s without rereading text or changing the resource owner", async (kind) => {
+    const path = `assets/report.${kind === "pdf" ? "pdf" : "png"}`;
+    useAppStore.setState({ editorTabs: [{ id: "retry-media", path, content: "", original: "", loading: false }], activeTabPath: path });
+    render(<EditorPanel />);
+    if (kind === "pdf") await screen.findByTestId("pdf-preview");
+    const before = kind === "pdf" ? screen.getByTestId("pdf-preview").getAttribute("data-url")! : screen.getByRole("img").getAttribute("src")!;
+    if (kind === "image") fireEvent.error(screen.getByRole("img"));
+    fireEvent.click(screen.getByRole("button", { name: `重试${kind === "pdf" ? " PDF " : "图片"}预览` }));
+    const after = new URL(kind === "pdf" ? screen.getByTestId("pdf-preview").getAttribute("data-url")! : screen.getByRole("img").getAttribute("src")!);
+    expect(after.toString()).not.toBe(before);
+    expect(after.searchParams.get("path")).toBe(path);
+    expect(after.searchParams.get("workspace_root")).toBe("C:\\projects\\demo");
+    expect(after.searchParams.get("preview_retry")).toBe("1");
+    expect(readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it("ignores another workspace's retained deletion when the editor remounts", async () => {
+    useAppStore.getState().addFileChange({ path: "same.ts", event: "delete", timestamp: 1 });
+    useAppStore.getState().setWorkingDirectory("C:/other");
+    useAppStore.setState({
+      editorTabs: [{ id: "other-workspace-buffer", path: "same.ts", content: "disk", original: "disk", loading: false, externalChanged: false }],
+      activeTabPath: "same.ts",
+    });
+    render(<EditorPanel />);
+    await screen.findByTestId("monaco-editor");
+    expect(useAppStore.getState().editorTabs[0].externalChanged).toBe(false);
+    expect(readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it("uses only the media file owner's change sequence when the editor remounts", () => {
+    useAppStore.getState().addFileChange({ path: "image.svg", event: "modify", timestamp: 1 });
+    useAppStore.getState().setWorkingDirectory("C:/other");
+    useAppStore.setState({
+      editorTabs: [{ id: "other-workspace-image", path: "image.svg", content: "", original: "", loading: false }],
+      activeTabPath: "image.svg",
+    });
+    render(<EditorPanel />);
+    expect(new URL(screen.getByRole("img").getAttribute("src")!).searchParams.get("version")).toBe("0");
+    act(() => useAppStore.getState().addFileChange({ path: "image.svg", event: "modify", timestamp: 2 }));
+    expect(new URL(screen.getByRole("img").getAttribute("src")!).searchParams.get("version")).toBe("2");
   });
 });

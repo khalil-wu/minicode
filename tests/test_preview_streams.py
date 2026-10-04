@@ -41,6 +41,7 @@ async def _monitor_output(payload: bytes, stream_name: str, workspace: Path):
             launched.process.returncode = 0
             launched._exit_event.set()
 
+    launcher._RUNNING[launched.id] = launched
     await launcher._monitor_process(launched, broadcast)
     return launched, events
 

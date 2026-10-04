@@ -25,45 +25,30 @@ RecoveryOperation = Callable[[AgentState, ContextBuilder], Awaitable[bool]]
 
 async def emergency_compact(state: AgentState, context: ContextBuilder) -> bool:
     """Rewrite oversized history using the context builder's full compaction path."""
-    try:
-        summary = await context.full_compact(restore_state=state)
-        if summary:
-            logger.info("[ErrorWithholding] Emergency compaction succeeded")
-            return True
-    except Exception as exc:
-        logger.warning("[ErrorWithholding] Compaction failed: %s", exc)
-    return False
+    summary = await context.full_compact(restore_state=state)
+    if summary:
+        logger.info("[ErrorWithholding] Emergency compaction succeeded")
+    return bool(summary)
 
 
 async def strip_historical_media(state: AgentState, context: ContextBuilder) -> bool:
     """Remove old image/PDF payloads after a provider media-size rejection."""
-    strip = getattr(context, "strip_historical_media", None)
-    if not callable(strip):
-        return False
-    try:
-        stats = strip(keep_recent_user_turns=1) or {}
-    except Exception as exc:
-        logger.debug("strip_historical_media failed: %s", exc)
-        return False
-    stripped = int(stats.get("images", 0) or 0) + int(stats.get("documents", 0) or 0)
+    stats = context.strip_historical_media(keep_recent_user_turns=1)
+    stripped = stats["images"] + stats["documents"]
     if stripped <= 0:
         return False
     state.mark_transition(
         "media_size_strip",
-        images=int(stats.get("images", 0) or 0),
-        documents=int(stats.get("documents", 0) or 0),
-        messages=int(stats.get("messages", 0) or 0),
+        images=stats["images"],
+        documents=stats["documents"],
+        messages=stats["messages"],
     )
     return True
 
 
 async def quarantine_external_web_results(state: AgentState, context: ContextBuilder) -> bool:
     """Isolate the latest external web batch after a content-filter rejection."""
-    try:
-        changed = context.quarantine_latest_external_web_results()
-    except Exception as exc:
-        logger.debug("quarantine_latest_external_web_results failed: %s", exc)
-        return False
+    changed = context.quarantine_latest_external_web_results()
     if changed <= 0:
         return False
     state.mark_transition("content_filter_web_quarantine", results=changed)
@@ -134,8 +119,9 @@ async def try_error_withholding_recovery(
             # Strategies above are already bound to this state/context. Passing
             # them again raises TypeError, which used to be swallowed as a
             # failed recovery and made every withholding path silently fail.
-            if await strategy.try_recover():
-                error_controller.record_recovery(strategy.name, True)
+            recovered = await strategy.try_recover()
+            error_controller.record_recovery(strategy.name, recovered)
+            if recovered:
                 state.mark_transition(
                     f"recovered_{strategy.name}",
                     error_type="media_size" if media_size and not content_filter else withhold_type,

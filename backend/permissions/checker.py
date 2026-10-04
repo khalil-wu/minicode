@@ -30,7 +30,7 @@ from pathspec.gitignore import GitIgnoreSpec
 from backend.config import PermissionSettings
 from backend.permissions.context import PermissionContext, PermissionDecision
 from backend.permissions.network import assess_network_url
-from backend.permissions.rules import PermissionRuleMatcher, SandboxValidator
+from backend.permissions.rules import PermissionRuleMatcher
 from backend.security.sensitive_files import (
     DANGEROUS_FILES,
     DANGEROUS_DIRECTORIES,
@@ -1004,11 +1004,6 @@ class PermissionChecker:
             self._workspace_root = None
         else:
             self._workspace_root = Path(workspace_root).expanduser().resolve()
-        self._sandbox = (
-            SandboxValidator(self._workspace_root)
-            if self._workspace_root is not None
-            else None
-        )
         self._rule_matcher = (
             PermissionRuleMatcher(self._workspace_root)
             if self._workspace_root is not None
@@ -1279,31 +1274,28 @@ class PermissionChecker:
             if side_effect_kind == "none":
                 if tool_name.startswith("mcp__"):
                     return PermissionLevel.ALWAYS_DENY, "mode", "plan:untrusted_mcp"
-                # Plan mode may strengthen permissions, but it must never
-                # weaken a tool-owned interactive floor.  ExitPlanMode is
-                # side-effect-free in the workspace taxonomy yet still
-                # requires explicit user approval.
-                if tool_decision_is_explicit and tool_level in {
-                    PermissionLevel.CONFIRM,
-                    PermissionLevel.DIFF_REVIEW,
-                }:
-                    return tool_level, "mode", f"plan:{tool_level.value}"
-                return PermissionLevel.AUTO, "mode", "plan:auto"
-
-            # Claude delegates the one Plan-mode write exception to the file
-            # tools' path-aware permission seam.  Their explicit AUTO is only
-            # returned for the exact session plan path; all other workspace,
-            # external, and destructive side effects remain denied.  In
-            # particular, a command tool's own CONFIRM declaration is not a
-            # Plan-mode exception and must not be downgraded to approval.
-            if (
+                plan_rule = "plan:auto"
+            elif (
                 tool_name in {"edit_file", "write_file"}
                 and tool_decision_is_explicit
                 and tool_level == PermissionLevel.AUTO
             ):
-                return PermissionLevel.AUTO, "mode", "plan:plan_file"
-            if side_effect_kind != "none":
+                # File tools grant only the current plan file. Other writes
+                # remain unavailable even when an approval rule matches.
+                plan_rule = "plan:plan_file"
+            else:
                 return PermissionLevel.ALWAYS_DENY, "mode", "plan:side_effect"
+
+            # Plan constrains side effects; it must also retain the same
+            # explicit asks as ordinary routing (including ExitPlanMode).
+            if tool_decision_is_explicit:
+                raise_floor(tool_level, "tool", f"{tool_name}.check_permission")
+            if policy_override is not None:
+                return apply_floor(*policy_override)
+            if not (tool_decision_is_explicit and tool_level == PermissionLevel.AUTO):
+                for floor in static_floor:
+                    raise_floor(*floor)
+            return apply_floor(PermissionLevel.AUTO, "mode", plan_rule)
 
         # Bypass is MiniCode's explicit unattended/full-access mode.  It
         # removes approval routing for ordinary workspace and external work;
@@ -1529,6 +1521,14 @@ class PermissionChecker:
         if not path.is_absolute() and effective_root is not None:
             effective_root = Path(effective_root).expanduser().resolve()
             path = effective_root / path
+        if operation == "write":
+            from backend.security.sensitive_files import is_protected_write_path
+
+            if is_protected_write_path(
+                path,
+                state_roots=context.protected_state_roots if context is not None else (),
+            ):
+                return False, f"Refusing to modify protected application or repository state: {file_path}"
         if context is not None:
             from backend.agent.plans import is_current_plan_file
 
@@ -1547,13 +1547,13 @@ class PermissionChecker:
         if effective_root is None:
             return False, "This operation requires an open workspace."
         effective_root = Path(effective_root).expanduser().resolve()
-        sandbox = (
-            self._sandbox
-            if self._workspace_root == effective_root and self._sandbox is not None
-            else SandboxValidator(effective_root)
+        matcher = (
+            self._rule_matcher
+            if self._workspace_root == effective_root and self._rule_matcher is not None
+            else PermissionRuleMatcher(effective_root)
         )
-        return sandbox.validate_file_operation(
-            str(path.resolve()), operation, content,
+        return matcher.check_file_access(
+            str(path.resolve()), operation,
             allow_workspace_escape=(
                 allow_workspace_escape or (context is not None and context.mode == "bypass")
             ),

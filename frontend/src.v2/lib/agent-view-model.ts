@@ -2,7 +2,7 @@ import { effectiveSubagentStatus } from "./collaborationDisplay";
 import type { SubagentState } from "../stores/types";
 
 export type AgentDisplayStatus = "attention" | "running" | "waiting" | "completed";
-export type AgentGlyphTone = "amber" | "blue" | "green" | "rose" | "teal" | "violet";
+export type AgentGlyphTone = "amber" | "blue" | "green" | "rose";
 
 /**
  * Ordinary UI projection for delegated work.
@@ -35,6 +35,7 @@ const titleFor = (agent: SubagentState): string => {
 };
 
 const displayStatus = (agent: SubagentState): AgentDisplayStatus => {
+  if (agent.cleanupPending) return "attention";
   switch (effectiveSubagentStatus(agent)) {
     case "error":
       return "attention";
@@ -66,6 +67,7 @@ const statusLabel = (status: AgentDisplayStatus): string => {
 };
 
 const statusLabelFor = (agent: SubagentState, status: AgentDisplayStatus): string => {
+  if (agent.cleanupPending) return "清理未完成";
   const effective = effectiveSubagentStatus(agent);
   if (effective === "blocked") {
     if (agent.needsInput) return "等待你回复";
@@ -86,6 +88,7 @@ const statusLabelFor = (agent: SubagentState, status: AgentDisplayStatus): strin
 };
 
 const summaryFor = (agent: SubagentState): string => {
+  if (agent.cleanupPending) return agent.cleanupReason || "进程退出尚未确认，请重试停止";
   const status = effectiveSubagentStatus(agent);
   const activity = String(agent.currentActivity || "").trim();
   const detail = String(agent.detail || "").trim();
@@ -189,7 +192,7 @@ export function projectAgentViews(
         effectiveStatus,
         hasResult: Boolean(resultError || resultContent || source.resultAvailable),
         needsResult,
-        canStop: ["pending", "running", "blocked"].includes(effectiveStatus),
+        canStop: Boolean(source.cleanupPending) || ["pending", "running", "blocked"].includes(effectiveStatus),
         executionMode,
         activityLog: (source.activityLog ?? [])
           .map((entry) => String(entry || "").trim())

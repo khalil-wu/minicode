@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 from uuid import uuid4
 
@@ -75,7 +76,18 @@ class GenerateImageTool(BaseTool):
                     "channel; refusing to borrow another provider's credentials."
                 ),
             }
-        return get_image_generation_settings(provider)
+        snapshot = context.model_execution if context is not None else None
+        if snapshot is None:
+            return get_image_generation_settings(provider)
+        stack = snapshot.config.config_layer_stack
+        settings_data = (
+            stack.effective_config() if stack is not None
+            else {"llm": {"provider": provider, provider: {
+                **asdict(snapshot.config.llm),
+                "default_headers": dict(snapshot.config.llm.default_headers),
+            }}}
+        )
+        return get_image_generation_settings(provider, settings_data=settings_data)
 
     def get_spec(self) -> ToolSpec:
         settings = self._settings_for_context()
@@ -160,6 +172,10 @@ class GenerateImageTool(BaseTool):
         prompt = str(args.get("prompt") or "").strip()
         settings = self._settings_for_context(context)
         metadata = context.metadata if context is not None else {}
+        turn_context = (
+            context.run_context.llm_turn_context
+            if context is not None and context.run_context is not None else None
+        )
         tool_call_id = str(
             getattr(context, "tool_call_id", "") or ""
         ).strip()
@@ -218,6 +234,7 @@ class GenerateImageTool(BaseTool):
                 size=str(args.get("size") or settings.get("size") or "1024x1024"),
                 quality=str(args.get("quality") or settings.get("quality") or ""),
                 metadata=metadata,
+                turn_context=turn_context,
             )
         except Exception as exc:
             classification = classify_llm_error(exc)

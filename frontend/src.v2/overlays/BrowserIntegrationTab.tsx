@@ -7,7 +7,7 @@ import { pushToast } from "./ToastContainer";
 import { useAppStore } from "../stores";
 import { SelectMenu } from "../components/SelectMenu";
 
-export const BrowserIntegrationTab = () => {
+export const BrowserIntegrationTab = ({ active = true }: { active?: boolean }) => {
   const conversationId = useAppStore((state) => state.conversationId) || "";
   const [tabs, setTabs] = useState<EmbeddedBrowserState[]>([]);
   const [downloadPolicy, setDownloadPolicy] = useState<EmbeddedBrowserSettings["downloadPolicy"]>("block");
@@ -15,23 +15,26 @@ export const BrowserIntegrationTab = () => {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const loadSequenceRef = useRef(0);
+  const policyRevisionRef = useRef(0);
 
   const loadBrowserState = useCallback(async (showFeedback = false) => {
     const requestId = ++loadSequenceRef.current;
     const requestConversationId = conversationId;
+    const policyRevision = policyRevisionRef.current;
     setLoading(true);
     setLoadError("");
+    setTabs([]);
     try {
       const [items, settings] = await Promise.all([
         conversationId ? Promise.resolve(embeddedBrowserList(conversationId)) : Promise.resolve([]),
         isDesktop() ? Promise.resolve(embeddedBrowserGetSettings("")) : Promise.resolve(null),
       ]);
-      if (requestId !== loadSequenceRef.current || useAppStore.getState().conversationId !== requestConversationId) return;
-      setTabs(Array.isArray(items) ? items : []);
-      if (settings?.downloadPolicy) setDownloadPolicy(settings.downloadPolicy);
+      if (requestId !== loadSequenceRef.current || (useAppStore.getState().conversationId || "") !== requestConversationId) return;
+      setTabs(items ?? []);
+      if (settings && policyRevision === policyRevisionRef.current) setDownloadPolicy(settings.downloadPolicy);
       if (showFeedback) pushToast("浏览器状态已刷新", "success");
     } catch (error) {
-      if (requestId !== loadSequenceRef.current || useAppStore.getState().conversationId !== requestConversationId) return;
+      if (requestId !== loadSequenceRef.current || (useAppStore.getState().conversationId || "") !== requestConversationId) return;
       const message = error instanceof Error ? error.message : String(error || "未知错误");
       setTabs([]);
       setLoadError(message);
@@ -42,8 +45,9 @@ export const BrowserIntegrationTab = () => {
   }, [conversationId]);
 
   useEffect(() => {
-    void loadBrowserState();
-  }, [loadBrowserState]);
+    if (active) void loadBrowserState();
+    return () => { loadSequenceRef.current += 1; };
+  }, [active, loadBrowserState]);
 
   const openBrowser = () => {
     openRightPanelFromSettings("browser");
@@ -52,6 +56,7 @@ export const BrowserIntegrationTab = () => {
   const updateDownloadPolicy = async (policy: EmbeddedBrowserSettings["downloadPolicy"]) => {
     if (savingDownloadPolicy || policy === downloadPolicy) return;
     const previous = downloadPolicy;
+    policyRevisionRef.current += 1;
     setDownloadPolicy(policy);
     setSavingDownloadPolicy(true);
     try {
@@ -77,6 +82,7 @@ export const BrowserIntegrationTab = () => {
             <strong>{loading ? "正在读取浏览器状态…" : tabs.length > 0 ? `${tabs.length} 个打开的页面` : "浏览器工作区"}</strong>
             <span>{loadError ? `状态读取失败：${loadError}` : tabs.find((item) => item.active)?.title || tabs[0]?.title || "当前没有打开的页面"}</span>
           </div>
+          <div className="settings-browser-summary-actions">
           {loadError && (
             <button type="button" className="settings-action-button" disabled={loading} onClick={() => void loadBrowserState(true)}>
               <RefreshCw className={loading ? "settings-spin" : undefined} />重试
@@ -85,6 +91,7 @@ export const BrowserIntegrationTab = () => {
           <button type="button" className="settings-action-button" data-primary="true" onClick={openBrowser}>
             <PanelRightOpen />打开浏览器
           </button>
+          </div>
         </div>
       </Section>
 

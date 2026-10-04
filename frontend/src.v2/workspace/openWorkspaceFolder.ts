@@ -4,6 +4,7 @@ import { pushToast } from "../overlays/ToastContainer";
 import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
 import { toBackendPermissionMode } from "../protocol/permissions";
+import { workspaceRootsEqual } from "../lib/workspace-path";
 
 export const openWorkspaceFolder = async (): Promise<string | null> => {
   try {
@@ -40,7 +41,10 @@ export const activateWorkspaceFolder = async (workspacePath: string): Promise<st
     const activatedPath = typeof result.data?.workspace_root === "string" ? result.data.workspace_root : workspacePath;
     // conversation.switched owns the new conversation and workspace together.
     // Applying the directory again here can overwrite a later user selection.
-    useAppStore.getState().setAppMode("code");
+    const state = useAppStore.getState();
+    if (state.conversationId === result.data?.conversation_id && workspaceRootsEqual(state.workingDirectory, activatedPath)) {
+      state.setAppMode("code");
+    }
     pushToast(`已打开工作区：${activatedPath}`, "info", 2200);
     return activatedPath;
   } catch (error) {

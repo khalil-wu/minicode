@@ -39,6 +39,22 @@ class StreamingToolExecution:
     def started(self) -> bool:
         return bool(self.calls)
 
+    def _committed_provider_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Persist only host tool calls that crossed this execution boundary."""
+        retained = []
+        for item in items:
+            kind = item.get("type")
+            if kind in {"function_call", "custom_tool_call"}:
+                if str(item.get("call_id") or item.get("id") or "") not in self.calls:
+                    continue
+            elif kind == "anthropic_message":
+                item = {**item, "content": [
+                    block for block in item["content"]
+                    if block.get("type") != "tool_use" or block.get("id") in self.calls
+                ]}
+            retained.append(item)
+        return retained
+
     async def submit(self, calls: list[Any], stream_state: Any, stream_text: Any, tracker: Any) -> None:
         for call in calls:
             previous = self.calls.get(call.id)
@@ -52,7 +68,7 @@ class StreamingToolExecution:
             stream_state.committed_tool_ids.add(call.id)
             self.history_message = owner.context_builder.append_assistant_tool_calls(
                 [prepared], content=stream_text.full_text, phase=stream_state.response_phase or "commentary",
-                provider_items=stream_state.response_items, message=self.history_message,
+                provider_items=self._committed_provider_items(stream_state.response_items), message=self.history_message,
             )
             await self._record_provider_item()
             owner.chain.record_tool_call()
@@ -192,7 +208,7 @@ class StreamingToolExecution:
                     self.owner.context_builder.append_assistant_tool_calls(
                         [], content=result.stream_text.full_text,
                         phase=result.response_phase or "commentary",
-                        provider_items=result.stream_state.response_items, message=self.history_message,
+                        provider_items=self._committed_provider_items(result.stream_state.response_items), message=self.history_message,
                     )
                     await self._record_provider_item()
                 if result.stream_text.agent_message_started and result.stream_text.active_agent_message_source == "commentary":

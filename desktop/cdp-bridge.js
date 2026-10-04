@@ -1,6 +1,7 @@
 "use strict";
 
 const { sleep, isHttpUrl } = require("./utils");
+const { isIP } = require("node:net");
 
 // ---------------------------------------------------------------------------
 // State
@@ -249,6 +250,10 @@ async function withCdpSession(webSocketDebuggerUrl, action) {
 
   const call = (method, params = {}, timeoutMs = 8000) =>
     new Promise((resolve, reject) => {
+      if (socket.readyState !== WebSocket.OPEN) {
+        reject(new Error("Chrome target connection is not open."));
+        return;
+      }
       const id = nextId++;
       const timer = setTimeout(() => {
         pending.delete(id);
@@ -473,8 +478,10 @@ function isPrivateOrLocalBrowserHost(host) {
   const normalized = String(host || "").replace(/^\[|\]$/g, "").toLowerCase();
   if (!normalized) return false;
   if (normalized === "localhost" || normalized === "localhost.localdomain" || normalized.endsWith(".localhost")) return true;
-  if (normalized.startsWith("::ffff:")) return true;
-  if (normalized === "::1" || normalized === "::" || normalized.startsWith("fc") || normalized.startsWith("fd") || /^fe[89ab]/.test(normalized) || normalized.startsWith("ff") || normalized.startsWith("2001:db8:")) return true;
+  if (isIP(normalized) === 6) {
+    if (normalized.startsWith("::ffff:")) return true;
+    if (normalized === "::1" || normalized === "::" || normalized.startsWith("fc") || normalized.startsWith("fd") || /^fe[89ab]/.test(normalized) || normalized.startsWith("ff") || normalized.startsWith("2001:db8:")) return true;
+  }
   const ipv4 = parseIpv4Host(normalized);
   if (!ipv4) return false;
   const [a, b] = ipv4;

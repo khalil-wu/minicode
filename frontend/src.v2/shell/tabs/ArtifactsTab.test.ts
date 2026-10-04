@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../stores/types";
 import { collectArtifacts } from "./ArtifactsTab";
+import { collectAttachments } from "../../chat/ChatContextCard";
+import { hydrateMessages } from "../../chat/transcriptHydration";
+import { collectLiveArtifacts } from "../../overlays/LiveArtifacts";
 
 const messageWithToolArtifact = (overrides: Partial<ChatMessage> = {}): ChatMessage => ({
   id: "message-browser",
@@ -28,6 +31,77 @@ const messageWithToolArtifact = (overrides: Partial<ChatMessage> = {}): ChatMess
 });
 
 describe("ArtifactsTab projection", () => {
+  it("keeps persisted execution output, real deliverables and uploads consistent across artifact collectors", () => {
+    const startedAt = 1790857935157;
+    const messages = hydrateMessages([
+      {
+        id: "user-reference", role: "user", content: "检查这些文件。", timestamp: startedAt - 1,
+        attachmentRefs: [{ id: "reference", artifactId: "output-first", name: "reference.txt", kind: "file", mediaType: "text/plain" }],
+      },
+      {
+        id: "assistant-audit", role: "assistant", content: "检查已完成。", timestamp: startedAt,
+        artifacts: [
+          { artifactId: "output-first", kind: "file", summary: "Script completed" },
+          { artifactId: "output-second", kind: "text", summary: "Script yielded" },
+          { artifactId: "generated-image", kind: "image", summary: "生成图片", mediaType: "image/png" },
+          { artifactId: "generated-pdf", kind: "file", summary: "审计报告.pdf", mediaType: "application/pdf" },
+        ],
+        tool_calls: [
+          { id: "script-first", name: "tool_exec", args: {}, status: "success", artifact_id: "output-first", display_summary: "Script completed", started_at: startedAt,
+            output_files: [{ path: "reports/audit.svg", name: "Script completed", size: 120, is_image: true }] },
+          { id: "script-second", name: "tool_wait", args: {}, status: "success", artifact_id: "output-second", artifact_kind: "text", display_summary: "Script completed", started_at: startedAt + 26000 },
+          { id: "image-call", name: "tool_exec", args: {}, status: "success", artifact_id: "generated-image", display_summary: "Script completed", started_at: startedAt + 30000 },
+          { id: "pdf-call", name: "tool_exec", args: {}, status: "success", artifact_id: "generated-pdf", display_summary: "Script completed", started_at: startedAt + 32000 },
+        ],
+        reply_attachments: [{ path: "reports/audit.svg", size: 120, is_image: true }],
+      },
+    ]);
+    const owner = "conversation-audit";
+    const contextItems = collectAttachments(messages, owner);
+    const sidebarItems = collectArtifacts(messages, null, owner);
+    const galleryItems = collectLiveArtifacts(messages, owner);
+
+    for (const items of [contextItems, sidebarItems, galleryItems]) {
+      expect(items.filter((item) => item.executionResult).map((item) => item.artifactId).sort())
+        .toEqual(["output-first", "output-second"]);
+      expect(items.find((item) => item.artifactId === "generated-image")).toMatchObject({
+        kind: "image", executionResult: false, conversationId: owner,
+      });
+      expect(items.find((item) => item.artifactId === "generated-pdf")).toMatchObject({
+        kind: "file", mediaType: "application/pdf", executionResult: false, conversationId: owner,
+      });
+      expect(items.every((item) => item.conversationId === owner)).toBe(true);
+    }
+    expect(sidebarItems).toHaveLength(6);
+    expect(sidebarItems.filter((item) => item.kind !== "attachment" && !item.executionResult)).toHaveLength(3);
+    expect(sidebarItems.filter((item) => item.kind === "attachment")).toMatchObject([{ label: "reference.txt" }]);
+    expect(sidebarItems.find((item) => item.path)).toMatchObject({ label: "audit.svg", path: "reports/audit.svg", kind: "image" });
+    expect(contextItems.filter((item) => item.executionResult).map((item) => item.label)).toEqual(["代码执行输出", "代码执行输出"]);
+    expect(sidebarItems.filter((item) => item.executionResult).map((item) => item.label)).toEqual(["代码执行输出", "代码执行输出"]);
+    expect(galleryItems.filter((item) => item.executionResult).map((item) => item.summary)).toEqual(["代码执行输出", "代码执行输出"]);
+    expect(galleryItems.find((item) => item.artifactId === "generated-image")?.summary).toBe("生成图片");
+
+    const [preview] = collectArtifacts(messages, {
+      artifactId: "output-first", source: "artifact", name: "Script completed", kind: "text", content: "测试执行输出", loadedAt: startedAt,
+    }, owner);
+    expect(preview).toMatchObject({ artifactId: "output-first", label: "代码执行输出", executionResult: true, occurredAt: startedAt, conversationId: owner });
+  });
+
+  it("preserves a specific artifact title and does not classify a status title without its producer", () => {
+    const messages = hydrateMessages([{
+      id: "assistant-names", role: "assistant", content: "", timestamp: 100,
+      artifacts: [
+        { artifactId: "named-output", kind: "text", summary: "审计执行记录.txt" },
+        { artifactId: "unowned-status", kind: "file", summary: "Script completed" },
+      ],
+      tool_calls: [{ id: "named-call", name: "tool_exec", args: {}, status: "success", artifact_id: "named-output", display_summary: "Script completed", started_at: 100 }],
+    }]);
+    const items = collectArtifacts(messages, null, "conversation-names");
+    expect(items.find((item) => item.artifactId === "named-output")).toMatchObject({ label: "审计执行记录.txt", executionResult: true });
+    expect(items.find((item) => item.artifactId === "unowned-status")).toMatchObject({ label: "Script completed", kind: "file" });
+    expect(items.find((item) => item.artifactId === "unowned-status")?.executionResult).toBeUndefined();
+  });
+
   it("includes image artifacts owned by tool_call records", () => {
     const [item] = collectArtifacts([messageWithToolArtifact()], null, "conversation-browser");
 
@@ -165,7 +239,7 @@ describe("ArtifactsTab projection", () => {
     }]);
   });
 
-  it("keeps the current preview at the top after applying the artifact cap", () => {
+  it("keeps the current preview first while retaining older artifacts for search and source navigation", () => {
     const messages = Array.from({ length: 31 }, (_, index) => messageWithToolArtifact({
       id: `assistant-${index}`,
       blocks: [],
@@ -184,7 +258,8 @@ describe("ArtifactsTab projection", () => {
       loadedAt: 1,
     }, "conversation-browser");
 
-    expect(items).toHaveLength(30);
+    expect(items).toHaveLength(32);
+    expect(items.find((item) => item.artifactId === "artifact-0")).toMatchObject({ messageId: "assistant-0", conversationId: "conversation-browser" });
     expect(items[0]).toMatchObject({
       artifactId: "preview-current",
       label: "preview-current.png",

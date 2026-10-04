@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import asyncio
-from contextlib import aclosing, suppress
+from contextlib import aclosing
 import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -141,12 +141,26 @@ class SDKSession:
             configured_workspace if configured_workspace is not None else Path.cwd()
         ).expanduser().resolve()
         self._active_query = False
+        self._closed = False
+        self._active_query_task: asyncio.Task | None = None
+        self._active_query_stream: AsyncIterator[AgentEvent] | None = None
+        self._active_run_context: RunContext | None = None
         self.lifecycle_cleanup_tasks: set[asyncio.Task] = set()
         self._lifecycle_cleanup_waiters: set[asyncio.Task] = set()
         self._code_stores: dict[str, CodeExecutionStore] = {}
         self._commands = BackgroundCommandManager(session_id=session_id)
 
     async def aclose(self) -> None:
+        self._closed = True
+        if self._active_run_context is not None:
+            self._active_run_context.cancel_event.set()
+        stream = self._active_query_stream
+        if stream is not None:
+            if stream.ag_running and self._active_query_task is not asyncio.current_task():
+                self._active_query_task.cancel()
+                await asyncio.gather(self._active_query_task, return_exceptions=True)
+            else:
+                await stream.aclose()
         while pending := {
             task for task in self.lifecycle_cleanup_tasks | self._lifecycle_cleanup_waiters
             if not task.done()
@@ -154,6 +168,10 @@ class SDKSession:
             await asyncio.wait(pending)
         await self._commands.shutdown()
         self._code_stores.clear()
+        self._active_query = False
+        self._active_query_task = None
+        self._active_query_stream = None
+        self._active_run_context = None
 
     async def __aenter__(self) -> SDKSession:
         return self
@@ -162,41 +180,52 @@ class SDKSession:
         await self.aclose()
 
     async def query(self, message: str, **overrides: Any) -> AsyncIterator[AgentEvent]:
+        if self._closed:
+            raise RuntimeError("SDK session is closed. Create a new session before submitting a prompt.")
         if self._active_query or any(not task.done() for task in self.lifecycle_cleanup_tasks):
             raise RuntimeError(
                 "SDK session is already processing a prompt. Wait for the active "
                 "query to finish before submitting another one."
             )
         self._active_query = True
-        run_kwargs = dict(self._query_kwargs)
-        run_kwargs.update(overrides)
-        metadata = dict(self.metadata)
-        metadata.update(run_kwargs.pop("metadata", {}) or {})
-        session_id = str(run_kwargs.pop("session_id", self.session_id))
-        context_builder = run_kwargs.pop("context_builder", self.context_builder)
-        run_kwargs.setdefault("background_manager", self._commands)
-        run_context = run_kwargs.pop("run_context", None)
-        if run_context is None:
-            run_context = RunContext(lifecycle_cleanup_tasks=self.lifecycle_cleanup_tasks)
-        else:
-            self.lifecycle_cleanup_tasks = run_context.lifecycle_cleanup_tasks
-        run_kwargs["run_context"] = run_context
-        run_kwargs["lifecycle_cleanup_waiters"] = self._lifecycle_cleanup_waiters
-        code_owner = str(metadata.get("conversation_id") or session_id)
-        run_kwargs.setdefault("code_store", self._code_stores.setdefault(code_owner, CodeExecutionStore()))
-        stream = query(
-            message,
-            session_id=session_id,
-            context_builder=context_builder,
-            metadata=metadata,
-            **run_kwargs,
-        )
+        self._active_query_task = asyncio.current_task()
         try:
+            run_kwargs = dict(self._query_kwargs)
+            run_kwargs.update(overrides)
+            metadata = dict(self.metadata)
+            metadata.update(run_kwargs.pop("metadata", {}) or {})
+            session_id = str(run_kwargs.pop("session_id", self.session_id))
+            context_builder = run_kwargs.pop("context_builder", self.context_builder)
+            run_kwargs.setdefault("background_manager", self._commands)
+            run_context = run_kwargs.pop("run_context", None)
+            if run_context is None:
+                run_context = RunContext(lifecycle_cleanup_tasks=self.lifecycle_cleanup_tasks)
+            else:
+                self.lifecycle_cleanup_tasks = run_context.lifecycle_cleanup_tasks
+            if run_context.cancel_event is None:
+                run_context.cancel_event = asyncio.Event()
+            self._active_run_context = run_context
+            run_kwargs["run_context"] = run_context
+            run_kwargs["lifecycle_cleanup_waiters"] = self._lifecycle_cleanup_waiters
+            code_owner = str(metadata.get("conversation_id") or session_id)
+            if "code_store" not in run_kwargs:
+                run_kwargs["code_store"] = self._code_stores.setdefault(code_owner, CodeExecutionStore())
+            stream = query(
+                message,
+                session_id=session_id,
+                context_builder=context_builder,
+                metadata=metadata,
+                **run_kwargs,
+            )
+            self._active_query_stream = stream
             async with aclosing(stream):
                 async for event in stream:
                     yield event
         finally:
             self._active_query = False
+            self._active_query_task = None
+            self._active_query_stream = None
+            self._active_run_context = None
 
     async def resume_with_context(self, message: str = "继续", **overrides: Any) -> AsyncIterator[AgentEvent]:
         async with aclosing(self.query(message, **overrides)) as stream:
@@ -209,16 +238,45 @@ class SDKSession:
         session_id: str | None = None,
         system_note: str | None = None,
         metadata: dict[str, Any] | None = None,
+        run_context: RunContext | None = None,
     ) -> "SDKSession":
+        """Copy history with fresh execution owners and shared host services.
+
+        Custom callbacks scoped to a child run can be supplied through its own
+        run_context; a fork never reuses the parent's active execution state.
+        """
+        if self._closed:
+            raise RuntimeError("SDK session is closed and cannot be forked.")
         if self._active_query or any(not task.done() for task in self.lifecycle_cleanup_tasks):
             raise RuntimeError("SDK session still owns an active query or pending lifecycle cleanup.")
         child_metadata = dict(self.metadata)
         child_metadata.update(metadata or {})
+        child_kwargs = {
+            key: value for key, value in self._query_kwargs.items()
+            if key not in {"run_context", "state", "code_store", "background_manager"}
+        }
+        inherited = self._query_kwargs.get("run_context")
+        if run_context is not None:
+            child_kwargs["run_context"] = run_context
+        elif inherited is not None:
+            child_kwargs["run_context"] = RunContext(
+                agent_runtime=inherited.agent_runtime,
+                conversation_repository=inherited.conversation_repository,
+                mcp_manager=inherited.mcp_manager,
+                mcp_owner_session_id=inherited.mcp_owner_session_id,
+                skill_manager=inherited.skill_manager,
+                workspace_context=inherited.workspace_context,
+                requires_explicit_workspace=inherited.requires_explicit_workspace,
+                connected_mcp_servers=inherited.connected_mcp_servers,
+                permission_context_provider=inherited.permission_context_provider,
+                toolset_policy=inherited.toolset_policy,
+                session_toolset_policy=inherited.session_toolset_policy,
+            )
         child = SDKSession(
             session_id=session_id or f"{self.session_id}-fork",
             context_builder=_clone_context_builder(self.context_builder),
             metadata=child_metadata,
-            **self._query_kwargs,
+            **child_kwargs,
         )
         if system_note:
             child.context_builder.append_system_note(system_note)
@@ -489,6 +547,7 @@ async def _query_unclaimed(
         state=state,
         runtime=AgentLoopSessionContext(
             permission_context=permission_context,
+            cancel_event=run_context.cancel_event,
             workspace_root=resolved_workspace_root,
             session_id=session_id,
             background_manager=background_manager,

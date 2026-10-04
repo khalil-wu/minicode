@@ -118,7 +118,7 @@ class ProviderCompletionCoordinator:
             )
 
         call_index, trace_id = self.turn_kernel.commit_provider_call(iteration_id)
-        raw_done.setdefault("trace_id", trace_id)
+        raw_done["trace_id"] = trace_id
         events.append(
             AgentEvent.inspector_update(
                 "provider",

@@ -38,6 +38,80 @@ class _RecordingLLM(LLMAdapter):
 
 
 @pytest.mark.asyncio
+async def test_ordinary_child_refreshes_parent_restrictions_at_its_own_boundary(startup_case, monkeypatch):
+    from backend.agent.message import AgentEvent
+    from backend.agent.query_engine import QueryEngine
+    from backend.permissions.context import PermissionContext
+
+    current = PermissionContext(mode="bypass")
+    startup_case.context.run_context.permission_context_provider = lambda: current
+    captured = []
+
+    async def submit(self, submission):
+        nonlocal current
+        provider = submission.runtime.run_context.permission_context_provider
+        assert provider().mode == "bypass"
+        current = PermissionContext(mode="plan", tool_deny_rules=["web_fetch"])
+        refreshed = provider()
+        captured.append(refreshed)
+        assert refreshed.mode == "plan" and "web_fetch" in refreshed.tool_deny_rules
+        current = PermissionContext(mode="bypass")
+        assert provider().mode == "bypass"
+        submission.state.reply = "Finished"
+        yield AgentEvent.done(status="completed", reason="success")
+
+    monkeypatch.setattr(QueryEngine, "submit", submit)
+    _, result = await _launch(startup_case, "foreground")
+    assert not result.is_error and len(captured) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments, own_mode", [({}, "confirm"), ({"read_only": True}, "plan"), ({"mode": "plan"}, "plan")])
+async def test_teammate_keeps_own_mode_but_refreshes_inherited_restrictions(startup_case, monkeypatch, arguments, own_mode):
+    from backend.agent.message import AgentEvent
+    from backend.agent.query_engine import QueryEngine
+    from backend.permissions.context import PermissionContext
+    from backend.tools.base import PermissionLevel
+
+    current = PermissionContext(mode="bypass")
+    startup_case.context.run_context.permission_context_provider = lambda: current
+    captured = []
+
+    async def submit(self, submission):
+        nonlocal current
+        run = submission.runtime.run_context
+        provider = run.permission_context_provider
+        assert provider().mode == own_mode
+        current = PermissionContext(
+            mode="plan", tool_deny_rules=["web_fetch"],
+            session_overrides={"read_file": PermissionLevel.ALWAYS_DENY},
+            filesystem_constraints={"deny_read": ["private/**"]}, allow_unsandboxed_commands=False,
+        )
+        refreshed = provider()
+        assert refreshed.mode == own_mode
+        assert "web_fetch" in refreshed.tool_deny_rules
+        assert refreshed.session_overrides["read_file"] == PermissionLevel.ALWAYS_DENY
+        assert refreshed.filesystem_constraints["deny_read"] == ["private/**"]
+        assert not refreshed.allow_unsandboxed_commands
+        current = PermissionContext(mode="confirm")
+        await run.permission_mode_setter("bypass")
+        applied_mode = "plan" if arguments.get("read_only") else "confirm"
+        assert provider().mode == applied_mode
+        assert "web_fetch" not in provider().tool_deny_rules
+        record = startup_case.runtime.get_subagent(submission.runtime.metadata["agent_id"])
+        assert record.permission_mode == applied_mode
+        captured.append(refreshed)
+        submission.state.reply = "Finished"
+        yield AgentEvent.done(status="completed", reason="success")
+
+    monkeypatch.setattr(QueryEngine, "submit", submit)
+    child_id, result = await _launch(startup_case, "teammate", **arguments)
+    assert not result.is_error
+    assert await startup_case.runtime.wait_for_subagent(child_id, 3)
+    assert len(captured) == 1
+
+
+@pytest.mark.asyncio
 async def test_continuation_metrics_sum_query_turns_once(startup_case, monkeypatch):
     from backend.agent.message import AgentEvent
     from backend.agent.query_engine import QueryEngine
@@ -151,6 +225,56 @@ async def _launch(case, delivery: str, **arguments):
         **arguments,
     }, context=case.context)
     return launch.runtime_metadata["subagent_id"], launch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rebuild_runtime", [False, True])
+async def test_team_owner_survives_next_turn_and_runtime_rebuild(startup_case, rebuild_runtime):
+    from backend.tools.swarm_tools import TeamCreateTool, TeamDeleteTool, TeamListTool
+
+    runtime = startup_case.runtime
+    runtime.complete_run("parent")
+    if rebuild_runtime:
+        runtime.close()
+        runtime = AgentRuntime(
+            metrics_file=startup_case.workspace.parent / "metrics.jsonl",
+            swarm_store_dir=startup_case.workspace.parent / "swarm", enable_lease_heartbeat=False,
+        )
+        startup_case.context.run_context.agent_runtime = runtime
+    try:
+        runtime.start_run(run_id="next-turn", conversation_id="conversation")
+        startup_case.context.metadata["run_id"] = "next-turn"
+        child_id, result = await _launch(startup_case, "teammate", team_name="")
+        assert not result.is_error
+        assert child_id == "alice@audit"
+        assert runtime.get_subagent(child_id).team_name == "audit"
+        assert await runtime.wait_for_subagent(child_id, 3)
+        team = runtime.list_swarm_teams(conversation_id="conversation")[0]
+        assert team.created_by == "parent"
+        duplicate = await TeamCreateTool().execute({"team_name": "second"}, startup_case.context)
+        assert duplicate.is_error
+        listing = await TeamListTool().execute({"team_name": "audit"}, startup_case.context)
+        assert not listing.is_error and "audit" in listing.content
+        deleted = await TeamDeleteTool().execute({"team_name": "audit"}, startup_case.context)
+        assert not deleted.is_error
+    finally:
+        if rebuild_runtime:
+            runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_implicit_team_selection_rejects_ambiguous_history(startup_case):
+    startup_case.runtime.create_swarm_team(
+        team_name="legacy-other", conversation_id="conversation", created_by="earlier-turn",
+    )
+    result = await startup_case.tool.execute({
+        "name": "alice", "description": "Audit startup", "prompt": "Answer the audit question.",
+    }, context=startup_case.context)
+    assert result.is_error and "team_name" in result.content
+    assert not startup_case.workers
+    child_id, explicit = await _launch(startup_case, "teammate", team_name="audit")
+    assert not explicit.is_error and child_id == "alice@audit"
+    assert await startup_case.runtime.wait_for_subagent(child_id, 3)
 
 
 @pytest.mark.asyncio

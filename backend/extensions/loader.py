@@ -115,6 +115,9 @@ class ExtensionModuleCache:
     ) -> int:
         return int(self._partition(cwd, cache_namespace)["generation"])
 
+    def module_names_for(self, cwd: Path, cache_namespace: str | None) -> set[str]:
+        return set(self._partition(cwd, cache_namespace)["module_names"])
+
     def get(
         self,
         path: Path,
@@ -163,6 +166,8 @@ class ExtensionModuleCache:
         *,
         cwd: Path | None = None,
         cache_namespace: str | None = None,
+        expected_generation: int | None = None,
+        preserve_modules: bool = False,
     ) -> None:
         if cwd is None and cache_namespace is None:
             partitions = tuple(self._partitions.values())
@@ -176,13 +181,19 @@ class ExtensionModuleCache:
                 keys.extend(
                     key for key in self._partitions if key[0] == namespace
                 )
-            partitions = tuple(
-                partition
+            selected_keys = [
+                key
                 for key in keys
-                if (partition := self._partitions.pop(key, None)) is not None
-            )
-        for partition in partitions:
-            self._purge_module_names(set(partition["module_names"]))
+                if (partition := self._partitions.get(key)) is not None
+                and (
+                    expected_generation is None
+                    or partition["generation"] == expected_generation
+                )
+            ]
+            partitions = tuple(self._partitions.pop(key) for key in selected_keys)
+        if not preserve_modules:
+            for partition in partitions:
+                self._purge_module_names(set(partition["module_names"]))
         self.cwd = None
         self.generation += 1
 
@@ -215,27 +226,6 @@ def extension_cache_generation(
         Path(cwd).expanduser(),
         cache_namespace,
     )
-
-
-def _resolve_factory(module: ModuleType) -> Callable[..., Any] | None:
-    for name in _FACTORY_NAMES:
-        candidate = getattr(module, name, None)
-        if callable(candidate) or (
-            hasattr(candidate, "setup") and callable(getattr(candidate, "setup", None))
-        ):
-            return candidate
-    # A module with a single public callable is convenient for tiny extensions,
-    # but do not guess from imported callables (which could register the wrong
-    # function).  Only inspect names declared by the module itself.
-    declared = getattr(module, "__dict__", {})
-    candidates = [
-        value
-        for name, value in declared.items()
-        if not name.startswith("_")
-        and callable(value)
-        and getattr(value, "__module__", None) == module.__name__
-    ]
-    return candidates[0] if len(candidates) == 1 else None
 
 
 def _manifest_entries(directory: Path) -> list[Path]:
@@ -408,16 +398,22 @@ class ExtensionLoader:
         self.runtime_actions = dict(runtime_actions or {})
         self.context_actions = dict(context_actions or {})
         self._last_result: LoadExtensionsResult | None = None
+        self._module_names: set[str] = set()
 
     @property
     def generation(self) -> int:
         return _GLOBAL_CACHE.generation_for(self.cwd, self.cache_namespace)
 
-    def clear_cache(self) -> int:
-        clear_extension_cache(
-            self.cwd,
+    def clear_cache(self, *, preserve_modules: bool = False) -> int:
+        _GLOBAL_CACHE.clear(
+            cwd=self.cwd,
             cache_namespace=self.cache_namespace,
+            expected_generation=(self._last_result.generation if self._last_result is not None else None),
+            preserve_modules=preserve_modules,
         )
+        if not preserve_modules:
+            _GLOBAL_CACHE._purge_module_names(self._module_names)
+            self._module_names.clear()
         return self.generation
 
     def discover(
@@ -690,6 +686,7 @@ class ExtensionLoader:
         if self.use_cache:
             cached = _GLOBAL_CACHE.get(path, self.cwd, self.cache_namespace)
             if cached is not None:
+                self._module_names.update(_GLOBAL_CACHE.module_names_for(self.cwd, self.cache_namespace))
                 return cached, None
 
         load_generation = self.generation
@@ -723,13 +720,15 @@ class ExtensionLoader:
             source = path.read_bytes()
             code = compile(source, str(path), "exec", dont_inherit=True)
             exec(code, module.__dict__)
-        except Exception:
-            sys.modules.pop(module_name, None)
+        except BaseException:
+            self._purge_module_name(module_name)
             raise
 
         factory = self._resolve_factory(module)
         if factory is None:
+            self._purge_module_name(module_name)
             return None, module_name
+        self._module_names.add(module_name)
         if self.use_cache:
             _GLOBAL_CACHE.put(
                 path,
@@ -752,12 +751,7 @@ class ExtensionLoader:
 
     @staticmethod
     def _resolve_factory(module: ModuleType) -> Callable[..., Any] | Any | None:
-        for name in (
-            "extension",
-            "register",
-            "create_extension",
-            "EXTENSION_FACTORY",
-        ):
+        for name in _FACTORY_NAMES:
             candidate = getattr(module, name, None)
             if callable(candidate) or (
                 hasattr(candidate, "setup")

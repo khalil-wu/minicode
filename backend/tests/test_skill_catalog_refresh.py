@@ -18,6 +18,8 @@ def test_skill_list_refreshes_session_snapshot_after_install_and_remove(tmp_path
     manager = SkillManager(loader)
     manager.discover()
     session = SimpleNamespace(skill_manager=manager, active_conversation_id="conversation-1", send_payload=AsyncMock(), send_event=AsyncMock())
+    session.resolve_requested_workspace = lambda _: None
+    session.session_lifecycle = SimpleNamespace(workspace_root=None, current_workspace_root=lambda: None)
     skill = root / "review" / "SKILL.md"
     skill.parent.mkdir()
     skill.write_text("---\nname: review\ndescription: Review code\n---\nReview the change.\n")

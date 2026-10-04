@@ -31,6 +31,17 @@ vi.mock("../../hooks/useWebSocket", () => ({
 
 const originalOpenEditorFile = useAppStore.getState().openEditorFile;
 
+it("keeps ordinary tool errors as tool evidence even when a path contains HTTP-like numbers", () => {
+  const view = render(<ActivityCell cell={{ kind: "activity", id: "tool-numeric-error",
+    activityKind: "genericTool", title: "工具失败", status: "failed", collapsed: false,
+    toolCallRecords: [{ id: "numeric-tool", name: "custom_tool", args: {}, status: "failed", startedAt: 1,
+      userSummary: "Cannot open src/500/report429.txt (call_abcdefghijk 1.5s elapsed)" }] }} />);
+  expect(view.container.textContent).toContain("Cannot open src/500/report429.txt");
+  expect(view.container.textContent).not.toContain("模型服务网络请求失败");
+  expect(view.container.textContent).not.toContain("模型暂时繁忙");
+  expect(view.container.textContent).not.toContain("call_abcdefghijk");
+});
+
 beforeEach(() => {
   useAppStore.setState({
     conversationId: null,
@@ -58,14 +69,14 @@ afterEach(() => {
 
 describe("ActivityCell", () => {
   it.each([
-    ["failed", "编辑失败"],
-    ["interrupted", "已取消编辑"],
-    ["partial", "编辑未完成"],
+    ["failed", "Failed"],
+    ["interrupted", "Interrupted"],
+    ["partial", "Partial"],
   ] as const)("does not claim an edit was applied after %s", (status, label) => {
     render(<ActivityCell cell={{ kind: "activity", id: "edit", activityKind: "fileChange", title: "Edit", status,
       toolCallRecords: [{ id: "edit", name: "edit_file", args: { file_path: "pricing.py" }, status: "failed" }] }} />);
     expect(screen.getByText(label)).toBeTruthy();
-    expect(screen.queryByText("已编辑")).toBeNull();
+    expect(screen.queryByText("Edited")).toBeNull();
   });
   it("preserves a user's disclosure choice across tool status updates", () => {
     const cell: ActivityCellState = { kind: "activity", id: "read", activityKind: "fileRead", title: "Read", status: "running", collapsed: false, startedAt: 1,
@@ -93,7 +104,7 @@ describe("ActivityCell", () => {
     };
 
     const { container, rerender } = render(React.createElement(ActivityCell, { cell: baseCell }));
-    expect(container.querySelector(".activity-cell-name")?.textContent).toBe("正在重新连接 1/5");
+    expect(container.querySelector(".activity-cell-name")?.textContent).toBe("Reconnecting 1/5");
     expect(container.querySelector(".activity-cell-running")).toBeTruthy();
     expect(container.querySelector(".activity-cell[data-provider-retry=\"true\"]")).toBeTruthy();
     expect(container.querySelector(".activity-cell-provider-icon .lucide-wifi")).toBeTruthy();
@@ -105,7 +116,7 @@ describe("ActivityCell", () => {
         progress: { ...baseCell.progress, text: "连接失败，正在重连（第 5/5 次）", retryAttempt: 5 },
       },
     }));
-    expect(container.querySelector(".activity-cell-name")?.textContent).toBe("正在重新连接 5/5");
+    expect(container.querySelector(".activity-cell-name")?.textContent).toBe("Reconnecting 5/5");
 
     rerender(React.createElement(ActivityCell, {
       cell: {
@@ -114,7 +125,7 @@ describe("ActivityCell", () => {
         progress: { ...baseCell.progress, text: "提供商请求失败（重试 5/5 后）", retryAttempt: 5 },
       },
     }));
-    expect(container.querySelector(".activity-cell-name")?.textContent).toBe("连接失败（重试 5/5 后）");
+    expect(container.querySelector(".activity-cell-name")?.textContent).toBe("Connection failed after 5/5 retries");
     expect(container.querySelector(".activity-cell-provider-icon .lucide-wifi-off")).toBeTruthy();
   });
 
@@ -140,7 +151,7 @@ describe("ActivityCell", () => {
       kind: "activity",
       id: "todo-cell",
       activityKind: "genericTool",
-      title: "已更新任务清单",
+      title: "Update plan",
       status: "done",
       collapsed: false,
       startedAt: 1,
@@ -165,7 +176,7 @@ describe("ActivityCell", () => {
 
     render(React.createElement(ActivityCell, { cell }));
 
-    expect(screen.getByText("已更新任务清单")).toBeTruthy();
+    expect(screen.queryByText("Update plan")).toBeNull();
     expect(screen.getByText("任务")).toBeTruthy();
     expect(document.querySelector(".activity-cell-main-button .activity-cell-detail")?.textContent)
       .toBe("2 项，1 进行中，1 已完成");
@@ -177,7 +188,7 @@ describe("ActivityCell", () => {
       kind: "activity",
       id: "plan-cell",
       activityKind: "genericTool",
-      title: "更新计划",
+      title: "Update plan",
       status: "done",
       collapsed: false,
       startedAt: 1,
@@ -209,7 +220,7 @@ describe("ActivityCell", () => {
     expect(screen.getByText("抓取北京天气")).toBeTruthy();
     expect(screen.getByText("汇总正式结果")).toBeTruthy();
     expect(document.body.textContent).not.toContain("Plan updated");
-    expect(screen.queryAllByText("更新计划")).toHaveLength(1);
+    expect(screen.queryAllByText("Update plan")).toHaveLength(1);
     expect(container.querySelector(".activity-cell-plan-spinner")).toBeNull();
     const inProgressStep = container.querySelector('[data-status="in_progress"]');
     const pendingStep = container.querySelector('[data-status="pending"]');
@@ -222,7 +233,7 @@ describe("ActivityCell", () => {
       kind: "activity",
       id: "live-plan-cell",
       activityKind: "genericTool",
-      title: "更新计划",
+      title: "Update plan",
       status: "running",
       collapsed: false,
       startedAt: Date.now(),
@@ -246,7 +257,7 @@ describe("ActivityCell", () => {
       kind: "activity",
       id: "live-read-cell",
       activityKind: "fileRead",
-      title: "读取文件",
+      title: "Read",
       status: "running",
       collapsed: true,
       startedAt: Date.now(),
@@ -263,7 +274,7 @@ describe("ActivityCell", () => {
 
     expect(screen.queryByRole("button", { name: "展开活动详情" })).toBeNull();
     expect(container.querySelector(".activity-cell-tool-expanded")).toBeNull();
-    expect(container.querySelector(".activity-cell-main-button .activity-cell-name")?.textContent).toBe("正在读取");
+    expect(container.querySelector(".activity-cell-main-button .activity-cell-name")?.textContent).toBe("Reading");
     expect(document.body.textContent).toContain("src/live.ts");
   });
 
@@ -328,7 +339,7 @@ describe("ActivityCell", () => {
       kind: "activity",
       id: "edit-detail",
       activityKind: "fileChange",
-      title: "已编辑",
+      title: "Edit",
       status: "done",
       collapsed: true,
       startedAt: 1,
@@ -355,7 +366,7 @@ describe("ActivityCell", () => {
 
     expect(container.querySelector(".activity-cell-file-change-expanded")).toBeTruthy();
     expect(container.querySelector(".activity-cell-change-card")).toBeTruthy();
-    expect(screen.getAllByText("frontend/src.v2/lib/fuzzy-match.ts")).toHaveLength(2);
+    expect(screen.getAllByText(/frontend[\\/]src\.v2[\\/]lib[\\/]fuzzy-match\.ts/)).toHaveLength(2);
     expect(screen.getByText("new value")).toBeTruthy();
     expect(screen.queryByText("其余上下文已折叠")).toBeNull();
   });
@@ -366,7 +377,7 @@ describe("ActivityCell", () => {
       kind: "activity",
       id: "edit-same-file",
       activityKind: "fileChange",
-      title: "已编辑",
+      title: "Edit",
       status: "done",
       collapsed: true,
       startedAt: 1,
@@ -502,7 +513,7 @@ describe("ActivityCell", () => {
       </>,
     );
     const labels = [...container.querySelectorAll(".activity-cell-name")].map((node) => node.textContent);
-    expect(labels).toEqual(["列出文件", "搜索文件"]);
+    expect(labels).toEqual(["List", "Search"]);
     expect(container.querySelectorAll(".activity-cell-detail")[0]?.textContent).toBe("frontend/src.v2/lib");
     expect(container.querySelectorAll(".activity-cell-detail")[1]?.textContent)
       .toBe("AgentTimeline · frontend/src.v2/agent-loop");
@@ -620,8 +631,8 @@ describe("ActivityCell", () => {
       collapsed: false,
       startedAt: 1,
       toolCallRecords: [
-        { id: "s1", name: "web_search", args: { query: "今天上海天气如何" }, displaySummary: "搜索网页", inputSummary: "今天上海天气如何", status: "success", startedAt: 1, finishedAt: 2 },
-        { id: "s2", name: "web_search", args: { query: "今天上海天气如何" }, displaySummary: "搜索网页", inputSummary: "今天上海天气如何", status: "success", startedAt: 2, finishedAt: 3 },
+        { id: "s1", name: "web_search", args: { query: "今天上海天气如何" }, displaySummary: "Search", inputSummary: "今天上海天气如何", status: "success", startedAt: 1, finishedAt: 2 },
+        { id: "s2", name: "web_search", args: { query: "今天上海天气如何" }, displaySummary: "Search", inputSummary: "今天上海天气如何", status: "success", startedAt: 2, finishedAt: 3 },
       ],
     };
 
@@ -685,7 +696,7 @@ describe("ActivityCell", () => {
     };
 
     const { rerender, container } = render(React.createElement(ActivityCell, { cell: fetchCell }));
-    expect(screen.getByText("获取网页")).toBeTruthy();
+    expect(screen.getByText("Fetch")).toBeTruthy();
     expect(container.querySelector(".activity-cell-tool-icon")).toBeTruthy();
     expect(container.querySelector(".activity-cell[data-web-action=\"fetch\"]")).toBeTruthy();
 
@@ -702,7 +713,7 @@ describe("ActivityCell", () => {
         inputSummary: "MiniCode",
       }],
     } }));
-    expect(screen.getByText("搜索网页")).toBeTruthy();
+    expect(screen.getByText("Search")).toBeTruthy();
   });
 
   it("does not repeat a single fetch URL inside a second disclosure card", () => {
@@ -710,7 +721,7 @@ describe("ActivityCell", () => {
       kind: "activity",
       id: "fetch-single-url",
       activityKind: "webSearch",
-      title: "获取网页",
+      title: "Fetch",
       status: "done",
       collapsed: false,
       startedAt: 1,
@@ -740,7 +751,7 @@ describe("ActivityCell", () => {
       kind: "activity",
       id: "fetch-failed-single-disclosure",
       activityKind: "webSearch",
-      title: "获取网页",
+      title: "Fetch",
       status: "failed",
       collapsed: false,
       startedAt: 1,
@@ -956,8 +967,8 @@ describe("ActivityCell", () => {
 
     render(React.createElement(ActivityCell, { cell }));
 
-    expect(screen.getAllByText("读取文件").length).toBeGreaterThanOrEqual(1);
-    expect(document.querySelector(".activity-cell-main-button .activity-cell-detail")?.textContent).toContain("art_screen");
+    expect(screen.getAllByText("Read").length).toBeGreaterThanOrEqual(1);
+    expect(document.querySelector(".activity-cell-main-button .activity-cell-detail")).toBeNull();
     expect(document.body.textContent).toContain("Dimensions: 1029x1071");
   });
 
@@ -966,7 +977,7 @@ describe("ActivityCell", () => {
       kind: "activity",
       id: "failed-tool",
       activityKind: "genericTool",
-      title: "工具调用失败",
+      title: "Failed",
       status: "failed",
       collapsed: true,
       startedAt: 1,
@@ -986,7 +997,7 @@ describe("ActivityCell", () => {
 
     render(React.createElement(ActivityCell, { cell }));
 
-    expect(document.body.textContent).toContain("工具调用失败");
+    expect(document.body.textContent).toContain("Failed");
     const disclosure = screen.getByRole("button", { name: "展开活动详情" });
     expect(disclosure.getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
@@ -1041,7 +1052,7 @@ describe("ActivityCell", () => {
       kind: "activity",
       id: "verbose-failed-tool",
       activityKind: "genericTool",
-      title: "工具调用失败",
+      title: "Failed",
       status: "failed",
       collapsed: false,
       startedAt: 1,
@@ -1059,8 +1070,8 @@ describe("ActivityCell", () => {
 
     render(React.createElement(ActivityCell, { cell }));
 
-    expect(document.body.textContent).toContain("content_hash=abc123");
-    expect(document.body.textContent).toContain("nearest match at line 10");
+    expect(cell.toolCallRecords?.[0]?.developerDetail).toContain("content_hash=abc123");
+    expect(cell.toolCallRecords?.[0]?.developerDetail).toContain("nearest match at line 10");
     expect(document.body.textContent).toContain("secret.py");
   });
 
@@ -1094,8 +1105,8 @@ describe("ActivityCell", () => {
     // rather than to a nested label box repeating the tool's own name.
     expect(container.querySelectorAll(".activity-cell-expanded")).toHaveLength(1);
     expect(container.querySelector(".activity-cell-output-preview")).toBeNull();
-    expect(container.querySelector(".activity-cell-elapsed")?.textContent).toBe("4.1s");
-    expect(container.querySelector(".activity-cell-expanded .activity-cell-output-pre")?.textContent)
+    expect(container.querySelector(".activity-cell-detail-duration")?.textContent).toBe("4.1s");
+    expect(container.querySelector(".activity-cell-expanded pre[aria-label=\"操作结果\"]")?.textContent)
       .toContain("Navigation requested.");
   });
 
@@ -1137,9 +1148,9 @@ describe("ActivityCell", () => {
     expect(image?.src).toContain("session_id=session-screen");
     expect(image?.src).toContain("conversation_id=conv-screen");
     expect(container.querySelectorAll(".activity-cell-expanded")).toHaveLength(1);
-    expect(container.querySelector(".activity-cell-expanded .activity-cell-output-pre")?.textContent)
+    expect(container.querySelector(".activity-cell-expanded pre[aria-label=\"操作结果\"]")?.textContent)
       .toContain("Screenshot captured.");
-    expect(document.body.textContent).toContain("浏览器截图");
+    expect(document.body.textContent).toContain("Capture screenshot");
   });
 
   it("rebuilds the screenshot URL when a mounted cell observes the connection", () => {

@@ -757,6 +757,7 @@ def test_attachment_metadata_limit_is_reported_as_413(monkeypatch, tmp_path) -> 
         workspace_root=tmp_path,
         artifact_store=artifact_store,
         attachment_store=RejectingAttachmentStore(),
+        release_upload=lambda: None,
     )
 
     with pytest.raises(ChatApiServiceError) as exc_info:

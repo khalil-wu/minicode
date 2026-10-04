@@ -12,7 +12,9 @@ import httpx
 
 from backend.secret_redaction import redact_secrets
 from backend.llm.capabilities import is_gpt_image_model
+from backend.llm.errors import llm_error_status_code as _http_error_status
 from backend.llm.proxy_policy import provider_httpx_proxy_kwargs
+from backend.llm.provider_contracts import normalize_model_limit
 
 logger = logging.getLogger(__name__)
 
@@ -169,13 +171,7 @@ def _positive_model_integer(item: dict[str, Any], keys: tuple[str, ...]) -> int:
     capabilities = item.get("capabilities") if isinstance(item.get("capabilities"), dict) else {}
     for source in (item, capabilities):
         for key in keys:
-            value = source.get(key)
-            if isinstance(value, bool) or value is None:
-                continue
-            try:
-                parsed = int(value)
-            except (TypeError, ValueError):
-                continue
+            parsed = normalize_model_limit(source.get(key))
             if parsed > 0:
                 return parsed
     return 0
@@ -733,17 +729,6 @@ def _status_hint_for_provider(provider_id: str, status_code: int | None, has_api
     if status_code and status_code >= 500:
         return "The upstream provider is temporarily unavailable. Retry later or switch provider."
     return ""
-
-
-def _http_error_status(exc: Exception) -> int | None:
-    status_code = getattr(exc, "status_code", None)
-    if status_code is None:
-        response = getattr(exc, "response", None)
-        status_code = getattr(response, "status_code", None)
-    try:
-        return int(status_code) if status_code is not None else None
-    except (TypeError, ValueError):
-        return None
 
 
 def _is_network_error(exc: Exception) -> bool:

@@ -1,4 +1,5 @@
 import { useAppStore } from "../stores";
+import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
 import {
   type GitStatus,
   type FileSearchResult,
@@ -36,7 +37,7 @@ export const SearchResultRow = ({
 }) => {
   const selected = isSameTreePath(activeEditorPath, result.path, workingDirectory);
   const isDir = result.kind === "folder";
-  const gitStatus = gitMap.get(result.path);
+  const gitStatus = gitMap.get(workspaceFilePathComparisonKey(result.path, workingDirectory));
   const parent = result.path.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
   const openResult = () => {
     if (isDir) {
@@ -51,6 +52,8 @@ export const SearchResultRow = ({
       role="treeitem"
       tabIndex={0}
       aria-selected={selected}
+      aria-level={1}
+      data-tree-path={result.path}
       title={result.path}
       onClick={openResult}
       onKeyDown={(event) => {

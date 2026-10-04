@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import (
     Any,
     Mapping,
+    Callable,
 )
 from urllib.parse import urlsplit
 import json
@@ -15,9 +16,12 @@ import logging
 import os
 import time
 
+from backend.atomic_io import atomic_write_text
+
 from backend.config_helpers import (
     MINICODE_CAPPED_DEFAULT_MAX_TOKENS,
     SettingsError,
+    SETTINGS_FILE,
     _RUNTIME_API_KEY_SCOPES,
     _RUNTIME_IMAGE_API_KEY_SCOPES,
     _coerce_int,
@@ -46,6 +50,7 @@ from backend.config_helpers import (
     _scoped_vault_names,
     _select_custom_model,
     _serialized_settings_update,
+    _vault_api_key,
     _write_settings_json,
     get_anthropic_settings,
     get_custom_settings,
@@ -60,24 +65,120 @@ from backend.config_helpers import (
 logger = logging.getLogger(__name__)
 
 
+def _credential_changes(provider: str, api_key: str, base_url: str, *, image: bool = False):
+    provider = _normalize_provider(provider)
+    names = _image_scoped_vault_names(provider, base_url) if image else _scoped_vault_names(provider, base_url)
+    if image and not names:
+        raise SettingsError("An independent image API key requires an image base URL.")
+    global_name = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "custom": "CUSTOM_API_KEY"}[provider]
+    description = f"{provider}{' image' if image else ''} provider API key for {urlsplit(base_url).netloc or base_url}"
+    changes = {name: (api_key, description, "global") for name in names}
+    if not image:
+        changes[global_name] = (api_key, f"{provider} provider API key", "global")
+    scope_map = _RUNTIME_IMAGE_API_KEY_SCOPES if image else _RUNTIME_API_KEY_SCOPES
+    scope_change = (scope_map, provider, _provider_key_scope(base_url)) if names else None
+    return changes, scope_change
+
+
+def _credential_deletions(
+    provider: str, base_url: str, *, image: bool = False, scoped_only: bool = True,
+):
+    """Remove an endpoint family while preserving another endpoint's alias."""
+    provider = _normalize_provider(provider)
+    names = list(
+        _image_scoped_vault_names(provider, base_url)
+        if image else _scoped_vault_names(provider, base_url)
+    )
+    scope_map = _RUNTIME_IMAGE_API_KEY_SCOPES if image else _RUNTIME_API_KEY_SCOPES
+    scope_matches = scope_map.get(provider) == _provider_key_scope(base_url)
+    if not image:
+        global_name = {
+            "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "custom": "CUSTOM_API_KEY",
+        }[provider]
+        alias_scope = scope_map.get(provider) or _provider_key_scope(
+            os.getenv({"openai": "OPENAI_BASE_URL", "anthropic": "ANTHROPIC_BASE_URL", "custom": "CUSTOM_BASE_URL"}[provider], "")
+        )
+        clear_global = not scoped_only or bool(alias_scope) and alias_scope == _provider_key_scope(base_url)
+        if scoped_only and names and not alias_scope:
+            scoped_values = {
+                value for name in names
+                if _is_api_key_replacement(
+                    value := (os.getenv(name, "").strip() or _vault_api_key(name).strip())
+                )
+            }
+            global_values = {
+                value for value in (os.getenv(global_name, "").strip(), _vault_api_key(global_name).strip())
+                if _is_api_key_replacement(value)
+            }
+            clear_global = bool(scoped_values & global_values)
+        if clear_global:
+            names.append(global_name)
+    changes = {name: (None, "", "") for name in names}
+    scope_changes = [(scope_map, provider, None)] if scope_matches or not scoped_only else []
+    return changes, scope_changes
+
+
+def _commit_credential_changes(changes, scope_changes, settings_data=None, after_publish=None):
+    """Publish one update or restore the exact previous profile on failure."""
+    env_before = {name: os.environ.get(name) for name in changes}
+    scopes_before = [(mapping, provider, mapping.get(provider)) for mapping, provider, _scope in scope_changes]
+    settings_before = (
+        SETTINGS_FILE.read_bytes() if SETTINGS_FILE.exists() else None
+    ) if settings_data is not None else None
+
+    def publish():
+        try:
+            if settings_data is not None:
+                _write_settings_json(settings_data)
+            for name, (value, _description, _scope) in changes.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+            for mapping, provider, scope in scope_changes:
+                if scope is None:
+                    mapping.pop(provider, None)
+                else:
+                    mapping[provider] = scope
+            if after_publish is not None:
+                after_publish()
+            return get_llm_settings_payload(settings_data, include_api_keys=True) if settings_data is not None else None
+        except Exception as failure:
+            for name, value in env_before.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+            for mapping, provider, scope in scopes_before:
+                if scope is None:
+                    mapping.pop(provider, None)
+                else:
+                    mapping[provider] = scope
+            if settings_data is not None:
+                try:
+                    current = SETTINGS_FILE.read_bytes() if SETTINGS_FILE.exists() else None
+                    if current != settings_before:
+                        if settings_before is None:
+                            SETTINGS_FILE.unlink()
+                        else:
+                            atomic_write_text(SETTINGS_FILE, settings_before.decode("utf-8"))
+                except OSError as rollback_failure:
+                    raise ExceptionGroup("Provider settings publication and rollback failed", [failure, rollback_failure]) from failure
+            raise
+
+    if changes:
+        from backend.vault import EnvVault
+        return EnvVault().set_many(changes, publish=publish)
+    return publish()
+
+
 def _set_runtime_image_api_key(provider: str, api_key: str, base_url: str) -> None:
     """Persist an independent Images API key without replacing the text key."""
 
     if not api_key:
         return
-    scoped_names = _image_scoped_vault_names(provider, base_url)
-    if not scoped_names:
-        raise SettingsError("An independent image API key requires an image base URL.")
-    runtime_key = _normalize_provider(provider)
-    from backend.vault import EnvVault
-
-    vault = EnvVault()
-    host = urlsplit(base_url).netloc or base_url
-    for name in scoped_names:
-        vault.set(name, api_key, description=f"{runtime_key} image provider API key for {host}", scope="global")
-    _RUNTIME_IMAGE_API_KEY_SCOPES[runtime_key] = _provider_key_scope(base_url)
-    for name in scoped_names:
-        os.environ[name] = api_key
+    changes, scope_change = _credential_changes(provider, api_key, base_url, image=True)
+    _commit_credential_changes(changes, [scope_change])
 
 
 
@@ -85,45 +186,23 @@ def _set_runtime_api_key(provider: str, api_key: str, base_url: str = "") -> Non
     if not api_key:
         _clear_runtime_api_key(provider, base_url)
         return
-    if provider == "anthropic":
-        vault_name = "ANTHROPIC_API_KEY"
-    elif provider == "custom":
-        vault_name = "CUSTOM_API_KEY"
-    else:
-        vault_name = "OPENAI_API_KEY"
-    from backend.vault import EnvVault
-
-    vault = EnvVault()
-    scoped_names = _scoped_vault_names(provider, base_url)
-    vault.set(vault_name, api_key, description=f"{provider} provider API key", scope="global")
-    for scoped_name in scoped_names:
-        vault.set(scoped_name, api_key, description=f"{provider} provider API key for {urlsplit(base_url).netloc or base_url}", scope="global")
-    os.environ[vault_name] = api_key
-    if scoped_names:
-        _RUNTIME_API_KEY_SCOPES[provider] = _provider_key_scope(base_url)
-    for scoped_name in scoped_names:
-        os.environ[scoped_name] = api_key
+    changes, scope_change = _credential_changes(provider, api_key, base_url)
+    _commit_credential_changes(changes, [scope_change] if scope_change is not None else [])
 
 
 def _clear_runtime_api_key(provider: str, base_url: str = "") -> None:
-    if provider == "anthropic":
-        vault_name = "ANTHROPIC_API_KEY"
-    elif provider == "custom":
-        vault_name = "CUSTOM_API_KEY"
-    else:
-        vault_name = "OPENAI_API_KEY"
-    names = [vault_name]
-    scoped_names = _scoped_vault_names(provider, base_url)
-    names.extend(name for name in scoped_names if name not in names)
-    from backend.vault import EnvVault
+    changes, scope_changes = _credential_deletions(provider, base_url, scoped_only=False)
+    _commit_credential_changes(changes, scope_changes)
 
-    vault = EnvVault()
-    for name in names:
-        vault.delete(name)
-    for name in names:
-        os.environ.pop(name, None)
-    if not base_url or _RUNTIME_API_KEY_SCOPES.get(provider) == _provider_key_scope(base_url):
-        _RUNTIME_API_KEY_SCOPES.pop(provider, None)
+
+def _clear_scoped_runtime_api_key(provider: str, base_url: str = "") -> None:
+    changes, scope_changes = _credential_deletions(provider, base_url)
+    _commit_credential_changes(changes, scope_changes)
+
+
+def _clear_scoped_runtime_image_api_key(provider: str, base_url: str) -> None:
+    changes, scope_changes = _credential_deletions(provider, base_url, image=True)
+    _commit_credential_changes(changes, scope_changes)
 
 
 
@@ -282,7 +361,7 @@ def get_models_source(
 
 
 @_serialized_settings_update
-def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
+def save_llm_settings(payload: dict[str, Any], *, after_publish: Callable[[], None] | None = None) -> dict[str, Any]:
     settings_data = _load_settings_json()
     settings_data.pop("prompt_persona", None)
     raw_llm = settings_data.get("llm")
@@ -626,6 +705,8 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
     # In particular, an invalid header must never poison the next startup.
     get_llm_settings_payload(settings_data)
     upserted_providers: set[str] = set()
+    credential_changes = {}
+    scope_changes = []
     for section_provider, updates, section in (
         ("openai", openai_updates, next_openai),
         ("anthropic", anthropic_updates, next_anthropic),
@@ -634,10 +715,15 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
         if updates:
             api_key = str(updates.get("api_key") or "").strip()
             if _is_api_key_replacement(api_key):
-                _set_runtime_api_key(section_provider, api_key, str(section["base_url"]))
+                changes, scope_change = _credential_changes(section_provider, api_key, str(section["base_url"]))
+                credential_changes.update(changes)
+                if scope_change is not None:
+                    scope_changes.append(scope_change)
             image_key = str(updates.get("image_api_key") or "").strip()
             if _is_api_key_replacement(image_key):
-                _set_runtime_image_api_key(section_provider, image_key, str(section["image_base_url"]))
+                changes, scope_change = _credential_changes(section_provider, image_key, str(section["image_base_url"]), image=True)
+                credential_changes.update(changes)
+                scope_changes.append(scope_change)
             _upsert_llm_history(settings_data, section_provider, section)
             upserted_providers.add(section_provider)
     active_section = {
@@ -650,5 +736,4 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
     # built-in/default provider sections into user-configured profiles.
     if active_section is not None and not upserted_providers and raw_provider is not None:
         _upsert_llm_history(settings_data, provider, active_section)
-    _write_settings_json(settings_data)
-    return get_llm_settings_payload(settings_data, include_api_keys=True)
+    return _commit_credential_changes(credential_changes, scope_changes, settings_data, after_publish)

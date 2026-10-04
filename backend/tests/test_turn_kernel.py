@@ -122,16 +122,7 @@ def test_turn_kernel_applies_structured_context_from_steer(monkeypatch, tmp_path
     monkeypatch.setattr(
         plugin_settings_service,
         "get_plugin_settings",
-        lambda: {
-            "plugins": [{
-                "id": "docs",
-                "name": "docs",
-                "displayName": "Docs",
-                "enabled": True,
-                "skill_count": 0,
-                "mcp_server_names": ["docs-search"],
-            }],
-        },
+        lambda *args, **kwargs: {'plugins': [{'id': 'docs', 'name': 'docs', 'displayName': 'Docs', 'enabled': True, 'skill_count': 0, 'mcp_server_names': ['docs-search']}]},
     )
     queue = TurnInputQueue()
     queue.enqueue_command(SimpleNamespace(data={
@@ -199,10 +190,11 @@ def test_turn_kernel_refresh_fails_closed_without_committer(tmp_path: Path) -> N
     kernel.run_context.permission_context_provider = lambda: current
     tool_context.run_context = kernel.run_context
     kernel.bind_tool_context(tool_context)
+    bound_permission = tool_context.permission
 
     with pytest.raises(PermissionContextRefreshError):
         kernel.refresh_live_permission_context()
-    assert tool_context.permission == PermissionContext(mode="bypass")
+    assert tool_context.permission == bound_permission
 
 
 def test_turn_kernel_refresh_failure_does_not_return_stale_policy(tmp_path: Path) -> None:
@@ -434,9 +426,9 @@ def test_turn_kernel_owns_provider_call_sequence(tmp_path: Path) -> None:
     kernel = _kernel(tmp_path)
 
     assert kernel.next_provider_call_count == 1
-    assert kernel.commit_provider_call("iteration:1") == (1, "iteration:1:provider:1")
+    assert kernel.commit_provider_call("iteration:1") == (1, f"{kernel.run_record.run_id}:iteration:1:provider:1")
     assert kernel.next_provider_call_count == 2
-    assert kernel.commit_provider_call("iteration:2") == (2, "iteration:2:provider:2")
+    assert kernel.commit_provider_call("iteration:2") == (2, f"{kernel.run_record.run_id}:iteration:2:provider:2")
 
 
 def test_provider_progress_identity_is_scoped_to_the_iteration(tmp_path: Path) -> None:
@@ -491,7 +483,7 @@ def test_turn_kernel_finalizes_checkpoint_by_terminal_reason(
     )
     monkeypatch.setattr(
         "backend.agent.turn_kernel.clear_checkpoints",
-        lambda session_id, *, conversation_id="": cleared.append((session_id, conversation_id)),
+        lambda session_id, *, conversation_id="", base_dir=None: cleared.append((session_id, conversation_id)),
     )
     kernel = _kernel(tmp_path)
     state = AgentState(user_message="work")

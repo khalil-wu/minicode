@@ -7,11 +7,8 @@ class that executes them.
 
 from __future__ import annotations
 
-import logging
-
 from backend.sandbox import (
     SandboxPolicy,
-    SandboxRunner,
 )
 from backend.terminal.shell_commands import normalize_windows_shell_command
 from backend.tools.base import (
@@ -29,9 +26,6 @@ import re
 import shutil
 import subprocess
 import sys
-
-
-logger = logging.getLogger(__name__)
 
 
 DEFAULT_TIMEOUT: float = 120.0
@@ -165,12 +159,9 @@ def _command_matches_excluded(command: str, policy: SandboxPolicy) -> bool:
 def _command_matches_patterns(command: str, patterns: tuple[str, ...]) -> bool:
     if not patterns:
         return False
-    try:
-        from backend.permissions.checker import _split_shell_compound
+    from backend.permissions.checker import _split_shell_compound
 
-        segments = _split_shell_compound(command)
-    except Exception:
-        segments = [command]
+    segments = _split_shell_compound(command)
     for segment in segments:
         candidate = str(segment or "").strip()
         for pattern in patterns:

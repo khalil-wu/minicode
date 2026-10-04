@@ -35,7 +35,8 @@ const extensionForPath = (path: string): string => {
   // before interpreting those characters as URL query/fragment separators.
   if (!/^[a-z][a-z\d+.-]*:\/\//i.test(path)) {
     const name = path.replace(/\\/g, "/").split("/").pop() || "";
-    const extension = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
+    const separator = name.lastIndexOf(".");
+    const extension = separator >= 0 ? name.slice(separator + 1).toLowerCase() : "";
     if (MEDIA_TYPE_BY_EXTENSION[extension]) return extension;
   }
   let cleanPath = String(path || "").split(/[?#]/, 1)[0];

@@ -33,6 +33,17 @@ logger = logging.getLogger(__name__)
 
 
 _GIT_TRANSPORT_LIMIT_BYTES = 20 * 1024 * 1024
+_GIT_REPOSITORY_ENV = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY", "GIT_CEILING_DIRECTORIES",
+    "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE",
+})
+
+
+def _is_git_repository_env(name: str) -> bool:
+    key = name.upper() if os.name == "nt" else name
+    return key in _GIT_REPOSITORY_ENV or key == "GIT_CONFIG" or key.startswith("GIT_CONFIG_")
 
 
 async def _run_git(
@@ -44,6 +55,7 @@ async def _run_git(
     sandbox_policy: SandboxPolicy | None = None,
     write_git_metadata: bool = False,
     timeout: float | None = None,
+    index_file: Path | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run repository-selected executables under the captured request authority.
 
@@ -63,37 +75,50 @@ async def _run_git(
         policy = SandboxPolicy(workspace_root=root, readable_roots=(root,))
     if timeout is not None:
         policy = replace(policy, timeout=timeout)
+    # This fixed Git capability selects its repository from cwd. Freeze the
+    # explicit settings without repository/config selectors. Inherited OS keys
+    # are filtered after the existing runner builds env, never reparsed as
+    # configuration keys (Windows has legitimate names such as ProgramFiles(x86)).
+    if any(_is_git_repository_env(key) for key in (*policy.shell_environment_policy.set_values, *policy.env_overrides)):
+        policy = replace(policy, shell_environment_policy=replace(policy.shell_environment_policy, set_values={
+            key: value for key, value in policy.shell_environment_policy.set_values.items()
+            if not _is_git_repository_env(key)
+        }), env_overrides={
+            key: value for key, value in policy.env_overrides.items() if not _is_git_repository_env(key)
+        })
     if write_git_metadata:
         policy = await _git_metadata_write_policy(policy, root, context)
     else:
         argv = [argv[0], "--no-optional-locks", *argv[1:]]
 
     async def execute() -> subprocess.CompletedProcess[bytes]:
-        launch_argv, common_dir = _portable_git_dispatch(policy, root, cwd, argv)
-        runner = SandboxRunner(policy)
-        # Windows sandboxes use PowerShell, including the Linux container's
-        # pwsh. Literal single quotes preserve messages/pathspecs as arguments.
-        command = (
-            "& " + " ".join("'" + value.replace("'", "''") + "'" for value in launch_argv)
-            if os.name == "nt" else shlex.join(launch_argv)
-        )
-        if common_dir is not None:
-            # Runtime-owned routing is confined to this child shell, after the
-            # runner's normal environment sanitization. No external GIT_* grant.
-            command = (
-                "$env:GIT_COMMON_DIR='" + common_dir.replace("'", "''") + "'; " + command
-                if os.name == "nt" else "GIT_COMMON_DIR=" + shlex.quote(common_dir) + " " + command
-            )
-        if os.name == "nt" and policy.resolve(cwd=cwd).enforcement in {
-            SandboxEnforcement.DISABLED, SandboxEnforcement.EXTERNAL,
-        }:
-            from backend.tools.command_support import _windows_powershell_shell_command
-
-            command = _windows_powershell_shell_command(command, cwd=cwd)
+        operation_policy = policy
+        if index_file is not None:
+            mapped_index = SandboxRunner(policy).map_path_to_sandbox(index_file)
+            operation_policy = replace(policy, env_overrides={"GIT_INDEX_FILE": mapped_index})
+        launch_argv, common_dir = _portable_git_dispatch(operation_policy, root, cwd, argv)
+        def filter_environment(environment: dict[str, str]) -> dict[str, str]:
+            return {key: value for key, value in environment.items()
+                    if not _is_git_repository_env(key)
+                    or (index_file is not None and (key.upper() if os.name == "nt" else key) == "GIT_INDEX_FILE")}
+        runner = SandboxRunner(operation_policy, env_filter=filter_environment)
         try:
-            process = await runner.spawn_shell_interactive(
-                command, cwd=cwd, stdin=asyncio.subprocess.DEVNULL,
-            )
+            if common_dir is None:
+                process = await runner.spawn_interactive(
+                    launch_argv, cwd=cwd, stdin=asyncio.subprocess.DEVNULL,
+                )
+            else:
+                # Linked container metadata needs child-local routing after
+                # normal environment sanitization. No host GIT_* grant.
+                command = (
+                    "$env:GIT_COMMON_DIR='" + common_dir.replace("'", "''") + "'; & "
+                    + " ".join("'" + value.replace("'", "''") + "'" for value in launch_argv)
+                    if os.name == "nt"
+                    else "GIT_COMMON_DIR=" + shlex.quote(common_dir) + " " + shlex.join(launch_argv)
+                )
+                process = await runner.spawn_shell_interactive(
+                    command, cwd=cwd, stdin=asyncio.subprocess.DEVNULL,
+                )
             stdout, stderr = await communicate_bounded(
                 process, timeout=policy.timeout,
                 stdout_limit_bytes=_GIT_TRANSPORT_LIMIT_BYTES,
@@ -183,7 +208,7 @@ async def _git_metadata_write_policy(
     if resolved.enforcement in {SandboxEnforcement.DISABLED, SandboxEnforcement.EXTERNAL}:
         return policy
     if not any(writable.is_path_writable(root) for writable in resolved.writable_roots):
-        raise PermissionError("Git commit requires workspace-write authority")
+        raise PermissionError("Git metadata writes require workspace-write authority")
     # Discover through the same sandbox, never a host rev-parse. This handles
     # nested repositories and gitfiles without trusting their arbitrary target.
     discovered = await _run_git(
@@ -232,36 +257,11 @@ def _workspace_root(context: Any, fallback: Path | None) -> Path | None:
     return fallback.resolve() if fallback is not None else None
 
 
-def _resolve_work_dir(root: Path, path_value: Any) -> Path:
-    raw = str(path_value or ".").strip() or "."
-    resolved = (root / raw).resolve() if not Path(raw).is_absolute() else Path(raw).resolve()
-    # Confine to the workspace: an absolute or ../-escaping path must not let a
-    # read-only AUTO tool inspect arbitrary repos on the host. Escapes fall back
-    # to the workspace root rather than running git in an unrelated directory.
-    root_resolved = root.resolve()
-    try:
-        resolved.relative_to(root_resolved)
-    except ValueError:
-        return root_resolved
-    return resolved
-
-
 def _is_denied_path(context: Any, file_path: str) -> bool:
     checker = getattr(context, "permission_checker", None) if context is not None else None
     if checker is None:
         return False
     permission = getattr(context, "permission", None)
-    try:
-        return not checker.is_path_allowed(str(file_path), context=permission)
-    except Exception:
-        # A read-only diff must not become an information-disclosure path when
-        # the policy boundary itself fails.  Callers treat ``True`` as denied,
-        # so a focused diff is rejected and a broad diff omits the path.
-        logger.warning(
-            "Git diff permission check failed closed for %s",
-            file_path,
-            exc_info=True,
-        )
-        return True
+    return not checker.is_path_allowed(str(file_path), context=permission)
 
 

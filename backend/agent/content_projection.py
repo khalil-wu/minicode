@@ -20,7 +20,8 @@ def normalise_content(value: Any) -> str:
         parts = []
         for item in value:
             if isinstance(item, Mapping) and item.get("type") == "text":
-                parts.append(str(item.get("text") or ""))
+                text = item.get("text")
+                parts.append("" if text is None else str(text))
             else:
                 parts.append(str(item))
         return "\n".join(part for part in parts if part)

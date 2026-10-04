@@ -51,11 +51,13 @@ def refresh_native_os_sandbox(platform_name: str | None = None) -> bool:
             available = shutil.which("bwrap") is not None
     else:
         try:
-            from backend.sandbox.policy import SandboxPolicy
+            from backend.permissions.context import PermissionContext
+            from backend.sandbox.policy import sandbox_policy_for_permission_context
             from backend.sandbox.runner import SandboxRunner
 
             workspace = Path.cwd().resolve()
-            capability = SandboxRunner(SandboxPolicy.workspace_default(workspace)).capability()
+            policy = sandbox_policy_for_permission_context(workspace, PermissionContext(mode="confirm"))
+            capability = SandboxRunner(policy).capability()
             available = bool(capability.available and capability.filesystem_isolated)
         except Exception:
             available = False

@@ -208,8 +208,10 @@ def test_prompt_git_launch_review_failed_status_is_not_clean_or_host_retry(monke
     async def unavailable(argv, **kwargs):
         raise SandboxUnavailableError("actual sandbox boundary unavailable")
     monkeypatch.setattr(git_support, "_run_git", unavailable)
-    with pytest.raises(SandboxUnavailableError, match="actual sandbox boundary unavailable"):
-        prompting.build_git_status_context(tmp_path, sandbox_policy=SandboxPolicy(workspace_root=tmp_path))
+    unavailable_snapshot = prompting.build_git_status_context(tmp_path, sandbox_policy=SandboxPolicy(workspace_root=tmp_path))
+    assert "snapshot is unavailable" in unavailable_snapshot
+    assert "does not mean the workspace is clean" in unavailable_snapshot
+    assert "(clean)" not in unavailable_snapshot
 
 
 def test_prompt_git_launch_review_real_fsmonitor_and_cancel(tmp_path, monkeypatch):

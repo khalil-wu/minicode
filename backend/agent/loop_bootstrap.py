@@ -21,7 +21,6 @@ from backend.agent.lifecycle_observer import (
     resolve_lifecycle_runtime,
 )
 from backend.agent.loop_preflight import prepare_turn_input
-from backend.agent.loop_runtime_helpers import epoch_ms
 from backend.agent.loop_session import (
     AgentLoopSessionContext,
     populate_prompt_context,
@@ -264,6 +263,16 @@ async def bootstrap_agent_loop(
         settings.stream_retry_policy or DefaultStreamRetryPolicy(settings)
     )
     effective_permission_context = permission_context or PermissionContext(mode="confirm")
+    from backend.security.sensitive_files import application_state_roots
+
+    protected_state_roots = application_state_roots(run_context)
+    effective_permission_context = replace(
+        effective_permission_context,
+        protected_state_roots=tuple(dict.fromkeys((
+            *effective_permission_context.protected_state_roots,
+            *protected_state_roots,
+        ))),
+    )
     from backend.config import load_config_layer_stack
 
     turn_config_stack = load_config_layer_stack(cwd=workspace_root)
@@ -423,6 +432,10 @@ async def bootstrap_agent_loop(
             )
         normalized = replace(
             current,
+            protected_state_roots=tuple(dict.fromkeys((
+                *current.protected_state_roots,
+                *protected_state_roots,
+            ))),
             mode=live_mode,
             approval_policy=managed_requirements.approval_policy_for_mode(live_mode),
             sandbox_mode=managed_requirements.sandbox_mode_for_permission_mode(
@@ -563,6 +576,7 @@ async def bootstrap_agent_loop(
             requirements=managed_requirements,
             config_layer_stack=turn_config_stack,
             session_id=hook_scope_id,
+            owner_session_id=session_id,
         )
     hook_manager.bind_runtime(
         llm=request.llm,

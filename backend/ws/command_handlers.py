@@ -22,7 +22,8 @@ class SessionCommandHandlersMixin:
         from backend.commands.slash_commands import register_all_slash_commands
         from backend.ws.handlers import register_domain_handlers
 
-        register_all_slash_commands(self.command_registry)
+        register_all_slash_commands(self.command_registry,
+            self.session_lifecycle.workspace_root_for_conversation(), resolve_active_workspace=False)
         register_domain_handlers(self)
 
     def refresh_llm_selection(self, *, prefer_config: bool = False) -> None:
@@ -178,6 +179,7 @@ class SessionCommandHandlersMixin:
             load_hook_manager_for_workspace,
             Path(new_cwd) if new_cwd else None,
             session_id=scope_id,
+            owner_session_id=self.session_id,
         )
         register_hook_manager_for_session(scope_id, manager, owner_session_id=self.session_id)
         await run_cwd_changed_hook(old_cwd=old_cwd, new_cwd=new_cwd, hook_manager=manager)

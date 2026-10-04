@@ -223,6 +223,7 @@ export interface FileTreeRevealRequest {
   id: string;
   path: string;
   kind: "folder";
+  workspaceRoot: string;
 }
 
 export interface DiffReviewFile {
@@ -240,6 +241,7 @@ export interface DiffReviewState {
   conversationId?: string;
   turnId?: string;
   messageId?: string;
+  previewReturnTarget?: { conversationId: string; tab: "browser" | "preview"; url?: string; targetId?: string };
   toolName?: string;
   sourceAgent?: string;
   sourceThread?: string;
@@ -262,6 +264,7 @@ export interface DiffLineComment {
 
 export interface ConversationWorkbenchState {
   diffReview: DiffReviewState | null;
+  gitReviewRequest?: GitReviewRequest | null;
   previewArtifact: ArtifactContentState | null;
   livePreviewUrl: string | null;
   previewServers: PreviewServerInfo[];
@@ -272,6 +275,7 @@ export interface ConversationWorkbenchState {
   activeTerminalSessionId: string | null;
   rightStackTab: RightStackTab;
   rightPanelOpen: boolean;
+  rightPanelExpanded?: boolean;
   rightStackTabLocked: boolean;
   draft: string;
   attachments: ComposerAttachment[];
@@ -293,6 +297,8 @@ export interface GitChangeFile {
 }
 
 export interface GitChangesState {
+  isGitRepo?: boolean;
+  error?: string;
   workingTree: GitChangeFile[];
   staged: GitChangeFile[];
   untracked: string[];
@@ -377,6 +383,7 @@ export interface UISlice {
   followUpBehavior: FollowUpBehavior;
   shortcutBindings: ShortcutBindings;
   appMode: AppMode;
+  workbenchLayout: "tabs" | "split";
   rightStackTab: RightStackTab;
   rightStackTabLocked: boolean;
   focusedSubagentId: string | null;
@@ -386,7 +393,6 @@ export interface UISlice {
   commandPaletteOpen: boolean;
   settingsOpen: boolean;
   settingsTab: SettingsTab;
-  automationsOpen: boolean;
   shortcutsHelpOpen: boolean;
   quickOpenVisible: boolean;
   quickOpenResults: QuickOpenResult[];
@@ -413,7 +419,7 @@ export interface UISlice {
   previewLaunchProcesses: PreviewLaunchProcessInfo[];
   previewVerification: PreviewVerificationInfo | null;
   previewOwnerConversationId: string | null;
-  fileChanges: { path: string; event: string; timestamp: number; sequence: number }[];
+  fileChanges: { path: string; event: string; timestamp: number; sequence: number; workspaceRoot: string }[];
   fileTreeVersion: number;
   fileTreeRevealRequests: FileTreeRevealRequest[];
   mcpServers: McpServerStatus[];
@@ -434,6 +440,7 @@ export interface UISlice {
   setShortcutBinding: (action: ShortcutActionId, binding: string) => void;
   resetShortcutBindings: () => void;
   setAppMode: (m: AppMode) => void;
+  setWorkbenchLayout: (layout: "tabs" | "split") => void;
   ensureCodeLayout: () => void;
   setRightStackTab: (t: RightStackTab, options?: { automatic?: boolean }) => void;
   setRightStackTabLocked: (locked: boolean) => void;
@@ -445,7 +452,6 @@ export interface UISlice {
   toggleCommandPalette: () => void;
   toggleSettings: () => void;
   setSettingsTab: (tab: SettingsTab) => void;
-  toggleAutomations: () => void;
   toggleShortcutsHelp: () => void;
   toggleQuickOpen: () => void;
   toggleSkillsMarketplace: (returnTarget?: "app" | "settings", tab?: "plugins" | "skills") => void;
@@ -533,7 +539,10 @@ export interface TerminalSessionInfo {
   cwd: string;
   status?: "running" | "exited";
   createdAt?: number;
-  exitCode?: number;
+  exitCode?: number | null;
+  exitSignal?: number | string | null;
+  cleanupPending?: boolean;
+  cleanupReason?: string;
   exitedAt?: number;
   terminalMode?: "pty" | "pipe";
 }
@@ -545,10 +554,17 @@ export interface TerminalSnapshotInfo {
   shell: string;
   cwd: string;
   status?: "running" | "exited";
+  exitCode?: number | null;
+  exitSignal?: number | string | null;
+  cleanupPending?: boolean;
+  cleanupReason?: string;
+  exitedAt?: number;
   terminalMode?: "pty" | "pipe";
   output: string;
   outputChars?: number;
   totalOutputChars?: number;
+  outputStartCursor?: number;
+  outputEndCursor?: number;
   truncated?: boolean;
   capturedAt: number;
   error?: string;
@@ -560,6 +576,22 @@ export interface EditorOpenRequest {
   exact?: boolean;
   line?: number;
   column?: number;
+  endLine?: number;
+  endColumn?: number;
+}
+
+export interface CodeSelectionRange {
+  startLineNumber: number;
+  startColumn: number;
+  endLineNumber: number;
+  endColumn: number;
+}
+
+export interface CodeSelectionContext {
+  text: string;
+  source?: string;
+  workspaceRoot?: string;
+  range?: CodeSelectionRange;
 }
 
 export interface BackgroundTaskEntry {
@@ -567,6 +599,9 @@ export interface BackgroundTaskEntry {
   command: string;
   status: "running" | "stalled" | "completed" | "failed" | "cancelled";
   exitCode?: number;
+  cleanupPending?: boolean;
+  cleanupReason?: string;
+  terminalStatus?: string;
   duration?: number;
   timestamp: number;
   completedAt?: number;
@@ -643,16 +678,26 @@ export interface ScheduledTaskRunEntry {
   error?: string;
 }
 
+export interface GitReviewRequest {
+  id: string;
+  path: string;
+  section: "staged" | "working" | "untracked";
+  workspaceRoot: string;
+  conversationId: string | null;
+}
+
 export interface WorkspaceSlice {
   leftSidebarWidth: number;
   rightSidebarWidth: number;
   rightPanelOpen: boolean;
+  rightPanelExpanded: boolean;
+  gitReviewRequest: GitReviewRequest | null;
   dockHeight: number;
   dockCollapsed: boolean;
   activeBottomTab: "terminal" | "git" | "tasks" | "timeline" | "debug" | "budget";
   panelSlots: PanelSlot[];
   sideChatOpen: boolean;
-  sideChatPendingContext: { text: string; source?: string } | null;
+  sideChatPendingContext: CodeSelectionContext | null;
   terminalSessions: TerminalSessionInfo[];
   terminalSnapshots: Record<string, TerminalSnapshotInfo>;
   backgroundTasks: BackgroundTaskEntry[];
@@ -664,6 +709,8 @@ export interface WorkspaceSlice {
   setLeftSidebarWidth: (w: number) => void;
   setRightSidebarWidth: (w: number) => void;
   toggleRightPanel: () => void;
+  setRightPanelExpanded: (expanded: boolean) => void;
+  openGitReview: (request: Omit<GitReviewRequest, "id">) => void;
   setDockHeight: (h: number) => void;
   toggleDock: () => void;
   openBottomTab: (t: WorkspaceSlice["activeBottomTab"]) => void;
@@ -682,11 +729,11 @@ export interface WorkspaceSlice {
   upsertTerminalSnapshot: (snapshot: TerminalSnapshotInfo) => void;
   removeTerminalSession: (id: string) => void;
   setActiveTerminalSession: (id: string | null) => void;
-  openEditorFile: (path: string, label?: string, target?: { line?: number; column?: number; exact?: boolean }) => void;
+  openEditorFile: (path: string, label?: string, target?: { line?: number; column?: number; endLine?: number; endColumn?: number; exact?: boolean }) => void;
   consumeEditorOpenRequest: (id: string) => void;
   toggleSideChat: () => void;
   closeSideChat: () => void;
-  openSideChatWithSelection: (text: string, source?: string) => void;
+  openSideChatWithSelection: (text: string, source?: string, location?: Pick<CodeSelectionContext, "range" | "workspaceRoot">) => void;
   addBackgroundTask: (task: BackgroundTaskEntry) => void;
   addBrowserAnnotation: (annotation: BrowserAnnotation) => void;
   removeBrowserAnnotation: (id: string) => void;
@@ -743,6 +790,9 @@ export interface FileContextRef {
   kind: "file" | "folder" | "url";
   name: string;
   path: string;
+  range?: CodeSelectionRange;
+  text?: string;
+  workspaceRoot?: string;
 }
 
 export interface SkillContextRef {
@@ -1122,6 +1172,9 @@ export interface ChatMessage {
   toolPage?: ToolHistoryPage;
   role: MessageRole;
   content: string;
+  /** Exact assembled model input for a user message with separate display text. */
+  backendContent?: string;
+  quotedMessage?: ComposerQuote | null;
   messageSource?: ChatMessageSource;
   contextRefs?: MessageContextRef[];
   attachmentRefs?: MessageAttachmentRef[];
@@ -1143,6 +1196,7 @@ export interface ChatMessage {
   systemNoticeTitle?: string;
   queueState?: "queued" | "cancelled";
   queuePosition?: number;
+  queuePaused?: boolean;
   queueMessageId?: string;
   steeredIntoMessageId?: string;
   /** Verified workspace deliverables produced by tools during this reply.
@@ -1238,7 +1292,12 @@ export interface SideChatThread {
   isStreaming: boolean;
   draft: string;
   inheritedContext?: string;
-  selectedContext?: { text: string; source?: string };
+  selectedContext?: CodeSelectionContext;
+  attachments?: ComposerAttachment[];
+  contextRefs?: MessageContextRef[];
+  workspaceRoot?: string;
+  model?: string;
+  permissionMode?: PermissionMode;
 }
 
 export interface ConversationHistoryPage {
@@ -1248,6 +1307,7 @@ export interface ConversationHistoryPage {
 }
 
 export interface ChatSlice {
+  messageRevealTarget: { conversationId: string; messageId: string; requestId: string } | null;
   conversationId: string | null;
   pendingConversationSwitchId: string | null;
   conversations: ConversationMeta[];
@@ -1367,7 +1427,7 @@ export interface ChatSlice {
     details?: Partial<Omit<ConnectionStateDetails, "phase">>,
   ) => void;
   setLastUsage: (u: ChatSlice["lastUsage"]) => void;
-  ensureSideChat: (id: string) => void;
+  ensureSideChat: (id: string, owner?: { workspaceRoot: string; permissionMode: PermissionMode }) => void;
   removeSideChat: (id: string) => void;
   setSideChatDraft: (id: string, draft: string) => void;
   startSideChatMessage: (
@@ -1421,6 +1481,7 @@ export interface ComposerAttachment {
   progress?: number;
   uploadPhase?: "uploading" | "processing";
   conversationId?: string;
+  workspaceRoot?: string;
   turnId?: string;
   messageId?: string;
   artifactId?: string;
@@ -1510,6 +1571,8 @@ export interface SubagentState {
   id: string;
   role: string;
   status: "pending" | "running" | "blocked" | "done" | "partial" | "cancelled" | "error";
+  cleanupPending?: boolean;
+  cleanupReason?: string;
   agentPath?: string;
   mailboxEpoch?: number;
   summary?: string;
@@ -1845,13 +1908,14 @@ export type InspectorTargetKind =
 export interface InspectorEntry {
   targetKind: InspectorTargetKind;
   targetId: string;
+  conversationId?: string;
   payload: Record<string, unknown>;
   timestamp: number;
 }
 
 export interface InspectorSlice {
   inspectorEntries: InspectorEntry[];
-  inspectorFocus: { kind: string; id: string } | null;
+  inspectorFocus: { kind: string; id: string; conversationId?: string } | null;
   addInspectorEntry: (entry: InspectorEntry) => void;
   setInspectorFocus: (focus: InspectorSlice["inspectorFocus"]) => void;
   clearInspector: () => void;
@@ -1884,6 +1948,7 @@ export interface EditorSlice {
   renameEditorPath: (path: string, newPath: string, workspaceRoot: string) => void;
   setActiveTab: (path: string) => void;
   updateTabContent: (path: string, content: string) => void;
+  adoptEditorModelChanges: (changes: Array<{ path: string; content: string; original: string; contentHash: string; sizeBytes?: number }>, workspaceRoot: string) => void;
   markTabLoaded: (
     path: string,
     content: string,
@@ -1893,7 +1958,6 @@ export interface EditorSlice {
   ) => void;
   markTabSaved: (path: string, savedContent: string, contentHash?: string, sizeBytes?: number, workspaceRoot?: string) => void;
   markTabExternalChanged: (path: string, options?: { workspaceRoot?: string; changed?: boolean }) => void;
-  insertIntoActiveEditor: (text: string) => boolean;
 }
 
 // ── Combined Store ────────────────────────────────────────────────

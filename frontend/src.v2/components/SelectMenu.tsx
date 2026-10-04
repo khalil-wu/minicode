@@ -1,4 +1,5 @@
-import { Children, isValidElement, useEffect, useId, useMemo, useRef, useState } from "react";
+import { Children, isValidElement, useEffect, useLayoutEffect, useId, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { CSSProperties, KeyboardEvent, OptionHTMLAttributes, ReactElement, ReactNode } from "react";
 import { Check, ChevronDown } from "lucide-react";
 import "./select-menu.css";
@@ -64,9 +65,10 @@ export const SelectMenu = ({
   menuMaxHeight = 280,
 }: SelectMenuProps) => {
   const [open, setOpen] = useState(false);
-  const [opensAbove, setOpensAbove] = useState(false);
+  const [position, setPosition] = useState({ left: 0, top: 0, width: 0, maxHeight: menuMaxHeight, above: false });
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const menuId = useId();
   const options = useMemo(() => optionsFromChildren(children), [children]);
   const selected = options.find((option) => option.value === value);
@@ -79,43 +81,67 @@ export const SelectMenu = ({
   useEffect(() => {
     if (!open) return undefined;
     const close = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      const path = event.composedPath();
+      if (!path.includes(rootRef.current!) && !path.includes(menuRef.current!)) setOpen(false);
     };
     const closeOnViewportChange = () => setOpen(false);
+    const closeOnScroll = (event: Event) => { if (!event.composedPath().includes(menuRef.current!)) setOpen(false); };
     document.addEventListener("pointerdown", close);
     window.addEventListener("resize", closeOnViewportChange);
+    window.addEventListener("scroll", closeOnScroll, true);
     return () => {
       document.removeEventListener("pointerdown", close);
       window.removeEventListener("resize", closeOnViewportChange);
+      window.removeEventListener("scroll", closeOnScroll, true);
     };
   }, [open]);
 
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const rect = triggerRef.current!.getBoundingClientRect();
+      const menu = menuRef.current!;
+      const height = Math.min(menu.scrollHeight, menuMaxHeight);
+      const below = window.innerHeight - rect.bottom - 14;
+      const above = rect.top - 14;
+      const useAbove = below < height && above > below;
+      const maxHeight = Math.max(0, Math.min(menuMaxHeight, useAbove ? above : below));
+      const width = Math.min(rect.width, window.innerWidth - 16);
+      setPosition({ left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+        top: useAbove ? rect.top - 6 - Math.min(menu.scrollHeight, maxHeight) : rect.bottom + 6,
+        width, maxHeight, above: useAbove });
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    observer.observe(triggerRef.current!); observer.observe(menuRef.current!);
+    return () => observer.disconnect();
+  }, [open, menuMaxHeight, options]);
+
   useEffect(() => {
     if (!open) return;
+    let active = true;
     queueMicrotask(() => {
-      const active = rootRef.current?.querySelector<HTMLButtonElement>('[role="option"][aria-selected="true"]:not(:disabled)');
-      const first = rootRef.current?.querySelector<HTMLButtonElement>('[role="option"]:not(:disabled)');
-      (active ?? first)?.focus();
+      if (!active) return;
+      const selectedOption = menuRef.current?.querySelector<HTMLButtonElement>('[role="option"][aria-selected="true"]:not(:disabled)');
+      const first = menuRef.current?.querySelector<HTMLButtonElement>('[role="option"]:not(:disabled)');
+      (selectedOption ?? first)?.focus();
     });
+    return () => { active = false; };
   }, [open]);
 
   const openMenu = () => {
     if (disabled) return;
-    const rect = triggerRef.current?.getBoundingClientRect();
-    if (rect) {
-      const estimatedHeight = Math.min(menuMaxHeight, options.length * 36 + 16);
-      setOpensAbove(window.innerHeight - rect.bottom < estimatedHeight && rect.top > window.innerHeight - rect.bottom);
-    }
     setOpen(true);
   };
 
   const selectValue = (nextValue: string) => {
     onValueChange(nextValue);
     setOpen(false);
-    queueMicrotask(() => triggerRef.current?.focus());
+    triggerRef.current!.focus({ preventScroll: true });
   };
 
   const handleTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (open && event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setOpen(false); return; }
     if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       event.stopPropagation();
@@ -124,11 +150,12 @@ export const SelectMenu = ({
   };
 
   const handleOptionKeyDown = (event: KeyboardEvent<HTMLButtonElement>, option: SelectOption) => {
+    if (event.key === "Tab") { setOpen(false); triggerRef.current!.focus({ preventScroll: true }); return; }
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
       setOpen(false);
-      queueMicrotask(() => triggerRef.current?.focus());
+      triggerRef.current!.focus({ preventScroll: true });
       return;
     }
     if (event.key === "Enter" || event.key === " ") {
@@ -147,7 +174,7 @@ export const SelectMenu = ({
         ? enabledOptions.length - 1
         : (current + (event.key === "ArrowDown" ? 1 : -1) + enabledOptions.length) % enabledOptions.length;
     const nextValue = enabledOptions[nextIndex]?.value;
-    Array.from(rootRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? [])
+    Array.from(menuRef.current!.querySelectorAll<HTMLButtonElement>('[role="option"]'))
       .find((item) => item.dataset.value === nextValue)
       ?.focus();
   };
@@ -156,7 +183,7 @@ export const SelectMenu = ({
   return (
     <div ref={rootRef} className={`mc-select-menu ${className}`.trim()} style={style} data-open={open ? "true" : "false"}
       onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+        if (!event.currentTarget.contains(event.relatedTarget) && !menuRef.current?.contains(event.relatedTarget)) setOpen(false);
       }}
     >
       <select
@@ -189,14 +216,15 @@ export const SelectMenu = ({
         <span>{selected?.label || "请选择"}</span>
         <ChevronDown size={15} aria-hidden="true" />
       </button>
-      {open && (
+      {open && createPortal(
         <div
+          ref={menuRef}
           id={menuId}
           role="listbox"
           aria-label={ariaLabel}
-          className="mc-select-popover"
-          data-placement={opensAbove ? "top" : "bottom"}
-          style={{ maxHeight: menuMaxHeight }}
+          className={`mc-select-popover${className.split(/\s+/).includes("mc-select-menu-mono") ? " mc-select-menu-mono" : ""}`}
+          data-placement={position.above ? "top" : "bottom"}
+          style={{ left: position.left, top: position.top, width: position.width, maxHeight: position.maxHeight }}
         >
           {options.map((option) => {
             const showGroup = Boolean(option.group && option.group !== previousGroup);
@@ -222,7 +250,7 @@ export const SelectMenu = ({
               </div>
             );
           })}
-        </div>
+        </div>, document.body
       )}
     </div>
   );

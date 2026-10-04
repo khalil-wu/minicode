@@ -70,6 +70,7 @@ class StreamTextState:
     process_text_last_emitted: str = ""
     process_text_source: str = "model_preamble"
     emitted_agent_messages: dict[str, str] = field(default_factory=dict)
+    sanitizer_owner: StreamEvent | None = None
 
     @property
     def has_live_provisional_item(self) -> bool:
@@ -312,6 +313,7 @@ class StreamTextState:
         )
 
     def reset_for_retry(self) -> None:
+        self.sanitizer_owner = None
         self.full_text = ""
         self.final_candidate_text = ""
         self.final_candidate_item_id = ""
@@ -520,8 +522,7 @@ class StreamAttemptState:
         response_phase: str,
     ) -> None:
         self.finish_reason = str(finish_reason or "")
-        self.raw_done.clear()
         self.raw_done.update(dict(raw or {}))
         if response_items or not self.committed_tool_ids:
             self.response_items[:] = list(response_items or [])
-        self.response_phase = str(response_phase or "")
+        self.response_phase = str(response_phase or self.response_phase or "")

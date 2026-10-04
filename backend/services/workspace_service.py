@@ -12,7 +12,6 @@ from typing import Any, TYPE_CHECKING
 
 from backend.agent.message import AgentEvent
 from backend.atomic_io import atomic_write_text, file_mutation_locks
-from backend.runtime_env import sanitized_git_env
 from backend.subprocesses import communicate, spawn_exec
 
 if TYPE_CHECKING:
@@ -232,7 +231,7 @@ def readonly_git_policy(root: Path) -> SandboxPolicy:
     from backend.config import load_config_layer_stack
     from backend.permissions.context import PermissionContext
     from backend.sandbox.policy import (
-        FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry,
+        FileSystemAccessMode, FileSystemPath, FileSystemSpecialPath, FileSystemSandboxEntry,
         FileSystemSandboxPolicy, NetworkSandboxPolicy, PermissionProfile,
         sandbox_policy_for_permission_context,
     )
@@ -275,11 +274,13 @@ def readonly_git_policy(root: Path) -> SandboxPolicy:
     # An ancestor managed DENY must not be reopened by a more precise READ.
     requested = SandboxPolicy(workspace_root=root, readable_roots=tuple(readable)).resolve(cwd=root)
     entries = []
+    if authority.root_read_baseline:
+        entries.append(FileSystemSandboxEntry(
+            FileSystemPath.special(FileSystemSpecialPath.ROOT), FileSystemAccessMode.READ,
+        ))
     for path, access in requested.resolved_entries:
-        allowed = authority.resolve_access(path)
         if may_read(path):
-            narrowed = FileSystemAccessMode.READ if not allowed.can_write else access
-            entries.append(FileSystemSandboxEntry(FileSystemPath.path(path), narrowed))
+            entries.append(FileSystemSandboxEntry(FileSystemPath.path(path), FileSystemAccessMode.READ))
     entries.extend(entry for entry in captured.permission_profile.file_system.entries if entry.access is FileSystemAccessMode.DENY)
     profile = PermissionProfile.managed(FileSystemSandboxPolicy.restricted(
         entries, glob_scan_max_depth=captured.permission_profile.file_system.glob_scan_max_depth,
@@ -302,13 +303,23 @@ def run_readonly_git(
     worker owns the coroutine through pipe and sandbox cleanup; no task is
     detached, and no session's bypass authority is borrowed for a snapshot.
     """
+    from backend.sandbox import SandboxRunner
     from backend.tools.git_support import _run_git
 
     policy = sandbox_policy or readonly_git_policy(root)
+    launch_cwd = root
+    argv = ["git", *args]
+    if (root != policy.workspace_root
+            and SandboxRunner(policy).capability(cwd=root).backend == "windows-elevated-wfp"):
+        # The native account prepares the process cwd for reading. Starting at
+        # the captured owner keeps its repository metadata reachable; Git -C
+        # still scopes discovery, pathspecs and output to the requested folder.
+        launch_cwd = policy.workspace_root
+        argv[1:1] = ["-C", str(root)]
 
     def execute() -> subprocess.CompletedProcess[bytes]:
         return asyncio.run(_run_git(
-            ["git", *args], root=policy.workspace_root, cwd=root,
+            argv, root=policy.workspace_root, cwd=launch_cwd,
             sandbox_policy=policy, timeout=timeout,
         ))
 
@@ -407,13 +418,13 @@ def validate_git_relative_path(path: str) -> str:
     return value
 
 
-def worktree_has_local_changes(path: Path) -> bool:
-    try:
-        result = run_readonly_git(path, "status", "--porcelain=v1")
-        result.check_returncode()
-        return bool(result.stdout.strip())
-    except Exception:
-        return True
+def worktree_has_local_changes(path: Path, *, timeout: float = 5) -> bool:
+    result = run_readonly_git(
+        path, "status", "--porcelain=v1", "--ignored", "--untracked-files=all",
+        timeout=timeout,
+    )
+    result.check_returncode()
+    return bool(result.stdout.strip())
 
 
 def git_pr_status_payload(

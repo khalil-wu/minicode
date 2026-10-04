@@ -17,7 +17,7 @@ import os
 import subprocess
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from datetime import UTC, datetime
@@ -25,8 +25,11 @@ from typing import Any
 
 from backend.agent.attachment_policy import AttachmentUnavailableError
 from backend.async_cleanup import retain_cleanup_task, to_thread_cancel_safe
+from backend.services.conversation_projection_service import (
+    replay_pending_conversation_projections as _replay_pending_conversation_projections,
+)
 from backend.agent.context import ContextBuilder
-from backend.agent.execution_journal import execution_journal_owner
+from backend.agent.execution_journal import execution_journal_owner, conversation_projection_owner_fields
 from backend.agent.lifecycle_generation import LifecycleGenerationState
 from backend.agent.loop import AgentLoopSessionContext
 from backend.agent.message import (
@@ -64,6 +67,7 @@ from backend.memory.pollution import pollution_sources_from_tool_calls
 from backend.permissions.checker import PermissionChecker
 from backend.ws.conversation_errors import emit_conversation_not_found
 from backend.ws.utils import (
+    USER_INPUT_METADATA_KEYS,
     build_conversation_summary,
 )
 from backend.ws.stream_state import (
@@ -907,6 +911,10 @@ def _project_subagent_done(state: dict[str, Any], data: dict[str, Any]) -> dict[
         "id": subagent_id,
         "role": str(record.get("agent_type") or record.get("role") or "subagent"),
         "status": status if status in _SUBAGENT_STATUSES else "done",
+        **({"cleanupPending": data.get("cleanup_pending", record.get("cleanup_pending"))}
+           if isinstance(data.get("cleanup_pending", record.get("cleanup_pending")), bool) else {}),
+        **({"cleanupReason": str(data.get("cleanup_reason", record.get("cleanup_reason")) or "")}
+           if "cleanup_reason" in data or "cleanup_reason" in record else {}),
         "summary": str(event_error or data.get("summary") or ""),
         "resultAvailable": bool(result_content or result_error),
         **({"resultContent": result_content} if result_content else {}),
@@ -1207,7 +1215,7 @@ async def _commit_automatic_compaction(
         commit = getattr(repository, "commit_compaction", None)
         if not callable(commit):
             raise RuntimeError("conversation repository has no canonical compaction commit")
-        committed = await asyncio.to_thread(
+        committed = await to_thread_cancel_safe(
             commit,
             conversation_id,
             context_snapshot=saved_snapshot,
@@ -1225,120 +1233,6 @@ async def _commit_automatic_compaction(
         return await _commit()
     async with projection_lock:
         return await _commit()
-
-
-async def _replay_pending_conversation_projections(
-    repository: Any,
-    journal: Any,
-    *,
-    conversation_id: str,
-) -> None:
-    """Publish durable terminal facts before the next turn mutates context."""
-
-    pending_projection_reader = getattr(
-        journal,
-        "pending_conversation_projections",
-        None,
-    )
-    if callable(pending_projection_reader):
-        for pending_projection in pending_projection_reader():
-            payload = dict(getattr(pending_projection, "payload", {}) or {})
-            if str(payload.get("conversation_id") or "") != conversation_id:
-                continue
-            recovered = await asyncio.to_thread(
-                repository.commit_turn_projection,
-                conversation_id,
-                assistant_message=(
-                    dict(payload["assistant_message"])
-                    if isinstance(payload.get("assistant_message"), dict)
-                    else None
-                ),
-                context_snapshot=(
-                    dict(payload["context_snapshot"])
-                    if isinstance(payload.get("context_snapshot"), dict)
-                    else {}
-                ),
-                **({"context_delta": payload["context_delta"], "partial": bool(payload.get("partial"))}
-                   if "context_delta" in payload else {}),
-                summary=(
-                    str(payload["summary"])
-                    if payload.get("summary") is not None
-                    else None
-                ),
-                # Rebase this staged terminal fact onto the current head, exactly
-                # as the unprojected-terminal loop below does. Its captured
-                # revision was only valid when staged; a non-input write since
-                # (UI-state flush, plan snapshot, reconcile) advanced the
-                # generation, and re-committing under the stale revision raised a
-                # write conflict that this replay never caught — wedging every
-                # later turn. The id-based message replace and context delta make
-                # the rebase idempotent and touch only this turn's own message.
-            )
-            if recovered is None:
-                raise RuntimeError("conversation no longer exists")
-            journal.append_lifecycle(
-                "conversation_projection_committed",
-                {
-                    "conversation_id": conversation_id,
-                    "pending_event_id": pending_projection.event_id,
-                    "conversation_revision": int(
-                        getattr(recovered, "revision", 0) or 0
-                    ),
-                    "message_id": str(
-                        (
-                            payload.get("assistant_message")
-                            if isinstance(payload.get("assistant_message"), dict)
-                            else {}
-                        ).get("id")
-                        or ""
-                    ),
-                    "recovered": True,
-                },
-            )
-
-    unprojected_reader = getattr(
-        journal,
-        "unprojected_terminal_projections",
-        None,
-    )
-    if not callable(unprojected_reader):
-        return
-    for projection in unprojected_reader():
-        if str(projection.get("conversation_id") or "") != conversation_id:
-            continue
-        assistant_projection = projection.get("assistant_message")
-        recovered = await asyncio.to_thread(
-            repository.commit_turn_projection,
-            conversation_id,
-            assistant_message=(
-                dict(assistant_projection)
-                if isinstance(assistant_projection, dict)
-                else None
-            ),
-            context_snapshot=dict(projection.get("context_snapshot") or {}),
-            summary=None,
-        )
-        if recovered is None:
-            raise RuntimeError(
-                "conversation disappeared while replaying terminal journal"
-            )
-        journal.append_lifecycle(
-            "conversation_projection_committed",
-            {
-                "conversation_id": conversation_id,
-                "pending_event_id": str(projection.get("source_event_id") or ""),
-                "conversation_revision": int(
-                    getattr(recovered, "revision", 0) or 0
-                ),
-                "message_id": str(
-                    (assistant_projection or {}).get("id")
-                    if isinstance(assistant_projection, dict)
-                    else ""
-                ),
-                "recovered": True,
-                "minimal_projection": True,
-            },
-        )
 
 
 class SessionAgentRunnerMixin:
@@ -1439,7 +1333,7 @@ class SessionAgentRunnerMixin:
         if item is not None:
             revision, state = item
             try:
-                await asyncio.to_thread(
+                await to_thread_cancel_safe(
                     self.conversation_repo.patch_context_snapshot,
                     conversation_id,
                     {UI_AGENT_STATE_SNAPSHOT_KEY: state},
@@ -1590,7 +1484,7 @@ class SessionAgentRunnerMixin:
                 if changed
                 else persisted_revision
             )
-            updated = await asyncio.to_thread(
+            updated = await to_thread_cancel_safe(
                 self.conversation_repo.patch_context_snapshot,
                 owner,
                 {UI_AGENT_STATE_SNAPSHOT_KEY: reconciled_state},
@@ -2133,10 +2027,6 @@ class SessionAgentRunnerMixin:
             previous_loader = state.get("loader")
             previous_model_runtime = state.get("model_runtime")
             if replacing_runtime:
-                # Clear only this session/cwd partition.  The old generation
-                # remains live until the fresh modules have loaded, matching
-                # MiniCode's atomic active-component swap.
-                loader.clear_cache()
                 if bound_registry is tool_registry:
                     # MiniCode replaces the complete AgentSession registry on reload.
                     # Binding a fresh generation into the old registry would
@@ -2160,7 +2050,7 @@ class SessionAgentRunnerMixin:
                     "Extension loader returned no runner for conversation %s",
                     owner_id,
                 )
-                candidate_model_runtime.retire()
+                capability.discard("Extension loader returned no runner")
                 if replacing_runtime:
                     return runtime
                 retire_previous_model_runtime = getattr(
@@ -2177,12 +2067,9 @@ class SessionAgentRunnerMixin:
                 # candidate was never published, so invalidate it directly and
                 # retire its private model runtime without session_start or
                 # session_shutdown lifecycle events.
-                try:
-                    next_runtime.invalidate(
-                        "Extension generation was discarded during session shutdown"
-                    )
-                finally:
-                    candidate_model_runtime.retire()
+                capability.discard(
+                    "Extension generation was discarded during session shutdown"
+                )
                 return None
             for error in result.errors:
                 logger.warning(
@@ -2222,12 +2109,11 @@ class SessionAgentRunnerMixin:
                     # generation, so it must not receive MiniCode's session_shutdown
                     # lifecycle event. Invalidate its wrappers directly, as an
                     # unpublished MiniCode active-component candidate.
-                    next_runtime.invalidate(
+                    capability.discard(
                         "Extension generation was discarded before publication"
                     )
                 except Exception:
                     logger.debug("Fresh extension runner cleanup failed", exc_info=True)
-                candidate_model_runtime.retire()
                 if replacing_runtime:
                     command_registry = getattr(self, "command_registry", None)
                     rebind_commands = getattr(runtime, "bind_command_registry", None)
@@ -2331,7 +2217,7 @@ class SessionAgentRunnerMixin:
                     previous_loader,
                     previous_model_runtime,
                     reason=reason,
-                    clear_loader_cache=runner_workspace_key != workspace_key,
+                    clear_loader_cache=True,
                     defer_until=defer_previous_shutdown_until,
                 )
             try:
@@ -3027,7 +2913,7 @@ class SessionAgentRunnerMixin:
                     or "medium"
                 ).strip().lower()
             )
-            effective_thinking = _apply_thinking_level(
+            _apply_thinking_level(
                 active_llm,
                 resolved_model,
                 thinking_seed,
@@ -3248,7 +3134,8 @@ class SessionAgentRunnerMixin:
                 discover_skills()
             from backend.commands.slash_commands import refresh_slash_commands
 
-            refresh_slash_commands(self.command_registry)
+            refresh_slash_commands(self.command_registry,
+                self.session_lifecycle.workspace_root_for_conversation(conversation), resolve_active_workspace=False)
             tool_registry = self._conversation_tool_registry(
                 conversation_id,
                 workspace_root=self.session_lifecycle.workspace_root_for_conversation(conversation),
@@ -3594,6 +3481,7 @@ class SessionAgentRunnerMixin:
                     workspace_root,
                     config_layer_stack=config_stack,
                     session_id=scope_id,
+                    owner_session_id=self.session_id,
                 )
                 register_hook_manager_for_session(
                     scope_id,
@@ -4072,7 +3960,7 @@ class SessionAgentRunnerMixin:
                 run_context_snapshot = _reset_ui_agent_state_snapshot(
                     conversation.context_snapshot
                 )
-                await asyncio.to_thread(
+                await to_thread_cancel_safe(
                     self.conversation_repo.save_context_snapshot,
                     conversation.id,
                     run_context_snapshot,
@@ -4749,11 +4637,23 @@ class SessionAgentRunnerMixin:
                 if consumed_steer is not None
                 else user_message
             )
+            admitted_client_command_id = str(
+                (
+                    consumed_steer.original_command.data.get("client_command_id")
+                    if consumed_steer is not None
+                    else run_metadata.get("client_command_id")
+                ) or ""
+            ).strip()
             admitted_attachments = (
                 [dict(item) for item in getattr(consumed_steer, "attachments", ())]
                 if consumed_steer is not None
                 else [dict(item) for item in normalized_attachments]
             )
+            admitted_input = consumed_steer.original_command.data if consumed_steer is not None else run_metadata
+            input_metadata = {key: admitted_input[key] for key in USER_INPUT_METADATA_KEYS if key in admitted_input}
+            source_key = "_submitted_content" if consumed_steer is not None else "submitted_content"
+            if source_key in admitted_input:
+                input_metadata["submitted_content"] = admitted_input[source_key]
             context_refs = list(persisted_context_refs)
             if consumed_steer is not None:
                 context_refs = [
@@ -4769,12 +4669,15 @@ class SessionAgentRunnerMixin:
                     }
                     for value in getattr(consumed_steer, "selected_plugins", ())
                 )
+            if "context_refs" in input_metadata:
+                context_refs = input_metadata["context_refs"]
             user_projection = {
                 "id": user_message_id,
                 "role": "user",
                 "content": admitted_content,
                 "timestamp": datetime.now(UTC).isoformat(),
                 "attachments": admitted_attachments,
+                **input_metadata,
                 **({"context_refs": context_refs} if context_refs else {}),
                 **(
                     {
@@ -4804,9 +4707,7 @@ class SessionAgentRunnerMixin:
                     "history_start": max(0, int(history_start)),
                     "history_end": max(0, int(history_end)),
                     "run_id": str(run_metadata.get("run_id") or ""),
-                    "client_command_id": str(
-                        run_metadata.get("client_command_id") or ""
-                    ),
+                    "client_command_id": admitted_client_command_id,
                 }
                 saved_snapshot["turn_admissions"] = admissions
                 run_context_builder.record_turn_admission(user_message_id, admissions[user_message_id])
@@ -4826,15 +4727,15 @@ class SessionAgentRunnerMixin:
                         "provider_content": admitted_content,
                         "conversation_id": conversation.id,
                         "user_message_id": user_message_id,
-                        "client_command_id": str(
-                            run_metadata.get("client_command_id") or ""
-                        ),
+                        "client_command_id": admitted_client_command_id,
                         "attachments": admitted_attachments,
+                        **input_metadata,
+                        **({"context_refs": context_refs} if context_refs else {}),
                         "context_snapshot": saved_snapshot,
                     },
                     event_id=journal_event_id,
                 )
-                committed = await asyncio.to_thread(
+                committed = await to_thread_cancel_safe(
                     self.conversation_repo.commit_turn_admission,
                     conversation.id,
                     user_message=user_projection,
@@ -4868,6 +4769,7 @@ class SessionAgentRunnerMixin:
             plugin_injections = resolve_enabled_plugin_mentions(
                 [item for item in selected_plugins if isinstance(item, dict)],
                 connected_mcp_servers=connected_mcp_servers,
+                workspace_root=run_workspace_root,
             )
             if plugin_injections:
                 agent_state.prompt_context["plugin_injections"] = plugin_injections
@@ -5006,7 +4908,6 @@ class SessionAgentRunnerMixin:
 
         async def _write_partial_turn(*, force: bool = False) -> None:
             """Journal context changes and publish the current turn projection."""
-            from backend.conversations.context_delta import context_snapshot_delta
             nonlocal last_partial_persisted_at
             nonlocal partial_history_revision
             if not _accepts_projection_events():
@@ -5078,9 +4979,12 @@ class SessionAgentRunnerMixin:
                                 "partial": True,
                                 "summary": None,
                                 "expected_revision": expected_revision,
+                                **conversation_projection_owner_fields(run_metadata, {
+                                    **previous_snapshot, **snapshot_changes["set"],
+                                }),
                             },
                         )
-                        committed = await asyncio.to_thread(
+                        committed = await to_thread_cancel_safe(
                             self.conversation_repo.commit_turn_projection,
                             conversation.id,
                             assistant_message=partial_message,
@@ -5104,6 +5008,7 @@ class SessionAgentRunnerMixin:
                                 ),
                                 "message_id": assistant_message_id,
                                 "partial": True,
+                                "run_id": str(run_metadata.get("run_id") or ""),
                             },
                         )
                         last_partial_persisted_at = time.monotonic()
@@ -5607,6 +5512,7 @@ class SessionAgentRunnerMixin:
                 else "completed"
             )
 
+            turn_state.reconcile_committed_tool_results(agent_state.tool_calls)
             turn_snapshot = turn_state.finalize(terminal_status=terminal_status)
             assistant_blocks = turn_snapshot.blocks
             assistant_citations = turn_snapshot.citations
@@ -5827,9 +5733,10 @@ class SessionAgentRunnerMixin:
                                 "context_delta": terminal_delta,
                                 "summary": new_summary,
                                 "expected_revision": expected_revision,
+                                **conversation_projection_owner_fields(run_metadata, saved_snapshot),
                             },
                         )
-                        updated_conversation = await asyncio.to_thread(
+                        updated_conversation = await to_thread_cancel_safe(
                             self.conversation_repo.commit_turn_projection,
                             conversation.id,
                             assistant_message=assistant_message,
@@ -5849,6 +5756,7 @@ class SessionAgentRunnerMixin:
                                     getattr(updated_conversation, "revision", 0) or 0
                                 ),
                                 "message_id": assistant_message_id,
+                                "run_id": str(run_metadata.get("run_id") or ""),
                             },
                         )
                         if (
@@ -5870,6 +5778,7 @@ class SessionAgentRunnerMixin:
                             conversation_summary_payload = {
                                 "type": "conversation.summary.updated",
                                 "conversation_id": conversation.id,
+                                "revision": updated_conversation.revision,
                                 "summary": new_summary,
                                 "title": getattr(updated_conversation, "title", conversation.title),
                                 "updated_at": getattr(updated_conversation, "updated_at", conversation.updated_at),
@@ -5908,12 +5817,11 @@ class SessionAgentRunnerMixin:
                 conversation_summary_payload = {
                     "type": "conversation.summary.updated",
                     "conversation_id": conversation.id,
-                    "summary": conversation.summary or "",
-                    "title": conversation.title,
+                    "revision": polluted_conversation.revision,
+                    "summary": polluted_conversation.summary or "",
+                    "title": polluted_conversation.title,
                     "updated_at": memory_pollution_updated_at,
-                    "memory_mode": "polluted" if memory_polluted else str(
-                        getattr(conversation, "memory_mode", "enabled")
-                    ),
+                    "memory_mode": polluted_conversation.memory_mode,
                     "memory_polluted": memory_polluted,
                     "memory_pollution_sources": memory_pollution_sources,
                 }

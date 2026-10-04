@@ -128,18 +128,31 @@ def _truncate_replay_string(value: str, path: str, truncated_fields: list[str]) 
     )
 
 
+def _terminal_cursor_fields(payload: dict[str, Any]) -> tuple[str, str, str] | None:
+    fields = {
+        "terminal.output": ("data", "start_cursor", "end_cursor"),
+        "terminal.snapshot": ("output", "output_start_cursor", "output_end_cursor"),
+    }.get(payload.get("type"))
+    if fields and isinstance(payload.get(fields[0]), str) and fields[2] in payload:
+        return fields
+    return None
+
+
 def sanitize_ws_live_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Return the secret-redacted payload used for live renderer delivery.
 
     Runtime ownership fences and credential-shaped fields are omitted by exact
-    field name. Other strings retain their original length and structure, so
-    large tool output and data URLs continue to satisfy the live UI contract.
+    field name. Terminal output uses a mask that preserves its UTF-16 cursor
+    offsets; other text uses the normal secret markers and data URLs remain intact.
     """
 
     sanitized = redact_json_secrets(
         dict(payload),
         preserve_data_urls=True,
     )
+    if fields := _terminal_cursor_fields(payload):
+        text_field = fields[0]
+        sanitized[text_field] = redact_secrets(payload[text_field], preserve_length=True)
     return sanitized if isinstance(sanitized, dict) else {}
 
 
@@ -232,6 +245,17 @@ def sanitize_ws_replay_payload(payload: dict[str, Any]) -> dict[str, Any]:
     )
     if not isinstance(sanitized, dict):
         sanitized = dict(payload)
+
+    if fields := _terminal_cursor_fields(payload):
+        text_field, start_field, end_field = fields
+        text = redact_secrets(payload[text_field], preserve_length=True)
+        bounded = text[-WS_REPLAY_MAX_STRING_CHARS:]
+        sanitized[text_field] = bounded
+        bounded_chars = len(bounded.encode("utf-16-le", "surrogatepass")) // 2
+        sanitized[start_field] = payload[end_field] - bounded_chars
+        if text_field == "output":
+            sanitized["output_chars"] = bounded_chars
+            sanitized["truncated"] = bool(payload.get("truncated")) or len(text) > len(bounded)
 
     existing_omitted = sanitized.get("replay_omitted_fields")
     if isinstance(existing_omitted, list):

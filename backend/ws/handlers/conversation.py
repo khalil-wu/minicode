@@ -19,6 +19,10 @@ from backend.async_cleanup import (
     to_thread_cancel_safe,
 )
 from backend.ws.conversation_errors import emit_conversation_not_found
+from backend.ws.conversation_activity import (
+    live_sessions as _all_live_sessions,
+    conversation_activity_blockers as _conversation_activity_blockers,
+)
 if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
 
@@ -44,14 +48,6 @@ async def _emit_context_error(
     if conversation_id:
         event.data["conversation_id"] = conversation_id
     await session.send_event(event)
-
-
-def _all_live_sessions(session: "WebSocketSession") -> list["WebSocketSession"]:
-    manager = session.ws_manager
-    if manager is None:
-        return [session]
-    sessions = list(manager.iter_sessions())
-    return sessions if session in sessions else [session, *sessions]
 
 
 def _conversation_cleanup_owner(
@@ -209,94 +205,13 @@ def _release_conversation_mutation(claim: Any | None) -> None:
         )
 
 
-def _conversation_activity_blockers(
-    session: "WebSocketSession",
-    conversation_id: str,
-) -> dict[str, int]:
-    """Count live resources that would remain hidden after archival/handoff."""
-
-    owner = str(conversation_id or "").strip()
-    counts = {
-        "background_commands": 0,
-        "terminal_sessions": 0,
-        "preview_processes": 0,
-        "scheduled_tasks": 0,
-    }
-    if not owner:
-        return counts
-
-    live_sessions = _all_live_sessions(session)
-    for owner_session in live_sessions:
-        try:
-            counts["background_commands"] += len(
-                owner_session.background_manager.list_commands(
-                    conversation_id=owner,
-                )
-            )
-        except Exception:
-            logger.exception(
-                "Failed to inspect background commands for %s in session %s",
-                owner,
-                getattr(owner_session, "session_id", ""),
-            )
-            counts["background_commands"] += 1
-        try:
-            counts["terminal_sessions"] += len(
-                owner_session.terminal_manager.list_sessions_for_conversation(owner)
-            )
-        except Exception:
-            logger.exception(
-                "Failed to inspect terminal sessions for %s in session %s",
-                owner,
-                getattr(owner_session, "session_id", ""),
-            )
-            counts["terminal_sessions"] += 1
-
-    try:
-        from backend.preview.launcher import running_preview_processes
-
-        counts["preview_processes"] = sum(
-            len(running_preview_processes(
-                session_id=str(getattr(owner_session, "session_id", "") or ""),
-                conversation_id=owner,
-            ))
-            for owner_session in live_sessions
-        )
-    except Exception:
-        logger.exception("Failed to inspect preview processes for %s", owner)
-        counts["preview_processes"] = 1
-
-    try:
-        from backend.api import _state as api_state
-        from backend.tasks import scheduler as scheduler_module
-
-        bootstrap = getattr(api_state, "bootstrap", None)
-        scheduler = getattr(bootstrap, "task_scheduler", None) or getattr(
-            scheduler_module,
-            "_GLOBAL_SCHEDULER",
-            None,
-        )
-        if scheduler is not None:
-            counts["scheduled_tasks"] = sum(
-                1
-                for task in scheduler.list_tasks()
-                if str(task.get("conversation_id") or "").strip() == owner
-                and bool(task.get("enabled", True))
-            )
-    except Exception:
-        logger.exception("Failed to inspect scheduled tasks for %s", owner)
-        counts["scheduled_tasks"] = 1
-
-    return counts
-
-
 def _apply_handoff_runtime_blockers(
     preflight: dict[str, Any],
     resource_counts: dict[str, int],
 ) -> dict[str, Any]:
     relevant = {
         name: int(resource_counts.get(name, 0) or 0)
-        for name in ("background_commands", "terminal_sessions", "preview_processes")
+        for name in ("background_commands", "terminal_sessions", "preview_processes", "subagents")
         if int(resource_counts.get(name, 0) or 0) > 0
     }
     if not relevant:
@@ -305,7 +220,7 @@ def _apply_handoff_runtime_blockers(
     checks.append({
         "code": "runtime.resources_active",
         "severity": "blocking",
-        "message": "Stop live background commands, terminals, and previews before moving this task.",
+        "message": "Stop live subagents, background commands, terminals, and previews before moving this task.",
         "details": {"resources": relevant},
     })
     return {
@@ -391,7 +306,7 @@ async def _purge_conversation_runtime_state(
         # this secondary cleanup in a session-owned worker instead of making
         # the renderer wait on a legacy global scan.
         inner = asyncio.create_task(
-            asyncio.to_thread(clear_checkpoints_for_conversation, owner)
+            to_thread_cancel_safe(clear_checkpoints_for_conversation, owner)
         )
         try:
             removed = await asyncio.shield(inner)
@@ -490,11 +405,17 @@ async def _purge_conversation_runtime_state(
 
     if runtime is not None:
         try:
-            runtime_records = runtime.purge_conversation(owner)
+            runtime_records = await to_thread_cancel_safe(runtime.purge_conversation, owner)
         except Exception as exc:
             logger.warning("Failed to purge agent runtime for %s: %s", owner, exc)
             errors.append("agent_runtime")
     if runtime_records is not None:
+        for receipt in runtime_records.get("cleanup_errors", []):
+            errors.append(f"agent_runtime:{receipt['resource']}:{receipt['resource_id']}")
+        if runtime_records.get("cleanup_pending"):
+            counts["agent_runtime_cleanup_pending"] = 1
+            if not runtime_records.get("cleanup_errors"):
+                errors.append("agent_runtime:cleanup_pending")
         counts["agent_runs"] = len(runtime_records.get("run_ids", []))
         counts["subagents"] = len(runtime_records.get("subagent_ids", []))
         counts["swarm_tasks"] = len(runtime_records.get("task_ids", []))
@@ -552,7 +473,7 @@ async def _purge_conversation_replay_state(
         )
         removed = 0
         if has_dormant_logs:
-            dormant_task = asyncio.create_task(asyncio.to_thread(
+            dormant_task = asyncio.create_task(to_thread_cancel_safe(
                 delete_replay_events_for_conversation,
                 replay_root,
                 owner,
@@ -649,6 +570,7 @@ async def handle_conversation_create(
         conversation_id=request.conversation_id,
         title=request.title,
         conversation_type=request.conversation_type,
+        reuse_existing=request.conversation_type == "side_chat",
         memory_mode=request.memory_mode,
         permission_mode=request.permission_mode,
         summary="",
@@ -663,7 +585,7 @@ async def handle_conversation_create(
             else None
         ),
     )
-    if request.git_isolated:
+    if request.git_isolated and not created.worktree_path:
         isolated = await session.create_isolated_conversation_worktree(created)
         if isolated is None:
             # The isolation request failed and the lifecycle owner already
@@ -991,6 +913,7 @@ async def handle_conversation_switch(session: "WebSocketSession", data: dict[str
         return True
     session.active_conversation_id = target.id
     session.permission_context = session.permission_context_for_conversation(target, source="conversation.switch")
+    session.session_lifecycle.schedule_runtime_capabilities(source="workspace.activate.conversation.switch")
     session.refresh_llm_selection()
 
     async def restored(owner: str) -> None:
@@ -1121,7 +1044,7 @@ async def handle_conversation_rename(session: "WebSocketSession", data: dict[str
     from backend.services.conversation_payload_service import parse_conversation_rename_request
 
     request = parse_conversation_rename_request(data)
-    updated = await asyncio.to_thread(
+    updated = await to_thread_cancel_safe(
         session.conversation_repo.rename_conversation, request.conversation_id, request.title,
     )
     if updated is None:
@@ -1176,7 +1099,7 @@ async def handle_conversation_archive(session: "WebSocketSession", data: dict[st
     if blocking_resources:
         await session.emit_command_result(
             "conversation.archive",
-            "Stop or remove the conversation's live terminals, previews, background commands, and scheduled tasks before archiving it.",
+            "Stop or remove the conversation's live subagents, terminals, previews, background commands, and scheduled tasks before archiving it.",
             level="error",
             data={
                 "conversation_id": conversation_id,
@@ -1382,8 +1305,6 @@ def _conversation_delete_task_done(task: asyncio.Task[Any]) -> None:
 
 async def _handle_conversation_delete_fenced(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.services.conversation_payload_service import (
-        build_worktree_cleanup_outcome,
-        build_worktree_cleanup_force_required_outcome,
         parse_conversation_delete_request,
     )
 
@@ -1671,13 +1592,13 @@ async def handle_conversation_worktree_cleanup(session: "WebSocketSession", data
     resource_counts = _conversation_activity_blockers(session, conversation_id)
     blocking_resources = {
         name: int(resource_counts.get(name, 0) or 0)
-        for name in ("background_commands", "terminal_sessions", "preview_processes")
+        for name in ("background_commands", "terminal_sessions", "preview_processes", "subagents")
         if int(resource_counts.get(name, 0) or 0) > 0
     }
     if blocking_resources:
         await session.emit_command_result(
             "conversation.worktree.cleanup",
-            "Stop live background commands, terminals, and previews before removing the protected workspace.",
+            "Stop live subagents, background commands, terminals, and previews before removing the protected workspace.",
             level="error",
             data={
                 "conversation_id": conversation_id,
@@ -1716,7 +1637,7 @@ async def handle_conversation_worktree_cleanup(session: "WebSocketSession", data
         resource_counts = _conversation_activity_blockers(session, conversation_id)
         blocking_resources = {
             name: int(resource_counts.get(name, 0) or 0)
-            for name in ("background_commands", "terminal_sessions", "preview_processes")
+            for name in ("background_commands", "terminal_sessions", "preview_processes", "subagents")
             if int(resource_counts.get(name, 0) or 0) > 0
         }
         if blocking_resources:
@@ -1862,14 +1783,9 @@ async def handle_conversation_worktree_handoff_preflight(session: "WebSocketSess
 
 
 async def handle_conversation_worktree_handoff_execute(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.services.conversation_payload_service import create_isolated_worktree_binding
     from backend.services.conversation_worktree_handoff_service import (
         build_handoff_preflight,
-        restore_workspace_stash,
-        stash_workspace_changes,
-        switch_main_checkout,
     )
-    from backend.workspace.worktree import WorktreeManager
 
     conversation_id = str(data.get("conversation_id") or "").strip()
     conversation = session.conversation_repo.get_conversation(conversation_id)
@@ -1990,7 +1906,7 @@ async def _handle_conversation_worktree_handoff_claimed(
         if not creation.created:
             rollback_errors: list[str] = []
             if stash_ref:
-                restored, restore_error = await asyncio.to_thread(
+                restored, restore_error = await to_thread_cancel_safe(
                     restore_workspace_stash,
                     source_path,
                     stash_ref,
@@ -2031,7 +1947,7 @@ async def _handle_conversation_worktree_handoff_claimed(
             manager = WorktreeManager(base_root)
             worktree_path = Path(creation.worktree_path or creation.workspace_root).resolve()
             try:
-                removed = bool(await asyncio.to_thread(
+                removed = bool(await to_thread_cancel_safe(
                     manager.remove_worktree,
                     worktree_path,
                     force=True,
@@ -2044,7 +1960,7 @@ async def _handle_conversation_worktree_handoff_claimed(
             ):
                 rollback_errors.append("remove_created_worktree:failed")
             if removed:
-                branch_deleted, branch_error = await asyncio.to_thread(
+                branch_deleted, branch_error = await to_thread_cancel_safe(
                     delete_local_branch,
                     base_root,
                     creation.git_branch,
@@ -2052,7 +1968,7 @@ async def _handle_conversation_worktree_handoff_claimed(
                 if not branch_deleted:
                     rollback_errors.append(f"delete_created_branch:{branch_error}")
             if stash_ref:
-                restored, restore_error = await asyncio.to_thread(
+                restored, restore_error = await to_thread_cancel_safe(
                     restore_workspace_stash,
                     source_path,
                     stash_ref,
@@ -2084,7 +2000,7 @@ async def _handle_conversation_worktree_handoff_claimed(
             )
             preflight = {**preflight, "binding_warning": binding_warning}
         if stash_ref:
-            restored, error = await asyncio.to_thread(
+            restored, error = await to_thread_cancel_safe(
                 restore_workspace_stash,
                 Path(creation.workspace_root),
                 stash_ref,
@@ -2111,7 +2027,7 @@ async def _handle_conversation_worktree_handoff_claimed(
             conversation_id,
         )
         manager = WorktreeManager(base_root)
-        if not await asyncio.to_thread(manager.remove_worktree, source_path, force=False):
+        if not await to_thread_cancel_safe(manager.remove_worktree, source_path, force=False):
             await _switch_active_sessions_to_conversation_workspace(
                 session,
                 conversation,
@@ -2120,7 +2036,7 @@ async def _handle_conversation_worktree_handoff_claimed(
             )
             rollback_errors: list[str] = []
             if stash_ref:
-                restored, restore_error = await asyncio.to_thread(
+                restored, restore_error = await to_thread_cancel_safe(
                     restore_workspace_stash,
                     source_path,
                     stash_ref,
@@ -2148,7 +2064,7 @@ async def _handle_conversation_worktree_handoff_claimed(
             # protected workspace gone and the stash unrestored with nothing in
             # the payload to act on. Mirrors the rollback below.
             checkout_rollback_errors: list[str] = []
-            recreated = await asyncio.to_thread(
+            recreated = await to_thread_cancel_safe(
                 manager.create_worktree,
                 source_path,
                 branch=branch,
@@ -2157,7 +2073,7 @@ async def _handle_conversation_worktree_handoff_claimed(
             if not recreated:
                 checkout_rollback_errors.append("create_worktree:failed")
             if stash_ref:
-                restored_stash, stash_error = await asyncio.to_thread(
+                restored_stash, stash_error = await to_thread_cancel_safe(
                     restore_workspace_stash, source_path, stash_ref
                 )
                 if not restored_stash:
@@ -2199,7 +2115,7 @@ async def _handle_conversation_worktree_handoff_claimed(
         )
         if updated is None:
             rollback_errors: list[str] = []
-            restored_checkout, checkout_error = await asyncio.to_thread(
+            restored_checkout, checkout_error = await to_thread_cancel_safe(
                 restore_main_checkout,
                 base_root,
                 branch=previous_main_branch,
@@ -2210,7 +2126,7 @@ async def _handle_conversation_worktree_handoff_claimed(
             recreated = False
             if restored_checkout:
                 try:
-                    recreated = bool(await asyncio.to_thread(
+                    recreated = bool(await to_thread_cancel_safe(
                         manager.create_worktree,
                         source_path,
                         branch=branch,
@@ -2223,7 +2139,7 @@ async def _handle_conversation_worktree_handoff_claimed(
                 ):
                     rollback_errors.append("recreate_worktree:failed")
             if recreated and stash_ref:
-                restored, restore_error = await asyncio.to_thread(
+                restored, restore_error = await to_thread_cancel_safe(
                     restore_workspace_stash,
                     source_path,
                     stash_ref,
@@ -2264,7 +2180,7 @@ async def _handle_conversation_worktree_handoff_claimed(
             )
             preflight = {**preflight, "binding_warning": binding_warning}
         if stash_ref:
-            restored, error = await asyncio.to_thread(
+            restored, error = await to_thread_cancel_safe(
                 restore_workspace_stash,
                 base_root,
                 stash_ref,
@@ -2340,7 +2256,7 @@ async def _persist_workspace_binding(
         )
 
     try:
-        updated = await asyncio.to_thread(commit_binding)
+        updated = await to_thread_cancel_safe(commit_binding)
     except Exception as exc:
         logger.exception(
             "Failed to persist workspace binding for %s",
@@ -2403,7 +2319,7 @@ async def _restore_removed_conversation_worktree(
             else await to_thread_cancel_safe(session.main_worktree_root, worktree_path)
         )
         manager = WorktreeManager(base_root)
-        restored = await asyncio.to_thread(
+        restored = await to_thread_cancel_safe(
             manager.restore_removed_worktree,
             worktree_path,
             branch=raw_branch,
@@ -2674,9 +2590,6 @@ async def handle_conversation_clear(session: "WebSocketSession", data: dict[str,
 
 async def handle_conversation_truncate(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.services.conversation_payload_service import (
-        build_conversation_switched_payload,
-        build_conversation_truncate_failed_outcome,
-        build_conversation_truncated_outcome,
         parse_conversation_truncate_request,
     )
 
@@ -2986,7 +2899,7 @@ async def _handle_memory_reset_impl(session: "WebSocketSession", data: dict[str,
         return True
 
     try:
-        file_result = await asyncio.to_thread(reset_files)
+        file_result = await to_thread_cancel_safe(reset_files)
     except Exception as exc:
         logger.exception("Failed to reset file-backed memory")
         await session.emit_command_result(
@@ -2998,7 +2911,7 @@ async def _handle_memory_reset_impl(session: "WebSocketSession", data: dict[str,
         return True
 
     try:
-        repository_result = await asyncio.to_thread(
+        repository_result = await to_thread_cancel_safe(
             session.conversation_repo.reset_memory_state
         )
     except Exception as exc:
@@ -3415,7 +3328,7 @@ async def _cleanup_conversation_worktree(session: "WebSocketSession", conversati
     from backend.services.conversation_payload_service import cleanup_isolated_worktree
 
     current_workspace_root = None if check_only else session.session_lifecycle.current_workspace_root()
-    return await asyncio.to_thread(
+    return await to_thread_cancel_safe(
         cleanup_isolated_worktree,
         conversation,
         force=force,
@@ -3811,6 +3724,8 @@ def _resolve_context_history_index(
 
 async def handle_context_fork(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     """Fork from a stable transcript message id, with index compatibility."""
+    from backend.ws.command_results import emit_command_error
+
     requested_message_id = str(data.get("message_id") or "").strip()
     source_conversation = getattr(session, "active_conversation", None)
     source_conversation_id = str(
@@ -3818,6 +3733,24 @@ async def handle_context_fork(session: "WebSocketSession", data: dict[str, Any])
         or getattr(session, "active_conversation_id", "")
         or ""
     ).strip()
+    requested_conversation_id = str(data.get("conversation_id") or "").strip()
+    if requested_conversation_id and requested_conversation_id != source_conversation_id:
+        await emit_command_error(session, "context.fork",
+            "Fork conversation owner is stale; switch back to the originating conversation and retry",
+            data={"conversation_id": requested_conversation_id, "reason": "stale_owner"})
+        return True
+    if "workspace_root" in data:
+        from backend.owner_scope import canonical_workspace_root
+
+        source_workspace = str(
+            getattr(source_conversation, "worktree_path", "")
+            or getattr(source_conversation, "workspace_root", "") or ""
+        )
+        if canonical_workspace_root(data["workspace_root"]) != canonical_workspace_root(source_workspace):
+            await emit_command_error(session, "context.fork",
+                "Fork workspace owner is stale; retry from the current workspace",
+                data={"conversation_id": source_conversation_id, "reason": "stale_workspace"})
+            return True
     if source_conversation is None or not source_conversation_id:
         await _emit_context_error(
             session,

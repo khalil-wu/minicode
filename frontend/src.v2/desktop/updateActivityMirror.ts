@@ -75,7 +75,7 @@ export const buildUpdateActivitySnapshot = (state: AppStore): UpdateActivitySnap
     backgroundTasks: sortedUnique(
       [
         ...state.backgroundTasks
-          .filter((task) => task.status === "running" || task.status === "stalled")
+          .filter((task) => task.status === "running" || task.status === "stalled" || task.cleanupPending)
           .map((task) => task.id),
         ...runtimeTaskIds,
       ],

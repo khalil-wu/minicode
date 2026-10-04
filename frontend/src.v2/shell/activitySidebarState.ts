@@ -1,6 +1,6 @@
-import { citationUrl, extractInlineCitationIndexes } from "../chat/citationProjection";
+import { collectConversationSources } from "../chat/conversationSources";
 import { getContentBlocks, getToolCallsFromMessage } from "../lib/content-blocks";
-import { planStepProgressStatus, shouldSurfacePlanProgress } from "../lib/planVisibility";
+import { hasVisiblePlanSteps, planStepProgressStatus } from "../lib/planVisibility";
 import { isProviderRequestProgress, providerProgressLabel } from "../lib/provider-progress";
 import { previewUrlsShareOrigin } from "../lib/preview-projection";
 import { mediaTypeForPath } from "../lib/media-types";
@@ -91,6 +91,7 @@ export interface ActivitySourceItem {
   url?: string;
   path?: string;
   host?: string;
+  messageId?: string;
 }
 
 export interface ActivitySummaryItem {
@@ -127,7 +128,7 @@ export interface RuntimeItem {
   label: string;
   kind: "terminal" | "background-command" | "preview" | "agent" | "automation";
   detail?: string;
-  status: "running" | "stalled" | "completed" | "failed" | "cancelled" | "idle";
+  status: "running" | "stalled" | "completed" | "failed" | "cancelled" | "idle" | "unknown" | "cleanup_pending";
   terminalId?: string;
   automationId?: string;
   previewId?: string;
@@ -321,7 +322,7 @@ function buildProgress(input: ActivitySidebarStateInput): ActivityProgressItem[]
         status: todoStatus(currentTodo.status, Boolean(input.isStreaming)),
       });
     }
-  } else if (shouldSurfacePlanProgress(input.plan)) {
+  } else if (hasVisiblePlanSteps(input.plan)) {
     const currentStep = input.plan.plan.find((step) => step.status === "in_progress")
       || input.plan.plan.find((step) => step.status === "pending");
     if (currentStep) {
@@ -527,48 +528,10 @@ function browserAnnotationCoordinateLabel(annotation: Pick<BrowserAnnotation, "x
 }
 
 function buildSources(messages: ChatMessage[]): ActivitySourceItem[] {
-  const items: ActivitySourceItem[] = [];
-  const seen = new Set<string>();
-  const assistantMessages = messages.filter((message) => message.role === "assistant");
-
-  for (const message of assistantMessages) {
-    for (const record of getToolCallsFromMessage(message)) {
-      const webUrl = toolSourceUrl(record);
-      if (webUrl && !seen.has(`web:${webUrl}`)) {
-        seen.add(`web:${webUrl}`);
-        items.push({
-          id: `web:${webUrl}`,
-          kind: "web",
-          label: hostLabel(webUrl),
-          title: record.displaySummary || record.summary,
-          url: webUrl,
-          host: hostLabel(webUrl),
-        });
-      }
-
-    }
-
-    const citedIndexes = extractInlineCitationIndexes(message.content || "");
-    if (citedIndexes.size === 0) continue;
-    const citations = (message.citations ?? []).filter((citation, index) =>
-      citedIndexes.has(index + 1),
-    );
-    for (const citation of citations) {
-      const url = citationUrl(citation);
-      if (!url || seen.has(`web:${url}`)) continue;
-      seen.add(`web:${url}`);
-      items.push({
-        id: `web:${url}`,
-        kind: "web",
-        label: citation.label || hostLabel(url),
-        title: citation.title,
-        url,
-        host: hostLabel(url),
-      });
-    }
-  }
-
-  return items.slice(-8);
+  return collectConversationSources(messages).map((source) => ({
+    id: source.id, kind: "web", label: source.label, title: source.label,
+    url: source.url, host: source.detail, messageId: source.messageId,
+  }));
 }
 
 function buildAttachments(messages: ChatMessage[]): ActivityAttachmentItem[] {
@@ -592,16 +555,18 @@ function buildRuns(input: ActivitySidebarStateInput): ActivityRunItem[] {
   const items: ActivityRunItem[] = [];
   if ((input.terminalSessions ?? []).length === 0 && input.activeTerminalSessionId) {
     const snapshot = input.terminalSnapshots?.[input.activeTerminalSessionId];
-    if (snapshot) items.push({
+    if (snapshot && snapshot.conversationId === input.conversationId) items.push({
       id: `terminal:${snapshot.id}`,
       terminalId: snapshot.id,
       kind: "terminal",
       label: snapshot.shell || "Terminal",
       detail: terminalDetail(snapshot),
-      status: snapshot.status === "exited" ? "completed" : "running",
+      status: terminalOutcome(snapshot),
+      attention: Boolean(snapshot.cleanupPending) || snapshot.status === "exited" && snapshot.exitCode !== 0,
     });
   }
   for (const session of input.terminalSessions ?? []) {
+    if (session.conversationId !== input.conversationId) continue;
     const snapshot = input.terminalSnapshots?.[session.id];
     items.push({
       id: `terminal:${session.id}`,
@@ -609,9 +574,9 @@ function buildRuns(input: ActivitySidebarStateInput): ActivityRunItem[] {
       kind: "terminal",
       label: session.shell || "Terminal",
       detail: snapshot ? terminalDetail(snapshot) : session.cwd,
-      status: session.status === "exited" ? (session.exitCode && session.exitCode !== 0 ? "failed" : "completed") : "running",
+      status: terminalOutcome(session),
       startedAt: session.createdAt,
-      attention: session.status === "exited" && Boolean(session.exitCode),
+      attention: Boolean(session.cleanupPending) || session.status === "exited" && session.exitCode !== 0,
     });
   }
 
@@ -624,9 +589,9 @@ function buildRuns(input: ActivitySidebarStateInput): ActivityRunItem[] {
       kind: "background-command",
       label: cleanDisplayText(task.command) || "Background command",
       detail: backgroundTaskDetail(task),
-      status: task.status,
+      status: task.cleanupPending ? "cleanup_pending" : task.status,
       startedAt: task.timestamp,
-      attention: task.status === "failed" || task.status === "stalled",
+      attention: Boolean(task.cleanupPending) || task.status === "failed" || task.status === "stalled",
     });
   }
 
@@ -640,8 +605,8 @@ function buildRuns(input: ActivitySidebarStateInput): ActivityRunItem[] {
       detail: process.status === "stopping"
         ? "正在停止"
         : process.cleanup_pending ? "清理未完成，请重试停止" : process.url || process.command,
-      status: running ? "running" : process.status === "exited" ? "completed" : "failed",
-      attention: process.status === "crashed" || process.status === "unhealthy",
+      status: process.cleanup_pending ? "cleanup_pending" : running ? "running" : process.status === "exited" ? "completed" : "failed",
+      attention: Boolean(process.cleanup_pending) || process.status === "crashed" || process.status === "unhealthy",
     });
   }
 
@@ -677,9 +642,18 @@ function buildRuns(input: ActivitySidebarStateInput): ActivityRunItem[] {
 }
 
 const isActiveRuntimeStatus = (status: ActivityRunItem["status"]): boolean =>
-  status === "running" || status === "stalled";
+  status === "running" || status === "stalled" || status === "cleanup_pending";
+
+function terminalOutcome(session: TerminalSessionInfo | TerminalSnapshotInfo): ActivityRunItem["status"] {
+  if (session.cleanupPending) return "cleanup_pending";
+  if (session.status !== "exited") return "running";
+  if (session.exitCode === 0) return "completed";
+  if (session.exitCode != null) return "failed";
+  return "unknown";
+}
 
 function backgroundTaskDetail(task: BackgroundTaskEntry): string | undefined {
+  if (task.cleanupPending) return `清理未完成${task.cleanupReason ? ` · ${task.cleanupReason}` : "，进程退出尚未确认"}`;
   if (task.status === "stalled") {
     const prompt = compactRuntimeDetail(task.stalledTail || task.stalledAdvice || "可能正在等待交互输入");
     return prompt ? `等待输入 · ${prompt}` : "等待输入";
@@ -703,13 +677,6 @@ function compactRuntimeDetail(value: string): string {
 const runtimeKindOrder = (kind: ActivityRunItem["kind"]): number =>
   ({ terminal: 0, agent: 1, preview: 2, "background-command": 3, automation: 4 })[kind];
 
-function toolSourceUrl(record: ReturnType<typeof getToolCallsFromMessage>[number]): string {
-  if (String(record.extractionStatus || "").toLowerCase() === "failed") return "";
-  const candidate = record.sourceUrl || stringArg(record.args.url) || stringArg(record.args.source_url);
-  if (!/^https?:\/\//i.test(candidate)) return "";
-  const evidence = String(record.evidenceType || "").toLowerCase();
-  return evidence === "fetched" ? candidate : "";
-}
 
 function toolSourcePath(record: ReturnType<typeof getToolCallsFromMessage>[number]): string {
   const candidate = pathArg(record.args.file_path ?? record.args.path ?? record.args.target ?? record.args.filename);
@@ -771,6 +738,7 @@ function outputFromReplyFile(attachment: ReplyAttachmentMeta): ActivityOutputIte
 }
 
 function terminalDetail(snapshot: TerminalSnapshotInfo): string {
+  if (snapshot.cleanupPending) return `清理未完成${snapshot.cleanupReason ? ` · ${snapshot.cleanupReason}` : "，进程退出尚未确认"}`;
   const output = snapshot.truncated ? "truncated" : `${snapshot.outputChars ?? snapshot.output.length} chars`;
   return [snapshot.cwd, snapshot.status || "running", output].filter(Boolean).join(" - ");
 }

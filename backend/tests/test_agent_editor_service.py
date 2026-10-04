@@ -47,6 +47,7 @@ def _configure_scopes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     workspace.mkdir(parents=True)
     (workspace / ".git").mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: home))
+    monkeypatch.setenv("MINICODE_CONFIG_DIR", str(home / ".minicode"))
     monkeypatch.setattr(agents_loader, "_get_managed_minicode_dir", lambda: managed)
     monkeypatch.setattr(agent_editor, "_active_workspace", lambda: workspace)
     return SimpleNamespace(
@@ -429,13 +430,7 @@ def test_agent_api_catalog_uses_live_model_runtime_and_survives_retirement(
     )
     manager = SimpleNamespace(iter_sessions=lambda: [fallback, stale])
     monkeypatch.setattr(routes_agents._state, "ws_manager", manager)
-    monkeypatch.setattr(
-        routes_agents,
-        "get_explicit_active_workspace_root",
-        lambda: workspace,
-    )
-
-    catalog = routes_agents._live_agent_model_catalog()
+    catalog = routes_agents._live_agent_model_catalog(str(workspace))
 
     assert catalog == [
         {

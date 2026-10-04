@@ -6,7 +6,6 @@ import asyncio
 from copy import deepcopy
 from contextlib import aclosing
 from dataclasses import dataclass, replace
-import hashlib
 import inspect
 import logging
 import os
@@ -15,7 +14,6 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
-from backend.atomic_io import canonical_path_mapping_key
 from backend.agent.context import ContextBuilder
 from backend.agent.loop_preflight import await_preflight
 from backend.agent.control_tools import CONTROL_TOOL_NAMES, ControlToolRouter
@@ -43,7 +41,6 @@ from backend.agent.tool_execution import (
     _invalidate_turn_diff_after_inexact_mutation,
     _permission_decision_denial,
     _remember_hook_model_context,
-    _resolve_workspace_path_for_diff,
     _tool_hook_manager,
     _tool_output_was_streamed,
     _tool_streams_output,
@@ -66,7 +63,6 @@ from backend.agent.tool_execution_guardrails import (
 from backend.agent.tool_projection import result_kind_for_tool
 from backend.agent.tool_runtime import (
     tool_is_idempotent as _tool_is_idempotent,
-    tool_mutates as _tool_mutates,
     tool_side_effect_kind as _tool_side_effect_kind,
 )
 from backend.async_cleanup import (
@@ -222,7 +218,7 @@ def batch_tool_calls(
     return batches
 
 
-async def _finalize_tool_result(
+def _store_final_tool_result(
     tc: ToolCallEvent,
     result: ToolResult,
     *,
@@ -235,8 +231,9 @@ async def _finalize_tool_result(
     diff: dict[str, Any] | None = None,
     tool_registry: ToolRegistry,
     append_context_result: Callable[..., None] | None = None,
-) -> AsyncIterator[AgentEvent]:
-    """Persist and emit one terminal result for every tool exit path."""
+) -> tuple[list[AgentEvent], list[dict[str, str]]]:
+    """Commit the completed observation before any transport await or yield."""
+    notices: list[AgentEvent] = []
     request_digest = _final_tool_request_digest(tc) or canonical_tool_request_digest(
         tc.name,
         tc.arguments or {},
@@ -262,10 +259,10 @@ async def _finalize_tool_result(
                         f"\n\nMCP dependency unavailable for Skill '{skill.name}': {names}. "
                         "Do not assume those tools or resources are available."
                     ))
-                    yield AgentEvent(
+                    notices.append(AgentEvent(
                         type="system_notice",
                         data={"content": f"Skill '{skill.name}' requires MCP server(s) that are not connected: {names}."},
-                    )
+                    ))
     if not result.is_error:
         _track_created_file_edits(tc, diff, tool_ctx)
     removed_records = _reconcile_removed_created_file_edits(tool_ctx)
@@ -296,25 +293,6 @@ async def _finalize_tool_result(
             superseded_tool_call_ids=superseded_ids,
             removed_file_paths=removed_paths,
         )
-        emit = getattr(tool_ctx, "emit_event", None)
-        if emit is not None:
-            for item in removed_records:
-                try:
-                    file_changed_payload = {
-                        "path": str(
-                            item.get("display_path") or item.get("resolved_path") or ""
-                        ),
-                        "event": "deleted",
-                        "temporary": True,
-                        "supersedes_tool_call_id": str(item.get("tool_call_id") or ""),
-                    }
-                    if tool_ctx.workspace_root is not None:
-                        file_changed_payload["workspace_root"] = str(
-                            tool_ctx.workspace_root
-                        )
-                    await emit("file.changed", file_changed_payload)
-                except Exception as exc:
-                    logger.debug("temporary file removal emit failed: %s", exc)
     events = store_result_events(
         tc,
         result,
@@ -328,6 +306,42 @@ async def _finalize_tool_result(
         tool_registry=tool_registry,
         append_context_result=append_context_result,
     )
+    return [*notices, *events], removed_records
+
+
+async def _emit_final_tool_result(
+    tc: ToolCallEvent,
+    result: ToolResult,
+    events: list[AgentEvent],
+    removed_records: list[dict[str, str]],
+    *,
+    tool_ctx: ToolExecutionContext,
+    tool_registry: ToolRegistry,
+    iteration_id: str,
+    turn_id: str,
+    buffered_output: bool = False,
+    prefix_events: list[AgentEvent] | None = None,
+) -> AsyncIterator[AgentEvent]:
+    if buffered_output and not _tool_output_was_streamed(tool_ctx, tc.id):
+        if _tool_streams_output(tc.name, tool_registry) and result.content and not result.is_error:
+            await _emit_tool_first_output_span(tc, tool_ctx, iteration_id=iteration_id,
+                detail="Buffered command output available")
+        for event in tool_output_delta_events(tc, result, tool_registry=tool_registry,
+                turn_id=turn_id, iteration_id=iteration_id):
+            yield event
+    for event in prefix_events or []:
+        yield event
+    emit = tool_ctx.emit_event
+    if emit is not None:
+        for item in removed_records:
+            try:
+                payload = {"path": item["display_path"] or item["resolved_path"], "event": "deleted",
+                    "temporary": True, "supersedes_tool_call_id": item["tool_call_id"]}
+                if tool_ctx.workspace_root is not None:
+                    payload["workspace_root"] = str(tool_ctx.workspace_root)
+                await emit("file.changed", payload)
+            except Exception as exc:
+                logger.debug("temporary file removal emit failed: %s", exc)
     if events:
         await _emit_tool_completed_runtime_span(
             tc,
@@ -336,6 +350,31 @@ async def _finalize_tool_result(
             iteration_id=iteration_id,
         )
     for event in events:
+        yield event
+
+
+async def _finalize_tool_result(
+    tc: ToolCallEvent,
+    result: ToolResult,
+    *,
+    ctx: ContextBuilder,
+    state: AgentState,
+    tool_ctx: ToolExecutionContext,
+    iteration_id: str,
+    turn_id: str,
+    status: str | None = None,
+    diff: dict[str, Any] | None = None,
+    tool_registry: ToolRegistry,
+    append_context_result: Callable[..., None] | None = None,
+    buffered_output: bool = False,
+    prefix_events: list[AgentEvent] | None = None,
+) -> AsyncIterator[AgentEvent]:
+    events, removed = _store_final_tool_result(tc, result, ctx=ctx, state=state,
+        tool_ctx=tool_ctx, iteration_id=iteration_id, turn_id=turn_id, status=status,
+        diff=diff, tool_registry=tool_registry, append_context_result=append_context_result)
+    async for event in _emit_final_tool_result(tc, result, events, removed,
+            tool_ctx=tool_ctx, tool_registry=tool_registry, iteration_id=iteration_id,
+            turn_id=turn_id, buffered_output=buffered_output, prefix_events=prefix_events):
         yield event
 
 
@@ -1050,31 +1089,12 @@ async def _flush_queue(
                     next_executable_index += 1
 
             async def _emit_ready_results() -> AsyncIterator[AgentEvent]:
+                ready: list[tuple[ToolCallEvent, ToolResult, list[AgentEvent], list[dict[str, str]]]] = []
                 for ready_tc in batch:
                     if ready_tc.id not in results_by_id:
                         continue
                     ready_result = results_by_id.pop(ready_tc.id)
-                    if not _tool_output_was_streamed(tool_ctx, ready_tc.id):
-                        if (
-                            _tool_streams_output(ready_tc.name, tool_registry)
-                            and ready_result.content
-                            and not ready_result.is_error
-                        ):
-                            await _emit_tool_first_output_span(
-                                ready_tc,
-                                tool_ctx,
-                                iteration_id=iteration_id,
-                                detail="Buffered command output available",
-                            )
-                        for event in tool_output_delta_events(
-                            ready_tc,
-                            ready_result,
-                            tool_registry=tool_registry,
-                            turn_id=turn_id,
-                            iteration_id=iteration_id,
-                        ):
-                            yield event
-                    async for event in _finalize_tool_result(
+                    events, removed = _store_final_tool_result(
                         ready_tc,
                         ready_result,
                         ctx=ctx,
@@ -1087,7 +1107,12 @@ async def _flush_queue(
                         tool_ctx=tool_ctx,
                         tool_registry=tool_registry,
                         append_context_result=_append_ordered_context_result,
-                    ):
+                    )
+                    ready.append((ready_tc, ready_result, events, removed))
+                for ready_tc, ready_result, events, removed in ready:
+                    async for event in _emit_final_tool_result(ready_tc, ready_result, events, removed,
+                            tool_ctx=tool_ctx, tool_registry=tool_registry, iteration_id=iteration_id,
+                            turn_id=turn_id, buffered_output=True):
                         yield event
 
             try:
@@ -1207,6 +1232,20 @@ async def _flush_queue(
                             task=task,
                             aggregate=batch_cleanup,
                         )
+                        if task.done() and not task.cancelled():
+                            try:
+                                settled = task.result()
+                            except Exception as exc:
+                                settled = _execution_exception_result(exc)
+                            results_by_id[tc.id] = settled
+
+                for completed_call in batch:
+                    completed_result = results_by_id.pop(completed_call.id, None)
+                    if completed_result is not None:
+                        _store_final_tool_result(completed_call, completed_result, ctx=ctx, state=state,
+                            tool_ctx=tool_ctx, iteration_id=iteration_id, turn_id=turn_id,
+                            diff=None if completed_result.is_error else diffs_by_id.get(completed_call.id),
+                            tool_registry=tool_registry, append_context_result=_append_ordered_context_result)
 
                 # An interrupt can leave earlier calls without a result. Keep
                 # every completed observation; normal history reconciliation
@@ -1247,26 +1286,6 @@ async def _flush_queue(
                     tool_registry=tool_registry,
                     tool_ctx=tool_ctx,
                 )
-                if not _tool_output_was_streamed(tool_ctx, tc.id):
-                    if (
-                        _tool_streams_output(tc.name, tool_registry)
-                        and result.content
-                        and not result.is_error
-                    ):
-                        await _emit_tool_first_output_span(
-                            tc,
-                            tool_ctx,
-                            iteration_id=iteration_id,
-                            detail="Buffered command output available",
-                        )
-                    for event in tool_output_delta_events(
-                        tc,
-                        result,
-                        tool_registry=tool_registry,
-                        turn_id=turn_id,
-                        iteration_id=iteration_id,
-                    ):
-                        yield event
                 async for event in _finalize_tool_result(
                     tc,
                     result,
@@ -1277,6 +1296,7 @@ async def _flush_queue(
                     turn_id=turn_id,
                     tool_ctx=tool_ctx,
                     tool_registry=tool_registry,
+                    buffered_output=True,
                 ):
                     yield event
 
@@ -2180,8 +2200,6 @@ async def execute_serial(
             else:
                 routed = update
     if routed is not None:
-        for event in routed.events:
-            yield event
         result = routed.result
     else:
         result = await run_tool_with_timeout(
@@ -2205,5 +2223,6 @@ async def execute_serial(
         turn_id=turn_id,
         tool_ctx=tool_ctx,
         tool_registry=tool_registry,
+        prefix_events=routed.events if routed is not None else None,
     ):
         yield event

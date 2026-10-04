@@ -1,16 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   initialUiPermissionMode,
   fromBackendPermissionMode,
   normalizeUiPermissionMode,
-  syncPermissionMode,
   toBackendPermissionMode,
 } from "./permissions";
-import { sendClientCommand } from "./ws-outbox";
-
-vi.mock("./ws-outbox", () => ({
-  sendClientCommand: vi.fn(() => true),
-}));
 
 describe("permission mode protocol mapping", () => {
   it("exposes MiniCode UI permission modes", () => {
@@ -39,21 +33,6 @@ describe("permission mode protocol mapping", () => {
     expect(toBackendPermissionMode("auto")).toBe("auto");
     expect(toBackendPermissionMode("bypass")).toBe("bypass");
 
-    expect(syncPermissionMode("bypass", "frontend.ui", "conv-1")).toBe(true);
-    expect(sendClientCommand).toHaveBeenCalledWith({
-      type: "conversation.permission_mode.set",
-      mode: "bypass",
-      source: "frontend.ui",
-      conversation_id: "conv-1",
-    });
   });
 
-  it("omits empty conversation ids when syncing permission mode", () => {
-    expect(syncPermissionMode("plan", "frontend.ui", "  ")).toBe(true);
-    expect(sendClientCommand).toHaveBeenCalledWith({
-      type: "conversation.permission_mode.set",
-      mode: "plan",
-      source: "frontend.ui",
-    });
-  });
 });

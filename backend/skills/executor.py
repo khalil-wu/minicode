@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from backend.skills.manager import SkillManager
+from backend.skills.loader import SkillMeta
 
 logger = logging.getLogger(__name__)
 
@@ -95,16 +96,16 @@ def _minicode_skill_char_budget(
 
 
 def _format_minicode_skills_within_budget(
-    metas: list[object],
+    metas: list[SkillMeta],
     *,
     max_chars: int,
 ) -> str:
     """Render MiniCode's locator catalog with a hard metadata budget."""
     entries: list[tuple[str, str, str]] = []
     for meta in metas:
-        name = str(getattr(meta, "name", "") or "").strip()
-        path = str(getattr(meta, "source_path", "") or "").replace("\\", "/")
-        description = str(getattr(meta, "description", "") or "").strip()
+        name = meta.name
+        path = str(meta.source_path).replace("\\", "/")
+        description = meta.description
         if len(description) > MINICODE_MAX_LISTING_DESC_CHARS:
             description = (
                 description[: MINICODE_MAX_LISTING_DESC_CHARS - 3] + "..."

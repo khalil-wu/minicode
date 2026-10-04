@@ -1,11 +1,10 @@
-import * as React from "react";
 import { Quote, X } from "lucide-react";
 import type { ComposerQuote } from "../../stores/types";
 import "./message-quote.css";
 
 interface MessageQuoteProps {
   message: ComposerQuote;
-  onRemove: () => void;
+  onRemove?: () => void;
 }
 
 /**
@@ -24,7 +23,7 @@ export function MessageQuote({ message, onRemove }: MessageQuoteProps) {
         <span className="message-quote-label">
           回复 {message.role === "user" ? "你的消息" : "助手"}
         </span>
-        <button
+        {onRemove && <button
           type="button"
           className="message-quote-remove"
           onClick={onRemove}
@@ -32,33 +31,12 @@ export function MessageQuote({ message, onRemove }: MessageQuoteProps) {
           aria-label="取消引用"
         >
           <X size={14} />
-        </button>
+        </button>}
       </div>
-      <div className="message-quote-content">
+      <div className="message-quote-content" title={message.content}>
         {preview}
         {needsEllipsis && "..."}
       </div>
     </div>
   );
-}
-
-/**
- * Hook to manage message quote state
- */
-export function useMessageQuote() {
-  const [quotedMessage, setQuotedMessage] = React.useState<ComposerQuote | null>(null);
-
-  const quoteMessage = (message: ComposerQuote) => {
-    setQuotedMessage(message);
-  };
-
-  const clearQuote = () => {
-    setQuotedMessage(null);
-  };
-
-  return {
-    quotedMessage,
-    quoteMessage,
-    clearQuote,
-  };
 }

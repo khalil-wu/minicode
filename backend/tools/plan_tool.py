@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -13,11 +12,6 @@ from backend.permissions.context import PermissionContext
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 
 _VALID_INPUT_STATUSES = {"pending", "in_progress", "completed"}
-
-
-def _safe_session_filename(value: Any) -> str:
-    text = str(value or "session").strip()
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._-") or "session"
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -140,7 +134,7 @@ class UpdatePlanTool(BaseTool):
                 "turn.plan.updated",
                 AgentEvent.turn_plan_updated(
                     thread_id=str(getattr(context, "conversation_id", "") or ""),
-                    turn_id=str(metadata.get("run_id") or metadata.get("turn_id") or ""),
+                    turn_id=str(metadata.get("turn_id") or metadata.get("run_id") or ""),
                     explanation=explanation,
                     plan=steps,
                 ).data,
@@ -325,7 +319,7 @@ class ExitPlanModeTool(BaseTool):
                 feedback = str((response or {}).get("feedback") or "").strip()
                 return ToolResult(
                     content=(
-                        "Could not submit the plan to the team leader. Stay in Plan mode."
+                        "Could not submit the plan for user review. Stay in Plan mode."
                         + (f" Feedback: {feedback}" if feedback else "")
                     ),
                     is_error=True,
@@ -335,14 +329,14 @@ class ExitPlanModeTool(BaseTool):
                 )
             return ToolResult(
                 content=(
-                    "Plan submitted to the team leader for approval. "
-                    "Remain in Plan mode until the matching mailbox response arrives.\n\n"
+                    "Plan submitted for user review. The host approves automatically only in a bypass session. "
+                    "Remain in Plan mode until the review decision arrives.\n\n"
                     f"request_id: {response.get('request_id')}\n"
                     f"plan_file_path: {path}"
                 ),
                 result_kind="plan",
                 status="waiting",
-                display_summary="Awaiting team leader approval",
+                display_summary="Awaiting plan review",
             )
 
         setter = getattr(
@@ -358,6 +352,19 @@ class ExitPlanModeTool(BaseTool):
                     approved_permission_mode or "confirm",
                     source="exit_plan_mode",
                 )
+            )
+            provider = getattr(context.run_context, "permission_context_provider", None)
+            if callable(provider):
+                context.permission = provider()
+        else:
+            from backend.agent.plans import merge_plan_constraints
+            from backend.config_requirements import permission_mode_requirements
+
+            approval_policy, sandbox_mode = permission_mode_requirements(approved_permission_mode)
+            context.permission = replace(
+                context.permission, mode=approved_permission_mode, pre_plan_mode=None,
+                approval_policy=approval_policy, sandbox_mode=sandbox_mode,
+                filesystem_constraints=merge_plan_constraints(context.permission.filesystem_constraints, None),
             )
 
         return ToolResult(
@@ -396,7 +403,7 @@ class EnterPlanModeTool(BaseTool):
     )
 
     def __init__(self, workspace_root: Path | None = None) -> None:
-        self._workspace_root = workspace_root
+        del workspace_root
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -422,6 +429,8 @@ class EnterPlanModeTool(BaseTool):
         return PermissionLevel.AUTO
 
     async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
+        if context is None or not isinstance(getattr(context, "permission", None), PermissionContext):
+            return ToolResult(content="enter_plan_mode requires a live permission context.", is_error=True)
         unexpected = set(args) - {"reason"}
         if unexpected or (
             "reason" in args and not isinstance(args.get("reason"), str)
@@ -445,14 +454,15 @@ class EnterPlanModeTool(BaseTool):
                     # transition locally so the next model iteration sees
                     # plan permissions instead of continuing with build mode.
                     plan_constraints = dict(context.permission.filesystem_constraints)
-                    if self._workspace_root is not None:
-                        session_id = _safe_session_filename(getattr(context, "session_id", ""))
-                        plan_path = (
-                            self._workspace_root
-                            / ".minicode"
-                            / "plans"
-                            / f"{session_id}.md"
-                        ).resolve()
+                    if not plan_constraints.get("plan_files"):
+                        from backend.agent.plans import bind_plan_owner, generate_plan_slug, get_plan_file_path
+
+                        repository = getattr(run_context, "conversation_repository", None)
+                        workspace_root = getattr(context, "workspace_root", None)
+                        if repository is not None and context.conversation_id:
+                            _, plan_path = bind_plan_owner(repository, context.conversation_id, workspace_root)
+                        else:
+                            plan_path = get_plan_file_path(generate_plan_slug(workspace_root), workspace_root)
                         plan_constraints["plan_files"] = [str(plan_path)]
                     context.permission = replace(
                         context.permission,

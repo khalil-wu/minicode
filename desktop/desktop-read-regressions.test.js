@@ -124,9 +124,12 @@ test("concurrent tab creation cannot overwrite another owner's live view", async
   browser.disposeAll();
 });
 
-test("concurrent same-owner creation reuses one registered view", async () => {
+test("latest same-owner creation supersedes the old request and keeps one registered view", async () => {
   const { browser, children } = browserFixture();
-  await Promise.all([1, 2].map(() => browser.create({ id: "same", url: "https://example.com", conversation_id: "A" })));
+  const outcomes = await Promise.allSettled([1, 2].map(() => browser.create({ id: "same", url: "https://example.com", conversation_id: "A" })));
+  assert.equal(outcomes[0].status, "rejected");
+  assert.match(outcomes[0].reason.message, /navigation was cancelled/);
+  assert.equal(outcomes[1].status, "fulfilled");
   assert.equal(children.length, 1);
   assert.equal(browser.listTargets("A").length, 1);
   const contents = children[0].webContents;

@@ -113,10 +113,16 @@ class CommandRegistry:
         self, name: str, *, scope_id: str | None = None
     ) -> SlashCommandHandler | None:
         normalized = self._slash_name(name)
-        extension = self._extension_scope_handlers(scope_id).get(normalized)
+        extension = self.get_extension_slash(normalized, scope_id=scope_id)
         if extension is not None:
-            return extension[0]
+            return extension
         return self._slash_handlers.get(normalized)
+
+    def get_extension_slash(
+        self, name: str, *, scope_id: str | None = None,
+    ) -> SlashCommandHandler | None:
+        entry = self._extension_scope_handlers(scope_id).get(self._slash_name(name))
+        return entry[0] if entry is not None else None
 
     def list_extension_slash_commands(
         self, *, scope_id: str | None = None
@@ -137,8 +143,9 @@ class CommandRegistry:
         attachments: Any,
         *,
         scope_id: str | None = None,
+        handler: SlashCommandHandler | None = None,
     ) -> tuple[bool, str]:
-        handler = self.get_slash(name, scope_id=scope_id)
+        handler = handler if handler is not None else self.get_slash(name, scope_id=scope_id)
         if handler is None:
             return False, arg
         token = _SLASH_CONVERSATION_ID.set(scope_id)

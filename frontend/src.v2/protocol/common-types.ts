@@ -81,6 +81,8 @@ export type CommonClientCommandType =
   // Scheduler
   | "scheduler.list"
   | "scheduler.add"
+  | "scheduler.update"
+  | "scheduler.history"
   | "scheduler.remove"
   | "scheduler.toggle"
   | "scheduler.run_now"
@@ -161,7 +163,7 @@ export type McpUpdateCommand = {
   original_name: string;
 } & McpServerMutationPayload;
 
-export interface McpInventoryListCommand {
+export interface McpInventoryListCommand extends WorkspaceOwnedCommand {
   type: "mcp.inventory.list";
   name: string;
   operation_id: string;
@@ -219,6 +221,8 @@ export interface McpInventoryPayload {
 
 export interface McpStatusEvent {
   type: "mcp_status";
+  conversation_id?: string;
+  workspace_root?: string;
   servers?: {
     name: string;
     status: string;
@@ -290,6 +294,8 @@ export type McpLifecyclePhase =
 
 export interface McpLifecycleEvent {
   type: "mcp.lifecycle";
+  conversation_id?: string;
+  workspace_root?: string;
   server_name: string;
   status?: string;
   phase: McpLifecyclePhase;
@@ -303,6 +309,8 @@ export interface McpLifecycleEvent {
 
 export interface McpProgressEvent {
   type: "mcp.progress";
+  conversation_id?: string;
+  workspace_root?: string;
   server_name: string;
   operation: string;
   message?: string;
@@ -321,7 +329,8 @@ export interface SchedulerListEvent {
 
 export interface SkillsListEvent {
   type: "skills.list";
-  conversation_id?: string;
+  workspace_root: string;
+  conversation_id: string;
   skills: {
     name: string;
     description: string;
@@ -436,6 +445,8 @@ export interface ClientCommandAckEvent {
 
 export interface RuntimeCapabilitiesEvent {
   type: "runtime.capabilities";
+  conversation_id: string;
+  workspace_root: string;
   session_id?: string;
   source?: string;
   capabilities: AgentCapabilitiesPayload;
@@ -646,6 +657,8 @@ export interface ControlCancelRequestCommand {
 
 export interface SkillsListCommand {
   type: "skills.list";
+  conversation_id?: string;
+  workspace_root?: string;
 }
 
 export interface SkillsMarketplaceListCommand {
@@ -681,7 +694,19 @@ export interface SchedulerAddCommand extends WorkspaceOwnedCommand {
   schedule: string;
   timezone?: string;
   isolation?: "worktree" | "workspace";
-  permission_mode?: "confirm" | "auto";
+  permission_mode?: string;
+}
+
+export interface SchedulerUpdateCommand extends Omit<SchedulerAddCommand, "type"> {
+  type: "scheduler.update";
+  task_id: string;
+}
+
+export interface SchedulerHistoryCommand extends WorkspaceOwnedCommand {
+  type: "scheduler.history";
+  task_id?: string;
+  offset?: number;
+  limit?: number;
 }
 
 export interface SchedulerRemoveCommand extends WorkspaceOwnedCommand {

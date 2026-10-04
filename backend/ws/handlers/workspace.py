@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.async_cleanup import to_thread_cancel_safe
+
 import asyncio
 import logging
 from typing import Any, TYPE_CHECKING
@@ -64,6 +66,7 @@ async def handle_workspace_recent_remove(session: "WebSocketSession", data: dict
         await emit_command_error(session, "workspace.recent.remove", "Path is required")
         return True
     closed_active = False
+    ids: list[str] = []
     if data.get("preserve_history") is True:
         from backend.services.workspace_history import workspace_conversation_ids
         from backend.ws.handlers.conversation import _conversation_has_active_run, handle_conversation_create
@@ -78,12 +81,8 @@ async def handle_workspace_recent_remove(session: "WebSocketSession", data: dict
         if any(_conversation_has_active_run(session, conversation_id) for conversation_id in ids):
             await emit_command_error(session, "workspace.recent.remove", "此工作区还有运行中的任务，请先停止任务再移除。")
             return True
-        if session.active_conversation_id in ids:
-            await handle_conversation_create(session, {"workspace_root": "", "title": "New chat", "conversation_type": "main"})
-            set_active_workspace_root(None)
-            closed_active = True
     try:
-        removed, payload = await asyncio.to_thread(remove_workspace_recent, path)
+        removed, payload = await to_thread_cancel_safe(remove_workspace_recent, path)
     except RecentProjectPersistenceError:
         logger.exception("Failed to persist removal of recent workspace metadata")
         await session.emit_command_result(
@@ -93,12 +92,21 @@ async def handle_workspace_recent_remove(session: "WebSocketSession", data: dict
             data={"path": path, "reason": "persistence_failed", "retryable": True},
         )
         return True
+    if session.active_conversation_id in ids:
+        await handle_conversation_create(session, {"workspace_root": "", "title": "New chat", "conversation_type": "main"})
+        closed_active = session.active_conversation_id not in ids
+        if closed_active:
+            set_active_workspace_root(None)
     await session.send_payload(payload, log_context="workspace.recent.list")
     await session.emit_command_result(
         "workspace.recent.remove",
         "Recent workspace entry removed." if removed else "Recent workspace entry was already absent.",
         level="success",
-        data={"path": path, "removed": removed, **({"closed_active": closed_active} if closed_active else {})},
+        data={"path": path, "removed": removed, **({
+            "closed_active": True,
+            "conversation_id": session.active_conversation_id,
+            "workspace_root": "",
+        } if closed_active else {})},
     )
     return True
 
@@ -108,7 +116,7 @@ async def handle_workspace_recent_clear(session: "WebSocketSession", data: dict[
     from backend.workspace.recent_projects import RecentProjectPersistenceError
 
     try:
-        removed, payload = await asyncio.to_thread(clear_workspace_recent)
+        removed, payload = await to_thread_cancel_safe(clear_workspace_recent)
     except RecentProjectPersistenceError:
         logger.exception("Failed to persist clearing recent workspace metadata")
         await session.emit_command_result(

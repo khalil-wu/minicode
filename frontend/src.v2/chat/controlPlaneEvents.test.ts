@@ -40,6 +40,7 @@ describe("handleControlPlaneProjectionEvent", () => {
       recentWorkspaces: [],
       inspectorEntries: [],
       inspectorFocus: null,
+      fileChanges: [],
       requestGitChanges: vi.fn(),
     });
   });
@@ -164,8 +165,11 @@ describe("handleControlPlaneProjectionEvent", () => {
       checkpoint: checkpoint({ id: "checkpoint-2", created_at: "2026-08-15T02:00:00Z" }),
     } as unknown as ServerEvent)).toBe(true);
     expect(requestGitChanges).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState().fileChanges).toEqual([
+      expect.objectContaining({ path: "src/app.ts", event: "modify", sequence: 1 }),
+    ]);
     expect(pushToast).toHaveBeenCalledWith(
-      "已回滚到检查点 checkpoint-2：src/app.ts",
+      "已回滚到检查点：src/app.ts",
       "success",
       5200,
     );
@@ -202,7 +206,7 @@ describe("handleControlPlaneProjectionEvent", () => {
       checkpointRunId: "run-1",
       iteration: 4,
     });
-    expect(pushToast).toHaveBeenCalledWith("已从运行 run-1 的第 4 轮恢复。", "success", 5200);
+    expect(pushToast).toHaveBeenCalledWith("已恢复未完成的任务。", "success", 5200);
 
     vi.clearAllMocks();
     expect(handleControlPlaneProjectionEvent({

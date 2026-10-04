@@ -49,4 +49,20 @@ describe("prepareNativeImageFile", () => {
 
     await expect(prepareNativeImageFile(file)).rejects.toThrow("超过 20 MB");
   });
+
+  it("closes the native bitmap when compression cannot acquire a canvas", async () => {
+    const close = vi.fn();
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 4000, height: 3000, close })));
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    await expect(prepareNativeImageFile(new File(["small"], "wide.png", { type: "image/png" }))).rejects.toThrow("无法创建图片压缩画布");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("closes the native bitmap when an already fitting image is retained", async () => {
+    const close = vi.fn();
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 1200, height: 800, close })));
+    const file = new File(["small"], "small.png", { type: "image/png" });
+    await expect(prepareNativeImageFile(file)).resolves.toBe(file);
+    expect(close).toHaveBeenCalledOnce();
+  });
 });

@@ -252,7 +252,6 @@ def _upsert_tool_state(
     prior = tools.get(tool_id) if isinstance(tools, dict) else None
     if not isinstance(prior, dict):
         prior = {}
-    record = _tool_record(prior, payload, status=status, transition=transition)
     # Runtime/progress events may arrive after the persisted tool result.  A
     # recovery snapshot must not turn a completed/failed tool back into a
     # running card merely because such a late event was projected last.
@@ -261,22 +260,8 @@ def _upsert_tool_state(
         prior_status in _TERMINAL_TOOL_STATUSES
         and not terminal_authoritative
     ):
-        record["status"] = prior_status
-        record["transition"] = str(
-            prior.get("transition")
-            or record.get("transition")
-            or "completed"
-        )
-        for key in (
-            "finishedAt",
-            "durationMs",
-            "errorInfo",
-            "errorKind",
-            "userSummary",
-            "developerDetail",
-        ):
-            if key in prior:
-                record[key] = prior[key]
+        return prior
+    record = _tool_record(prior, payload, status=status, transition=transition)
     tools[tool_id] = record
     _replace_tool_block(state, record)
     return record
@@ -564,7 +549,7 @@ def apply_stream_event(
             transition="streaming_output",
         )
         tool_id = _tool_id(payload)
-        if tool_id:
+        if tool_id and state["tool_calls"][tool_id]["status"] not in _TERMINAL_TOOL_STATUSES:
             record = state["tool_calls"][tool_id]
             output = str(payload.get("output") or payload.get("content") or "")
             stream_name = str(payload.get("stream") or "stdout").lower()

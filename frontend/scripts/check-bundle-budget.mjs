@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(root, "dist");
@@ -9,6 +10,10 @@ const limits = {
   entry: 900 * 1024,
   javascript: 1500 * 1024,
   css: 350 * 1024,
+  // Monaco 0.56's compiler and standard libraries live in a lazy language
+  // worker, rather than the UI entry. Keep a separate raw and transfer budget.
+  typescriptWorker: 7 * 1024 * 1024,
+  typescriptWorkerGzip: 1500 * 1024,
 };
 
 if (!fs.existsSync(assets)) {
@@ -26,9 +31,15 @@ const rows = [];
 for (const name of fs.readdirSync(assets)) {
   if (!name.endsWith(".js") && !name.endsWith(".css")) continue;
   const bytes = fs.statSync(path.join(assets, name)).size;
-  const limit = name === entryName ? limits.entry : name.endsWith(".js") ? limits.javascript : limits.css;
+  const typescriptWorker = /^(?:ts\.worker|workspaceTypeScriptWorker)-.*\.js$/.test(name);
+  const limit = name === entryName ? limits.entry : typescriptWorker ? limits.typescriptWorker : name.endsWith(".js") ? limits.javascript : limits.css;
   rows.push({ name, bytes, limit });
   if (bytes > limit) failures.push({ name, bytes, limit });
+  if (typescriptWorker) {
+    const compressed = { name: `${name} (gzip)`, bytes: gzipSync(fs.readFileSync(path.join(assets, name))).length, limit: limits.typescriptWorkerGzip };
+    rows.push(compressed);
+    if (compressed.bytes > compressed.limit) failures.push(compressed);
+  }
 }
 
 rows.sort((a, b) => b.bytes - a.bytes);

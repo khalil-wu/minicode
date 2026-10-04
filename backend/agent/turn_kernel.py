@@ -24,9 +24,9 @@ from backend.agent.runtime import (
     AgentRuntime,
     TerminalCommitError,
 )
-from backend.agent.runtime_records import AgentRunRecord, AgentRunStatus
+from backend.agent.runtime_records import AgentRunRecord, AgentRunStatus, epoch_ms
 from backend.agent.run_context import RunContext
-from backend.agent.runtime_spans import epoch_ms, runtime_span
+from backend.agent.runtime_spans import runtime_span
 from backend.agent.state import AgentState, TerminalReason, TerminalStatus
 from backend.agent.turn_input import TurnInput, TurnInputQueue
 from backend.agent.provider_attempt import ProviderAttempt, provider_progress_id
@@ -333,6 +333,10 @@ class TurnKernel:
     ) -> tuple[AgentEvent, ...]:
         """Commit the resumable history contract for a cancelled turn."""
 
+        final_answer_committed = (
+            self.state.terminal_status in {"completed", "partial"}
+            and bool(self.state.reply.strip())
+        )
         _set_terminal_reason(self.state, "interrupted", status="cancelled")
         cancelled_final_text = (
             scrub_text(stream_text.final_candidate_text)
@@ -340,8 +344,9 @@ class TurnKernel:
             and stream_text.final_candidate_text.strip()
             else ""
         )
-        if cancelled_final_text:
+        if cancelled_final_text and not final_answer_committed:
             context_builder.append_assistant(cancelled_final_text)
+            self.state.reply = cancelled_final_text
         events: list[AgentEvent] = []
         if stream_text.agent_message_started:
             # Only text the provider actually phased as the final answer is a
@@ -412,7 +417,7 @@ class TurnKernel:
         self._provider_call_count += 1
         return (
             self._provider_call_count,
-            f"{iteration_id}:provider:{self._provider_call_count}",
+            f"{self.run_record.run_id}:{iteration_id}:provider:{self._provider_call_count}",
         )
 
     def bind_tool_context(self, tool_context: ToolExecutionContext) -> None:
@@ -799,6 +804,7 @@ class TurnKernel:
             resolved = resolve_enabled_plugin_mentions(
                 item.selected_plugins,
                 connected_mcp_servers=self.run_context.connected_mcp_servers,
+                workspace_root=self.state.workspace_root,
             )
             if resolved:
                 existing_plugins = self.state.prompt_context.get("plugin_injections")
@@ -910,14 +916,16 @@ class TurnKernel:
             return "pending_clear"
         self.metadata.pop("checkpoint_error", None)
         try:
-            clear_checkpoints(
-                session_id,
-                conversation_id=str(
-                    getattr(state, "conversation_id", "")
-                    or self.run_record.conversation_id
-                    or ""
-                ),
-            )
+            checkpoint_sessions = {session_id}
+            origin = self.metadata.get("checkpoint_origin") or {}
+            if source_session_id := origin.get("session_id"):
+                checkpoint_sessions.add(source_session_id)
+            for checkpoint_session in checkpoint_sessions:
+                clear_checkpoints(
+                    checkpoint_session,
+                    base_dir=self.runtime.state_root,
+                    conversation_id=state.conversation_id or self.run_record.conversation_id,
+                )
             self.metadata["checkpoint_status"] = "cleared"
             self.metadata.pop("checkpoint_context_revision", None)
             self.metadata.pop("checkpoint_sequence", None)
@@ -954,11 +962,21 @@ class TurnKernel:
                 "run_id": self.run_record.run_id,
                 "conversation_id": str(getattr(state, "conversation_id", "") or ""),
                 "role": self.run_record.role,
+                **{
+                    key: self.metadata[key]
+                    for key in ("agent_mode", "agent_role", "query_source", "primary_file", "active_tab_path")
+                    if key in self.metadata
+                },
             }
+            if plugins := state.prompt_context.get("plugin_injections"):
+                resume_payload["selected_plugins"] = [
+                    {"config_name": plugin["config_name"]} for plugin in plugins
+                ]
             if isinstance(checkpoint_origin, dict) and checkpoint_origin:
                 resume_payload["parent_checkpoint"] = dict(checkpoint_origin)
             save_run_checkpoint(
                 receipt=receipt,
+                base_dir=self.runtime.state_root,
                 session_id=session_id,
                 user_message=user_message,
                 iterations=state.iterations,

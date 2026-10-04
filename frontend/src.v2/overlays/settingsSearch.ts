@@ -1,0 +1,70 @@
+import type { Tab } from "./settingsShared";
+
+type SettingsOption = { tab: Tab; title: string; description: string; keywords: string };
+const options = (tab: Tab, entries: [string, string, string][]): SettingsOption[] =>
+  entries.map(([title, description, keywords]) => ({ tab, title, description, keywords }));
+
+export const SETTINGS_OPTIONS: SettingsOption[] = [
+  ...options("general", [
+    ["工作模式", "选择协作区或代码区。", "编辑器 代码 布局"],
+    ["过程详情", "控制活动和工具过程的展开程度。", "工具 日志 执行"],
+    ["发送快捷键", "选择 Enter 或 Ctrl+Enter 发送消息。", "发送 换行 输入"],
+    ["跟进行为", "选择运行中的消息排队或引导方式。", "队列 补充 消息"],
+    ["远程 Markdown 图片", "决定外部图片的加载策略。", "远程 md 图像"],
+    ["已允许的网站", "管理外部图片加载的站点许可。", "域名 图片"],
+    ["更新通道", "检查桌面应用更新。", "版本 桌面 更新"],
+  ]),
+  ...options("appearance", [
+    ["主题", "使用系统、浅色或深色主题。", "暗色 外观"],
+    ["界面字号", "调整导航、对话和设置的文字大小。", "字体 缩放"],
+    ["代码字号", "单独调整编辑器和代码块的文字大小。", "字体 编辑器 缩放"],
+    ["减少动态效果", "关闭界面动画和平滑滚动。", "减少动画 动效 无动画"],
+  ]),
+  ...options("personalization", [
+    ["自定义指令", "编辑所有任务共用的 INSTRUCTIONS.md。", "用户 偏好 prompt 规则"],
+    ["长期记忆生成", "控制当前任务是否生成长期记忆。", "记忆 摘要"],
+    ["清除长期记忆", "清除生成的记忆和派生摘要。", "记忆 重置"],
+    ["当前指令来源", "查看项目、用户和规则的加载来源。", "AGENTS.md INSTRUCTIONS.md"],
+  ]),
+  ...options("provider", [
+    ["显示名称", "设置提供商在模型菜单中的名称。", "名称 提供商"],
+    ["提供商类型", "选择接口提供商。", "OpenAI Anthropic 自定义"],
+    ["接口地址", "配置模型接口的 Base URL。", "api url 服务"],
+    ["API 密钥", "配置模型请求的认证凭据。", "api key token 密钥 认证"],
+    ["API 格式", "选择 Responses、Chat 或 Anthropic 协议。", "协议 接口"],
+    ["模型", "管理模型映射、默认模型和上下文窗口。", "模型 id 上下文"],
+    ["OAuth 登录", "管理提供商的 OAuth 认证。", "登录 授权"],
+    ["网络连接", "配置代理连接方式。", "代理 网络 proxy"],
+    ["当前模型行为", "配置模型的推理和工具行为。", "工具 推理 instructions"],
+    ["Responses 提示词缓存", "设置 Responses API 提示词缓存。", "缓存 cache retention"],
+    ["Responses 推理摘要", "设置模型返回的可见推理摘要。", "reasoning 思考"],
+    ["扩展思考 Token 预算", "设置 Anthropic 扩展思考预算。", "思考 预算 thinking"],
+    ["请求最大输出 Token", "设置单次输出上限。", "token 输出 长度"],
+    ["辅助模型", "选择轻量辅助任务的模型。", "small fast model"],
+  ]),
+  ...options("browser", [
+    ["内置浏览器", "查看当前页面并进入浏览器工作区。", "网页 预览 控制台"],
+    ["下载", "设置浏览器下载策略。", "下载 文件 保存 拦截"],
+    ["站点权限与数据", "管理网站权限和保存的数据。", "网站 cookie 清理"],
+  ]),
+  ...options("connectors", [
+    ["MCP 服务", "管理服务连接、登录和能力目录。", "mcp 工具 服务 资源"],
+    ["服务名称", "创建或编辑 MCP 服务配置。", "添加 命令 参数 地址"],
+  ]),
+  ...options("skills", [["技能", "查看技能来源、可调用性和当前选择。", "SKILL.md 工作流 技能 安装 目录"]]),
+  ...options("plugins", [
+    ["已安装插件", "查看能力包并管理启用状态。", "插件 安装 卸载"],
+    ["插件来源", "添加或移除插件市场来源。", "github git 来源"],
+    ["插件开发", "验证、导入和打包本地插件。", "zip 导入 打包"],
+  ]),
+  ...options("advanced", [
+    ["运行环境", "检测 Git、Python、Node.js 等工具。", "docker ollama 开发"],
+    ["当前目录", "查看当前工作区路径。", "项目 路径"],
+    ["Git 工作树", "查看当前任务的工作树目录。", "worktree 分支"],
+    ["环境变量", "配置工具使用的环境变量。", "env secret 密钥"],
+    ["后端、模型与 MCP", "查看各运行组件的诊断状态。", "运行状态 错误 诊断"],
+    ["导出诊断信息", "导出当前诊断数据。", "诊断 日志 导出"],
+  ]),
+  ...options("scheduler", [["任务名称", "创建或编辑任务时间、提示词和工作区。", "定时 计划 cron 时区 自动"]]),
+  ...options("archived", [["搜索已归档任务", "按任务标题、项目和日期找回对话。", "归档 历史 恢复 搜索"]]),
+];

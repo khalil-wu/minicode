@@ -16,6 +16,7 @@ from typing import Any
 from filelock import AsyncFileLock
 
 from backend.vault import EnvVault
+from backend.vault.store import VaultReadError
 
 
 _AUTH_LOCK_ROOT = Path(tempfile.gettempdir()) / "minicode-provider-auth-locks"
@@ -71,8 +72,13 @@ class ProviderAuthStorage:
             return lock
 
     def get(self, provider_id: str) -> dict[str, Any] | None:
-        raw = self._vault.get(_credential_name(provider_id))
-        if not raw:
+        try:
+            raw = self._vault.get(_credential_name(provider_id))
+        except VaultReadError as exc:
+            raise ProviderCredentialCorruptError(
+                f'Stored credential for provider "{provider_id}" cannot be read'
+            ) from exc
+        if raw is None:
             return None
         try:
             value = json.loads(raw)

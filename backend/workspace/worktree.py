@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from backend.runtime_env import sanitized_git_env
 
@@ -33,6 +33,10 @@ WORKTREE_GIT_TIMEOUT_SECONDS = 120
 WORKTREE_SNAPSHOT_MAX_PER_REPO = 50
 WORKTREE_SNAPSHOT_MAX_AGE_DAYS = 30
 MINICODE_WORKTREE_RELATIVE_ROOT = Path(".minicode") / "worktrees"
+
+
+class NotGitRepositoryError(ValueError):
+    """The selected directory has no owning Git repository."""
 
 
 def isolated_worktree_root(repo_root: Path) -> Path:
@@ -92,7 +96,7 @@ class WorktreeManager:
     适用于并行开发、测试、代码审查等场景。
     """
 
-    def __init__(self, repo_root: Path, *, snapshot_store: "WorktreeSnapshotStore | None" = None):
+    def __init__(self, repo_root: Path, *, snapshot_store: "WorktreeSnapshotStore | None" = None, git_runner: Callable[..., Any] | None = None):
         """
         初始化 Worktree 管理器。
 
@@ -102,11 +106,17 @@ class WorktreeManager:
         """
         self.repo_root = repo_root.resolve()
         self._snapshot_store = snapshot_store
+        self._git_runner = git_runner
 
         if not self._is_git_repo():
-            raise ValueError(f"Not a git repository: {repo_root}")
+            raise NotGitRepositoryError(f"Not a git repository: {repo_root}")
 
         logger.info(f"Initialized worktree manager for {repo_root}")
+
+    def _run_git(self, *args: Any, index_file: Path | None = None, **kwargs: Any) -> Any:
+        if self._git_runner is not None:
+            return self._git_runner(*args, index_file=index_file, **kwargs)
+        return subprocess.run(*args, **kwargs)
 
     def list_worktrees(self) -> list[WorktreeInfo]:
         """
@@ -116,7 +126,7 @@ class WorktreeManager:
             Worktree 信息列表
         """
         try:
-            result = subprocess.run(
+            result = self._run_git(
                 ["git", "worktree", "list", "--porcelain", "-z"],
                 cwd=self.repo_root,
                 env=sanitized_git_env(),
@@ -196,7 +206,7 @@ class WorktreeManager:
             cmd.append(commit)
 
         try:
-            result = subprocess.run(
+            result = self._run_git(
                 cmd,
                 cwd=self.repo_root,
                 env=sanitized_git_env(),
@@ -235,7 +245,7 @@ class WorktreeManager:
         cmd.append(str(path))
 
         try:
-            result = subprocess.run(
+            result = self._run_git(
                 cmd,
                 cwd=self.repo_root,
                 env=sanitized_git_env(),
@@ -261,7 +271,7 @@ class WorktreeManager:
             True 如果成功
         """
         try:
-            result = subprocess.run(
+            result = self._run_git(
                 ["git", "worktree", "prune"],
                 cwd=self.repo_root,
                 env=sanitized_git_env(),
@@ -282,23 +292,10 @@ class WorktreeManager:
     # ── 快照 / 恢复 ──────────────────────────────────────────────
 
     def has_local_changes(self, path: Path) -> bool:
-        """worktree 是否有未提交改动(含 untracked 和 ignored)。出错时保守返回 True。
+        """Read worktree changes, including untracked and ignored files."""
+        from backend.services.workspace_service import worktree_has_local_changes
 
-        注意:必须区分「成功且无输出」(干净)与「命令失败」(未知→保守),
-        所以不复用 _capture_output(后者把空输出也当成 None)。
-        """
-        from backend.services.workspace_service import run_readonly_git
-        from backend.sandbox.runner import SandboxUnavailableError
-
-        try:
-            result = run_readonly_git(
-                Path(path), "status", "--porcelain=v1", "--ignored", "--untracked-files=all",
-                timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
-            )
-            result.check_returncode()
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, SandboxUnavailableError):
-            return True
-        return bool(result.stdout.strip())
+        return worktree_has_local_changes(Path(path), timeout=WORKTREE_GIT_TIMEOUT_SECONDS)
 
     def snapshot_worktree(
         self,
@@ -331,8 +328,9 @@ class WorktreeManager:
 
             def _snapshot_git(*args: str) -> subprocess.CompletedProcess[str] | None:
                 try:
-                    return subprocess.run(
+                    return self._run_git(
                         ["git", *args],
+                        index_file=index_path,
                         cwd=wt,
                         env=env,
                         capture_output=True,
@@ -625,7 +623,12 @@ class WorktreeManager:
         """
         wt = Path(path).resolve()
         head = self._rev_parse(wt, "HEAD") or ""
-        dirty = self.has_local_changes(wt)
+        from backend.sandbox.runner import SandboxUnavailableError
+
+        try:
+            dirty = self.has_local_changes(wt)
+        except (OSError, subprocess.SubprocessError, SandboxUnavailableError) as exc:
+            return WorktreeRemoval(removed=False, head=head, error=f"Could not inspect worktree: {exc}")
 
         if dirty and not force:
             return WorktreeRemoval(
@@ -664,7 +667,7 @@ class WorktreeManager:
 
     def _capture_output(self, cwd: Path, *args: str) -> str | None:
         try:
-            result = subprocess.run(
+            result = self._run_git(
                 ["git", *args],
                 cwd=cwd,
                 env=sanitized_git_env(),
@@ -680,7 +683,7 @@ class WorktreeManager:
 
     def _git_ok(self, cwd: Path, *args: str) -> bool:
         try:
-            subprocess.run(
+            self._run_git(
                 ["git", *args],
                 cwd=cwd,
                 env=sanitized_git_env(),
@@ -703,7 +706,7 @@ class WorktreeManager:
     def _is_git_repo(self) -> bool:
         """检查是否为 Git 仓库"""
         try:
-            subprocess.run(
+            self._run_git(
                 ["git", "rev-parse", "--git-dir"],
                 cwd=self.repo_root,
                 env=sanitized_git_env(),
@@ -712,8 +715,11 @@ class WorktreeManager:
                 timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
             )
             return True
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
-            return False
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr or "")
+            if "not a git repository" in stderr.lower():
+                return False
+            raise
 
     def _parse_worktree_info(self, data: dict[str, str]) -> WorktreeInfo:
         """解析 worktree 信息"""
@@ -758,7 +764,7 @@ def get_global_worktree_manager(repo_root: Optional[Path] = None) -> Optional[Wo
 
         try:
             _global_manager = WorktreeManager(repo_root)
-        except ValueError:
+        except NotGitRepositoryError:
             logger.debug(f"Not a git repository: {repo_root}")
             return None
 

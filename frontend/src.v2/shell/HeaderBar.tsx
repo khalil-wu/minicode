@@ -49,9 +49,12 @@ export const HeaderBar = ({
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
   const dockCollapsed = useAppStore((s) => s.dockCollapsed);
+  const rightPanelExpanded = useAppStore((s) => s.rightPanelExpanded);
+  const mainPanelMaximized = useAppStore((s) => s.panelSlots.some((slot) => slot.maximized));
   const activeBottomTab = useAppStore((s) => s.activeBottomTab);
   const openBottomTab = useAppStore((s) => s.openBottomTab);
   const closeBottomDock = useAppStore((s) => s.closeBottomDock);
+  const terminalVisible = !rightPanelExpanded && !mainPanelMaximized && !dockCollapsed && activeBottomTab === "terminal";
 
   const connection = getConnectionPresentation({
     isConnected,
@@ -95,13 +98,13 @@ export const HeaderBar = ({
         {rightPanelAvailable && (
           <>
             <IconButton
-              label={!dockCollapsed && activeBottomTab === "terminal" ? "关闭终端" : "打开终端"}
+              label={terminalVisible ? "关闭终端" : "打开终端"}
               onClick={() => {
-                if (!dockCollapsed && activeBottomTab === "terminal") closeBottomDock();
+                if (terminalVisible) closeBottomDock();
                 else openBottomTab("terminal");
               }}
-              active={!dockCollapsed && activeBottomTab === "terminal"}
-              expanded={!dockCollapsed && activeBottomTab === "terminal"}
+              active={terminalVisible}
+              expanded={terminalVisible}
             >
               <SquareTerminal />
             </IconButton>

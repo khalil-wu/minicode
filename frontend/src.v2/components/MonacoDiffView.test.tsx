@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseUnifiedDiffToOriginalModified } from "./MonacoDiffView";
+import { parseUnifiedDiffExcerpt, parseUnifiedDiffToOriginalModified } from "./MonacoDiffView";
 import { countUnifiedDiffLines, parseUnifiedDiffLines } from "../lib/unified-diff";
 import { summarizeTurnDiff } from "../lib/turn-diff";
 
@@ -15,6 +15,14 @@ const patch = [
 ].join("\n");
 
 describe("shared diff interpretation", () => {
+  it("keeps real source offsets and a visible gap between distant excerpts", () => {
+    const patch = "--- a/file.ts\n+++ b/file.ts\n@@ -100,2 +120,2 @@\n keep\n-old\n+new\n@@ -500 +520 @@\n-later old\n+later new\n";
+    const excerpt = parseUnifiedDiffExcerpt(patch);
+    expect(excerpt.originalLines).toEqual([100, 101, null, 500]);
+    expect(excerpt.modifiedLines).toEqual([120, 121, null, 520]);
+    expect(excerpt.original).toContain("⋯ 中间省略 398 行 ⋯");
+    expect(excerpt.modified).toContain("⋯ 中间省略 398 行 ⋯");
+  });
   it("retains header-shaped content and the final-newline difference in Monaco", () => {
     expect(parseUnifiedDiffToOriginalModified(patch)).toEqual({
       filePath: "sample.txt", original: "-- before", modified: "++ after\n",
@@ -44,5 +52,17 @@ describe("shared diff interpretation", () => {
   it("resets hunk classification at each subsequent file header", () => {
     const second = patch.replaceAll("sample.txt", "second.txt");
     expect(countUnifiedDiffLines(patch + second)).toEqual({ plus: 2, minus: 2 });
+  });
+  it("uses the destination identity for renames and the removed identity for deletions", () => {
+    const rename = "diff --git a/old.ts b/new.ts\nrename from old.ts\nrename to new.ts\n--- a/old.ts\n+++ b/new.ts\n@@ -1 +1 @@\n-old\n+new\n";
+    const deleted = "diff --git a/deleted.ts b/deleted.ts\n--- a/deleted.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n";
+    expect(parseUnifiedDiffToOriginalModified(rename).filePath).toBe("new.ts");
+    expect(parseUnifiedDiffToOriginalModified(deleted).filePath).toBe("deleted.ts");
+    expect(summarizeTurnDiff({ threadId: "A", turnId: "T", updatedAt: 0, diff: rename })?.files[0]).toMatchObject({ path: "new.ts", oldPath: "old.ts" });
+    expect(summarizeTurnDiff({ threadId: "A", turnId: "T", updatedAt: 0, diff: deleted })?.files[0]).not.toHaveProperty("oldPath");
+  });
+  it("preserves CRLF and final-newline markers in the displayed source sides", () => {
+    const patch = "--- a/file.ts\n+++ b/file.ts\n@@ -1,2 +1,2 @@\n keep\r\n-old\r\n+new\n\\ No newline at end of file\n";
+    expect(parseUnifiedDiffToOriginalModified(patch)).toEqual({ filePath: "file.ts", original: "keep\r\nold\r\n", modified: "keep\r\nnew" });
   });
 });

@@ -13,10 +13,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 from uuid import uuid4
 
-from backend.config import DATA_ROOT, TokenBudget
+from backend.config import TokenBudget
 from backend.config_requirements import normalize_string_array
-
-SWARM_DIR = DATA_ROOT / "swarm"
 
 from backend.agent.public_projection import (
     project_public_agent_run,
@@ -356,13 +354,6 @@ class SwarmTeamRecord:
     def lead_agent_id(self) -> str:
         return f"team-lead@{self.team_name}"
 
-    @property
-    def team_file_path(self) -> str:
-        # MiniCode's durable team store is the swarm SQLite database, so report
-        # that real path
-        # instead of an invented swarm:// URI.
-        return str(SWARM_DIR / "swarm.sqlite3")
-
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["members"] = [member.to_dict() for member in self.members]
@@ -480,6 +471,8 @@ def _subagent_from_dict(data: dict[str, Any]) -> SubagentRunRecord:
         subagent_id=str(data.get("subagent_id") or ""),
         parent_run_id=str(data.get("parent_run_id") or ""),
         agent_type=str(data.get("agent_type") or "general-purpose") or "general-purpose",
+        role=str(data.get("role") or "subagent"),  # type: ignore[arg-type]
+        write_scope_strategy=str(data.get("write_scope_strategy") or "workspace"),
         prompt_summary=str(data.get("prompt_summary") or ""),
         background=bool(data.get("background", False)),
         task_id=str(data.get("task_id") or ""),
@@ -508,6 +501,7 @@ def _subagent_from_dict(data: dict[str, Any]) -> SubagentRunRecord:
         plan_mode_required=bool(data.get("plan_mode_required", False)),
         awaiting_plan_approval=bool(data.get("awaiting_plan_approval", False)),
         active_plan_request_id=str(data.get("active_plan_request_id") or ""),
+        is_idle=bool(data.get("is_idle", False)),
         current_activity=str(data.get("current_activity") or ""),
         status=str(data.get("status") or "running"),  # type: ignore[arg-type]
         tool_count=int(data.get("tool_count") or 0),

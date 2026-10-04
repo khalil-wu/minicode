@@ -31,6 +31,9 @@ import {
   getWebSocket,
   resetPendingClientCommandAcksForTests,
   resetRecentInboundEventIdsForTests,
+  commitProcessedInboundEvent,
+  getLastReceivedServerSeqForTests,
+  skipUndeliverableInboundEvent,
   useWebSocketConnection,
 } from "./useWebSocket";
 
@@ -982,6 +985,56 @@ describe("useWebSocketConnection socket ownership", () => {
     expect(getWebSocket()?.sessionId).toBe(sessionId);
     expect(useAppStore.getState().reconnectAttempt).toBe(0);
     expect(useAppStore.getState().connectionPhase).toBe("connecting");
+  });
+
+  it("seals a disconnected live turn as unconfirmed partial rather than a backend failure", () => {
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    let socket = MockWebSocket.instances[0];
+    act(() => socket.emit("open"));
+    useAppStore.setState({
+      conversationId: "live-owner", isStreaming: true,
+      messages: [{ id: "live-message", role: "assistant", content: "partial output", timestamp: 1, artifacts: [], isStreaming: true }],
+      conversationStreaming: { "live-owner": true },
+    });
+    for (let attempt = 0; attempt < 5; attempt++) {
+      act(() => socket.emit("close", 1006));
+      act(() => vi.advanceTimersByTime(40_000));
+      socket = MockWebSocket.instances[attempt + 1];
+    }
+    act(() => socket.emit("close", 1006));
+    expect(useAppStore.getState().connectionPhase).toBe("failed");
+    expect(useAppStore.getState().messages[0]).toMatchObject({ terminalStatus: "partial", failureRecoverable: true, isStreaming: false });
+  });
+
+  it("does not advance the durable cursor for an unknown transient wire frame", () => {
+    commitProcessedInboundEvent({ type: "agent.progress", conversation_id: "owner", seq: 1, previous_replay_seq: 0 } as never);
+    expect(skipUndeliverableInboundEvent({ type: "future.transient", seq: 2 }, 2)).toBe(true);
+    expect(getLastReceivedServerSeqForTests()).toBe(1);
+    commitProcessedInboundEvent({ type: "agent.progress", conversation_id: "owner", seq: 3, previous_replay_seq: 1 } as never);
+    expect(getLastReceivedServerSeqForTests()).toBe(3);
+  });
+
+  it("defers an unknown durable frame until the requested recovery snapshot commits", async () => {
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const first = MockWebSocket.instances[0];
+    act(() => first.emit("open"));
+    commitProcessedInboundEvent({ type: "agent.progress", conversation_id: "owner", seq: 1, previous_replay_seq: 0 } as never);
+    useAppStore.setState({ conversationId: "owner", workingDirectory: "C:/owned", conversations: [{ id: "owner", title: "Owned", workspaceRoot: "C:/owned", updatedAt: "2026-10-03" }] });
+    act(() => first.emit("close", 1006));
+    act(() => vi.advanceTimersByTime(2_000));
+    const resumed = MockWebSocket.instances[1];
+    act(() => resumed.emit("open"));
+    await flushQueuedCommands();
+    act(() => resumed.emitMessage({ type: "future.durable", conversation_id: "owner", seq: 2, previous_replay_seq: 1 }));
+    expect(getLastReceivedServerSeqForTests()).toBe(1);
+    act(() => resumed.emitMessage({ type: "session.restored", active_conversation_id: "owner", current_seq: 1, last_seq: 1, replayed_events: 0,
+      session: { active_conversation_id: "owner", workspace_root: "C:/owned" } }));
+    await flushQueuedCommands();
+    expect(getLastReceivedServerSeqForTests()).toBe(2);
+    expect(useAppStore.getState().connectionPhase).toBe("connected");
+    expect(resumed.close).not.toHaveBeenCalled();
   });
 
 });

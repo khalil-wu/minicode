@@ -51,6 +51,8 @@ export interface TerminalOutputEvent {
   conversation_id: string;
   session_id?: string;
   data?: string;
+  start_cursor?: number;
+  end_cursor?: number;
   command?: string;
   output?: string;
   exit_code?: number;
@@ -60,7 +62,9 @@ export interface TerminalExitEvent {
   type: "terminal.exit";
   conversation_id: string;
   session_id: string;
-  exit_code: number;
+  exit_code: number | null;
+  exit_signal?: number | string | null;
+  exited_at?: number;
 }
 
 export interface TerminalCreatedEvent {
@@ -107,6 +111,8 @@ export interface TerminalSnapshotEvent {
   output: string;
   output_chars?: number;
   total_output_chars?: number;
+  output_start_cursor?: number;
+  output_end_cursor?: number;
   truncated?: boolean;
   error?: string;
 }
@@ -243,6 +249,12 @@ export interface TerminalMirrorCreatedCommand {
   shell?: string;
   cwd?: string;
   is_alive?: boolean;
+  exit_code?: number | null;
+  exit_signal?: number | string | null;
+  exited_at?: number;
+  output?: string;
+  output_start_cursor?: number;
+  output_end_cursor?: number;
 }
 
 export interface TerminalMirrorOutputCommand {
@@ -250,6 +262,8 @@ export interface TerminalMirrorOutputCommand {
   conversation_id: string;
   session_id: string;
   data: string;
+  start_cursor?: number;
+  end_cursor?: number;
   pid?: number;
   shell?: string;
   cwd?: string;
@@ -259,7 +273,9 @@ export interface TerminalMirrorExitCommand {
   type: "terminal.mirror.exit";
   conversation_id: string;
   session_id: string;
-  exit_code?: number;
+  exit_code?: number | null;
+  exit_signal?: number | string | null;
+  exited_at?: number;
 }
 
 export interface TerminalExecCommand extends TerminalOwnedCommand {

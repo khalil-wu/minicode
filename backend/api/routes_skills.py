@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from backend.async_cleanup import to_thread_cancel_safe
+
 import asyncio
 import logging
 from typing import Any
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import FileResponse
@@ -63,11 +66,23 @@ async def get_skill_asset_api(
     skill_path: str = Query(..., min_length=1),
     variant: str = Query("small", pattern="^(small|large)$"),
     asset_token: str | None = Query(None),
+    workspace_root: str = Query(""),
 ) -> FileResponse:
     """Serve metadata icons only for exact Skills in the discovered catalog."""
     _ = asset_token
     manager = _state.bootstrap.skill_manager if _state.bootstrap is not None else None
-    asset = manager.resolve_asset(skill_path, variant) if manager is not None else None
+    root = Path(workspace_root).expanduser().resolve() if workspace_root.strip() else None
+    if root is not None:
+        from backend.workspace.trust import is_workspace_trusted
+
+        if not root.is_dir():
+            raise HTTPException(status_code=409, detail="Workspace folder does not exist.")
+        if not is_workspace_trusted(root):
+            raise HTTPException(status_code=403, detail="Workspace folder is not trusted.")
+    asset = (
+        await to_thread_cancel_safe(lambda: manager.snapshot(root).resolve_asset(skill_path, variant))
+        if manager is not None else None
+    )
     if asset is None:
         raise HTTPException(status_code=404, detail="Skill asset not found")
     media_type = _SKILL_ASSET_MEDIA_TYPES.get(asset.suffix.lower())
@@ -137,9 +152,15 @@ async def get_extensions_marketplace_api(response: Response, refresh: bool = Fal
 
 
 @router.get("/api/plugins")
-def list_plugins_api(response: Response) -> dict[str, Any]:
+def list_plugins_api(response: Response, workspace_root: str | None = None) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    return get_plugin_settings()
+    if workspace_root is None:
+        return get_plugin_settings()
+    root = Path(workspace_root).expanduser().resolve() if workspace_root.strip() else None
+    if root is not None and not root.is_dir():
+        raise HTTPException(status_code=409, detail="Workspace folder does not exist.")
+    stack = load_config_layer_stack(cwd=root)
+    return get_plugin_settings(config_stack=stack)
 
 
 @router.get("/api/plugins/marketplaces")
@@ -243,7 +264,7 @@ async def install_plugin_api(request: PluginInstallRequest, response: Response) 
     response.headers["Cache-Control"] = "no-store"
     try:
         if request.plugin_name:
-            manager = PluginManager(config_stack=load_config_layer_stack())
+            manager = PluginManager(config_stack=await to_thread_cancel_safe(load_config_layer_stack))
             result = await manager.install_marketplace_plugin(
                 request.marketplace,
                 request.plugin_name,
@@ -286,7 +307,7 @@ async def update_plugin_state_api(plugin_name: str, request: PluginStateUpdateRe
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     from backend.config import load_config
 
-    config = load_config()
+    config = await to_thread_cancel_safe(load_config)
     if _state.bootstrap is not None:
         if config is not None:
             _state.bootstrap.config = config
@@ -313,7 +334,7 @@ async def import_plugin_api(request: PluginImportRequest, response: Response) ->
     if _state.bootstrap is not None:
         from backend.config import load_config
 
-        _state.bootstrap.config = load_config()
+        _state.bootstrap.config = await to_thread_cancel_safe(load_config)
         runtime_refresh = await _refresh_plugin_runtime_state()
         if isinstance(result, dict):
             result["runtime_refresh"] = runtime_refresh
@@ -388,7 +409,7 @@ async def remove_skill_api(skill_name: str, response: Response) -> dict[str, Any
     """Remove a user-installed Skill directory, then refresh Skill discovery."""
     response.headers["Cache-Control"] = "no-store"
     try:
-        result = await asyncio.to_thread(
+        result = await to_thread_cancel_safe(
             remove_skill,
             skill_name,
             skill_manager=_state.bootstrap.skill_manager if _state.bootstrap is not None else None,
@@ -409,7 +430,7 @@ async def import_skill_api(request: SkillImportRequest, response: Response) -> d
     """Import a local SKILL.md into MiniCode's private extension directory."""
     response.headers["Cache-Control"] = "no-store"
     try:
-        result = await asyncio.to_thread(
+        result = await to_thread_cancel_safe(
             import_skill,
             request.source_path,
             skill_manager=_state.bootstrap.skill_manager if _state.bootstrap is not None else None,

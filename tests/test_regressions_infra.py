@@ -629,6 +629,10 @@ def test_git_diff_commands_reject_workspace_outside_session(monkeypatch, tmp_pat
     async def fake_get_untracked_files(_workspace: str):
         return []
 
+    async def fake_is_git_worktree(_workspace: str):
+        return True
+
+    monkeypatch.setattr("backend.diff.git_integration.is_git_worktree", fake_is_git_worktree)
     monkeypatch.setattr("backend.diff.git_integration.get_working_tree_diff", fake_get_working_tree_diff)
     monkeypatch.setattr("backend.diff.git_integration.get_untracked_files", fake_get_untracked_files)
     monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", tmp_path / "conversations")

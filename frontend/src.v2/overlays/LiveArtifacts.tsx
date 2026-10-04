@@ -8,15 +8,19 @@ import { openArtifactPreview } from "../chat/openAttachmentPreview";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { useEscapeKey, useFocusTrap } from "../hooks/useFocusTrap";
 import { getToolCallsFromMessage } from "../lib/content-blocks";
+import { revealConversationMessage } from "../chat/revealConversationMessage";
 import {
   artifactMediaTypeForProjection,
   artifactSummaryForRecord,
   canonicalArtifactKind,
   cleanArtifactLabel,
+  isExecutionResultArtifact,
+  isExecutionStatusLabel,
+  isExecutionOutputMediaType,
   normalizeArtifactPreview,
 } from "../lib/artifact-projection";
 import {
-  artifactImageResourceUrl,
+  artifactResourceUrl,
   withPreviewCacheBust,
 } from "../lib/artifact-resource";
 
@@ -34,6 +38,8 @@ interface ArtifactEntry extends ArtifactPreview {
   messageId: string;
   timestamp: number;
   conversationId?: string;
+  executionResult?: boolean;
+  turnId?: string;
 }
 
 /**
@@ -46,12 +52,18 @@ export const LiveArtifacts = () => {
   const toggleLiveArtifacts = useAppStore((s) => s.toggleLiveArtifacts);
   const messages = useAppStore((s) => s.messages);
   const conversationId = useAppStore((s) => s.conversationId);
+  const [query, setQuery] = useState("");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [recentOnly, setRecentOnly] = useState(false);
   const dialogRef = useFocusTrap(liveArtifactsOpen);
   useEscapeKey(toggleLiveArtifacts, liveArtifactsOpen, dialogRef);
 
   const artifacts = useMemo<ArtifactEntry[]>(() => {
     return collectLiveArtifacts(messages, conversationId?.trim() || undefined);
   }, [conversationId, messages]);
+  const filtered = artifacts.filter((artifact) => `${artifact.summary} ${artifact.turnId || ""}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
+    && (typeFilter === "all" || (typeFilter === "execution" ? artifact.executionResult : artifact.kind === typeFilter)));
+  const visible = recentOnly ? filtered.slice(0, 12) : filtered;
 
   if (!liveArtifactsOpen) return null;
 
@@ -93,15 +105,23 @@ export const LiveArtifacts = () => {
           <button type="button" onClick={toggleLiveArtifacts} aria-label="关闭实时制品" style={closeBtn}><X size={16} /></button>
         </div>
 
+        <div style={{ display: "flex", gap: 8, padding: "10px 18px", flexWrap: "wrap", alignItems: "center" }}>
+          <input aria-label="搜索实时制品" placeholder="搜索文件名或轮次…" value={query} onChange={(event) => setQuery(event.target.value)} style={{ ...filterStyle, flex: "1 1 200px" }} />
+          <select aria-label="实时制品类型" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)} style={filterStyle}>
+            <option value="all">全部类型</option>{Object.entries(KIND_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}<option value="execution">执行结果</option>
+          </select>
+          <label style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)" }}><input type="checkbox" checked={recentOnly} onChange={(event) => setRecentOnly(event.target.checked)} />仅最近 12 项</label>
+        </div>
+
         <div style={listWrapStyle}>
-          {artifacts.length === 0 ? (
+          {visible.length === 0 ? (
             <div style={{ padding: "40px 16px", textAlign: "center" }}>
-              <div style={{ fontSize: "var(--text-sm)", color: "var(--text-secondary)", marginBottom: 6 }}>暂无制品</div>
-              <div style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>当助手生成文件、差异或图像时，会出现在这里。</div>
+              <div style={{ fontSize: "var(--text-sm)", color: "var(--text-secondary)", marginBottom: 6 }}>{artifacts.length === 0 ? "暂无制品" : "没有匹配的制品"}</div>
+              <div style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>{artifacts.length === 0 ? "当助手生成文件、差异或图像时，会出现在这里。" : "尝试其他名称或类型。"}</div>
             </div>
           ) : (
             <div style={gridStyle}>
-              {artifacts.map((artifact) => {
+              {visible.map((artifact) => {
                 const Icon = artifact.kind === "diff" ? GitCompare : Paperclip;
                 const sizeLabel = artifact.bytes
                   ? artifact.bytes > 1024
@@ -115,6 +135,10 @@ export const LiveArtifacts = () => {
                     icon={Icon}
                     sizeLabel={sizeLabel}
                     onOpen={() => openArtifact(artifact)}
+                    onReturn={() => {
+                      toggleLiveArtifacts();
+                      revealConversationMessage(artifact.conversationId!, artifact.messageId);
+                    }}
                   />
                 );
               })}
@@ -154,6 +178,7 @@ export function collectLiveArtifacts(
         mediaType,
         url: artifact.url,
         messageId: message.id,
+        turnId: message.turnId,
         timestamp: message.timestamp,
         conversationId: ownerConversationId,
       });
@@ -165,7 +190,7 @@ export function collectLiveArtifacts(
         record,
         ownerConversationId,
       );
-      if (entry) upsert(entry);
+      if (entry) upsert({ ...entry, turnId: message.turnId });
     }
   }
   return out.reverse();
@@ -191,6 +216,7 @@ function liveArtifactFromToolRecord(
     messageId,
     timestamp,
     conversationId,
+    executionResult: isExecutionResultArtifact(record),
   };
 }
 
@@ -200,16 +226,25 @@ function mergeLiveArtifact(existing: ArtifactEntry, incoming: ArtifactEntry): Ar
     : existing.kind === "file" && incoming.kind !== "file"
       ? incoming.kind
       : existing.kind;
+  const executionResult = kind !== "image"
+    && isExecutionOutputMediaType(existing.mediaType || incoming.mediaType)
+    && Boolean(existing.executionResult || incoming.executionResult);
   return {
     ...existing,
     kind,
-    summary: isPlaceholderSummary(existing.summary) ? incoming.summary : existing.summary,
+    summary: (isPlaceholderSummary(existing.summary) || (incoming.executionResult && isExecutionStatusLabel(existing.summary)))
+      && !(incoming.executionResult && !executionResult)
+      ? incoming.summary : existing.summary,
     mediaType: incoming.kind === "image"
       ? incoming.mediaType || existing.mediaType
       : existing.mediaType || incoming.mediaType,
     url: incoming.url || existing.url,
     bytes: existing.bytes ?? incoming.bytes,
     conversationId: existing.conversationId || incoming.conversationId,
+    messageId: incoming.messageId,
+    timestamp: incoming.timestamp,
+    turnId: incoming.turnId || existing.turnId,
+    executionResult,
   };
 }
 
@@ -222,28 +257,30 @@ function LiveArtifactCard({
   icon: Icon,
   sizeLabel,
   onOpen,
+  onReturn,
 }: {
   artifact: ArtifactEntry;
   icon: typeof Paperclip;
   sizeLabel: string | null;
   onOpen: () => void;
+  onReturn: () => void;
 }) {
   const [reloadNonce, setReloadNonce] = useState(0);
   const [failed, setFailed] = useState(false);
   const sessionId = getWebSocket()?.sessionId?.trim() || "";
   const isConnected = useAppStore((s) => s.isConnected);
-  const freshUrl = useMemo(() => artifactImageResourceUrl({
+  const freshUrl = useMemo(() => artifactResourceUrl({
     artifactId: artifact.artifactId,
     conversationId: artifact.conversationId,
     sessionId,
     source: "artifact",
     originalUrl: artifact.url,
     isConnected,
-  }), [artifact.artifactId, artifact.conversationId, artifact.url, isConnected, sessionId]);
+  }), [artifact.artifactId, artifact.conversationId, artifact.url, isConnected, sessionId, reloadNonce]);
   useEffect(() => {
     setReloadNonce(0);
     setFailed(false);
-  }, [artifact.artifactId, artifact.conversationId, artifact.url, freshUrl, isConnected, sessionId]);
+  }, [artifact.artifactId, artifact.conversationId, artifact.url, isConnected, sessionId]);
   const imageUrl = withPreviewCacheBust(freshUrl, reloadNonce);
   const retry = () => {
     setFailed(false);
@@ -301,8 +338,13 @@ function LiveArtifactCard({
             <span style={kindTagStyle}>{KIND_LABEL[artifact.kind] || artifact.kind}</span>
             {sizeLabel && <span style={{ color: "var(--text-muted)" }}>{sizeLabel}</span>}
           </div>
+          <div style={{ ...metaRowStyle, flexWrap: "wrap", color: "var(--text-muted)" }} title={artifact.turnId || artifact.messageId}>
+            {artifact.turnId ? `轮次 ${artifact.turnId.slice(-8)}` : `消息 ${artifact.messageId.slice(-8)}`} · {new Date(artifact.timestamp).toLocaleString()}
+            {artifact.executionResult && <span>执行结果</span>}
+          </div>
         </div>
       </button>
+      {artifact.conversationId && <button type="button" onClick={onReturn} style={{ ...closeBtn, width: "auto", alignSelf: "center", marginRight: 7, padding: "3px 6px", whiteSpace: "nowrap", fontSize: "var(--text-xs)" }}>回到对话</button>}
       {failed && (
         <button
           type="button"
@@ -333,3 +375,4 @@ const thumbnailRetryButtonStyle: React.CSSProperties = { alignSelf: "center", ma
 const summaryStyle: React.CSSProperties = { fontSize: "var(--text-sm)", fontWeight: "var(--fw-semibold)", color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const metaRowStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 7, marginTop: 4, fontSize: "var(--text-xs)" };
 const kindTagStyle: React.CSSProperties = { fontSize: "var(--text-3xs)", fontFamily: "var(--font-ui)", padding: "1px 6px", borderRadius: "var(--radius-sm, 4px)", background: "var(--surface-base)", color: "var(--text-muted)", border: "1px solid var(--border-subtle)" };
+const filterStyle: React.CSSProperties = { minWidth: 0, border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm)", padding: "7px 9px", background: "var(--surface-base)", color: "var(--text-primary)", font: "inherit", fontSize: "var(--text-xs)" };

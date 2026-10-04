@@ -742,9 +742,9 @@ body:has(.settings-workspace.settings-center) .toast-container {
   justify-content: center;
   gap: 5px;
   padding: 0;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid transparent;
   border-radius: var(--radius-full);
-  background: color-mix(in oklch, var(--surface-page) 72%, transparent);
+  background: transparent;
   color: var(--text-secondary);
   font-size: var(--text-xs);
   font-weight: var(--fw-semibold);
@@ -781,6 +781,8 @@ body:has(.settings-workspace.settings-center) .toast-container {
 .mc-connection-status[data-connected="false"] {
   width: auto;
   padding: 0 7px;
+  border-color: var(--border-subtle);
+  background: var(--surface-soft);
 }
 
 .mc-connection-status-spinner {
@@ -1403,4 +1405,31 @@ body:has(.settings-workspace.settings-center) .toast-container {
 }
 .agent-edit-review-keepall {
   color: var(--text-muted);
+}
+
+.provider-request-status {
+  display: flex;
+  margin: 0 auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 6px 4px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.provider-request-status > svg {
+  flex-shrink: 0;
+}
+
+.provider-request-status-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-request-status-elapsed {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
 }

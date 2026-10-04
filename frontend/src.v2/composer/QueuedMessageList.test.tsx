@@ -31,6 +31,7 @@ describe("QueuedMessageList", () => {
     vi.mocked(sendClientCommand).mockClear();
     useAppStore.setState({
       conversationId: "conv-queue",
+      isStreaming: true,
       messages: [
         { id: "assistant-active", role: "assistant", content: "working", artifacts: [], timestamp: 1, isStreaming: true },
         { id: "user-three", role: "user", content: "third request", artifacts: [], timestamp: 3, queueState: "queued", queuePosition: 2, queueMessageId: "assistant-three" },
@@ -42,6 +43,21 @@ describe("QueuedMessageList", () => {
   });
 
   afterEach(() => cleanup());
+
+  it("keeps stopped inputs visible and offers explicit queue continuation", () => {
+    useAppStore.setState((state) => ({
+      isStreaming: false,
+      messages: state.messages.map((message) => ({ ...message, queuePaused: message.queueState === "queued" })),
+    }));
+    render(<QueuedMessageList />);
+    expect(screen.getAllByText("已暂停")).toHaveLength(2);
+    expect(sendClientCommand).not.toHaveBeenCalled();
+    fireEvent.click(screen.getAllByRole("button", { name: "发送" })[0]);
+    expect(sendClientCommand).toHaveBeenCalledWith({
+      type: "user_message.queue.steer", conversation_id: "conv-queue",
+      message_id: "assistant-two", user_message_id: "user-two",
+    });
+  });
 
   it("renders MiniCode numbered rows and exposes steer and delete actions", () => {
     render(<QueuedMessageList />);

@@ -1,5 +1,5 @@
 import type { GitChangeFile, TurnDiffState } from "../stores/types";
-import { countUnifiedDiffLines } from "./unified-diff";
+import { countUnifiedDiffLines, parseUnifiedDiffLines, unifiedDiffFilePaths } from "./unified-diff";
 
 export interface TurnDiffSummary {
   files: GitChangeFile[];
@@ -18,13 +18,14 @@ export function summarizeTurnDiff(state: TurnDiffState | null | undefined): Turn
     const header = patch.split(/\r?\n/, 1)[0] ?? "";
     const match = DIFF_HEADER.exec(header);
     if (!match) continue;
-    const oldPath = match[1];
-    const newPath = match[2];
+    const paths = unifiedDiffFilePaths(parseUnifiedDiffLines(patch));
+    const oldPath = paths.oldPath || match[1];
+    const newPath = paths.newPath || match[2];
     const { plus: additions, minus: deletions } = countUnifiedDiffLines(patch);
     const isBinary = /^(?:Binary files |GIT binary patch)/m.test(patch);
     files.push({
       path: newPath === "/dev/null" ? oldPath : newPath,
-      ...(oldPath !== newPath ? { oldPath } : {}),
+      ...(oldPath !== newPath && oldPath !== "/dev/null" && newPath !== "/dev/null" ? { oldPath } : {}),
       patch,
       additions,
       deletions,

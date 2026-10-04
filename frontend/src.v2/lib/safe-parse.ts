@@ -29,26 +29,3 @@ export const safeURL = (url: string, base?: string | URL): URL | null => {
     return null;
   }
 };
-
-/**
- * Safely parse JSON with schema validation
- * @param text - JSON string to parse
- * @param validator - Function to validate parsed value
- * @param fallback - Value to return if parsing or validation fails
- * @returns Parsed and validated value or fallback
- */
-export const safeJsonParseWithValidation = <T>(
-  text: string,
-  validator: (value: unknown) => value is T,
-  fallback: T
-): T => {
-  try {
-    const parsed = JSON.parse(text);
-    if (validator(parsed)) {
-      return parsed;
-    }
-    return fallback;
-  } catch {
-    return fallback;
-  }
-};

@@ -11,6 +11,11 @@ describe("Markdown helpers", () => {
     expect([...extractInlineCitationIndexes("See [2], [1], [2], and [0].")]).toEqual([2, 1]);
   });
 
+  it("binds prose citations without treating code examples or indexing expressions as sources", () => {
+    const content = "Example `value[1]` and `[2]`.\n\n```md\n[3]\n```\n\n    [4]\n\n> See [5].\n\nSee [6], array[7], and [8](https://example.test).";
+    expect([...extractInlineCitationIndexes(content)]).toEqual([5, 6]);
+  });
+
   it("creates deterministic heading slugs", () => {
     expect(markdownHeadingSlug("  API_Über!  ")).toBe("api-über");
     expect(markdownHeadingSlug("***")).toBe("section");
@@ -44,5 +49,15 @@ describe("Markdown helpers", () => {
       "scope-overview",
       "scope-overview-2",
     ]);
+  });
+
+  it("keeps duplicate heading IDs distinct from an actual suffixed title", () => {
+    const headingId = createMarkdownHeadingIdAssigner("scope");
+    const ids = [headingId("Overview"), headingId("Overview"), headingId("Overview-2"), headingId("Overview")];
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual(["scope-overview", "scope-overview-2", "scope-overview-2-2", "scope-overview-3"]);
+    headingId.reset();
+    expect([headingId("Overview-2"), headingId("Overview"), headingId("Overview")])
+      .toEqual(["scope-overview-2", "scope-overview", "scope-overview-3"]);
   });
 });

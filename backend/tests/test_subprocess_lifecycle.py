@@ -87,6 +87,8 @@ def test_communicate_timeout_reports_the_proof_of_exit_verdict() -> None:
     assert isinstance(error, SubprocessTimeoutError)
     assert error.cleanup_pending is False
     assert error.cleanup_reason == ""
+    assert error.cleanup_receipt["completed"] is True
+    assert error.cleanup_receipt["pending"] == 0
 
 
 def test_communicate_reports_unproven_cleanup_when_the_tree_survives(monkeypatch) -> None:
@@ -116,6 +118,12 @@ def test_communicate_reports_unproven_cleanup_when_the_tree_survives(monkeypatch
     error = asyncio.run(scenario())
     assert error.cleanup_pending is True
     assert "subprocess_tree_survived_kill" in error.cleanup_reason
+    assert error.cleanup_receipt["resource_kind"] == "process"
+    assert int(error.cleanup_receipt["resource_id"]) > 0
+    assert error.cleanup_receipt["reason"] == error.cleanup_reason
+    assert error.cleanup_receipt["pending"] == 1
+    assert error.cleanup_receipt["completed"] is False
+    assert error.cleanup_receipt["manual_recovery_required"] is True
 
 
 def test_terminate_process_tree_supports_threaded_subprocess_fallbacks() -> None:

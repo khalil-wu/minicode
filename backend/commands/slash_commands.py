@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import shlex
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from backend.commands.catalog import get_composer_command_catalog
@@ -536,9 +537,12 @@ async def _handle_help(
     _ = arg
     _ = attachments
 
+    conversation_id = slash_conversation_id() or ws.active_conversation_id or ""
+    conversation = ws.conversation_repo.get_conversation_summary(conversation_id) if conversation_id else None
+    workspace_root = ws.session_lifecycle.workspace_root_for_conversation(conversation) if conversation is not None else None
     enabled_entries = [
         entry
-        for entry in get_composer_command_catalog()
+        for entry in get_composer_command_catalog(workspace_root, resolve_active_workspace=False)
         if bool(entry.get("enabled", True))
     ]
     local_commands = sorted(
@@ -798,36 +802,27 @@ def _substitute_command_arguments(
 ) -> str:
     """Apply CC's $ARGUMENTS, indexed, and shorthand substitutions."""
     raw = str(arguments or "").strip()
-    original_template = template
     values = _split_args(raw)
+    named_indices: dict[str, int] = {}
+    for index, name in enumerate(argument_names or []):
+        if name and not name.isdecimal():
+            named_indices.setdefault(name, index)
+    pattern = r"\$ARGUMENTS\[(\d+)\]|\$ARGUMENTS|(?<![A-Za-z0-9_])\$(\d+)\b"
+    if named_indices:
+        pattern += r"|\$(?P<named>" + "|".join(re.escape(name) for name in named_indices) + r")(?![\[\w])"
 
-    def indexed(match: Any) -> str:
-        index = int(match.group(1))
+    def substitute(match: Any) -> str:
+        if match.group(1) is not None or match.group(2) is not None:
+            index = int(match.group(1) or match.group(2))
+        elif named_indices and match.group("named") is not None:
+            index = named_indices[match.group("named")]
+        else:
+            return raw
         return values[index] if index < len(values) else ""
 
-    content = template
-    had_placeholder = bool(
-        re.search(r"\$ARGUMENTS(?:\[\d+\])?", original_template)
-        or re.search(r"(?<![A-Za-z0-9_])\$\d+\b", original_template)
-        or any(
-            re.search(rf"\${re.escape(name)}(?![\[\w])", original_template)
-            for name in (argument_names or [])
-            if name and not name.isdecimal()
-        )
-    )
-    for index, name in enumerate(argument_names or []):
-        if not name or name.isdecimal():
-            continue
-        value = values[index] if index < len(values) else ""
-        content = re.sub(
-            rf"\${re.escape(name)}(?![\[\w])",
-            lambda _match, replacement=value: replacement,
-            content,
-        )
-    content = re.sub(r"\$ARGUMENTS\[(\d+)\]", indexed, content)
-    content = re.sub(r"(?<![A-Za-z0-9_])\$(\d+)\b", indexed, content)
-    content = content.replace("$ARGUMENTS", raw)
-    if raw and not had_placeholder:
+    # Match only the original template; inserted argument text is literal.
+    content, substitutions = re.subn(pattern, substitute, template)
+    if raw and not substitutions:
         content = f"{content.rstrip()}\n\nARGUMENTS: {raw}"
     return content.strip()
 
@@ -869,44 +864,37 @@ def _build_protocol_handler(entry: dict[str, Any]) -> SlashHandler:
     return _handler
 
 
-def register_all_slash_commands(registry: Any) -> None:
+def build_slash_command_handler(entry: dict[str, Any]) -> SlashHandler | None:
+    """Prepare one captured catalog entry without publishing another registry."""
+    command_name = str(entry.get("command", "")).strip().lower()
+    if not command_name or not bool(entry.get("enabled", True)):
+        return None
+    command_type = str(entry.get("type", "")).strip().lower()
+    if command_type == "local":
+        return _build_local_handler(command_name)
+    if command_type == "template":
+        return _build_template_handler(command_name, str(entry.get("template", "")),
+            list(entry.get("argument_names") or []), base_dir=str(entry.get("base_dir") or ""),
+            is_skill_file=bool(entry.get("is_skill_file")))
+    if command_type == "protocol":
+        return _build_protocol_handler(entry)
+    return None
+
+
+def register_all_slash_commands(
+    registry: Any, workspace_root: str | Path | None = None, *, resolve_active_workspace: bool = True,
+) -> None:
     """Register slash commands from the composer command catalog."""
 
-    for entry in get_composer_command_catalog():
-        if not bool(entry.get("enabled", True)):
-            continue
-
-        command_name = str(entry.get("command", "")).strip().lower()
-        if not command_name:
-            continue
-
-        command_type = str(entry.get("type", "")).strip().lower()
-        slash_name = f"/{command_name}"
-
-        if command_type == "local":
-            registry.register_slash(slash_name, _build_local_handler(command_name))
-            continue
-
-        if command_type == "template":
-            registry.register_slash(
-                slash_name,
-                _build_template_handler(
-                    command_name,
-                    str(entry.get("template", "")),
-                    list(entry.get("argument_names") or []),
-                    base_dir=str(entry.get("base_dir") or ""),
-                    is_skill_file=bool(entry.get("is_skill_file")),
-                ),
-            )
-            continue
-
-        if command_type == "protocol":
-            registry.register_slash(slash_name, _build_protocol_handler(entry))
+    for entry in get_composer_command_catalog(workspace_root, resolve_active_workspace=resolve_active_workspace):
+        handler = build_slash_command_handler(entry)
+        if handler is not None:
+            registry.register_slash(f"/{entry['command']}", handler)
 
 
 
-def refresh_slash_commands(registry: Any) -> None:
-    clear = getattr(registry, "clear_slash_handlers", None)
-    if callable(clear):
-        clear()
-    register_all_slash_commands(registry)
+def refresh_slash_commands(
+    registry: Any, workspace_root: str | Path | None = None, *, resolve_active_workspace: bool = True,
+) -> None:
+    registry.clear_slash_handlers()
+    register_all_slash_commands(registry, workspace_root, resolve_active_workspace=resolve_active_workspace)

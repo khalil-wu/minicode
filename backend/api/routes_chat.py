@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from backend.artifact.media import AUDIO_MEDIA_EXTENSIONS
 
 from urllib.parse import quote
@@ -10,6 +12,7 @@ from fastapi import APIRouter, File, HTTPException, Query, Request, Response, Up
 from starlette.concurrency import run_in_threadpool
 
 from backend.agent.query_engine import QueryEngine
+from backend.async_cleanup import _consume_task_result
 from backend.attachments.store import MAX_ATTACHMENT_CONTENT_BYTES
 from backend.services.chat_api_service import (
     ChatApiServiceError,
@@ -21,11 +24,11 @@ from backend.services.chat_api_service import (
     upload_document_payload,
 )
 
-_UPLOAD_READ_CHUNK = 1024 * 1024
-
 from . import _state
 from .models import ChatRequest, ChatResponse, UploadResponse
 from backend.services.tool_registry_factory import get_attachment_store as _get_attachment_store
+
+_UPLOAD_READ_CHUNK = 1024 * 1024
 
 router = APIRouter()
 
@@ -90,6 +93,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
 async def upload_document(
     session_id: str = Query(..., min_length=1),
     conversation_id: str = Query(""),
+    workspace_root: str = Query(""),
     file: UploadFile = File(...),
 ) -> UploadResponse:
     """Upload a document into one fixed conversation owner."""
@@ -100,6 +104,7 @@ async def upload_document(
         upload_context = reserve_attachment_upload_context(
             session_id=session_id,
             conversation_id=conversation_id,
+            workspace_root=workspace_root,
             ws_manager=_state.ws_manager,
             attachment_store=_get_attachment_store(),
         )
@@ -111,6 +116,7 @@ async def upload_document(
     # attachment store enforces is exceeded, instead of pulling an unbounded
     # body fully into memory (and then base64/vectorizing it) before the store's
     # post-hoc size check runs. Closes the upload OOM window.
+    upload_task: asyncio.Task[dict] | None = None
     try:
         chunks: list[bytes] = []
         total = 0
@@ -127,16 +133,26 @@ async def upload_document(
             # PDF/Office/archive extraction is synchronous and can be CPU or disk
             # intensive. Keep it off the ASGI event loop so an upload cannot starve
             # WebSocket heartbeat/reconnect traffic for the same desktop session.
-            payload = await run_in_threadpool(
-                upload_document_payload,
-                context=upload_context,
-                file_name=file.filename,
-                raw_content=raw_content,
-            )
+            def persist_upload() -> dict:
+                try:
+                    return upload_document_payload(
+                        context=upload_context,
+                        file_name=file.filename,
+                        raw_content=raw_content,
+                    )
+                finally:
+                    upload_context.release()
+
+            # Cancelling the HTTP request does not stop a parsing thread. Its
+            # owner reservation must remain live until its final disk write.
+            upload_task = asyncio.create_task(run_in_threadpool(persist_upload))
+            upload_task.add_done_callback(_consume_task_result)
+            payload = await asyncio.shield(upload_task)
         except ChatApiServiceError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     finally:
-        upload_context.release()
+        if upload_task is None:
+            upload_context.release()
         await file.close()
 
     return UploadResponse(**payload)

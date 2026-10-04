@@ -31,15 +31,10 @@ class _MemoryTool(BaseTool):
         self,
         context: ToolExecutionContext | None,
         operation: Callable[[LocalMemoryBackend], dict[str, Any]],
-        *,
-        lock: bool = False,
     ) -> ToolResult:
         try:
             memory = self._memory_for(context)
-            if lock:
-                with memory.reset_lock.acquire(timeout=5.0):
-                    payload = operation(LocalMemoryBackend(memory.memory_dir))
-            else:
+            with memory.reset_lock.acquire(timeout=5.0):
                 payload = operation(LocalMemoryBackend(memory.memory_dir))
         except (MemoryBackendError, ValueError, TypeError) as exc:
             return self._error_result(str(exc))
@@ -53,8 +48,6 @@ class _MemoryTool(BaseTool):
         self,
         context: ToolExecutionContext | None,
         operation: Callable[[LocalMemoryBackend], dict[str, Any]],
-        *,
-        lock: bool = False,
     ) -> ToolResult:
         """Run file-backed memory I/O off the shared agent event loop.
 
@@ -67,7 +60,6 @@ class _MemoryTool(BaseTool):
             self._execute_backend_sync,
             context,
             operation,
-            lock=lock,
         )
 
 
@@ -259,5 +251,4 @@ class MemoryAddAdHocNoteTool(_MemoryTool):
         return await self._execute_backend(
             context,
             lambda backend: backend.add_ad_hoc_note(filename=filename, note=note),
-            lock=True,
         )

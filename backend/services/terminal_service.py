@@ -113,6 +113,11 @@ def terminal_list_payload(sessions: list[Any], *, conversation_id: str = "") -> 
                 "is_alive": item.is_alive,
                 "started_at": item.started_at,
                 "terminal_mode": item.terminal_mode,
+                "exit_code": item.exit_code,
+                "exit_signal": item.exit_signal,
+                "exited_at": item.exited_at,
+                "cleanup_pending": item.cleanup_pending,
+                "cleanup_reason": item.cleanup_reason,
                 "conversation_id": str(getattr(item, "conversation_id", "") or ""),
             }
             for item in sessions
@@ -210,7 +215,13 @@ def terminal_output_payload(
 
 
 def parse_terminal_exec_command(data: dict[str, Any]) -> TerminalCommandRequest:
-    command = str(data.get("command", "")).strip()
+    command = data.get("command", "")
+    if not isinstance(command, str):
+        return TerminalCommandRequest(
+            command="",
+            error_event=AgentEvent.error("Command must be a string", recoverable=True),
+        )
+    command = command.strip()
     if not command:
         return TerminalCommandRequest(
             command="",

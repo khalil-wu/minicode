@@ -96,7 +96,7 @@ export type FileGlyphKind =
   | "pdf" | "style" | "terminal";
 
 const CODE_EXTENSIONS = new Set([
-  "c", "cc", "cjs", "cpp", "cs", "dart", "ex", "exs", "go", "h", "hpp", "html", "java", "js", "jsx", "kt", "lua", "mjs", "php", "py", "r", "rb", "rs", "scala", "svelte", "swift", "ts", "tsx", "vue",
+  "c", "cc", "cjs", "cpp", "cs", "dart", "ex", "exs", "go", "h", "hpp", "htm", "html", "java", "js", "jsx", "kt", "lua", "mjs", "php", "py", "r", "rb", "rs", "scala", "svelte", "swift", "ts", "tsx", "vue",
 ]);
 const DATA_EXTENSIONS = new Set(["csv", "ini", "json", "toml", "xml", "yaml", "yml"]);
 const DATABASE_EXTENSIONS = new Set(["db", "sqlite", "sqlite3", "sql"]);
@@ -136,7 +136,7 @@ const ICON_BY_EXTENSION: Record<string, IconifyIcon> = {
   db: dbIcon, sqlite: dbIcon, sqlite3: dbIcon, sql: dbIcon,
   doc: wordIcon, docx: wordIcon, xls: tableIcon, xlsx: tableIcon, csv: tableIcon,
   ppt: powerpointIcon, pptx: powerpointIcon, pdf: pdfIcon,
-  go: goIcon, html: htmlIcon, js: jsIcon, cjs: jsIcon, mjs: jsIcon,
+  go: goIcon, htm: htmlIcon, html: htmlIcon, js: jsIcon, cjs: jsIcon, mjs: jsIcon,
   jsx: reactIcon, tsx: reactIcon, ts: tsIcon,
   json: jsonIcon, kt: kotlinIcon, java: javaIcon, lua: luaIcon,
   md: markdownIcon, mdx: markdownIcon, php: phpIcon, py: pythonIcon,

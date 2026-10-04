@@ -22,6 +22,7 @@ export const QuickOpen = () => {
   const [activeIdx, setActiveIdx] = useState(0);
   const [searchError, setSearchError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
   const dialogRef = useFocusTrap(visible && enabled);
 
   useEffect(() => {
@@ -88,14 +89,18 @@ export const QuickOpen = () => {
     close();
   };
 
-  if (!visible || !enabled) return null;
-
   // Empty query falls back to the files already open in the editor — a
   // "recents" section without new state, since tabs ARE the recents.
   const showingOpenTabs = !query.trim();
   const results = showingOpenTabs
     ? editorTabs.map((tab) => ({ path: tab.path, name: fileNameOf(tab.path) }))
     : storeResults;
+
+  useEffect(() => {
+    resultsRef.current?.querySelector<HTMLElement>(`#qo-${activeIdx}`)?.scrollIntoView({ block: "nearest" });
+  }, [activeIdx, results]);
+
+  if (!visible || !enabled) return null;
 
   return (
     <div
@@ -122,6 +127,7 @@ export const QuickOpen = () => {
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing || event.keyCode === 229) return;
           if (event.key === "Escape") {
             event.preventDefault();
             event.stopPropagation();
@@ -152,6 +158,7 @@ export const QuickOpen = () => {
           aria-controls="quick-open-results"
           aria-activedescendant={results[activeIdx] ? `qo-${activeIdx}` : undefined}
           onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
             if (e.key === "ArrowDown") {
               e.preventDefault();
               setActiveIdx((i) => Math.max(0, Math.min(i + 1, results.length - 1)));
@@ -182,7 +189,7 @@ export const QuickOpen = () => {
           <X size={16} />
         </button>
         </div>
-        <div id="quick-open-results" role="listbox" style={{ borderTop: "1px solid var(--border-subtle)", maxHeight: 360, minHeight: 0, overflowY: "auto" }}>
+        <div ref={resultsRef} id="quick-open-results" role="listbox" style={{ borderTop: "1px solid var(--border-subtle)", maxHeight: 360, minHeight: 0, overflowY: "auto" }}>
           {storeLoading && (
             <div style={{ padding: 14, color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
               正在搜索…
@@ -208,6 +215,8 @@ export const QuickOpen = () => {
               key={file.path}
               id={`qo-${i}`}
               role="option"
+              type="button"
+              tabIndex={-1}
               aria-selected={i === activeIdx}
               onClick={() => openFile(file)}
               onMouseEnter={() => setActiveIdx(i)}

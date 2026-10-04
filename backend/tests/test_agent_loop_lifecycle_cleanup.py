@@ -289,6 +289,7 @@ def test_actual_host_callback_owner_holds_process_claim_after_public_done(
     async def scenario():
         entered, release = asyncio.Event(), asyncio.Event()
         effects, loans, submissions, events = [], [], [], []
+        public_done = asyncio.Event()
         llm = _LLM()
         runtime = AgentRuntime(
             metrics_file=tmp_path / "runtime.jsonl", swarm_store_dir=tmp_path / "swarm",
@@ -340,10 +341,13 @@ def test_actual_host_callback_owner_holds_process_claim_after_public_done(
                 async with aclosing(super().submit(submission)) as stream:
                     async for event in stream:
                         events.append(event)
+                        if event.type == "done":
+                            public_done.set()
                         yield event
 
         monkeypatch.setattr(sdk, "QueryEngine", ObservedEngine)
         monkeypatch.setattr(chat_api_service, "default_runtime", lambda: runtime)
+        monkeypatch.setattr(scheduled_task_runner, "default_runtime", lambda: runtime)
         monkeypatch.setattr(scheduled_task_runner, "main_worktree_root", lambda path: path.resolve())
         monkeypatch.setattr(scheduled_task_runner, "git_branch_for", lambda path: "main")
         monkeypatch.setattr(chat_api_service, "QueryEngine", ObservedEngine)
@@ -386,8 +390,18 @@ def test_actual_host_callback_owner_holds_process_claim_after_public_done(
             await asyncio.wait_for(entered.wait(), 1)
             if phase == "observe":
                 caller.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await asyncio.wait_for(asyncio.shield(caller), 1)
+                if host == "scheduler":
+                    await asyncio.wait_for(public_done.wait(), 1)
+                    assert not caller.done()
+                else:
+                    with pytest.raises(asyncio.CancelledError):
+                        await asyncio.wait_for(asyncio.shield(caller), 1)
+            elif host == "scheduler":
+                await asyncio.wait_for(public_done.wait(), 1)
+                assert not caller.done()
+                persisted = repository.get_conversation(conversation_id)
+                assert persisted.transcript[-1]["role"] == "assistant"
+                assert persisted.context_snapshot["scheduled_task"]["lifecycle_cleanup_pending_count"] > 0
             else:
                 result = await asyncio.wait_for(asyncio.shield(caller), 1)
                 if host != "sdk":
@@ -426,6 +440,12 @@ def test_actual_host_callback_owner_holds_process_claim_after_public_done(
             release.set()
             if submissions:
                 await _settle(submissions[0].runtime.run_context)
+            if host == "scheduler":
+                if phase == "observe":
+                    with pytest.raises(asyncio.CancelledError):
+                        await asyncio.wait_for(asyncio.shield(caller), 1)
+                else:
+                    assert (await asyncio.wait_for(asyncio.shield(caller), 1))["status"] == "completed"
             await _claim_released(conversation_id)
             await sdk_session.aclose()
             if closer is not None:

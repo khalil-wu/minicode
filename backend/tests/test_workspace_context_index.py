@@ -4,7 +4,7 @@ from backend.workspace.context import WorkspaceContext
 
 
 @pytest.mark.asyncio
-async def test_workspace_index_prunes_environment_data_and_model_dirs(tmp_path):
+async def test_workspace_index_keeps_regular_data_source_and_prunes_dependencies_and_binary_files(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('ok')", encoding="utf-8")
     for dirname in [".conda", "data", "checkpoints", "node_modules", ".ipynb_checkpoints"]:
@@ -16,8 +16,8 @@ async def test_workspace_index_prunes_environment_data_and_model_dirs(tmp_path):
     ctx = WorkspaceContext(tmp_path)
     metadata = await ctx.initialize()
 
-    assert metadata.file_count == 1
-    assert [path.replace("\\", "/") for path in sorted(ctx.file_index.keys())] == ["src/app.py"]
+    assert metadata.file_count == 3
+    assert [path.replace("\\", "/") for path in sorted(ctx.get_file_list(limit=50_000))] == ["checkpoints/ignored.py", "data/ignored.py", "src/app.py"]
     assert not ctx.index_truncated
 
 
@@ -70,7 +70,7 @@ async def test_workspace_index_uses_gitignore_wildmatch_semantics(tmp_path):
     ctx = WorkspaceContext(tmp_path)
     await ctx.initialize()
 
-    indexed = {path.replace("\\", "/") for path in ctx.file_index}
+    indexed = {path.replace("\\", "/") for path in ctx.get_file_list(limit=50_000)}
     assert indexed == {
         ".gitignore",
         "important.log",

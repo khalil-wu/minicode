@@ -108,6 +108,7 @@ describe("PluginsTab loading", () => {
     }));
     render(<PluginsTab />);
     await screen.findByText("还没有本地插件");
+    fireEvent.click(screen.getByRole("button", { name: "添加插件来源", exact: true }));
     fireEvent.change(screen.getByRole("textbox", { name: "来源名称" }), { target: { value: "team" } });
     fireEvent.change(screen.getByRole("textbox", { name: "来源地址" }), { target: { value: "org/plugins" } });
     fireEvent.click(screen.getByRole("button", { name: "添加来源", exact: true }));
@@ -137,8 +138,10 @@ describe("PluginsTab loading", () => {
     expect(screen.queryByRole("checkbox", { name: "启用插件 review@team" })).toBeNull();
     await waitFor(() => expect((icon as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(icon);
-    expect(screen.getByRole("checkbox", { name: "启用插件 review@team" })).toBeTruthy();
-    expect(screen.getByText("插件依赖尚未满足，请检查：parser@team")).toBeTruthy();
+    expect(screen.getByRole("region", { name: "插件详情" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "启用插件", exact: true })).toBeTruthy();
+    expect(screen.getByText("插件依赖尚未满足：parser@team")).toBeTruthy();
+    expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === "PUT")).toBe(false);
   });
 
   it("changes to the declared dark logo when the theme changes", async () => {
@@ -161,12 +164,52 @@ describe("PluginsTab loading", () => {
     }));
     render(<PluginsTab />);
     await screen.findByText("还没有本地插件");
+    fireEvent.click(screen.getByRole("button", { name: "管理来源与本地导入", exact: true }));
     fireEvent.change(screen.getByRole("textbox", { name: "来源名称" }), { target: { value: "team" } });
     fireEvent.change(screen.getByRole("textbox", { name: "来源地址" }), { target: { value: "org/repo" } });
     fireEvent.click(screen.getByRole("button", { name: "添加来源", exact: true }));
     await screen.findByRole("button", { name: "同步来源 team" });
     await act(async () => resolveOld(new Response(JSON.stringify({ marketplaces: [] }), { status: 200 })));
     expect(screen.getByRole("button", { name: "同步来源 team" })).toBeTruthy();
+  });
+
+  it("opens the complete catalog description before installing to the actual supported scope", async () => {
+    const plugin = { id: "build@team", name: "build", description: "完整说明：用于项目构建和分析。", interface: { displayName: "构建助手", developerName: "Team" } };
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(String(input).endsWith("/marketplaces") ? { marketplaces: [{ name: "team", status: "ready", source: { repo: "org/tools" }, plugins: [plugin] }] } : { plugins: [] }), { status: 200 }))));
+    render(<PluginsTab />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看插件详情 build@team" }));
+    const detail = screen.getByRole("region", { name: "插件详情" });
+    expect(detail.textContent).toContain("完整说明：用于项目构建和分析。");
+    expect(detail.textContent).toContain("org/tools");
+    expect(detail.textContent).toContain("用户级插件配置");
+    expect(screen.getByRole("button", { name: "安装到用户级配置" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /安装到项目/ })).toBeNull();
+  });
+
+  it("connects installed MCP components to their real login state and configuration", async () => {
+    useAppStore.setState({ mcpServers: [{ name: "tool_server", status: "error", phase: "auth_required", lastError: "login expired", tools: 0 }] });
+    const plugin = { id: "tools@local", name: "tools", displayName: "工具包", path: "C:/plugins/tools", enabled: true, mcp_server_count: 1, mcp_server_names: ["tool_server"] };
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(JSON.stringify({ plugins: [plugin], marketplaces: [] }), { status: 200 }))));
+    render(<PluginsTab />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看插件详情 tools@local" }));
+    expect(screen.getByText("需要连接或登录")).toBeTruthy();
+    expect(screen.getByText(/tool_server · 需要登录/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "配置 MCP 服务" }));
+    expect(useAppStore.getState().settingsTab).toBe("connectors");
+  });
+
+  it("keeps a declared MCP component unknown until its actual status is received", async () => {
+    useAppStore.setState({ mcpServers: [] });
+    const plugin = { id: "pending@local", name: "pending", path: "C:/plugins/pending", enabled: true, mcp_server_count: 1, mcp_server_names: ["later-server"] };
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(JSON.stringify({ plugins: [plugin], marketplaces: [] }), { status: 200 }))));
+    render(<PluginsTab />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看插件详情 pending@local" }));
+    expect(screen.getByText("组件状态待同步")).toBeTruthy();
+    expect(screen.getByText("later-server · 状态未知（待同步）")).toBeTruthy();
+    expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === "POST" || init?.method === "PUT")).toBe(false);
+    act(() => useAppStore.setState({ mcpServers: [{ name: "later-server", status: "connected", tools: 1 }] }));
+    expect(screen.queryByText("组件状态待同步")).toBeNull();
+    expect(screen.getByText("later-server · 已连接")).toBeTruthy();
   });
 
 });

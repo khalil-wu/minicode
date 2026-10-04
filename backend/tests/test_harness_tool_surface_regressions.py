@@ -218,13 +218,13 @@ async def test_git_launch_review_snapshot_and_transport_contract(monkeypatch, tm
     process = type("GitProcess", (), {"returncode": 0})()
 
     class Runner:
-        def __init__(self, policy):
+        def __init__(self, policy, *, env_filter=None):
             seen["policy"] = policy
         def capability(self, *, cwd=None):
             from types import SimpleNamespace
             return SimpleNamespace(backend="full-access")
-        async def spawn_shell_interactive(self, command, **kwargs):
-            seen["command"] = command
+        async def spawn_interactive(self, argv, **kwargs):
+            seen["command"] = argv
             seen["cwd"] = kwargs["cwd"]
             return process
         async def cleanup(self):
@@ -262,12 +262,12 @@ async def test_git_launch_review_repeated_cancel_keeps_actual_cleanup_owned(monk
                                    sandbox_policy=SandboxPolicy.workspace_default(tmp_path))
 
     class Runner:
-        def __init__(self, policy):
+        def __init__(self, policy, *, env_filter=None):
             pass
         def capability(self, *, cwd=None):
             from types import SimpleNamespace
             return SimpleNamespace(backend="full-access")
-        async def spawn_shell_interactive(self, command, **kwargs):
+        async def spawn_interactive(self, argv, **kwargs):
             spawned.set()
             return object()
         async def cleanup(self):
@@ -300,12 +300,12 @@ async def test_git_launch_review_overflow_releases_runner(monkeypatch, tmp_path)
 
     closed = []
     class Runner:
-        def __init__(self, policy):
+        def __init__(self, policy, *, env_filter=None):
             pass
         def capability(self, *, cwd=None):
             from types import SimpleNamespace
             return SimpleNamespace(backend="full-access")
-        async def spawn_shell_interactive(self, command, **kwargs):
+        async def spawn_interactive(self, argv, **kwargs):
             return object()
         async def cleanup(self):
             closed.append(True)
@@ -371,7 +371,6 @@ async def test_git_launch_review_exact_metadata_grant_preserves_other_authority(
 async def test_git_launch_review_real_fsmonitor_and_commit_boundary(tmp_path, monkeypatch):
     import json
     import subprocess
-    from pathlib import Path
     from backend.runtime_env import sanitized_git_env
     from backend.permissions.context import PermissionContext, ToolExecutionContext
     from backend.sandbox import SandboxPolicy, SandboxRunner
@@ -580,7 +579,7 @@ async def test_git_linked_review_common_env_is_owned_child_only(monkeypatch, tmp
         assert policy is snapshot
         return [argv[0], "--git-dir=/declared/worktree", "--work-tree=/workspace", *argv[1:]], common
     class Runner:
-        def __init__(self, policy):
+        def __init__(self, policy, *, env_filter=None):
             assert policy is snapshot
         async def spawn_shell_interactive(self, command, **kwargs):
             seen.append(command)

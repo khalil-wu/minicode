@@ -533,6 +533,10 @@ def project_public_transcript_message(value: Any) -> dict[str, Any]:
         ),
     }
     timestamp = source.get("timestamp")
+    if role == "user" and isinstance(source.get("display_content"), str):
+        projected["display_content"] = public_text(source["display_content"], max_chars=4_194_304)
+    if role == "user" and isinstance(source.get("submitted_content"), str):
+        projected["submitted_content"] = public_text(source["submitted_content"], max_chars=4_194_304)
     if isinstance(timestamp, str):
         projected["timestamp"] = public_text(timestamp, max_chars=128, single_line=True)
     else:
@@ -630,6 +634,7 @@ def project_public_transcript_message(value: Any) -> dict[str, Any]:
         ("attachmentRefs", "attachmentRefs", True),
         ("context_refs", "context_refs", False),
         ("contextRefs", "context_refs", False),
+        ("quoted_message", "quoted_message", False),
         ("reply_attachments", "reply_attachments", False),
         ("replyAttachments", "reply_attachments", False),
         ("citations", "citations", False),

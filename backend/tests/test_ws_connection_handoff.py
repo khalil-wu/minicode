@@ -172,7 +172,7 @@ async def test_replaced_asgi_reader_cannot_admit_late_input(tmp_path, frame_kind
         assert newer["websocket"].sent == []
         assert session.conversation_repo.get_conversation("conv_old_input") is None
         assert "old-input-command" not in session.command_dispatcher.recent_client_command_id_set
-        assert not session.run_manager.durable_queue.has_client_command("old-input-command")
+        assert not session.run_manager.durable_client_commands.has_client_command("old-input-command")
     finally:
         if not reader.done():
             reader.cancel()
@@ -194,7 +194,7 @@ async def test_replacement_preserves_work_already_durably_admitted(tmp_path):
     try:
         incoming.put_nowait(_create_conversation_frame())
         await asyncio.wait_for(sent_ack.wait(), 2)
-        assert session.run_manager.durable_queue.has_client_command("old-input-command")
+        assert session.run_manager.durable_client_commands.has_client_command("old-input-command")
         await manager.connect(**newer)
         ack_release.set()
         session.command_dispatcher.command_semaphore.release()
@@ -209,7 +209,7 @@ async def test_replacement_preserves_work_already_durably_admitted(tmp_path):
             await asyncio.sleep(0.01)
         assert session.conversation_repo.get_conversation("conv_old_input") is not None
         assert "old-input-command" in session.command_dispatcher.recent_client_command_id_set
-        assert not session.run_manager.durable_queue.has_client_command("old-input-command")
+        assert not session.run_manager.durable_client_commands.has_client_command("old-input-command")
         incoming.put_nowait({"type": "websocket.disconnect", "code": 1000})
         # A replaced reader retires by returning from its generation guard, not
         # by raising: see test_replaced_asgi_reader_cannot_admit_late_input.

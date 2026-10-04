@@ -15,10 +15,11 @@ def diff_file_payload(file: Any) -> dict[str, Any]:
     }
 
 
-def working_tree_diff_event(result: Any, *, untracked: list[str]) -> AgentEvent:
+def working_tree_diff_event(result: Any, *, untracked: list[str], is_git_repo: bool = True) -> AgentEvent:
     return AgentEvent(
         type="diff.git_working_tree",
         data={
+            "is_git_repo": is_git_repo,
             "files": [diff_file_payload(file) for file in result.files],
             "untracked": untracked,
             "total_additions": result.total_additions,
@@ -27,10 +28,11 @@ def working_tree_diff_event(result: Any, *, untracked: list[str]) -> AgentEvent:
     )
 
 
-def staged_diff_event(result: Any) -> AgentEvent:
+def staged_diff_event(result: Any, *, is_git_repo: bool = True) -> AgentEvent:
     return AgentEvent(
         type="diff.git_staged",
         data={
+            "is_git_repo": is_git_repo,
             "files": [diff_file_payload(file) for file in result.files],
             "total_additions": result.total_additions,
             "total_deletions": result.total_deletions,

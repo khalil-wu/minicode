@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 from backend.hooks.dispatcher import HookExecution
@@ -80,7 +79,7 @@ def reduce_hook_executions(
         stdout = execution.stdout.strip()
         stderr = execution.stderr.strip()
         exit_code = execution.exit_code
-        json_result = _parse_json_object(stdout)
+        json_result = execution.json_output
         suppress_output = bool(
             json_result is not None and json_result.get("suppress_output") is True
         )
@@ -305,7 +304,7 @@ def execution_succeeded_for_once(
         return False
     if execution.exit_code != 0:
         return False
-    payload = _parse_json_object(execution.stdout)
+    payload = execution.json_output
     if payload is None:
         return True
     actual = str(payload.get("event") or "")
@@ -315,17 +314,6 @@ def execution_succeeded_for_once(
         path = payload.get("worktree_path")
         return bool(str(path or "").strip())
     return True
-
-
-def _parse_json_object(value: str) -> dict[str, Any] | None:
-    stripped = value.strip()
-    if not stripped or not stripped.startswith("{"):
-        return None
-    try:
-        parsed = json.loads(stripped)
-    except (TypeError, ValueError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 def _permission_fields(

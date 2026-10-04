@@ -7,16 +7,38 @@ does not depend on a particular provider SDK or external agent runtime.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
+import math
 from typing import Any, Mapping
 
 
 TokenNumber = int | float
+MAX_SAFE_INTEGER = 9_007_199_254_740_991
 TOOL_MODES = frozenset({"direct", "code_mode", "code_mode_only"})
 
 
 def normalize_tool_mode(value: Any) -> str:
     mode = str(value or "").strip().lower()
     return mode if mode in TOOL_MODES else ""
+
+
+def normalize_model_limit(value: Any) -> int:
+    """Keep exact positive model limits that survive the frontend number wire."""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text.isascii() or not text.isdecimal():
+            return 0
+        text = text.lstrip("0") or "0"
+        if len(text) > 16:
+            return 0
+        value = int(text)
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value if 0 < value <= MAX_SAFE_INTEGER else 0
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value) if 0 < value <= MAX_SAFE_INTEGER else 0
+    return 0
 
 
 class ProviderRegistrationError(ValueError):
@@ -82,7 +104,7 @@ class ModelDefinition:
             **dict(self.extra), "provider": self.provider, "id": self.id,
             "name": self.name, "api": self.api, "baseUrl": self.base_url,
             "reasoning": self.reasoning, "input": list(self.input),
-            "cost": dict(self.cost), "contextWindow": self.context_window,
+            "cost": deepcopy(dict(self.cost)), "contextWindow": self.context_window,
             "maxTokens": self.max_tokens,
         }
         if self.thinking_level_map is not None:
@@ -119,7 +141,7 @@ class ModelDefinition:
             "base_url": self.base_url,
             "reasoning": self.reasoning,
             "input": list(self.input),
-            "cost": dict(self.cost),
+            "cost": deepcopy(dict(self.cost)),
             "context_window": self.context_window,
             "max_context_window": self.max_context_window,
             "max_tokens": self.max_tokens,
@@ -207,6 +229,6 @@ class ReasoningPolicy:
 __all__ = [
     "ModelDefinition", "ProviderAdapterSpec", "ProviderDefinition",
     "ReasoningPolicy",
-    "ProviderRegistrationError", "TokenNumber",
+    "ProviderRegistrationError", "TokenNumber", "MAX_SAFE_INTEGER", "normalize_model_limit",
     "UnsupportedProviderCapabilityError",
 ]

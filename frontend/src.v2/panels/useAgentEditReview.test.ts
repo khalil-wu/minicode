@@ -197,4 +197,24 @@ describe("useAgentEditReview", () => {
     act(() => result.current.keepAll());
     expect(result.current.total).toBe(0);
   });
+
+  it("locates the displayed current change without skipping it or editing the buffer", () => {
+    const content = "line1\nADDED\nline2\nline3\nALSO\nline4\n";
+    const patch = "@@ -1,4 +1,6 @@\n line1\n+ADDED\n line2\n line3\n+ALSO\n line4";
+    const { editor, state } = fakeEditor(content.split("\n"));
+    const { result } = renderHook(() => useAgentEditReview({
+      editorRef: { current: editor }, path: "src/app.ts", content, readOnly: false,
+      turnDiff: turnDiffFor("src/app.ts", patch), workingDirectory: WORKDIR, editorEpoch: 1,
+    }));
+
+    expect(result.current.currentLine).toBe(2);
+    act(() => result.current.reveal());
+    expect(state.position).toEqual({ lineNumber: 2, column: 1 });
+    act(() => result.current.onCursorLine(6));
+    expect(result.current.currentLine).toBe(5);
+    act(() => result.current.reveal());
+    expect(state.revealed).toEqual([2, 5]);
+    expect(state.lines.join("\n")).toBe(content);
+    expect(result.current.total).toBe(2);
+  });
 });

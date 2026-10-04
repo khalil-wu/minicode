@@ -85,8 +85,9 @@ describe("UserMessageCell", () => {
     );
 
     expect(screen.getByText("定时任务")).toBeTruthy();
-    expect(screen.getByText("运行 run-2026-09-03")).toBeTruthy();
-    expect(screen.getByTitle("定时任务 · 任务 task-nightly · 运行 run-2026-09-03")).toBeTruthy();
+    expect(screen.queryByText("运行 run-2026-09-03")).toBeNull();
+    expect(screen.queryByTitle("定时任务 · 任务 task-nightly · 运行 run-2026-09-03")).toBeNull();
+    expect(screen.getByTitle("定时任务")).toBeTruthy();
   });
 
   it("collapses long user messages by default and allows expanding them", () => {

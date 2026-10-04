@@ -12,14 +12,11 @@ from __future__ import annotations
 def wrap_untrusted_content(content: str, source: str, *, min_length: int = 0) -> str:
     """Wrap ``content`` in untrusted-content markers.
 
-    Skips wrapping when content is not a string, is at or below ``min_length``,
-    or is already wrapped. ``min_length=0`` (the default) wraps any non-empty
-    string — terminal output is an injection vector even when short, unlike the
-    web tools which skip tiny snippets.
+    Skips wrapping when content is not a string or is at or below ``min_length``.
+    ``min_length=0`` (the default) wraps any non-empty string. Callers
+    provide raw external text; a marker in that text is not host provenance.
     """
     if not isinstance(content, str) or len(content) <= min_length:
-        return content
-    if content.startswith("<untrusted_tool_result"):
         return content
     # External content can itself contain the closing marker to forge an
     # early block end and append instructions after it; defang any literal

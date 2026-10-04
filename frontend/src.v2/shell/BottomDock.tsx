@@ -1,5 +1,5 @@
-import { Bug, Gauge, GitBranch, Plus, TerminalSquare, X } from "lucide-react";
-import { lazy, Suspense } from "react";
+import { Bug, Gauge, GitBranch, TerminalSquare, X } from "lucide-react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useAppStore } from "../stores";
 import { GitPanel } from "../panels/GitPanel";
 import {
@@ -7,7 +7,6 @@ import {
   promptCacheHitRate,
   promptCacheOrdinaryInputTokens,
 } from "../chat/cacheUsage";
-import { requestNewTerminalSession } from "../panels/terminalRequests";
 import { ChunkErrorBoundary, SafeBoundary } from "./ChunkErrorBoundary";
 import { PanelErrorFallback } from "../components/PanelErrorFallback";
 import { PanelSkeleton } from "./PanelSkeleton";
@@ -24,21 +23,31 @@ const LazyTerminalPanel = lazy(() =>
   import("../panels/TerminalPanel").then((module) => ({ default: module.TerminalPanel })),
 );
 
-export const BottomDock = () => {
+export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
   const dockCollapsed = useAppStore((s) => s.dockCollapsed);
   const dockHeight = useAppStore((s) => s.dockHeight);
   const activeBottomTab = useAppStore((s) => s.activeBottomTab);
   const totalBudgetPercent = useAppStore((s) => s.totalBudgetPercent);
+  const hasBudget = useAppStore((s) => s.budgetBuckets.length > 0);
   const openBottomTab = useAppStore((s) => s.openBottomTab);
   const closeBottomDock = useAppStore((s) => s.closeBottomDock);
   const setDockHeight = useAppStore((s) => s.setDockHeight);
+  const mainVisible = useAppStore((s) => !s.settingsOpen && !s.skillsMarketplaceOpen && !s.rightPanelExpanded) && visible;
   const visibleTab = activeBottomTab === "tasks" || activeBottomTab === "timeline" ? "terminal" : activeBottomTab;
-  const isOpen = !dockCollapsed;
+  const isOpen = !dockCollapsed && mainVisible;
+  const terminalVisible = isOpen && visibleTab === "terminal";
+  const [terminalVisited, setTerminalVisited] = useState(terminalVisible);
+  useEffect(() => { if (terminalVisible) setTerminalVisited(true); }, [terminalVisible]);
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => resizeCleanupRef.current?.(), []);
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
+    resizeCleanupRef.current?.();
     const handle = event.currentTarget;
     const pointerId = event.pointerId;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
     const startY = event.clientY;
     const startHeight = dockHeight;
     const onMove = (moveEvent: PointerEvent) => {
@@ -51,13 +60,15 @@ export const BottomDock = () => {
       window.removeEventListener("pointercancel", onUp);
       handle.removeEventListener("lostpointercapture", cleanup);
       if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      resizeCleanupRef.current = null;
     };
     const onUp = (upEvent: PointerEvent) => {
       if (upEvent.pointerId !== pointerId) return;
       cleanup();
     };
+    resizeCleanupRef.current = cleanup;
     document.body.style.cursor = "row-resize";
     document.body.style.userSelect = "none";
     handle.setPointerCapture(pointerId);
@@ -133,11 +144,6 @@ export const BottomDock = () => {
         })}
         </div>
         <div className="mc-bottom-drawer-spacer" />
-        {visibleTab === "terminal" && (
-          <button type="button" className="mc-icon-button" aria-label="新建终端" title="新建终端" onClick={requestNewTerminalSession}>
-            <Plus size={15} />
-          </button>
-        )}
         <button type="button" className="mc-icon-button" aria-label="关闭底部工具" title="关闭底部工具" onClick={closeBottomDock}>
           <X size={15} />
         </button>
@@ -148,25 +154,25 @@ export const BottomDock = () => {
         role="tabpanel"
         aria-labelledby={`bottom-dock-tab-${visibleTab}`}
       >
-          {isOpen && visibleTab === "terminal" && (
+          {(terminalVisited || terminalVisible) && <div className="h-full" hidden={!terminalVisible} aria-hidden={!terminalVisible}>
             <ChunkErrorBoundary>
               <Suspense fallback={<PanelSkeleton kind="terminal" />}>
                 <SafeBoundary fallback={<PanelErrorFallback panelName="终端" />}>
-                  <LazyTerminalPanel />
+                  <LazyTerminalPanel visible={terminalVisible} />
                 </SafeBoundary>
               </Suspense>
             </ChunkErrorBoundary>
-          )}
+          </div>}
           {isOpen && visibleTab === "budget" && (
             <div className="p-3">
               <div className="mb-2" style={{ color: "var(--text-secondary)", fontVariantNumeric: "tabular-nums" }}>
-                总用量：{(totalBudgetPercent * 100).toFixed(1)}%
+                {hasBudget ? `任务预算：${(totalBudgetPercent * 100).toFixed(1)}%` : "暂无预算数据"}
               </div>
               <PromptCacheStats />
               <BudgetBars />
             </div>
           )}
-          {isOpen && visibleTab === "git" && <GitPanel />}
+          {isOpen && visibleTab === "git" && <GitPanel active={mainVisible} />}
           {isOpen && visibleTab === "debug" && <div className="p-3"><DebugLog /></div>}
       </div>
     </section>
@@ -223,7 +229,7 @@ const PromptCacheStats = () => {
 const BudgetBars = () => {
   const budgetBuckets = useAppStore((s) => s.budgetBuckets);
   if (budgetBuckets.length === 0)
-    return <span style={{ color: "var(--text-muted)" }}>暂无用量数据。</span>;
+    return null;
   return (
     <div className="grid grid-cols-1 gap-1.5">
       {budgetBuckets.map((b) => {

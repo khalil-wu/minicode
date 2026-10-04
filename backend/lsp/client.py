@@ -15,9 +15,9 @@ only the subset needed for agent-driven code navigation:
 
 Design goals:
   - Zero hard dependencies (the `lsprotocol` package is optional).
-  - One manager per workspace root, reused across tool calls.
-  - Graceful fallback: if the server crashes or is unavailable, callers
-    receive empty results and the manager auto-restarts on next use.
+  - Clients cached by workspace root and launch authority across tool calls.
+  - Explicit errors for unavailable or disconnected servers; stale clients
+    are cleaned up before the next use starts a replacement.
 """
 
 from __future__ import annotations
@@ -66,22 +66,6 @@ _SERVER_ARGS: dict[str, list[str]] = {
     "rust-analyzer": [],
     "clangd": [],
 }
-
-_EXTENSIONS_BY_LANG: dict[str, str] = {
-    "python": "py",
-    "typescript": "ts",
-    "typescriptreact": "tsx",
-    "javascript": "js",
-    "javascriptreact": "jsx",
-    "go": "go",
-    "rust": "rs",
-    "java": "java",
-    "c": "c",
-    "cpp": "cpp",
-    "ruby": "rb",
-    "csharp": "cs",
-}
-
 
 @dataclass
 class LSPLocation:
@@ -146,6 +130,7 @@ class LSPClient:
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+        self.startup_cleanup_pending = False
 
     def is_running(self) -> bool:
         return (
@@ -184,26 +169,34 @@ class LSPClient:
         self._initialized = False
         self._opened_files.clear()
         try:
-            self._process = await self._sandbox_runner.spawn_interactive(
-                [self._command, *self._args],
-                container_argv=[self._server_name, *self._args],
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=self._workspace_root,
-            )
-            self._stdin = self._process.stdin
-            self._stdout = self._process.stdout
-        except FileNotFoundError:
-            raise RuntimeError(f"Language server not found: {self._command}")
-        except SandboxUnavailableError as exc:
-            raise RuntimeError(f"Language server sandbox unavailable: {exc}") from exc
-        except OSError as exc:
-            raise RuntimeError(f"Failed to start language server: {exc}")
+            try:
+                self._process = await self._sandbox_runner.spawn_interactive(
+                    [self._command, *self._args],
+                    container_argv=[self._server_name, *self._args],
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=self._workspace_root,
+                )
+                self._stdin = self._process.stdin
+                self._stdout = self._process.stdout
+            except FileNotFoundError:
+                raise RuntimeError(f"Language server not found: {self._command}")
+            except SandboxUnavailableError as exc:
+                raise RuntimeError(f"Language server sandbox unavailable: {exc}") from exc
+            except OSError as exc:
+                raise RuntimeError(f"Failed to start language server: {exc}")
 
-        self._reader_task = asyncio.create_task(self._read_loop())
-        self._stderr_task = asyncio.create_task(self._drain_stderr())
-        await self._initialize()
+            self._reader_task = asyncio.create_task(self._read_loop())
+            self._stderr_task = asyncio.create_task(self._drain_stderr())
+            await self._initialize()
+        except BaseException:
+            self.startup_cleanup_pending = True
+            try:
+                await self.stop()
+            except (RuntimeError, OSError):
+                logger.warning("LSP startup cleanup remains owned by its runner", exc_info=True)
+            raise
 
     async def stop(self) -> None:
         # Graceful LSP shutdown requires the protocol reader to deliver the
@@ -243,6 +236,7 @@ class LSPClient:
         self._stdout = None
         self._initialized = False
         self._opened_files.clear()
+        self.startup_cleanup_pending = False
 
     async def _initialize(self) -> None:
         await self._send_request("initialize", {
@@ -272,6 +266,10 @@ class LSPClient:
         self._initialized = True
 
     async def _ensure_file_open(self, file_path: str) -> None:
+        async with self._lock:
+            await self._sync_file(file_path)
+
+    async def _sync_file(self, file_path: str) -> None:
         abs_path = str(Path(file_path).resolve())
         try:
             content = Path(abs_path).read_text(encoding="utf-8", errors="replace")
@@ -304,13 +302,14 @@ class LSPClient:
 
     async def close_file(self, file_path: str) -> None:
         """Notify the server that a tracked document is no longer active."""
-        abs_path = str(Path(file_path).resolve())
-        if abs_path not in self._opened_files:
-            return
-        await self._send_notification("textDocument/didClose", {
-            "textDocument": {"uri": self._path_to_uri(abs_path)},
-        })
-        self._opened_files.pop(abs_path, None)
+        async with self._lock:
+            abs_path = str(Path(file_path).resolve())
+            if abs_path not in self._opened_files:
+                return
+            await self._send_notification("textDocument/didClose", {
+                "textDocument": {"uri": self._path_to_uri(abs_path)},
+            })
+            self._opened_files.pop(abs_path, None)
 
     async def definition(self, file_path: str, line: int, character: int) -> list[LSPLocation]:
         await self._ensure_file_open(file_path)
@@ -385,9 +384,16 @@ class LSPClient:
         try:
             await self._write_message(message)
             return await asyncio.wait_for(future, timeout=30.0)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
             self._pending.pop(msg_id, None)
-            raise RuntimeError(f"LSP request timed out: {method}")
+            try:
+                await self._send_notification("$/cancelRequest", {"id": msg_id})
+            except OSError:
+                # Preserve the caller's cancellation when the transport closed.
+                logger.debug("LSP request cancellation reached a closed transport")
+            if isinstance(exc, asyncio.TimeoutError):
+                raise RuntimeError(f"LSP request timed out: {method}") from exc
+            raise
         except BaseException:
             self._pending.pop(msg_id, None)
             raise
@@ -557,11 +563,7 @@ class LSPManager:
                     await client.start()
                 except (RuntimeError, asyncio.CancelledError) as exc:
                     logger.debug("LSP start failed for %s: %s", server, exc)
-                    try:
-                        await client.stop()
-                    except (RuntimeError, OSError):
-                        logger.debug("LSP cleanup failed after start error for %s", server, exc_info=True)
-                    else:
+                    if not client.startup_cleanup_pending:
                         self._clients.pop(key, None)
                     if isinstance(exc, asyncio.CancelledError):
                         raise
@@ -657,6 +659,8 @@ def _uri_to_path(uri: str, *, path_mapper: Callable[[str], str] | None = None) -
     if parsed.scheme and parsed.scheme != "file":
         return uri
     path = unquote(parsed.path if parsed.scheme else uri)
+    if parsed.scheme == "file" and parsed.netloc and parsed.netloc.lower() != "localhost":
+        path = f"//{parsed.netloc}{path}"
     if path_mapper is not None:
         path = path_mapper(path)
     if os.name == "nt" and path.startswith("/") and len(path) >= 3 and path[2] == ":":

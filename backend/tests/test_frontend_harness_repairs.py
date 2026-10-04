@@ -83,7 +83,17 @@ def test_lsp_start_cancellation_cleans_or_retains_the_started_owner(tmp_path: Pa
 
             async def start(self):
                 started.set()
-                await asyncio.Event().wait()
+                try:
+                    await asyncio.Event().wait()
+                except BaseException:
+                    self.startup_cleanup_pending = True
+                    try:
+                        await self.stop()
+                    except RuntimeError:
+                        pass
+                    else:
+                        self.startup_cleanup_pending = False
+                    raise
 
             async def stop(self):
                 self.stopped = True
@@ -92,7 +102,9 @@ def test_lsp_start_cancellation_cleans_or_retains_the_started_owner(tmp_path: Pa
 
         monkeypatch.setattr(lsp, "LSPClient", StartingClient)
         monkeypatch.setattr(lsp, "_resolve_server_executable", lambda *_: "fake-server")
-        monkeypatch.setattr(lsp, "_lsp_sandbox_runner", lambda *_: SimpleNamespace(capability=lambda: SimpleNamespace(available=True)))
+        runner = lsp.SandboxRunner(lsp.SandboxPolicy(workspace_root=tmp_path))
+        monkeypatch.setattr(runner, "capability", lambda: SimpleNamespace(available=True))
+        monkeypatch.setattr(lsp, "_lsp_sandbox_runner", lambda *_: runner)
         manager = lsp.LSPManager()
         pending = asyncio.create_task(manager.get_client("file.py", str(tmp_path)))
         await started.wait()
@@ -107,7 +119,7 @@ def test_lsp_start_cancellation_cleans_or_retains_the_started_owner(tmp_path: Pa
 
 def test_lsp_unproven_termination_does_not_replace_or_forget_process(tmp_path: Path) -> None:
     async def scenario():
-        runner = SimpleNamespace(terminate=AsyncMock(return_value=False), spawn_interactive=AsyncMock())
+        runner = SimpleNamespace(terminate=AsyncMock(return_value=False), spawn_interactive=AsyncMock(), cleanup=lambda: asyncio.sleep(0, result=False))
         client = lsp.LSPClient("fake", [], str(tmp_path), sandbox_runner=runner)
         process = SimpleNamespace(returncode=None)
         client._process = process

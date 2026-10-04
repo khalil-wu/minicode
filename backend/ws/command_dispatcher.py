@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from backend.async_cleanup import to_thread_cancel_safe
+
 import asyncio
 import json
 import logging
 import uuid
 from contextlib import AsyncExitStack, nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -14,13 +17,19 @@ from backend.ws.client_command_log import ClientCommandDedupStore, _clean_comman
 from backend.ws.command_results import emit_command_error
 from backend.ws.conversation_errors import emit_conversation_not_found
 from backend.ws.event_outbox import EventOutbox
-from backend.ws.utils import normalize_attachment_payloads, normalize_permission_mode
+from backend.ws.utils import normalize_attachment_payloads, normalize_permission_mode, normalize_user_input_metadata
 
 logger = logging.getLogger(__name__)
 
 MAX_PENDING_COMMAND_TASKS = 100
 COMMAND_BACKLOG_ERROR_INTERVAL_SECONDS = 2.0
 RECENT_CLIENT_COMMAND_IDS_MAX = 2_000
+
+
+@dataclass
+class _UserMessageAdmission:
+    command: UserCommand
+    interrupted: bool = False
 
 COMMAND_BACKLOG_BYPASS_TYPES = {
     "control_response",
@@ -162,6 +171,7 @@ class SessionCommandDispatcher:
         )
         self._command_semaphore = asyncio.Semaphore(20)
         self._command_tasks: set[asyncio.Task[Any]] = set()
+        self._user_message_admissions: dict[asyncio.Task[Any], _UserMessageAdmission] = {}
         self._active_client_command_ids: set[str] = set()
         self._reported_durable_queue_load_error = ""
         self._max_command_tasks = MAX_PENDING_COMMAND_TASKS
@@ -222,10 +232,12 @@ class SessionCommandDispatcher:
         return self._recent_client_command_id_set
 
     async def _replay_pending_client_commands(self, connection_generation: int) -> None:
-        durable_queue = self._session.run_manager.durable_queue
+        await self._report_durable_queue_load_error(self._client_command_store.last_load_error)
+        durable_queue = self._session.run_manager.durable_client_commands
         if durable_queue is None:
             return
-        await self._report_durable_queue_load_error(durable_queue)
+        await self._report_durable_queue_load_error(durable_queue.load_error)
+        await self._report_durable_queue_load_error(self._session.run_manager.durable_queue.load_error)
         for command in durable_queue.pending_client_commands():
             command_id = self._client_command_id(command)
             if not command_id:
@@ -240,17 +252,13 @@ class SessionCommandDispatcher:
             await self._send_client_command_ack(command, duplicate=True)
             self._schedule_durable_client_command(command_id, connection_generation)
 
-    async def _report_durable_queue_load_error(self, durable_queue: Any) -> None:
-        """Surface an unreadable durable queue file to the client.
+    async def _report_durable_queue_load_error(self, evidence: dict[str, Any] | None) -> None:
+        """Surface preserved queue or completion-record read errors on reconnect.
 
-        The queue quarantines a corrupt file instead of overwriting it, so the
-        commands still exist on disk but were not loaded. Reporting only through
-        a server-side log made the user's queued messages disappear silently.
-        The evidence path is the dedupe key, so a reconnect does not repeat a
-        warning the client already has, while a fresh failure is reported again.
+        The evidence path identifies the failed read without treating a damaged
+        completion log as an empty set of completed requests.
         """
 
-        evidence = durable_queue.load_error
         if not isinstance(evidence, dict) or not evidence:
             return
         signature = str(
@@ -261,13 +269,14 @@ class SessionCommandDispatcher:
         self._reported_durable_queue_load_error = signature
         await self._session.emit_command_result(
             "user_message.queue.restore",
-            "Queued messages could not be restored: the durable queue file was unreadable. "
-            "It has been preserved for recovery instead of overwritten.",
+            "Queued commands or completed request records could not be fully restored. "
+            "The unreadable data was preserved for recovery instead of overwritten.",
             level="error",
             data={
                 "reason": str(evidence.get("reason") or "unreadable"),
                 "detail": str(evidence.get("detail") or ""),
                 "path": str(evidence.get("path") or ""),
+                "line": str(evidence.get("line") or ""),
                 "quarantined_to": str(evidence.get("quarantined_to") or ""),
                 "quarantine_error": str(evidence.get("quarantine_error") or ""),
                 "recoverable": False,
@@ -351,7 +360,7 @@ class SessionCommandDispatcher:
                 continue
 
             command_id = self._client_command_id(command)
-            durable_queue = self._session.run_manager.durable_queue
+            durable_queue = self._session.run_manager.durable_client_commands
             if command_id and durable_queue is not None:
                 if durable_queue.has_client_command(command_id):
                     await self._send_client_command_ack(command, duplicate=True)
@@ -393,15 +402,7 @@ class SessionCommandDispatcher:
         connection_generation: int,
     ) -> None:
         async def _guarded_handle() -> None:
-            async with (nullcontext() if command.type in COMMAND_BACKLOG_BYPASS_TYPES else self._command_semaphore):
-                with self._session.event_outbox.bind_client_command(
-                    self._client_command_id(command),
-                    command.type,
-                ):
-                    await self._handle_command(
-                        command,
-                        connection_generation=connection_generation,
-                    )
+            await self._dispatch_client_command(command, connection_generation)
 
         self.track_command_task(asyncio.create_task(_guarded_handle()))
 
@@ -429,22 +430,14 @@ class SessionCommandDispatcher:
         client_command_id: str,
         connection_generation: int,
     ) -> None:
-        durable_queue = self._session.run_manager.durable_queue
+        durable_queue = self._session.run_manager.durable_client_commands
         if durable_queue is None:
             return
         command = durable_queue.claim_client_command(client_command_id)
         if command is None:
             return
         try:
-            async with (nullcontext() if command.type in COMMAND_BACKLOG_BYPASS_TYPES else self._command_semaphore):
-                with self._session.event_outbox.bind_client_command(
-                    client_command_id,
-                    command.type,
-                ):
-                    handled = await self._handle_command(
-                        command,
-                        connection_generation=connection_generation,
-                    )
+            handled = await self._dispatch_client_command(command, connection_generation)
             if handled is False:
                 # ``_handle_command`` reports the failure to the client and
                 # returns False.  It is not a successful durable completion:
@@ -473,6 +466,61 @@ class SessionCommandDispatcher:
                     f"Could not complete durable client command {client_command_id}"
                 )
 
+    async def _dispatch_client_command(self, command: UserCommand, connection_generation: int) -> bool:
+        task = asyncio.current_task()
+        admission = _UserMessageAdmission(command) if command.type == "user_message" else None
+        if admission is not None:
+            self._user_message_admissions[task] = admission
+        try:
+            conversation_id = str(command.data.get("owner_conversation_id")
+                or command.data.get("ownerConversationId") or command.data.get("conversation_id")
+                or self._session.active_conversation_id or "")
+            if "workspace_root" in command.data:
+                workspace_root = command.data["workspace_root"]
+            elif conversation_id and conversation_id != self._session.active_conversation_id:
+                conversation = self._session.conversation_repo.get_conversation_summary(conversation_id)
+                workspace_root = (
+                    self._session.session_lifecycle.workspace_root_for_conversation(conversation)
+                    if conversation is not None else ""
+                )
+            else:
+                workspace_root = self._session.session_lifecycle.workspace_root_for_conversation()
+            owner = (conversation_id, str(workspace_root or ""))
+            async with (nullcontext() if command.type in COMMAND_BACKLOG_BYPASS_TYPES else self._command_semaphore):
+                with self._session.event_outbox.bind_client_command(
+                    self._client_command_id(command), command.type, owner=owner,
+                ):
+                    return await self._handle_command(command, connection_generation=connection_generation)
+        except asyncio.CancelledError:
+            if admission is None or not admission.interrupted:
+                raise
+            await self._seal_unstarted_user_message(
+                str(command.data.get("conversation_id") or self._session.active_conversation_id or ""),
+                reason="user_interrupted", status="cancelled",
+                message_id=str(command.data.get("assistant_message_id") or ""),
+            )
+            return True
+        finally:
+            self._user_message_admissions.pop(task, None)
+
+    async def interrupt_user_message_admission(self, conversation_id: str, message_id: str) -> bool:
+        for task, admission in self._user_message_admissions.items():
+            data = admission.command.data
+            owner = str(data.get("conversation_id") or self._session.active_conversation_id or "")
+            if owner != conversation_id or str(data.get("assistant_message_id") or "") != message_id:
+                continue
+            # Persist the accepted Stop before signalling its command task.
+            # A process exit during workspace cleanup must not replay this input.
+            if not admission.interrupted:
+                if self._client_command_id(admission.command):
+                    self._mark_client_command_seen(admission.command, require_persistence=True)
+                self._session.run_manager.set_user_queue_paused(conversation_id, message_id)
+                admission.interrupted = True
+                task.cancel()
+            await asyncio.shield(task)
+            return True
+        return False
+
     def prune_command_tasks(self) -> None:
         for task in list(self._command_tasks):
             if task.done():
@@ -498,11 +546,7 @@ class SessionCommandDispatcher:
             logger.error("Unhandled error in _handle_command: %s", exc, exc_info=exc)
 
     def _load_recent_client_command_ids(self) -> list[str]:
-        try:
-            return self._client_command_store.load_ids(limit=RECENT_CLIENT_COMMAND_IDS_MAX)
-        except Exception as exc:
-            logger.debug("Failed to load recent client command ids for %s: %s", self._session.session_id, exc)
-            return []
+        return self._client_command_store.load_ids(limit=RECENT_CLIENT_COMMAND_IDS_MAX)
 
     def _client_command_id(self, command: UserCommand) -> str:
         client_command_id = command.data.get("client_command_id")
@@ -612,8 +656,6 @@ class SessionCommandDispatcher:
                             "",
                         )
                         if fenced_conversation_id:
-                            from backend.ws.command_results import emit_command_error
-
                             await emit_command_error(self._session,
                                 command.type,
                                 "This conversation is being deleted; wait for deletion to finish before changing it.",
@@ -644,8 +686,6 @@ class SessionCommandDispatcher:
                   exc_info=True,
               )
               try:
-                  from backend.ws.command_results import emit_command_error
-
                   await emit_command_error(self._session, command.type, exc)
               except Exception:
                   logger.error(
@@ -770,7 +810,7 @@ class SessionCommandDispatcher:
 
         if updated_target:
             git_branch = await asyncio.to_thread(self._session.git_branch_for, requested_workspace_path)
-            await asyncio.to_thread(
+            await to_thread_cancel_safe(
                 self._session.conversation_repo.update_workspace_binding,
                 str(updated_target),
                 workspace_root=str(requested_workspace_path),
@@ -778,6 +818,7 @@ class SessionCommandDispatcher:
                 worktree_path="",
                 git_isolated=False,
             )
+            self._session.session_lifecycle.schedule_runtime_capabilities(source="workspace.activate.user_message")
 
         return True, updated_target
 
@@ -813,6 +854,7 @@ class SessionCommandDispatcher:
         *,
         reason: str,
         message_id: str = "",
+        status: str = "failed",
     ) -> None:
         """Publish the terminal fence for a turn that never started a run.
 
@@ -824,7 +866,7 @@ class SessionCommandDispatcher:
         would never arrive.  Emitting it here keeps one invariant true for every
         accepted ``user_message``: exactly one terminal envelope, always.
         """
-        done_event = AgentEvent.done(status="failed", reason=reason)
+        done_event = AgentEvent.done(status=status, reason=reason)
         if target_conversation_id:
             done_event.data["conversation_id"] = target_conversation_id
         clean_message_id = str(message_id or "").strip()
@@ -889,8 +931,6 @@ class SessionCommandDispatcher:
             "control_cancel_request",
             "interrupt",
         }:
-            from backend.ws.command_results import emit_command_error
-
             await emit_command_error(self._session,
                 command.type,
                 "Session shutdown was requested by an extension; no new work is accepted.",
@@ -899,7 +939,6 @@ class SessionCommandDispatcher:
 
         if command.type == "user_message":
             content = str(command.data.get("content", ""))
-            attachments = normalize_attachment_payloads(command.data.get("attachments", []))
             requested_conversation_id = str(
                 command.data.get("conversation_id") or ""
             ).strip()
@@ -910,6 +949,30 @@ class SessionCommandDispatcher:
                     await emit_conversation_not_found(self._session, requested_conversation_id)
                     return
                 target_conversation_id = target.id
+
+            try:
+                attachments = normalize_attachment_payloads(command.data.get("attachments", []))
+            except ValueError as exc:
+                error_event = AgentEvent.error(
+                    str(exc), recoverable=False, error_type="validation", error_code="invalid_attachments",
+                )
+                error_event.data["conversation_id"] = target_conversation_id
+                await self._session.send_event(error_event)
+                await self._seal_unstarted_user_message(
+                    target_conversation_id, reason="attachments_rejected",
+                    message_id=str(command.data.get("assistant_message_id") or ""),
+                )
+                return
+
+            try:
+                input_metadata = normalize_user_input_metadata(command.data)
+            except ValueError as exc:
+                await emit_command_error(self._session, command.type, exc,
+                    data={"conversation_id": target_conversation_id, "reason": "input_metadata_rejected"})
+                await self._seal_unstarted_user_message(target_conversation_id,
+                    reason="input_metadata_rejected", message_id=str(command.data.get("assistant_message_id") or ""))
+                return
+            command.data.update(input_metadata)
 
             raw_permission_mode = command.data.get("permission_mode")
             requested_permission_mode: str | None = None
@@ -965,6 +1028,7 @@ class SessionCommandDispatcher:
                 for key in ("primary_file", "active_tab_path")
                 if str(command.data.get(key) or "").strip()
             }
+            message_metadata.update(input_metadata)
             selected_skills = [
                 {
                     "name": str(item.get("name") or "").strip(),
@@ -1054,8 +1118,10 @@ class SessionCommandDispatcher:
                 )
                 if existing_user is not None:
                     same_payload = (
-                        str(existing_user.get("content") or "") == content
+                        str(existing_user.get("submitted_content", existing_user.get("content", "")))
+                        == str(command.data.get("_submitted_content", content))
                         and list(existing_user.get("attachments") or []) == attachments
+                        and all(existing_user.get(key) == value for key, value in input_metadata.items())
                     )
                     same_owner = (
                         str(admission.get("client_command_id") or "")
@@ -1073,9 +1139,19 @@ class SessionCommandDispatcher:
                         await self._session.send_event(conflict)
                         return
                     message_metadata["_turn_admission_restored"] = True
+                    content = str(existing_user.get("content") or "")
+                    if "submitted_content" in existing_user:
+                        message_metadata["submitted_content"] = existing_user["submitted_content"]
 
-            stripped = content.lstrip()
-            if stripped.startswith("/") and not stripped.startswith("//"):
+            if "_submitted_content" in command.data:
+                message_metadata["submitted_content"] = command.data["_submitted_content"]
+
+            retry_from_message_id = str(command.data.get("retry_from_message_id", "")).strip()
+            slash_input = str(input_metadata.get("display_content", content)).strip()
+            stripped = slash_input.lstrip()
+            if (not message_metadata.get("_turn_admission_restored")
+                    and not retry_from_message_id and content.rstrip().endswith(slash_input)
+                    and stripped.startswith("/") and not stripped.startswith("//")):
                 if target_conversation_id:
                     await self._session._ensure_extension_commands_for_conversation(
                         target_conversation_id
@@ -1083,22 +1159,48 @@ class SessionCommandDispatcher:
                 parts = stripped.split(maxsplit=1)
                 cmd_name = parts[0].lower()
                 cmd_arg = parts[1] if len(parts) > 1 else ""
-                if self._session.command_registry.dispatch_slash_sync(
-                    cmd_name,
-                    scope_id=target_conversation_id,
-                ):
+                registry = self._session.command_registry
+                handler = registry.get_extension_slash(cmd_name, scope_id=target_conversation_id)
+                if handler is None:
+                    from backend.commands.catalog import get_composer_command_catalog
+                    from backend.commands.slash_commands import build_slash_command_handler
+                    from backend.services.workspace_service import parse_user_message_workspace_request
+
+                    if requested_workspace_root:
+                        request = parse_user_message_workspace_request(
+                            requested_workspace_root, conversation_id=target_conversation_id,
+                        )
+                        if request.error_event is not None:
+                            await self._session.send_event(request.error_event)
+                            await self._seal_unstarted_user_message(target_conversation_id,
+                                reason="workspace_activation_failed", message_id=assistant_message_id)
+                            return
+                        command_root = request.project_path
+                    else:
+                        owner = self._session.conversation_repo.get_conversation_summary(target_conversation_id) if target_conversation_id else None
+                        command_root = self._session.session_lifecycle.workspace_root_for_conversation(owner) if owner is not None else None
+                    catalog = await to_thread_cancel_safe(get_composer_command_catalog,
+                        command_root, resolve_active_workspace=False)
+                    entry = next((entry for entry in catalog
+                                  if f"/{entry['command']}".casefold() == cmd_name.casefold()), None)
+                    handler = build_slash_command_handler(entry) if entry is not None else None
+                if handler is not None:
                     handled, content_override = await self._session.command_registry.dispatch_slash(
                         self._session,
                         cmd_name,
                         cmd_arg,
                         attachments,
                         scope_id=target_conversation_id,
+                        handler=handler,
                     )
                     if handled:
                         return
-                    content = content_override
+                    prepared_content = content.rstrip()[:-len(slash_input)] + content_override
+                    if prepared_content != content:
+                        command.data["_submitted_content"] = content
+                        message_metadata["submitted_content"] = content
+                    content = prepared_content
 
-            retry_from_message_id = str(command.data.get("retry_from_message_id", "")).strip()
             if content or attachments:
                 if not target_conversation_id:
                     self._session._ensure_active_conversation()
@@ -1201,6 +1303,18 @@ class SessionCommandDispatcher:
                         await self._session.send_event(error_event)
                         return
                 running_for_target = self._session.running_agent_task_for(target_conversation_id)
+                pause_token = self._session.run_manager.user_queue_pause_token(target_conversation_id)
+                if not queued_dispatch and pause_token:
+                    if (
+                        not self._session.run_manager.queued_user_messages(target_conversation_id)
+                        and running_for_target is None
+                        and not self._session.run_manager.has_pending_lifecycle_cleanup(target_conversation_id)
+                    ):
+                        self._session.run_manager.set_user_queue_paused(target_conversation_id, "")
+                    else:
+                        # This newly submitted input is explicit consent to its
+                        # own execution, without releasing older paused work.
+                        command.data["_queue_explicit_send"] = pause_token
                 if (
                     running_for_target
                     or self._session.run_manager.is_queue_dispatching(target_conversation_id)
@@ -1297,6 +1411,7 @@ class SessionCommandDispatcher:
                 await self._handle_user_message_permission(
                     requested_permission_mode, target_conversation_id,
                 )
+                self._user_message_admissions.pop(asyncio.current_task(), None)
                 await self._session.start_agent_run(
                     content,
                     attachments=attachments,
@@ -1315,5 +1430,4 @@ class SessionCommandDispatcher:
 
         handled = await self._session.command_registry.dispatch(command.type, command.data)
         if not handled:
-            from backend.ws.command_results import emit_command_error
             await emit_command_error(self._session, command.type, f"Unsupported command '{command.type}'")

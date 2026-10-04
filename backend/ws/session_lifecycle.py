@@ -15,6 +15,7 @@ from backend.async_cleanup import (
     await_with_deadline,
     cancel_and_drain_receipt,
     cancel_and_retire,
+    retain_cleanup_task,
     to_thread_cancel_safe,
 )
 from backend.permissions.profiles import sandbox_capability_for_context
@@ -42,6 +43,7 @@ class SessionLifecycle:
         self._sandbox_capability_payload: dict[str, Any] | None = None
         self._sandbox_capability_task: asyncio.Task[Any] | None = None
         self._sandbox_capability_generation = 0
+        self._sandbox_capability_scope: tuple[Any, ...] | None = None
         self._task_runtime_update_task: asyncio.Task[Any] | None = None
         self.is_shutting_down = False
 
@@ -111,6 +113,8 @@ class SessionLifecycle:
 
     @property
     def sandbox_capability_payload(self) -> dict[str, Any] | None:
+        if self._sandbox_capability_scope != self._current_sandbox_capability_scope():
+            return None
         return self._sandbox_capability_payload
 
     @sandbox_capability_payload.setter
@@ -176,13 +180,18 @@ class SessionLifecycle:
             return
         self._workspace_context_task = loop.create_task(self.initialize_workspace_context())
 
-    async def on_terminal_output(self, session_id: str, data: str, conversation_id: str = "") -> None:
+    async def on_terminal_output(
+        self, session_id: str, data: str, start_cursor: int, end_cursor: int,
+        conversation_id: str = "",
+    ) -> None:
         try:
             await self._session.send_payload(
                 {
                     "type": "terminal.output",
                     "session_id": session_id,
                     "data": data,
+                    "start_cursor": start_cursor,
+                    "end_cursor": end_cursor,
                     "conversation_id": str(conversation_id or ""),
                 },
                 log_context="terminal.output",
@@ -443,6 +452,7 @@ class SessionLifecycle:
 
     def clear_workspace_runtime(self) -> None:
         self._workspace_generation += 1
+        self.invalidate_sandbox_capabilities()
         self._retire_workspace_task(self._workspace_context_task)
         self._workspace_context_task = None
         self._retire_workspace_task(self._workspace_mcp_task)
@@ -585,8 +595,9 @@ class SessionLifecycle:
         restart_file_watcher = self.restart_file_watcher
         from backend.commands.slash_commands import refresh_slash_commands
 
-        def refresh_commands() -> None:
-            refresh_slash_commands(self._session.command_registry)
+        def refresh_commands(root: Path | None) -> None:
+            refresh_slash_commands(self._session.command_registry,
+                root, resolve_active_workspace=False)
 
         def activation_is_current() -> bool:
             return (
@@ -600,6 +611,8 @@ class SessionLifecycle:
             enforce_generation: bool = True,
         ) -> None:
             from backend.api import _state
+            from backend.services.mcp_service import get_mcp_status
+            from backend.ws.mcp_projection import send_mcp_projection
 
             bootstrap = _state.bootstrap
             if bootstrap is not None:
@@ -617,6 +630,9 @@ class SessionLifecycle:
             self._session.mcp_manager = manager
             refresh_registry = self._session.refresh_tool_registry_if_mcp_changed
             refresh_registry(allow_when_busy=False)
+            await send_mcp_projection(
+                self._session, manager, {"type": "mcp_status", "servers": get_mcp_status(manager)},
+            )
 
         refresh_registry = self._session.refresh_tool_registry_if_mcp_changed
 
@@ -645,6 +661,12 @@ class SessionLifecycle:
                 if not activation_is_current():
                     return
                 publish_mcp_manager(ready_manager)
+                from backend.services.mcp_service import get_mcp_status
+                from backend.ws.mcp_projection import send_mcp_projection
+
+                await send_mcp_projection(
+                    self._session, ready_manager, {"type": "mcp_status", "servers": get_mcp_status(ready_manager)},
+                )
             except asyncio.CancelledError:
                 if ready_task is not None and not ready_task.done():
                     ready_task.cancel()
@@ -679,7 +701,7 @@ class SessionLifecycle:
             skill_manager = self._session.skill_manager
             if skill_manager is not None:
                 skill_manager.set_project_root(restored_root)
-            refresh_commands()
+            refresh_commands(restored_root)
             try:
                 await self._session._run_cwd_changed_hook(
                     old_cwd=str(project_path),
@@ -725,7 +747,7 @@ class SessionLifecycle:
             async def prepare_workspace_projection() -> None:
                 """Finish non-index workspace projections for this generation."""
 
-                refresh_commands()
+                refresh_commands(project_path)
                 if not activation_is_current():
                     return
                 skill_manager = self._session.skill_manager
@@ -740,8 +762,6 @@ class SessionLifecycle:
                 if not activation_is_current():
                     return
                 restart_file_watcher(project_path)
-            await self.send_runtime_capabilities(source="workspace.activate")
-
             async def prepare_workspace_projection_background() -> None:
                 try:
                     await prepare_workspace_projection()
@@ -841,6 +861,10 @@ class SessionLifecycle:
 
                 context_task.add_done_callback(clear_context_task)
             return True
+        except asyncio.CancelledError:
+            if wait_for_initialize:
+                await rollback_workspace()
+            raise
         except Exception as exc:
             await rollback_workspace()
             message = f"Failed to switch session workspace: {exc}"
@@ -851,9 +875,47 @@ class SessionLifecycle:
                 await self._session.send_event(AgentEvent.error(message, recoverable=True))
             return False
 
+    def _current_sandbox_capability_scope(self) -> tuple[Any, ...]:
+        workspace = self.workspace_root_for_conversation()
+        workspace_key = canonical_file_path_key(workspace) if workspace is not None else ""
+        return (
+            str(self._session.active_conversation_id or ""),
+            workspace_key,
+            self._session.permission_context,
+        )
+
+    def invalidate_sandbox_capabilities(self) -> None:
+        if self._sandbox_capability_task is not None:
+            retain_cleanup_task(self._sandbox_capability_task, self._retired_workspace_tasks)
+        self._sandbox_capability_generation += 1
+        self._sandbox_capability_task = None
+        self._sandbox_capability_scope = None
+        self._sandbox_capability_payload = None
+
+    def schedule_runtime_capabilities(self, *, source: str) -> None:
+        if self.is_shutting_down:
+            return
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(self.send_runtime_capabilities(source=source))
+        retain_cleanup_task(task, self._retired_workspace_tasks)
+
     async def send_runtime_capabilities(self, *, source: str = "session") -> None:
+        if self.is_shutting_down:
+            return
+        workspace = self.workspace_root_for_conversation()
+        permission = self._session.permission_context
+        scope = self._current_sandbox_capability_scope()
+
+        def scope_is_current() -> bool:
+            return (
+                not self.is_shutting_down
+                and scope == self._current_sandbox_capability_scope()
+            )
+
+        if self._sandbox_capability_scope != scope:
+            self.invalidate_sandbox_capabilities()
+            self._sandbox_capability_scope = scope
         try:
-            workspace = self.workspace_root_for_conversation()
             if workspace:
                 probe_task = self._sandbox_capability_task
                 if self._sandbox_capability_payload is None and (
@@ -861,12 +923,11 @@ class SessionLifecycle:
                 ):
                     self._sandbox_capability_generation += 1
                     probe_generation = self._sandbox_capability_generation
-                    probe_workspace = canonical_file_path_key(workspace)
                     probe_task = asyncio.create_task(
-                        asyncio.to_thread(
+                        to_thread_cancel_safe(
                             sandbox_capability_for_context,
                             workspace,
-                            self._session.permission_context,
+                            permission,
                         )
                     )
                     self._sandbox_capability_task = probe_task
@@ -876,10 +937,7 @@ class SessionLifecycle:
                             return
                         if (
                             probe_generation != self._sandbox_capability_generation
-                            or probe_workspace
-                            != canonical_file_path_key(
-                                self.workspace_root_for_conversation()
-                            )
+                            or not scope_is_current()
                         ):
                             return
                         try:
@@ -901,9 +959,7 @@ class SessionLifecycle:
                                 "reason": str(exc),
                             }
                         if self._session.is_connected:
-                            asyncio.create_task(
-                                self.send_runtime_capabilities(source="sandbox.probe")
-                            )
+                            self.schedule_runtime_capabilities(source="sandbox.probe")
 
                     probe_task.add_done_callback(publish_probe_result)
 
@@ -912,8 +968,13 @@ class SessionLifecycle:
                 if self._sandbox_capability_payload is None and not source.startswith(
                     "workspace.activate"
                 ):
-                    self._sandbox_capability_payload = await probe_task
+                    result = await probe_task
+                    if not scope_is_current():
+                        return
+                    self._sandbox_capability_payload = result
         except Exception as exc:
+            if not scope_is_current():
+                return
             logger.debug("Sandbox capability probe failed: %s", exc)
             self._sandbox_capability_payload = {
                 "policy_configured": True,
@@ -929,8 +990,15 @@ class SessionLifecycle:
                 "unavailable_action": "reject_command",
                 "reason": str(exc),
             }
+        manager = self._session.skill_manager
+        skills = (
+            await to_thread_cancel_safe(lambda: manager.snapshot(workspace).list_all())
+            if manager is not None else None
+        )
+        if not scope_is_current():
+            return
         await self._session.send_payload(
-            self._session.runtime_capabilities_payload(source=source),
+            self._session.runtime_capabilities_payload(source=source, skill_catalog=skills),
             log_context="runtime.capabilities",
         )
 
@@ -1101,10 +1169,12 @@ class SessionLifecycle:
         try:
             self.ensure_workspace_context_task()
             await self.recover_orphaned_background_commands()
-            from backend.api.routes_health import get_mcp_status
+            from backend.services.mcp_service import get_mcp_status
+            from backend.ws.mcp_projection import send_mcp_projection
 
-            mcp_status = get_mcp_status() or []
-            await self._session.send_event(AgentEvent(type="mcp_status", data={"servers": mcp_status}))
+            manager = self._session.mcp_manager
+            mcp_status = get_mcp_status(manager) if manager is not None else []
+            await send_mcp_projection(self._session, manager, {"type": "mcp_status", "servers": mcp_status})
             await self._session.send_llm_state(force=True)
             await self._session.command_dispatcher._replay_pending_client_commands(
                 active_generation
@@ -1344,7 +1414,7 @@ class SessionLifecycle:
             await self._session.event_outbox.drain_delivery()
             await self._session.event_outbox.drain_persistence()
             await self._session.artifact_store.flush()
+        finally:
             self._session.artifact_store.shutdown()
             self._session.artifact_store.clear()
-        finally:
             self._session.run_manager.close_durable_queue()

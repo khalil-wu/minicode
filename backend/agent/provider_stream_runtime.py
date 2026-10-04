@@ -57,8 +57,11 @@ from backend.agent.provider_stream_transport import (
 from backend.agent.stream_attempt import StreamAttemptState, StreamTextState
 from backend.agent.policies.stream_retry import StreamRetryState
 from backend.agent.stream_sanitizer import ThinkingStreamSanitizer
+from backend.agent.provider_text_projection import finish_provider_text_item
+from backend.agent.loop_process_events import model_process_text_event
 from backend.agent.terminal_projection import TurnTerminalProjection
 from backend.agent.tool_stream_tracker import StreamingToolTracker
+from backend.agent.tool_events import abandoned_tool_announcement_events, cancelled_pending_tool_events
 from backend.llm.errors import classify_llm_error
 from backend.llm.base import (
     StreamEventType,
@@ -249,6 +252,14 @@ async def stream_provider_response(
                 if wait_result.response_phase:
                     provider_response_phase = wait_result.response_phase
                 if wait_result.action == "finish":
+                    async for projected in finish_provider_text_item(
+                        stream_state=stream_state, stream_text=stream_text,
+                        visible_text_sanitizer=visible_text_sanitizer,
+                        live_text_streaming=settings.live_text_streaming,
+                        awaiting_trailing_done=awaiting_trailing_tool_done,
+                        process_event_factory=model_process_text_event,
+                    ):
+                        yield projected
                     break
                 event = wait_result.event
                 if event is None:
@@ -398,6 +409,15 @@ async def stream_provider_response(
             break
 
     except (asyncio.CancelledError, Exception) as exc:
+        if isinstance(exc, asyncio.CancelledError):
+            async for projected in finish_provider_text_item(
+                stream_state=stream_state, stream_text=stream_text,
+                visible_text_sanitizer=visible_text_sanitizer,
+                live_text_streaming=settings.live_text_streaming,
+                awaiting_trailing_done=awaiting_trailing_tool_done,
+                process_event_factory=model_process_text_event,
+            ):
+                yield projected
         settle_attempt_usage()
         exception_result = None
         async for exception_update in handle_provider_stream_exception(
@@ -427,6 +447,29 @@ async def stream_provider_response(
         if isinstance(exc, asyncio.CancelledError):
             raise
         retry_budget_boundary = exception_result.retry_budget_boundary
+    else:
+        # Normal EOF is settled before the consumer-close fallback. Only a
+        # consumer that interrupts acquisition owns a cancelled request span.
+        settle_attempt_usage()
+        if provider_attempt is not None and not provider_attempt.closed:
+            await turn_kernel.close_provider_attempt(
+                provider_attempt,
+                status="completed" if stream_state.provider_done else "failed",
+                summary="Provider stream completed" if stream_state.provider_done else "Provider stream ended without a terminal event",
+                data={
+                    "finish_reason": finish_reason or "stream_exhausted",
+                    **({} if stream_state.provider_done else {"error_type": "provider_terminal_missing"}),
+                },
+            )
+            if not stream_state.provider_done and not stream_state.committed_tool_ids:
+                for abandoned in abandoned_tool_announcement_events(stream_state, iteration_id=iteration_id_value):
+                    yield abandoned
+                for cancelled in cancelled_pending_tool_events(
+                    stream_state, tool_tracker, iteration_id=iteration_id_value,
+                    reason="provider_truncated",
+                ):
+                    yield cancelled
+                tool_tracker.cancel_remaining()
     finally:
         settle_attempt_usage()
         await finish_provider_stream(_close_stream, turn_kernel, provider_attempt)

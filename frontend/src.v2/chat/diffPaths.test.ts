@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { workspaceRelativeDiffPath } from "./diffPaths";
 
 describe("workspaceRelativeDiffPath", () => {
-  it("strips the active workspace folder prefix from relative diff paths", () => {
-    expect(workspaceRelativeDiffPath("temp/greeting.py", "C:\\Desktop\\temp")).toBe("greeting.py");
+  it("keeps a relative subdirectory even when it shares the workspace folder name", () => {
+    expect(workspaceRelativeDiffPath("temp/greeting.py", "C:\\Desktop\\temp")).toBe("temp/greeting.py");
   });
 
   it("keeps nested paths when the prefix is not the active workspace folder", () => {

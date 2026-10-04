@@ -58,7 +58,9 @@ export default defineConfig(async ({ command, mode }) => {
   ];
   const resolvedBackend =
     command === "serve" && !isVitest && !isPreview
-      ? await resolveMiniCodeDevBackendOrigins({ candidates: backendCandidates })
+      ? await resolveMiniCodeDevBackendOrigins({ candidates: backendCandidates,
+          wsBaseUrl: process.env.MINICODE_WS_BASE_URL || process.env.VITE_WS_BASE_URL || env.MINICODE_WS_BASE_URL || env.VITE_WS_BASE_URL,
+        })
       : (() => {
           const apiBaseUrl =
             process.env.VITE_API_BASE_URL ||
@@ -78,15 +80,11 @@ export default defineConfig(async ({ command, mode }) => {
   if (command === "serve" && !isVitest && !isPreview) {
     console.info(`[MiniCode] Vite dev backend: ${backendOrigin} (${wsOrigin})`);
   }
-  // Keep every production build file:// safe for the Electron shell. The env
-  // flag stays for compatibility with existing desktop scripts.
-  const useRelativeBase =
-    process.env.MINICODE_VITE_RELATIVE_BASE === "1" || env.MINICODE_VITE_RELATIVE_BASE === "1";
-
   return {
-    base: useRelativeBase ? "./" : "./",
+    base: "./",
     plugins: [react(), devCspRelaxPlugin],
     test: {
+      setupFiles: [path.resolve(__dirname, "test/setup-browser.ts")],
       exclude: ["tests/**", "node_modules/**", ".minicode/**"],
       testTimeout: 10_000,
     },
@@ -134,9 +132,9 @@ export default defineConfig(async ({ command, mode }) => {
             const normalized = id.replace(/\\/g, "/");
             if (!normalized.includes("/node_modules/")) return undefined;
             if (normalized.includes("/@monaco-editor/react/")) return "monaco-react";
-            if (normalized.includes("/monaco-editor/esm/vs/basic-languages/")) return "monaco-languages";
-            if (normalized.includes("/monaco-editor/esm/vs/editor/contrib/")) {
-              const feature = normalized.split("/monaco-editor/esm/vs/editor/contrib/")[1]?.split("/")[0] || "misc";
+            if (normalized.includes("/monaco-editor/esm/vs/languages/definitions/")) return "monaco-languages";
+            if (normalized.includes("/monaco-editor/esm/vs/features/")) {
+              const feature = normalized.split("/monaco-editor/esm/vs/features/")[1].split("/")[0];
               return `monaco-contrib-${feature}`;
             }
             if (normalized.includes("/monaco-editor/esm/vs/editor/browser/")) return "monaco-editor-ui";

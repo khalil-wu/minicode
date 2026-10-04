@@ -29,7 +29,7 @@ interface NativeContextAttachments {
 
 export const buildContextPayload = async (refs: MessageContextRef[]): Promise<string> => {
   if (refs.length === 0) return "";
-  const blocks = await Promise.all(refs.map(contextBlockForRef));
+  const blocks = refs.map(contextBlockForRef);
   return blocks.filter(Boolean).join("\n\n");
 };
 
@@ -84,7 +84,7 @@ export const buildContextNativeAttachments = async (
       // attachment. Pin that owner immediately and pass it explicitly for all
       // later uploads; relying on server-side "current conversation" state is
       // what caused pasted PDFs to land in a different turn after a switch.
-      const result = await uploadAttachment(sessionId, ownerConversationId, file);
+      const result = await uploadAttachment(sessionId, ownerConversationId, file, { workspaceRoot });
       const returnedOwner = String(result.conversation_id || "").trim();
       if (!returnedOwner) {
         throw new Error("附件上传没有返回所属会话。");
@@ -127,28 +127,24 @@ export const buildContextNativeAttachments = async (
   };
 };
 
-const contextBlockForRef = async (ref: MessageContextRef): Promise<string> => {
-  try {
-    if (ref.kind === "skill" || ref.kind === "plugin") return "";
-    if (ref.kind === "url") {
-      return `URL context: ${ref.path}`;
-    }
-    if (ref.kind === "browser_annotation") {
-      return [
-        `Browser annotation: ${ref.url}`,
-        ref.selector ? `Target: ${ref.selector}` : "",
-        ref.xPercent != null && ref.yPercent != null
-          ? `Viewport target: ${(ref.xPercent * 100).toFixed(1)}%, ${(ref.yPercent * 100).toFixed(1)}%${ref.widthPercent != null && ref.heightPercent != null ? `; size ${(ref.widthPercent * 100).toFixed(1)}% x ${(ref.heightPercent * 100).toFixed(1)}%` : ""}${ref.viewportWidth && ref.viewportHeight ? ` in ${ref.viewportWidth}x${ref.viewportHeight}` : ""}`
-          : "",
-        `Comment: ${ref.note}`,
-      ].filter(Boolean).join("\n");
-    }
-    if (ref.kind === "folder") return `Directory reference: ${ref.path}`;
-    return `File reference: ${ref.path}`;
-  } catch {
-    if (ref.kind === "skill" || ref.kind === "plugin") return "";
-    return `Context unavailable: @${ref.kind}:${ref.path}`;
+const contextBlockForRef = (ref: MessageContextRef): string => {
+  if (ref.kind === "skill" || ref.kind === "plugin") return "";
+  if (ref.kind === "url") {
+    return `URL context: ${ref.path}`;
   }
+  if (ref.kind === "browser_annotation") {
+    return [
+      `Browser annotation: ${ref.url}`,
+      ref.selector ? `Target: ${ref.selector}` : "",
+      ref.xPercent != null && ref.yPercent != null
+        ? `Viewport target: ${(ref.xPercent * 100).toFixed(1)}%, ${(ref.yPercent * 100).toFixed(1)}%${ref.widthPercent != null && ref.heightPercent != null ? `; size ${(ref.widthPercent * 100).toFixed(1)}% x ${(ref.heightPercent * 100).toFixed(1)}%` : ""}${ref.viewportWidth && ref.viewportHeight ? ` in ${ref.viewportWidth}x${ref.viewportHeight}` : ""}`
+        : "",
+      `Comment: ${ref.note}`,
+    ].filter(Boolean).join("\n");
+  }
+  if (ref.kind === "folder") return `Directory reference: ${ref.path}`;
+  const range = ref.range ? `:${ref.range.startLineNumber}:${ref.range.startColumn}-${ref.range.endLineNumber}:${ref.range.endColumn}` : "";
+  return [`File reference: ${ref.path}${range}`, ref.text ? `Selected code:\n${ref.text}` : ""].filter(Boolean).join("\n\n");
 };
 
 interface NativeContextCandidate {

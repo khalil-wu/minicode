@@ -1,28 +1,19 @@
 """ReadFileTool (extracted from file_tools.py)."""
 from __future__ import annotations
 
-import difflib
-import asyncio
 import os
-import tempfile
-import time
-import hashlib
 from io import StringIO
 from itertools import islice
-from collections import OrderedDict
-from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
 from typing import Any
 
-from backend.atomic_io import canonical_file_path_key, canonical_path_mapping_key, normalize_text_newlines
+from backend.atomic_io import canonical_path_mapping_key, normalize_text_newlines
 from backend.artifact.store import ArtifactStore
 from backend.permissions.context import ToolExecutionContext
 from backend.agent.cache_metrics import args_signature, emit_cache_metric
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.path_resolution import PathTraversalError, _is_bypass_mode, _resolve_path
 from backend.workspace.file_state_cache import get_global_file_cache
-from backend.workspace.path_filters import is_windows_reserved_path
 
 
 from backend.tools.file_tools_common import (
@@ -30,52 +21,11 @@ from backend.tools.file_tools_common import (
     READ_FILE_MAX_BYTES,
     READ_FILE_MAX_LINES,
     _add_line_numbers,
-    _coerce_line_number,
     _path_arg,
     _read_text_range,
     content_hash,
 )
 
-
-def _file_version(path: Path, stat_result: os.stat_result) -> str:
-    return f"{canonical_file_path_key(path)}:{stat_result.st_size}:{stat_result.st_mtime_ns}"
-
-
-def _range_already_returned(
-    context: ToolExecutionContext | None,
-    *,
-    path: Path,
-    version: str,
-    start_line: int,
-    end_line: int,
-    record: bool,
-) -> bool:
-    if context is None or end_line < start_line:
-        return False
-    states = context.metadata.setdefault("_read_file_ranges", {})
-    path_key = canonical_path_mapping_key(states, path)
-    state = states.get(path_key)
-    if not isinstance(state, dict) or state.get("version") != version:
-        state = {"version": version, "ranges": []}
-        states[path_key] = state
-    ranges = [
-        (int(item[0]), int(item[1]))
-        for item in state.get("ranges", [])
-        if isinstance(item, (list, tuple)) and len(item) == 2
-    ]
-    covered = any(start_line >= lower and end_line <= upper for lower, upper in ranges)
-    if covered or not record:
-        return covered
-
-    ranges.append((start_line, end_line))
-    merged: list[list[int]] = []
-    for lower, upper in sorted(ranges):
-        if merged and lower <= merged[-1][1] + 1:
-            merged[-1][1] = max(merged[-1][1], upper)
-        else:
-            merged.append([lower, upper])
-    state["ranges"] = merged
-    return False
 
 class ReadFileTool(BaseTool):
     """
@@ -126,9 +76,10 @@ class ReadFileTool(BaseTool):
                     "file_path": {"type": "string", "description": "Workspace file path."},
                     "start_line": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "Optional first line for a focused range. A focused read still returns a current full-file content_hash when available.",
                     },
-                    "end_line": {"type": "integer", "description": "Optional inclusive last line."},
+                    "end_line": {"type": "integer", "minimum": 1, "description": "Optional inclusive last line."},
                 },
                 "required": ["file_path"],
             },
@@ -157,10 +108,12 @@ class ReadFileTool(BaseTool):
                     },
                     "start_line": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "Optional 1-indexed start line. Focused reads include a current full-file content_hash when available.",
                     },
                     "end_line": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "Optional 1-indexed inclusive end line.",
                     },
                 },
@@ -238,8 +191,8 @@ class ReadFileTool(BaseTool):
         start_line_arg = args.get("start_line")
         end_line_arg = args.get("end_line")
         has_line_range = start_line_arg is not None or end_line_arg is not None
-        start_line = _coerce_line_number(start_line_arg, default=1)
-        end_line = _coerce_line_number(end_line_arg)
+        start_line = int(start_line_arg) if start_line_arg is not None else 1
+        end_line = int(end_line_arg) if end_line_arg is not None else None
 
         if not file_path:
             return self._error_result("Missing file_path argument")
@@ -353,7 +306,6 @@ class ReadFileTool(BaseTool):
         returned_line_count = len(content.splitlines())
         returned_start_line = (line_offset + 1) if line_offset else 1
         returned_end_line = returned_start_line + returned_line_count - 1
-        version = _file_version(path, stat_result)
 
         write_safe_hash = full_file_hash if has_line_range else ""
 
@@ -374,14 +326,6 @@ class ReadFileTool(BaseTool):
             seen.pop(path_key, None)
             seen[path_key] = file_hash
 
-        _range_already_returned(
-            context,
-            path=path,
-            version=version,
-            start_line=returned_start_line,
-            end_line=returned_end_line,
-            record=True,
-        )
         numbered = _add_line_numbers(content, start_line=(line_offset + 1) if line_offset else 1)
         from backend.tools.base import truncate_text_head
 

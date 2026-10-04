@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import os
 from pathlib import Path
 from typing import Any
 
 from backend.artifact.store import ArtifactStore
 from backend.attachments.store import AttachmentStore
+from backend.async_cleanup import to_thread_cancel_safe
 from backend.media_types import media_type_for_path
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema, artifact_owner_workspace_root
@@ -90,6 +90,9 @@ class PresentFileTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        return await to_thread_cancel_safe(self._execute, args, context)
+
+    def _execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         raw_path = str(args.get("file_path") or "").strip()
         if not raw_path:
             return self._error_result("Missing file_path argument")
@@ -208,10 +211,12 @@ class ReadArtifactTool(BaseTool):
                     },
                     "offset": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "Optional 1-indexed first line to return. Use to page through an artifact larger than one result.",
                     },
                     "limit": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "Optional number of lines to return starting at offset.",
                     },
                 },
@@ -229,15 +234,19 @@ class ReadArtifactTool(BaseTool):
                     "artifact_id": {"type": "string", "description": "Exact artifact_id returned by a previous tool result."},
                     "offset": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "Optional 1-indexed first line; page through artifacts too large for one result.",
                     },
-                    "limit": {"type": "integer", "description": "Optional line count from offset."},
+                    "limit": {"type": "integer", "minimum": 1, "description": "Optional line count from offset."},
                 },
                 "required": ["artifact_id"],
             },
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        return await to_thread_cancel_safe(self._execute, args, context)
+
+    def _execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         artifact_id = str(args.get("artifact_id", "") or "").strip()
         if not artifact_id:
             return self._error_result("Missing artifact_id argument")
@@ -261,8 +270,8 @@ class ReadArtifactTool(BaseTool):
                 and self._is_parse_error(content)
             )
             if attachment.get("parse_error") or legacy_pdf_error:
-                reparsed = await asyncio.to_thread(
-                    self._try_reparse, payload,
+                reparsed = self._try_reparse(
+                    payload,
                     conversation_id=conversation_id,
                     workspace_root=workspace_root,
                 )
@@ -314,18 +323,8 @@ class ReadArtifactTool(BaseTool):
     def _slice_lines(content: str, args: dict[str, Any]) -> tuple[str, str]:
         """Return the requested line window, plus a label for the UI summary."""
 
-        def _positive_int(key: str) -> int | None:
-            raw = args.get(key)
-            if raw is None or isinstance(raw, bool):
-                return None
-            try:
-                value = int(raw)
-            except (TypeError, ValueError):
-                return None
-            return value if value > 0 else None
-
-        offset = _positive_int("offset")
-        limit = _positive_int("limit")
+        offset = args.get("offset")
+        limit = args.get("limit")
         if offset is None and limit is None:
             return content, ""
 

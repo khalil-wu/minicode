@@ -1,5 +1,17 @@
 import { Check, Monitor, Moon, Sun, Type } from "lucide-react";
 import { useAppStore } from "../stores";
+import type { KeyboardEvent } from "react";
+
+const onRadioGroupKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+  if (!["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="radio"]'));
+  const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+  const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+    : (current + (["ArrowLeft", "ArrowUp"].includes(event.key) ? -1 : 1) + buttons.length) % buttons.length;
+  buttons[next].focus();
+  buttons[next].click();
+};
 
 const THEMES = [
   { id: "system", label: "系统", icon: Monitor },
@@ -40,7 +52,7 @@ export const AppearanceTab = () => {
     <>
       <section className="settings-group settings-appearance-theme">
         <h3 className="settings-group-title">主题</h3>
-        <div className="settings-theme-grid" role="radiogroup" aria-label="应用主题">
+        <div className="settings-theme-grid" role="radiogroup" aria-label="应用主题" onKeyDown={onRadioGroupKeyDown}>
           {THEMES.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -50,6 +62,7 @@ export const AppearanceTab = () => {
               data-active={themeMode === id ? "true" : "false"}
               role="radio"
               aria-checked={themeMode === id}
+              tabIndex={themeMode === id ? 0 : -1}
               aria-label={label}
               onClick={() => setThemeMode(id)}
             >
@@ -78,7 +91,7 @@ export const AppearanceTab = () => {
               <div className="settings-row-description">调整导航、对话和设置页面的基础字号。</div>
             </div>
             <div className="settings-row-control">
-              <div className="settings-segmented" role="radiogroup" aria-label="界面字号">
+              <div className="settings-segmented" role="radiogroup" aria-label="界面字号" onKeyDown={onRadioGroupKeyDown}>
                 {TEXT_SCALES.map((option) => (
                   <button
                     key={option.value}
@@ -87,6 +100,7 @@ export const AppearanceTab = () => {
                     data-active={selectedScale.value === option.value ? "true" : "false"}
                     role="radio"
                     aria-checked={selectedScale.value === option.value}
+                    tabIndex={selectedScale.value === option.value ? 0 : -1}
                     onClick={() => setTextScale(option.value)}
                   >
                     {option.label}
@@ -104,7 +118,7 @@ export const AppearanceTab = () => {
               <div className="settings-row-description">单独调整编辑器和代码块字号。</div>
             </div>
             <div className="settings-row-control">
-              <div className="settings-segmented" role="radiogroup" aria-label="代码字号">
+              <div className="settings-segmented" role="radiogroup" aria-label="代码字号" onKeyDown={onRadioGroupKeyDown}>
                 {CODE_TEXT_SCALES.map((option) => (
                   <button
                     key={option.value}
@@ -113,6 +127,7 @@ export const AppearanceTab = () => {
                     data-active={selectedCodeScale.value === option.value ? "true" : "false"}
                     role="radio"
                     aria-checked={selectedCodeScale.value === option.value}
+                    tabIndex={selectedCodeScale.value === option.value ? 0 : -1}
                     onClick={() => setCodeTextScale(option.value)}
                   >
                     {option.label}

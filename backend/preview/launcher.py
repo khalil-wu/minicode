@@ -11,7 +11,6 @@ import re
 import secrets
 import shlex
 import socket
-import subprocess
 import sys
 from collections import deque
 from dataclasses import asdict, dataclass, field, replace
@@ -552,7 +551,7 @@ async def mark_preview_ready(
     broadcast: BroadcastFn | None = None,
 ) -> bool:
     """Commit readiness after either process output or HTTP verification."""
-    if launched.process.returncode is not None or launched.status not in {"starting", "ready"}:
+    if not launched.is_active:
         return False
     transitioned = launched.status != "ready"
     launched.status = "ready"
@@ -648,10 +647,13 @@ async def _start_preview_config(
                 timeout=None,
             )
         sandbox_runner = SandboxRunner(policy)
+        from backend.tools.command_support import _host_shell_command
+
         exit_event = asyncio.Event()
         process = await sandbox_runner.spawn_shell_interactive(
             config.command,
             cwd=config.cwd,
+            host_command=_host_shell_command(config.command, cwd=config.cwd),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

@@ -168,8 +168,7 @@ export const normalizeDesktopExpandedPaths = (workspace: string, paths: Iterable
   return next;
 };
 
-export const normalizeChangePath = (path: string): string =>
-  path.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/$/, "");
+export const normalizeChangePath = normalizeWorkspacePath;
 
 export const parentTreePath = (path: string, workingDirectory: string): string => {
   const normalized = normalizeChangePath(path);

@@ -20,7 +20,7 @@ $repoRoot = Resolve-Path (Join-Path $scriptDir "..")
 
 Write-Host "[MiniCode Desktop] Repo root: $repoRoot"
 
-function Stop-ExistingMiniCodeDesktop {
+function Assert-DesktopRuntimeClosed {
   $desktopElectron = Join-Path $repoRoot "desktop\node_modules\electron\dist\electron.exe"
   if (-not (Test-Path $desktopElectron)) {
     return
@@ -28,7 +28,7 @@ function Stop-ExistingMiniCodeDesktop {
 
   $resolvedElectron = (Resolve-Path $desktopElectron).Path
   $currentPid = $PID
-  $processes = Get-CimInstance Win32_Process -Filter "name = 'electron.exe'" -ErrorAction SilentlyContinue |
+  $processes = Get-CimInstance Win32_Process -Filter "name = 'electron.exe'" -ErrorAction Stop |
     Where-Object {
       $_.ProcessId -ne $currentPid -and
       $_.ExecutablePath -and
@@ -39,15 +39,7 @@ function Stop-ExistingMiniCodeDesktop {
     return
   }
 
-  Write-Host "[MiniCode Desktop] Closing existing desktop instance before rebuilding frontend assets..."
-  foreach ($proc in $processes) {
-    try {
-      Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
-    } catch {
-      Write-Warning "Failed to stop existing Electron process $($proc.ProcessId): $($_.Exception.Message)"
-    }
-  }
-  Start-Sleep -Milliseconds 500
+  throw "This project's Electron runtime is still active. Close the desktop normally before rebuilding its frontend assets."
 }
 
 function Invoke-Step {
@@ -67,9 +59,8 @@ function Invoke-Step {
 
 # The Electron shell loads Vite's hashed dynamic chunks from frontend/dist.
 # Rebuilding while an old desktop window is alive deletes chunks that the old
-# renderer may still lazy-load, which turns into a white screen. Close this
-# project's previous Electron instance before touching dist.
-Stop-ExistingMiniCodeDesktop
+# renderer may still lazy-load. Normal app quit owns PTY/backend/browser cleanup.
+Assert-DesktopRuntimeClosed
 
 # Ensure frontend dependencies are installed.
 if (-not (Test-Path (Join-Path $repoRoot "frontend\node_modules"))) {
@@ -97,9 +88,13 @@ if ($LASTEXITCODE -ne 0) {
 
 # Build frontend assets used by Electron shell.
 Invoke-Step -Description "Building frontend..." -Action {
+  $previousRelativeBase = $env:MINICODE_VITE_RELATIVE_BASE
   $env:MINICODE_VITE_RELATIVE_BASE = "1"
-  npm --prefix "$repoRoot\frontend" run build
-  Remove-Item Env:MINICODE_VITE_RELATIVE_BASE -ErrorAction SilentlyContinue
+  try {
+    npm --prefix "$repoRoot\frontend" run build
+  } finally {
+    $env:MINICODE_VITE_RELATIVE_BASE = $previousRelativeBase
+  }
 }
 
 # Start desktop client (Electron + managed backend sidecar).

@@ -19,6 +19,9 @@ CONTEXT: MEMORY FOLDER STRUCTURE
 
 Folder structure (under {{ memory_root }}/):
 
+This folder is a temporary consolidation workspace. Use relative paths when referring to memory
+files in the generated artifacts; retain the original project paths provided by the input records.
+
 - memory_summary.md
   - Always loaded into the system prompt. First line must be exactly `v1`.
     Must stay dense, highly navigational, and discriminative enough to guide retrieval.

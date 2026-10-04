@@ -47,9 +47,7 @@ class BudgetTerminationCoordinator:
             post_tools=boundary.post_tools,
         )
 
-        reconcile = getattr(deps.context, "reconcile_dangling_tool_calls", None)
-        if callable(reconcile):
-            reconcile()
+        deps.context.reconcile_dangling_tool_calls()
 
         # MiniCode exposes max turns and max USD as error result subtypes,
         # and an exhausted provider/context recovery cannot produce a valid

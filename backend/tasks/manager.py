@@ -163,7 +163,7 @@ class TaskManager:
         managed = self._tasks.get(task_id)
         if managed is None or managed.task is None:
             raise KeyError(task_id)
-        return await managed.task
+        return await asyncio.shield(managed.task)
 
     async def cancel_all_and_wait(self) -> int:
         """Cancel and drain every live managed task.
@@ -198,10 +198,22 @@ class TaskManager:
             self._notify_changed()
         return len(pending)
 
-    async def _wrap_awaitable(self, awaitable: Any, *, timeout: float | None) -> Any:
+    async def _wrap_awaitable(self, awaitable: asyncio.Future[Any], *, timeout: float | None) -> Any:
         if timeout is None:
             return await awaitable
-        return await asyncio.wait_for(awaitable, timeout=timeout)
+        deadline = asyncio.timeout(timeout)
+        try:
+            async with deadline:
+                return await asyncio.shield(awaitable)
+        except TimeoutError as exc:
+            if not deadline.expired():
+                raise
+            await cancel_and_drain_receipt(
+                [awaitable],
+                timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label="managed task timeout",
+            )
+            raise TimeoutError(f"Task timed out after {timeout} seconds") from exc
 
     def _finalize(self, managed: ManagedTask, task: asyncio.Task[Any]) -> None:
         managed.updated_at = _utc_now_iso()

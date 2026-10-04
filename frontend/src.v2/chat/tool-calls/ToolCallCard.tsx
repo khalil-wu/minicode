@@ -7,75 +7,49 @@ import {
   Image as ImageIcon,
   LoaderCircle,
   RotateCw,
-  TerminalSquare,
 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useSharedSecondTick } from "../../lib/shared-tick";
-import { isFileChangeToolRecord, type ToolCallRecord, type ToolCallStatus } from "../../lib/tool-call-reducer";
+import type { ToolCallRecord } from "../../lib/tool-call-reducer";
+import { toolCleanupNotice } from "../../lib/tool-call-reducer";
 import {
   extractToolFilePath,
   ToolGlyph,
 } from "../toolUtils";
-import { StatusIcon } from "../../components/icons";
 import { useAppStore } from "../../stores";
 import type { ViewMode } from "../../stores/types";
 import { pushToast } from "../../overlays/ToastContainer";
 import { openWebInBrowser } from "../openWebInBrowser";
-import { purifyToolErrorText } from "../errorMessages";
-import { readableToolLabel } from "../toolDisplayName";
 import { openArtifactPreview } from "../openAttachmentPreview";
-import {
-  CommandToolRenderer,
-  FileChangeToolRenderer,
-  WebSearchToolRenderer,
-} from "./renderers";
+import { CommandToolRenderer } from "./renderers/CommandRenderer";
+import { WebSearchResultsView } from "./renderers/WebSearchRenderer";
+import { getRecordOutputText, isBrowserRecord, isCodeModeRecord, isHttpUrl, readableRecordLabel, recordInputTarget } from "../cells/activityCellHelpers";
 import { InlineDiff } from "../diff/InlineDiff";
 import { workspaceRelativeDiffPath } from "../diffPaths";
 import { getWebSocket } from "../../hooks/useWebSocket";
 import {
-  artifactImageResourceUrl,
+  artifactResourceUrl,
   inlineImageResourceUrl,
   withPreviewCacheBust,
 } from "../../lib/artifact-resource";
 import {
   artifactMediaTypeForProjection,
-  artifactSummaryForRecord,
+  artifactFallbackLabel,
   canonicalArtifactKind,
   recordHasImageArtifact,
 } from "../../lib/artifact-projection";
 
 const LOCAL_URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+(?:[/?#][^\s'"<>]*)?/i;
 
-function isCommandRecord(record: ToolCallRecord): boolean {
-  return record.resultKind === "command" || record.activityKind === "commandExecution";
-}
-
-function isWebRecord(record: ToolCallRecord): boolean {
-  return record.resultKind === "web" || record.resultKind === "search";
+function isWebSearchRecord(record: ToolCallRecord): boolean {
+  return record.resultKind === "search" || record.name === "web_search" || record.name === "websearch";
 }
 
 function evidenceLabel(record: ToolCallRecord): string {
-  const parts: string[] = [];
-  if (record.evidenceType === "candidate") parts.push("候选来源");
-  else if (record.evidenceType === "fetched") parts.push("已获取证据");
-  else if (record.evidenceType) parts.push(record.evidenceType);
-  if (record.extractionStatus) parts.push(`提取状态：${record.extractionStatus}`);
-  return parts.join(" - ");
+  if (record.evidenceType === "candidate") return "候选来源";
+  if (record.evidenceType === "fetched") return "已获取证据";
+  return "";
 }
-
-const RawJsonDetails = ({ args }: { args: Record<string, unknown> }) => {
-  if (Object.keys(args).length === 0) return null;
-  return (
-    <details className="border-t border-[var(--border-subtle)] pt-2">
-      <summary className="cursor-pointer text-[var(--text-muted)] text-xs inline-flex items-center gap-[5px]">
-        原始 JSON
-      </summary>
-      <pre className="mt-[7px] mb-0 p-2 border border-[var(--border-subtle)] rounded bg-[var(--surface-soft)] text-[var(--text-secondary)] whitespace-pre-wrap break-words">
-        {JSON.stringify(args, null, 2)}
-      </pre>
-    </details>
-  );
-};
 
 function normalizeLocalUrl(url: string): string {
   return url.replace(/^https?:\/\/0\.0\.0\.0/i, (prefix) => prefix.replace("0.0.0.0", "localhost"));
@@ -86,37 +60,26 @@ const Spinner = () => (
 );
 
 function phaseLabel(record: ToolCallRecord): string {
+  if (record.status === "failed") return "失败";
+  if (record.status === "timeout") return "超时";
+  if (record.status === "blocked") return "已阻止";
+  if (record.status === "partial") return "部分完成";
+  if (record.status === "cancelled") return "已取消";
+  if (isCodeModeRecord(record) && ["Script yielded", "Script running", "脚本仍在运行"].includes(record.displaySummary || "")) return "运行中";
+  if (record.status === "success") return "已完成";
   const transition = String(record.transition || "").toLowerCase();
-  if (transition === "waiting_approval") return "等待授权";
-  if (transition === "queued") return "排队中";
+  if (transition === "waiting_approval" || record.waitingOn === "approval") return "等待审批";
+  if (record.waitingOn === "user" || record.waitingOn === "user_input") return "等待用户输入";
+  if (transition === "queued" || record.waitingOn === "dispatch") return "排队中";
   if (transition === "prepared") return "准备中";
   if (transition === "streaming_output") return "输出中";
   if (record.status === "pending") return "准备中";
   if (record.status === "running") return "运行中";
-  if (record.status === "failed" || record.status === "timeout") return "需要处理";
-  if (record.status === "blocked") return "已阻止";
-  if (record.status === "partial") return "部分完成";
-  if (record.status === "cancelled") return "已取消";
   return "已完成";
 }
 
 function shouldAutoOpen(viewMode: ViewMode): boolean {
   return viewMode === "verbose";
-}
-
-function waitingOnLabel(record: ToolCallRecord): string {
-  if (record.blockingReason) return record.blockingReason;
-  if (record.waitingOn) {
-    const waitingOn = record.waitingOn.toLowerCase();
-    if (waitingOn === "approval") return "等待审批";
-    if (waitingOn === "dispatch") return "等待调度";
-    if (waitingOn === "user" || waitingOn === "user_input") return "等待用户输入";
-    return `等待 ${record.waitingOn.replace(/^waiting(?: on)?\s*/i, "")}`;
-  }
-  if (record.transition === "waiting_approval") return "等待审批";
-  if (record.transition === "queued") return "等待调度";
-  if (record.status === "pending") return "等待调度";
-  return "";
 }
 
 const SmallAction = ({
@@ -156,7 +119,9 @@ export const ToolCallCard = memo(({
   /** Explicit transcript owner; side/history views must not borrow the active chat. */
   conversationId?: string;
 }) => {
-  const [open, setOpen] = useState(() => shouldAutoOpen(viewMode));
+  const hasFailure = ["failed", "blocked", "timeout"].includes(record.status);
+  const cleanupNotice = toolCleanupNotice(record.cleanupReceipt);
+  const [open, setOpen] = useState(() => shouldAutoOpen(viewMode) || hasFailure);
   const [outputExpanded, setOutputExpanded] = useState(false);
   const userToggled = useRef(false);
   const isActive = record.status === "running" || record.status === "pending";
@@ -170,35 +135,26 @@ export const ToolCallCard = memo(({
       return;
     }
     if (!userToggled.current) {
-      setOpen(shouldAutoOpen(viewMode));
+      setOpen(shouldAutoOpen(viewMode) || hasFailure);
     }
-  }, [record, record.status, viewMode]);
+  }, [hasFailure, record, record.status, viewMode]);
   const duration =
     record.finishedAt && record.startedAt
       ? `${((record.finishedAt - record.startedAt) / 1000).toFixed(1)}s`
       : record.status === "running"
         ? formatElapsed(now - (record.startedAt ?? now))
         : "";
-  const waitingOn = waitingOnLabel(record);
-
   const filePath = extractToolFilePath(record.args);
-  const inputSummary = record.inputSummary || "";
-  const displayFilePath = filePath
-    ? workspaceRelativeDiffPath(filePath, workspaceDirectory) || filePath
-    : null;
-  const displayInput = displayFilePath || inputSummary;
-  const previewUrl = record.summary ? normalizeLocalUrl(record.summary.match(LOCAL_URL_RE)?.[0] ?? "") : "";
-  const rawResultSummary = purifyToolErrorText(record.summary?.trim() || "");
-  const resultSummary = record.displaySummary || rawResultSummary;
-  const readableName = readableToolLabel(record.name);
-  const hasReadableProtocolName = Boolean(record.name && readableName !== record.name);
-  const toolLabel = hasReadableProtocolName
-    ? readableName
-    : readableToolLabel(
-        viewMode === "verbose"
-          ? record.displayHint || record.name
-          : record.displayHint || record.displaySummary || record.name || "工具",
-      );
+  const inputTarget = recordInputTarget(record);
+  const displayInput = filePath && inputTarget === filePath
+    ? workspaceRelativeDiffPath(filePath, workspaceDirectory) || inputTarget
+    : inputTarget;
+  const resultText = getRecordOutputText(record)
+    || (hasFailure ? record.userSummary || "工具执行失败。" : "");
+  const previewUrl = normalizeLocalUrl(resultText.match(LOCAL_URL_RE)?.[0] ?? "");
+  const toolLabel = readableRecordLabel(record);
+  const phase = phaseLabel(record);
+  const showStatus = phase !== "已完成";
   const evidence = evidenceLabel(record);
   const imageArtifact = recordHasImageArtifact(record)
     ? {
@@ -211,16 +167,9 @@ export const ToolCallCard = memo(({
     : null;
 
   const copyResult = () => {
-    // Copy the actual bounded tool output, not the humanized display summary
-    // (cc copies the real result; the summary may drop or rephrase content).
-    const text = record.outputPreview
-      || record.stdoutPreview
-      || record.stderrPreview
-      || resultSummary
-      || record.summary
-      || "";
-    if (!text) return;
-    void navigator.clipboard?.writeText(text)
+    // The same user-facing result is displayed and copied. Canonical raw
+    // output and orchestration envelopes remain in the record and Inspector.
+    void navigator.clipboard.writeText(resultText)
       .then(() => pushToast("已复制工具结果", "success", 1200))
       .catch(() => pushToast("复制失败", "error", 1800));
   };
@@ -231,8 +180,7 @@ export const ToolCallCard = memo(({
     if (!ownerConversationId) return;
     openArtifactPreview({
       artifactId: record.artifactId,
-      name: record.displaySummary || record.summary || "生成文件",
-      summary: record.displaySummary || record.summary,
+      name: isBrowserRecord(record) && imageArtifact ? "浏览器截图" : artifactFallbackLabel(record.artifactKind, record.artifactMediaType),
       kind: record.artifactKind || record.resultKind,
       mediaType: record.artifactMediaType,
       conversationId: ownerConversationId,
@@ -246,17 +194,18 @@ export const ToolCallCard = memo(({
 
   if (viewMode === "summary") {
     return (
-      <div className="flex items-center gap-1.5 py-0.5 text-xs text-[var(--text-muted)]">
-        <StatusIcon status={record.status} size={14} />
-        <ToolGlyph kind={record.activityKind || record.resultKind} size={14} className="shrink-0" />
-        <span className="text-[var(--text-secondary)] font-semibold">
-          {toolLabel}
-        </span>
-        {displayFilePath && (
-          <span style={summaryValueStyle}>{displayFilePath}</span>
-        )}
-        {!filePath && inputSummary && <span style={summaryValueStyle}>{inputSummary}</span>}
-        {duration && <span>{duration}</span>}
+      <div className="grid gap-1 text-xs text-[var(--text-muted)]">
+        <div className="flex items-center gap-1.5 py-0.5">
+          {isActive ? <Spinner /> : <ToolGlyph kind={record.activityKind || record.resultKind} size={14} className="shrink-0" />}
+          <span className="text-[var(--text-secondary)] font-semibold">
+            {toolLabel}
+          </span>
+          {displayInput && <span style={summaryValueStyle}>{displayInput}</span>}
+          {showStatus && <span>{phase}</span>}
+          {showStatus && duration && <span>{duration}</span>}
+          {resultText && <SmallAction label="复制工具结果" onClick={copyResult}><Copy size={14} /></SmallAction>}
+        </div>
+        {hasFailure && <div className="text-[var(--state-danger)] whitespace-pre-wrap break-words">{resultText}</div>}
       </div>
     );
   }
@@ -315,7 +264,7 @@ export const ToolCallCard = memo(({
           }}
         >
           {(record.status === "running" || record.status === "pending") ? <Spinner /> : <ToolGlyph kind={record.activityKind || record.resultKind} size={14} className="shrink-0" />}
-          <span style={phaseBadgeStyle(record)}>{phaseLabel(record)}</span>
+          {showStatus && <span style={phaseBadgeStyle(record)}>{phase}</span>}
           <span className="text-[var(--accent-primary)] font-semibold">
             {toolLabel}
           </span>
@@ -325,14 +274,9 @@ export const ToolCallCard = memo(({
             </span>
           )}
           <span className="flex-1" />
-          {duration && (
+          {showStatus && duration && (
             <span className="text-[var(--text-muted)] text-xs shrink-0">
-              {record.status === "running" ? `运行中 · ${duration}` : record.status === "pending" ? `准备中 · ${duration}` : duration}
-            </span>
-          )}
-          {waitingOn && (
-            <span className="text-[var(--text-muted)] text-xs shrink-0">
-              {waitingOn}
+              {duration}
             </span>
           )}
         </button>
@@ -353,13 +297,12 @@ export const ToolCallCard = memo(({
             预览
           </SmallAction>
         )}
-        {resultSummary && (
+        {resultText && (
           <SmallAction label="复制工具结果" onClick={copyResult}>
             <Copy size={14} />
             复制
           </SmallAction>
         )}
-        <StatusIcon status={record.status} size={14} />
         <button
           type="button"
           title={open ? "收起工具详情" : "展开工具详情"}
@@ -373,6 +316,7 @@ export const ToolCallCard = memo(({
           {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </button>
       </div>
+      {cleanupNotice && <div className="text-xs text-[var(--text-secondary)]" role="status">{cleanupNotice}</div>}
       {imageArtifact && record.artifactId && (
         <ToolCallArtifactImage
           record={record}
@@ -395,39 +339,29 @@ export const ToolCallCard = memo(({
             </>
           )}
           <div className="grid gap-2 p-2.5 px-3.5 font-mono text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words">
-            {inputSummary && (
-              <div style={humanSummaryStyle}>
-            {isCommandRecord(record) ? <TerminalSquare size={14} /> : <ToolGlyph kind={record.activityKind || record.resultKind} size={14} />}
-            <span>{inputSummary}</span>
-          </div>
-        )}
+            {record.diff && (record.diff.plus > 0 || record.diff.minus > 0) && (
+              <div className="flex items-center gap-2">
+                {record.diff.plus > 0 && <span className="text-[var(--state-success)]">+{record.diff.plus}</span>}
+                {record.diff.minus > 0 && <span className="text-[var(--state-danger)]">-{record.diff.minus}</span>}
+              </div>
+            )}
             {record.limitation && (
               <div style={limitationBadgeStyle}>
                 {record.limitation}
               </div>
             )}
-            {resultSummary && (
+            {resultText && (
               <div>
-                {isCommandRecord(record) ? (
-                  <CommandToolRenderer record={record} resultSummary={resultSummary} />
-                ) : isWebRecord(record) ? (
-                  <WebSearchToolRenderer
-                    record={record}
-                    resultSummary={resultSummary}
-                    rawResultSummary={rawResultSummary}
-                  />
-                ) : isFileChangeToolRecord(record) ? (
-                  <FileChangeToolRenderer
-                    record={record}
-                    inputSummary={displayFilePath || inputSummary}
-                    resultSummary={resultSummary}
-                  />
+                {record.name !== "monitor" && (record.resultKind === "command" || record.activityKind === "commandExecution" || record.name === "run_command") ? (
+                  <CommandToolRenderer record={record} resultSummary={resultText} />
+                ) : isWebSearchRecord(record) ? (
+                  <WebSearchResultsView text={resultText} />
                 ) : (
                   <>
-                    <div className="text-[var(--text-muted)] mb-1 font-medium">结果</div>
-                    {resultSummary.length > 500 && !outputExpanded ? (
+                    {!record.diff && <div className="text-[var(--text-muted)] mb-1 font-medium">结果</div>}
+                    {resultText.length > 500 && !outputExpanded ? (
                       <>
-                        <div>{resultSummary.slice(0, 500)}...</div>
+                        <div>{resultText.slice(0, 500)}...</div>
                         <button
                           type="button"
                           onClick={() => setOutputExpanded(true)}
@@ -437,24 +371,17 @@ export const ToolCallCard = memo(({
                         </button>
                       </>
                     ) : (
-                      <div>{resultSummary}</div>
+                      <div>{resultText}</div>
                     )}
                   </>
                 )}
               </div>
             )}
-            {record.sourceUrl && (
+            {record.sourceUrl && isHttpUrl(record.sourceUrl) && record.sourceUrl !== inputTarget && !resultText.includes(record.sourceUrl) && (
               <div style={sourceUrlStyle}>
                 来源：{record.sourceUrl}
               </div>
             )}
-            {record.contentPreview && purifyToolErrorText(record.contentPreview) !== resultSummary && !isWebRecord(record) && (
-              <div>
-                <div className="text-[var(--text-muted)] mb-1 font-medium">内容预览</div>
-                <div>{purifyToolErrorText(record.contentPreview)}</div>
-              </div>
-            )}
-            {viewMode === "verbose" && <RawJsonDetails args={record.args} />}
           </div>
         </div>
       )}
@@ -482,19 +409,19 @@ function ToolCallArtifactImage({
   const inlineUrl = inlineImageResourceUrl(record.sourceUrl);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [loadState, setLoadState] = useState<"loading" | "loaded" | "error">("loading");
-  const baseUrl = useMemo(() => artifactImageResourceUrl({
+  const baseUrl = useMemo(() => artifactResourceUrl({
     artifactId,
     conversationId: ownerConversationId,
     sessionId,
     source: "artifact",
     originalUrl: inlineUrl,
     isConnected,
-  }), [artifactId, inlineUrl, isConnected, ownerConversationId, sessionId]);
+  }), [artifactId, inlineUrl, isConnected, ownerConversationId, sessionId, reloadNonce]);
 
   useEffect(() => {
     setReloadNonce(0);
     setLoadState("loading");
-  }, [artifactId, baseUrl, isConnected, ownerConversationId, mediaType, sessionId]);
+  }, [artifactId, inlineUrl, isConnected, ownerConversationId, mediaType, sessionId]);
 
   const imageUrl = withPreviewCacheBust(baseUrl, reloadNonce);
 
@@ -538,13 +465,13 @@ function ToolCallArtifactImage({
           event.stopPropagation();
           onOpen();
         }}
-        aria-label={`打开${artifactSummaryForRecord(record)}`}
+        aria-label="打开图片预览"
         style={toolArtifactImageButtonStyle}
       >
         <img
           key={`${imageUrl}:${reloadNonce}`}
           src={imageUrl}
-          alt={artifactSummaryForRecord(record)}
+          alt="工具生成图片"
           style={toolArtifactImageStyle}
           data-load-state={loadState}
           onLoad={() => setLoadState("loaded")}
@@ -561,18 +488,6 @@ function formatElapsed(ms: number): string {
   const seconds = total % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}s`;
 }
-
-const humanSummaryStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
-  padding: "6px 8px",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 4px)",
-  background: "var(--surface-soft)",
-  color: "var(--text-secondary)",
-  overflow: "hidden",
-};
 
 const summaryValueStyle: React.CSSProperties = {
   minWidth: 0,

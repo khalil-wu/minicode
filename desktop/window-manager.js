@@ -293,12 +293,7 @@ async function createMainWindow() {
       event.preventDefault();
       return;
     }
-    // Ctrl+P opens quick-open (intentional override of browser print shortcut)
-    if (input.control && !input.shift && !input.alt && input.key === "p") {
-      mainWindow.webContents.send("minicode:shortcut:import");
-      event.preventDefault();
-      return;
-    }
+    // File search is handled by the renderer using the user's current binding.
     // Zoom: Ctrl+= / Ctrl+Plus -> zoom in, Ctrl+- -> zoom out, Ctrl+0 -> reset
     if (input.control && !input.alt) {
       const wc = mainWindow.webContents;

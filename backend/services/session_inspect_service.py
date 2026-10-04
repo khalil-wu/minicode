@@ -143,10 +143,20 @@ def build_usage_inspect_result(
             f"write {prompt_cache['write_tokens']} "
             f"hit {prompt_cache['hit_rate']}%"
         )
+    unpriced_requests = int(tracker_summary.get("unpriced_requests") or 0)
+    if unpriced_requests:
+        cost_message = (
+            f"estimated priced-request subtotal ${cost:.4f}"
+            if tracker_summary.get("priced_requests")
+            else "session cost unknown"
+        )
+        cost_message += f" ({unpriced_requests} unpriced requests)"
+    else:
+        cost_message = f"estimated session cost ${cost:.4f}"
     message = (
         f"Usage: context {used}/{total} tokens ({percent}%) | "
         f"session API tokens in {input_tokens} out {output_tokens} | "
-        f"estimated session cost ${cost:.4f}"
+        f"{cost_message}"
         f"{cache_message}"
     )
 

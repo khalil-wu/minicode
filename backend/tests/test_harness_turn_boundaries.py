@@ -40,8 +40,10 @@ class Provider(LLMAdapter):
 
 
 @pytest.fixture
-def query_factory(tmp_path):
+def query_factory(tmp_path, monkeypatch):
     runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", swarm_store_dir=tmp_path / "swarm", enable_lease_heartbeat=False)
+    original_load = load_latest_checkpoint
+    monkeypatch.setattr(__name__ + ".load_latest_checkpoint", lambda session_id, **kwargs: original_load(session_id, base_dir=runtime.state_root, **kwargs))
 
     def session(llm, registry=None, limit=3):
         return AgentSession(
@@ -247,6 +249,7 @@ def test_restored_input_is_not_admitted_or_hooked_again(query_factory, source):
         snapshot = owner.context_builder.export_snapshot()
         save_checkpoint(
             session_id="boundary-session", conversation_id="boundary-conversation",
+            base_dir=request.runtime.run_context.agent_runtime.state_root,
             user_message=message, iterations=0, reply="", messages=snapshot["history"],
             context_snapshot=snapshot, tool_calls=[], active_skills=[], disabled_tools=set(),
             stopped_reason="interrupted", last_mutation_index=0,

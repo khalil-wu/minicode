@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 
 class TranscriptCursorMissing(ValueError):
@@ -31,9 +31,17 @@ def read_message(path: Path, index: list[list[Any]], message_id: str) -> dict[st
     if row is None:
         return None
     with path.open("rb") as stream:
-        stream.seek(row[2])
-        message = json.loads(stream.read(row[3]))
-    if message.get("id") != message_id or message.get("role") != row[1]:
+        return _read_indexed_message(stream, row)
+
+
+def _read_indexed_message(stream: BinaryIO, row: list[Any]) -> dict[str, Any]:
+    message_id, role, offset, size = row
+    stream.seek(offset)
+    raw = stream.read(size)
+    if len(raw) != size:
+        raise TranscriptIndexError("Transcript generation is truncated at its indexed byte range")
+    message = json.loads(raw.decode("utf-8"))
+    if not isinstance(message, dict) or message.get("id") != message_id or message.get("role") != role:
         raise TranscriptIndexError("Transcript index does not match its generation")
     return message
 
@@ -63,12 +71,7 @@ def read_page(
             if position == replacement_index:
                 messages.append(replacement)
                 continue
-            message_id, role, offset, size = rows[position]
-            stream.seek(offset)
-            message = json.loads(stream.read(size))
-            if message.get("id") != message_id or message.get("role") != role:
-                raise TranscriptIndexError("Transcript index does not match its generation")
-            messages.append(message)
+            messages.append(_read_indexed_message(stream, rows[position]))
     return {
         "transcript": messages,
         "transcript_page": {"before_message_id": rows[start][0] if start < end else "",

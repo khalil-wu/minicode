@@ -38,6 +38,7 @@ class RunCheckpointResumeResult:
     iteration: int
     stopped_reason: str | None
     user_message: str
+    checkpoint_session_id: str = ""
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -133,12 +134,14 @@ def list_run_checkpoints(
     clean_session_id = str(session_id or "").strip()
     clean_conversation_id = str(conversation_id or "").strip()
     checkpoints: list[dict[str, Any]] = []
+    runtime_obj = runtime or default_runtime()
     if clean_session_id:
         try:
             clean_session_id = validate_storage_id(clean_session_id, field_name="session_id")
         except ValueError as exc:
             raise CheckpointServiceError(str(exc)) from exc
-        checkpoint_dir = get_checkpoint_dir(clean_session_id)
+        source = runtime_obj.latest_main_run(clean_conversation_id) if clean_conversation_id else None
+        checkpoint_dir = get_checkpoint_dir(source.session_id if source else clean_session_id, runtime_obj.state_root)
         for path in sorted(checkpoint_dir.glob("*.json"), reverse=True)[:50]:
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
@@ -165,7 +168,6 @@ def list_run_checkpoints(
                     "created_at": payload.get("timestamp"),
                 }
             )
-    runtime_obj = runtime or default_runtime()
     runtime_snapshot = runtime_obj.list_runs(conversation_id=clean_conversation_id, include_subagents=True)
     return RunCheckpointListResult(
         session_id=clean_session_id,
@@ -180,6 +182,7 @@ def prepare_run_checkpoint_resume(
     session_id: str,
     requested_conversation_id: str = "",
     active_conversation_id: str = "",
+    runtime: Any | None = None,
 ) -> RunCheckpointResumeResult | None:
     from backend.agent.checkpoint import (
         CheckpointError,
@@ -201,18 +204,29 @@ def prepare_run_checkpoint_resume(
     if not conversation_id:
         raise CheckpointServiceError("No active conversation. Cannot resume.")
 
+    from backend.agent.runtime import default_runtime
+
+    runtime_obj = runtime or default_runtime()
+    source = runtime_obj.latest_main_run(conversation_id)
+    if source is not None and source.status == "completed":
+        return None
+    checkpoint_session_id = source.session_id if source is not None else clean_session_id
+
     # A corrupt checkpoint is a user-visible resume failure, not an unhandled
     # error: CheckpointError is a RuntimeError, so without this the exception
     # escapes agent.resume entirely and the durable command path re-claims it
     # forever while the client never hears back.
     try:
         checkpoint = load_latest_run_checkpoint(
-            clean_session_id,
+            checkpoint_session_id,
+            base_dir=runtime_obj.state_root,
             conversation_id=conversation_id,
         )
     except CheckpointError as exc:
         raise CheckpointServiceError(f"Cannot resume: {exc}") from exc
     if checkpoint is None:
+        return None
+    if source is not None and checkpoint.run_id != source.run_id:
         return None
 
     return RunCheckpointResumeResult(
@@ -222,4 +236,5 @@ def prepare_run_checkpoint_resume(
         iteration=checkpoint.iterations,
         stopped_reason=checkpoint.stopped_reason,
         user_message=checkpoint.user_message,
+        checkpoint_session_id=checkpoint.session_id,
     )

@@ -144,6 +144,20 @@ describe("composer user-boundary regressions", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("scrolls keyboard history selection into view and clamps selection after the list shrinks", async () => {
+    const select = vi.fn();
+    Element.prototype.scrollIntoView = vi.fn();
+    const view = render(<PromptHistoryOverlay open items={Array.from({ length: 30 }, (_, index) => `prompt ${index}`)} onClear={vi.fn()} onSelect={select} onClose={vi.fn()} />);
+    await act(async () => {});
+    const input = screen.getByRole("textbox", { name: "搜索输入历史" });
+    for (let index = 0; index < 25; index++) fireEvent.keyDown(input, { key: "ArrowDown" });
+    const option = screen.getByRole("option", { name: "prompt 25" });
+    expect(vi.mocked(option.scrollIntoView).mock.instances.at(-1)).toBe(option);
+    view.rerender(<PromptHistoryOverlay open items={["remaining"]} onClear={vi.fn()} onSelect={select} onClose={vi.fn()} />);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(select).toHaveBeenCalledWith("remaining");
+  });
+
   it("gives the primary textarea a stable accessible name", () => {
     render(<ComposerTextarea value="" onChange={vi.fn()} onSubmit={vi.fn()} />);
     expect(computeAccessibleName(screen.getByRole("textbox"))).toBe("消息输入");

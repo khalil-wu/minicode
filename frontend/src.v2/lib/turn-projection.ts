@@ -149,6 +149,8 @@ export const activityKindFromToolRecord = (record: ToolCallRecord): TurnActivity
   // The operation name is the canonical discriminator for this one built-in,
   // so it must win before the broad declaration is accepted.
   if (name === "list_files") return "workspaceList";
+  // Monitoring an existing process is not executing a new shell command.
+  if (name === "monitor") return "genericTool";
   if (declared && declared !== "genericTool" && ACTIVITY_KINDS.has(declared as TurnActivityKind)) {
     return declared as TurnActivityKind;
   }

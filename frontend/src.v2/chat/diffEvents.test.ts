@@ -1,10 +1,14 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleDiffEvent } from "./diffEvents";
 import { useAppStore } from "../stores";
 import type { ServerEvent } from "../protocol/events";
+import { pushToast } from "../overlays/ToastContainer";
+
+vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 describe("handleDiffEvent", () => {
   beforeEach(() => {
+    vi.mocked(pushToast).mockClear();
     useAppStore.setState({
       conversationId: "conv-current",
       workingDirectory: "C:\\workspace",
@@ -82,6 +86,7 @@ describe("handleDiffEvent", () => {
   it("stores ordinary worktree diffs as global workspace state", () => {
     handleDiffEvent({
       type: "diff.git_working_tree",
+      is_git_repo: true,
       conversation_id: "conv-current",
       workspace_root: "C:\\workspace",
       files: [{ path: "src/app.ts", patch: "diff", additions: 2, deletions: 0 }],
@@ -93,6 +98,47 @@ describe("handleDiffEvent", () => {
       { path: "src/app.ts", patch: "diff", additions: 2, deletions: 0, isBinary: undefined },
     ]);
     expect(useAppStore.getState().gitChanges.untracked).toEqual(["new.txt"]);
+    expect(useAppStore.getState().gitChanges.isGitRepo).toBe(true);
+  });
+
+  it.each(["diff.git_working_tree", "diff.git_staged"] as const)("stores %s for a plain folder without an error notification", (type) => {
+    useAppStore.setState({
+      gitChanges: {
+        workingTree: [{ path: "old.txt", additions: 1, deletions: 0 }],
+        staged: [{ path: "old-staged.txt", additions: 1, deletions: 0 }],
+        untracked: ["old-untracked.txt"],
+        loading: true,
+      },
+    });
+    handleDiffEvent({
+      type,
+      conversation_id: "conv-current",
+      workspace_root: "C:\\workspace",
+      is_git_repo: false,
+      files: [],
+      untracked: [],
+    } as ServerEvent);
+
+    expect(useAppStore.getState().gitChanges).toMatchObject({
+      isGitRepo: false, workingTree: [], staged: [], untracked: [], loading: false,
+    });
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it("clears repository detection when switching folders", () => {
+    useAppStore.getState().setGitChanges({ isGitRepo: false });
+    useAppStore.getState().setWorkingDirectory("C:\\new-project");
+    expect(useAppStore.getState().gitChanges.isGitRepo).toBeUndefined();
+  });
+
+  it("clears the previous conversation's Git state before restoring another project", () => {
+    useAppStore.setState({
+      conversations: [{ id: "conv-other", title: "Other project", updatedAt: "", workspaceRoot: "C:\\other-project" }],
+      gitChanges: { isGitRepo: false, workingTree: [], staged: [], untracked: [], loading: false },
+    });
+    useAppStore.getState().applyConversationSwitched({ conversationId: "conv-other" });
+    expect(useAppStore.getState().workingDirectory).toBe("C:\\other-project");
+    expect(useAppStore.getState().gitChanges.isGitRepo).toBeUndefined();
   });
 
   it("keeps POSIX workspace owners case-sensitive", () => {

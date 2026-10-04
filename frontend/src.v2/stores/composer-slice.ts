@@ -104,14 +104,31 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
     set((s) => {
       const removed = s.attachments.find((a) => a.id === id);
       revokeBlobDataUrl(removed?.dataUrl);
-      return { attachments: s.attachments.filter((a) => a.id !== id) };
+      return {
+        attachments: s.attachments.filter((a) => a.id !== id),
+        conversationWorkbenchStates: Object.fromEntries(
+          Object.entries(s.conversationWorkbenchStates).map(([conversationId, state]) => [
+            conversationId,
+            { ...state, attachments: (state.attachments ?? []).filter((attachment) => attachment.id !== id) },
+          ]),
+        ),
+      };
     }),
   clearAttachments: () =>
     set((s) => {
       // Revoke every blob: dataURL so image blob URLs don't leak when the
       // composer is cleared on send / conversation switch / long sessions.
       for (const attachment of s.attachments) revokeBlobDataUrl(attachment.dataUrl);
-      return { attachments: [] };
+      const removedIds = new Set(s.attachments.map((attachment) => attachment.id));
+      return {
+        attachments: [],
+        conversationWorkbenchStates: Object.fromEntries(
+          Object.entries(s.conversationWorkbenchStates).map(([conversationId, state]) => [
+            conversationId,
+            { ...state, attachments: (state.attachments ?? []).filter((attachment) => !removedIds.has(attachment.id)) },
+          ]),
+        ),
+      };
     }),
   setPermissionMode: (m) => {
     const before = get();

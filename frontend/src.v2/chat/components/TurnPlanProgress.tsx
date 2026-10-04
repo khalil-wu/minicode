@@ -3,7 +3,6 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../../stores";
 import type { TurnPlanStep } from "../../protocol/events";
 import type { ChatMessage, PlanState } from "../../stores/types";
-import { visiblePlanStepStatus } from "../../lib/planVisibility";
 import "./turn-plan-progress.css";
 
 interface TurnPlanProgressProps {
@@ -119,7 +118,7 @@ export function TurnPlanProgress({ wide = false }: TurnPlanProgressProps = {}) {
 }
 
 function PlanStepRow({ step }: { step: TurnPlanStep }) {
-  const status = visiblePlanStepStatus(step);
+  const status = step.status;
   const isActive = status === "in_progress";
   const Icon = status === "completed"
     ? Check
@@ -167,8 +166,8 @@ function planProgress(steps: TurnPlanStep[]): {
   activeStep?: string;
   status: "pending" | "running" | "completed";
 } {
-  const active = steps.findIndex((step) => visiblePlanStepStatus(step) === "in_progress");
-  const completed = steps.filter((step) => visiblePlanStepStatus(step) === "completed").length;
+  const active = steps.findIndex((step) => step.status === "in_progress");
+  const completed = steps.filter((step) => step.status === "completed").length;
   const allCompleted = completed === steps.length;
   return {
     total: steps.length,

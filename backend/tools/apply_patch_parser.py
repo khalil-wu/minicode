@@ -143,7 +143,9 @@ def parse_patch(text: str) -> list[FileChange]:
             i += 1
             move_to: str | None = None
             if i < n and body[i].startswith(MOVE_TO):
-                move_to = body[i][len(MOVE_TO):].strip() or None
+                move_to = body[i][len(MOVE_TO):].strip()
+                if not move_to:
+                    raise ApplyPatchError(f"Update File '{path}': 'Move to' is missing a path.")
                 i += 1
             hunks, i = _parse_update_hunks(body, i, n, path)
             if not hunks and not move_to:
@@ -199,13 +201,22 @@ def _parse_update_hunks(
 
     def flush() -> None:
         nonlocal current
-        if current is not None and (current.old_lines or current.new_lines or current.is_eof):
+        if current is not None:
+            if not current.old_lines and not current.new_lines:
+                raise ApplyPatchError(f"Update File '{path}': change hunk contains no lines.")
             hunks.append(current)
         current = None
 
     while i < n and not _is_section_header(body[i]):
         row = body[i]
-        if row.startswith(CHANGE_MARKER):
+        is_change_marker = row == CHANGE_MARKER or row.startswith(CHANGE_MARKER + " ")
+        if current is not None and current.is_eof:
+            if not row.strip():
+                i += 1
+                continue
+            if not is_change_marker:
+                raise ApplyPatchError(f"Update File '{path}': a new hunk after 'End of File' must start with '@@'.")
+        if is_change_marker:
             # New change block. Text after @@ is an orientation anchor (for
             # example ``@@ class Media:``); the hunk is then searched for after
             # that line. Keeping the anchor materially improves patches against
@@ -215,8 +226,8 @@ def _parse_update_hunks(
             i += 1
             continue
         if row.strip() == END_OF_FILE:
-            if current is None:
-                current = PatchHunk()
+            if current is None or not (current.old_lines or current.new_lines):
+                raise ApplyPatchError(f"Update File '{path}': 'End of File' must follow change lines.")
             current.is_eof = True
             i += 1
             continue

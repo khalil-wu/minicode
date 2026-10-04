@@ -6,6 +6,7 @@ import { useMemo } from 'react'
 import { EmptyState } from '../../components/EmptyState'
 import { useAppStore } from '../../stores'
 import { openWebTarget } from '../../chat/openWebTarget'
+import { revealConversationMessage } from '../../chat/revealConversationMessage'
 import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } from '../../chat/openAttachmentPreview'
 import { hasVisibleActiveConversation } from '../../chat/activeConversation'
 import { openAutomations } from '../../lib/automations-navigation'
@@ -146,7 +147,7 @@ export const ActivityTab = () => {
     <div style={activityPanelStyle}>
       <ActivityWorkspaceSection items={state.workspace} />
       <ActivityAttachmentsSection items={state.attachments} workingDirectory={workingDirectory} />
-      <ActivitySourcesSection items={state.sources} />
+      <ActivitySourcesSection items={state.sources} conversationId={conversationId} />
       <ActivityOutputSection items={state.output} />
       <ActivityRunsSection items={state.runs} />
       <ActivityBrowserAnnotationsSection items={state.browserAnnotations} />
@@ -292,6 +293,7 @@ const ActivityBrowserAnnotationsSection = ({ items }: { items: ActivityBrowserAn
     store.addInspectorEntry({
       targetKind: 'message',
       targetId: item.id,
+      conversationId: store.conversationId || undefined,
       payload: {
         kind: 'browser_annotation',
         id: item.id,
@@ -308,7 +310,7 @@ const ActivityBrowserAnnotationsSection = ({ items }: { items: ActivityBrowserAn
       },
       timestamp: Date.now(),
     })
-    store.setInspectorFocus({ kind: 'browser_annotation', id: item.id })
+    store.setInspectorFocus({ kind: 'message', id: item.id })
     store.setRightStackTab('inspector')
   }
 
@@ -366,6 +368,7 @@ const ActivityAttachmentsSection = ({
     store.addInspectorEntry({
       targetKind: 'message',
       targetId: item.messageId,
+      conversationId: store.conversationId || undefined,
       payload: {
         kind: 'attachment',
         attachmentId: item.id,
@@ -378,7 +381,7 @@ const ActivityAttachmentsSection = ({
       },
       timestamp: Date.now(),
     })
-    store.setInspectorFocus({ kind: 'attachment', id: item.id })
+    store.setInspectorFocus({ kind: 'message', id: item.messageId })
     store.setRightStackTab('inspector')
   }
 
@@ -461,15 +464,16 @@ const ActivityRunsSection = ({ items }: { items: ActivityRunItem[] }) => {
   )
 }
 
-const ActivitySourcesSection = ({ items }: { items: ActivitySourceItem[] }) => {
+const ActivitySourcesSection = ({ items, conversationId }: { items: ActivitySourceItem[]; conversationId: string | null }) => {
   const openWebSource = (item: ActivitySourceItem) => {
     if (!item.url) return
     openWebTarget(item.url)
   }
 
   return (
-    <ActivitySection title="来源" previewCount={5}>
-      {items.slice(0, 10).map((item) => {
+    <div id="conversation-sources" tabIndex={-1}>
+    <ActivitySection title="来源" previewCount={5} initialExpanded>
+      {items.map((item) => {
         const detail = sourceDetail(item)
         const body = (
           <>
@@ -486,9 +490,8 @@ const ActivitySourcesSection = ({ items }: { items: ActivitySourceItem[] }) => {
           </>
         )
 
-        return (
+        return (<div key={item.id}>
           <ActivityButtonRow
-            key={item.id}
             onClick={item.kind === 'file' && item.path
               ? () => useAppStore.getState().openEditorFile(item.path!, item.label)
               : item.kind === 'web' && item.url
@@ -498,9 +501,11 @@ const ActivitySourcesSection = ({ items }: { items: ActivitySourceItem[] }) => {
           >
             {body}
           </ActivityButtonRow>
-        )
+          {item.messageId && conversationId && <button type="button" className="activity-source-locate" onClick={() => revealConversationMessage(conversationId, item.messageId!)}>在对话中定位</button>}
+        </div>)
       })}
     </ActivitySection>
+    </div>
   )
 }
 
@@ -510,6 +515,7 @@ function sourceDetail(item: ActivitySourceItem): string {
     return path ? compactPath(path) : '工作区文件'
   }
   if (item.title && item.title !== item.label) return item.title
+  if (item.host) return item.host
   if (item.url) {
     try {
       const parsed = new URL(item.url)
@@ -544,6 +550,8 @@ function browserStatusLabel(status: ActivityBrowserItem['status']): string {
 }
 
 function statusLabel(status: string): string {
+  if (status === 'unknown') return '已退出 · 结果未知'
+  if (status === 'cleanup_pending') return '清理未完成'
   if (status === 'completed') return '完成'
   if (status === 'failed') return '失败'
   if (status === 'blocked') return '受阻'
@@ -609,7 +617,7 @@ const activityStatusPillStyle = (status: string): React.CSSProperties => ({
     ? 'var(--state-success)'
     : status === 'failed'
       ? 'var(--state-danger)'
-      : status === 'stalled'
+      : status === 'stalled' || status === 'unknown' || status === 'cleanup_pending'
         ? 'var(--state-warning)'
         : status === 'running'
           ? 'var(--state-info)'

@@ -6,7 +6,6 @@ import logging
 import math
 import os
 import re
-import shlex
 import shutil
 import sys
 import uuid
@@ -22,7 +21,12 @@ from backend.hooks.task_output import (
     drain_hook_process_output,
 )
 from backend.runtime_env import sanitized_subprocess_env
-from backend.subprocesses import spawn_exec, spawn_shell, terminate_process_tree
+from backend.subprocesses import (
+    record_unproven_cleanup,
+    spawn_exec,
+    spawn_shell,
+    terminate_process_tree,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +56,7 @@ class HookExecutionResult:
     stderr: str
     exit_code: int
     backgrounded: bool = False
+    semantic_stdout: str | None = None
 
 
 @dataclass(frozen=True)
@@ -162,16 +167,15 @@ async def _execute_command(
         scope_id=_hook_output_scope(runtime),
         task_id=str(getattr(entry, "entry_id", "") or event_name or "hook"),
     )
-    if proc.stdout is not None and runtime.register_async_command is not None:
-        return await _execute_command_with_async_handshake(
-            proc,
-            capture=capture,
-            stdin_bytes=stdin_bytes,
-            timeout=timeout,
-            runtime=runtime,
-        )
-
     try:
+        if proc.stdout is not None and runtime.register_async_command is not None:
+            return await _execute_command_with_async_handshake(
+                proc,
+                capture=capture,
+                stdin_bytes=stdin_bytes,
+                timeout=timeout,
+                runtime=runtime,
+            )
         stdout, stderr, cancelled = await _communicate_with_cancel(
             proc,
             stdin_bytes,
@@ -179,6 +183,7 @@ async def _execute_command(
             cancel_event=getattr(runtime.tool_context, "cancel_event", None),
             capture=capture,
         )
+        semantic_stdout = await capture.semantic_stdout_text()
     except asyncio.TimeoutError as exc:
         raise HookExecutionError(f"Hook timed out after {timeout:g}s") from exc
     except HookOutputCaptureError as exc:
@@ -191,6 +196,7 @@ async def _execute_command(
         stdout,
         stderr,
         int(proc.returncode if proc.returncode is not None else 0),
+        semantic_stdout=semantic_stdout,
     )
 
 
@@ -287,6 +293,7 @@ async def _execute_command_with_async_handshake(
             stdout.strip(),
             stderr.strip(),
             int(proc.returncode if proc.returncode is not None else 0),
+            semantic_stdout=await capture.semantic_stdout_text(),
         )
     except asyncio.CancelledError:
         await _terminate_hook_operation(proc, operation, capture)
@@ -311,6 +318,7 @@ async def finish_async_command(command: PendingAsyncCommand) -> HookExecutionRes
             cancel_event=None,
             capture=command.capture,
         )
+        semantic_stdout = await command.capture.semantic_stdout_text()
     except asyncio.TimeoutError as exc:
         raise HookExecutionError(
             f"Async hook timed out after {command.timeout_seconds:g}s"
@@ -327,6 +335,7 @@ async def finish_async_command(command: PendingAsyncCommand) -> HookExecutionRes
             if command.process.returncode is not None
             else 0
         ),
+        semantic_stdout=semantic_stdout,
     )
 
 
@@ -773,9 +782,11 @@ async def _terminate_hook_operation(
     """Terminate one hook tree, drain/cancel its pipes, and close capture once."""
 
     cancellation_requested = False
+    reaped = False
     terminate_task = asyncio.create_task(terminate_process_tree(proc))
     try:
         cancellation_requested |= await _wait_cleanup_task(terminate_task)
+        reaped = terminate_task.result()
     except asyncio.CancelledError:
         # The termination task itself was cancelled; continue with pipe and
         # capture cleanup so the caller still owns every spawned resource.
@@ -811,7 +822,13 @@ async def _terminate_hook_operation(
     except Exception:
         logger.warning("Hook output capture failed during cleanup", exc_info=True)
     if cancellation_requested:
-        raise asyncio.CancelledError
+        cancelled = asyncio.CancelledError()
+        record_unproven_cleanup(cancelled, reaped=reaped, proc=proc)
+        raise cancelled
+    if not reaped:
+        failed = HookExecutionError("Hook process tree could not be proven terminated")
+        record_unproven_cleanup(failed, reaped=reaped, proc=proc)
+        raise failed
 
 
 async def _wait_for_hook_pipe_drain(operation: asyncio.Task[Any]) -> None:

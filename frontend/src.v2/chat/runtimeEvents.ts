@@ -1,4 +1,6 @@
 import { useAppStore } from "../stores";
+import { mcpProjectionMatches } from "./mcpProjectionScope";
+import { workspaceRootsEqual } from "../lib/workspace-path";
 import type {
   AgentProgressEvent,
   AgentRunCompletedEvent,
@@ -267,6 +269,9 @@ const subagentMetadataPatch = (
   const writeScope = maybeStringList(value("write_scope"));
   const background = maybeBoolean(value("background"));
   const readOnly = maybeBoolean(value("read_only"));
+  const cleanupPending = maybeBoolean(value("cleanup_pending", "cleanupPending"));
+  const rawCleanupReason = value("cleanup_reason", "cleanupReason");
+  const cleanupReason = maybeString(rawCleanupReason);
   const { agentPath, mailboxEpoch } = subagentIncarnation(payload, record);
   if (agentPath) patch.agentPath = agentPath;
   if (typeof mailboxEpoch === "number") patch.mailboxEpoch = mailboxEpoch;
@@ -281,6 +286,8 @@ const subagentMetadataPatch = (
   if (writeScope) patch.writeScope = writeScope;
   if (typeof background === "boolean") patch.background = background;
   if (typeof readOnly === "boolean") patch.readOnly = readOnly;
+  if (typeof cleanupPending === "boolean") patch.cleanupPending = cleanupPending;
+  if (typeof rawCleanupReason === "string") patch.cleanupReason = cleanupReason ?? "";
   return patch;
 };
 
@@ -589,6 +596,13 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
   if (e.type === "agent.run.started" && conversationId && messageId) {
     const target = assistantForMessage(conversationId, messageId);
     const turnId = eventTurnIdentity(e);
+    if (!target && (e as AgentRunStartedEvent).role === "main"
+      && !isReplayedRuntimeEvent(e)
+      && !s.getVisibleMessages(conversationId).some((message) => message.isStreaming || message.isThinkingStreaming)) {
+      // Resume and server-triggered turns have no composer-created placeholder.
+      // Admit their exact assistant before the normal turn/event fences run.
+      s.resumeStreaming(conversationId, undefined, messageId, turnId);
+    }
     // A restore snapshot can settle the optimistic placeholder before the
     // server admits its new run. Run-start is the authority for that message,
     // not the renderer's earlier optimistic streaming flag.
@@ -1059,6 +1073,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         ...stableMetadata,
       }, conversationId);
       addInspectorPayload("subagent", ev.subagent_id, {
+        conversation_id: conversationId,
         event: "subagent.start",
         role: ev.role,
         prompt: ev.prompt,
@@ -1121,6 +1136,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         }
       }
       addInspectorPayload("subagent", ev.subagent_id || "swarm", {
+        conversation_id: conversationId,
         event: "subagent.event",
         payload: ev.event,
       });
@@ -1143,6 +1159,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const lastProgressAt = maybeNumber((ev as unknown as Record<string, unknown>).last_progress_at);
       if (existing && isTerminalSubagentStatus(existing.status)) {
         addInspectorPayload("subagent", subagentId, {
+          conversation_id: conversationId,
           event: "subagent.progress",
           ignored: "terminal_state_is_sticky",
           terminal_status: existing.status,
@@ -1196,6 +1213,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         s.addSubagent({ id: subagentId, role: "subagent", ...patch }, conversationId);
       }
       addInspectorPayload("subagent", subagentId, {
+        conversation_id: conversationId,
         event: "subagent.progress",
         iteration: ev.iteration,
         max_iterations: ev.max_iterations,
@@ -1302,6 +1320,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         }, conversationId);
       }
       addInspectorPayload("subagent", e.subagent_id, {
+        conversation_id: conversationId,
         event: "subagent.done",
         summary: e.summary,
         error: e.error,
@@ -1390,6 +1409,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         }, conversationId);
       }
       addInspectorPayload("subagent", subagentId, {
+        conversation_id: conversationId,
         event: "subagent.mailbox",
         count: ev.count,
         high_water: ev.high_water,
@@ -1434,6 +1454,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         },
       });
       addInspectorPayload("subagent", subagentId, {
+        conversation_id: conversationId,
         event: "subagent.plan_approval_requested",
         request_id: requestId,
         teammate_name: teammateName,
@@ -1455,11 +1476,13 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       return true;
     }
     case "runtime.capabilities": {
+      if (e.conversation_id !== (s.conversationId || "") || typeof e.workspace_root !== "string"
+        || !workspaceRootsEqual(e.workspace_root, s.workingDirectory)) return true;
       const ev = e as unknown as { capabilities?: Parameters<typeof withDerivedCapabilitySummary>[0] };
       const capabilities = withDerivedCapabilitySummary(ev.capabilities) ?? null;
       s.setRuntimeCapabilities(capabilities);
       if (Array.isArray(capabilities?.skills)) {
-        s.setAvailableSkills(normalizeSkillList(capabilities.skills));
+        s.setAvailableSkills(normalizeSkillList(capabilities.skills, e.workspace_root));
       }
       if (Array.isArray(capabilities?.composer_commands)) {
         s.setSlashCommands(normalizeSlashCommands(capabilities.composer_commands));
@@ -1467,6 +1490,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       return true;
     }
     case "mcp.lifecycle": {
+      if (!mcpProjectionMatches(e, s.conversationId, s.workingDirectory)) return true;
       // Per-server lifecycle: update the matching connector compactly. Consumed
       // here (returns true) so it is never rendered as chat text.
       const ev = e as unknown as {
@@ -1506,6 +1530,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       return true;
     }
     case "mcp.progress": {
+      if (!mcpProjectionMatches(e, s.conversationId, s.workingDirectory)) return true;
       // Coarse connect/reconnect progress; stored on the server, not in chat.
       const ev = e as unknown as {
         server_name?: string;

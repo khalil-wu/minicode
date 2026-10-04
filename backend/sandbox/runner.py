@@ -6,7 +6,6 @@ import codecs
 from contextlib import suppress
 from fnmatch import fnmatchcase
 import inspect
-import json
 import locale
 import logging
 import os
@@ -27,8 +26,6 @@ from backend.config import DATA_ROOT
 from backend.runtime_env import powershell_script, shell_subprocess_env
 from backend.sandbox.policy import (
     FileSystemAccessMode,
-    FileSystemPath,
-    FileSystemSpecialPath,
     ResolvedSandboxPolicy,
     SandboxEnforcement,
     SandboxPolicy,
@@ -36,7 +33,6 @@ from backend.sandbox.policy import (
 from backend.sandbox.result import SandboxResult
 from backend.subprocesses import (
     SubprocessOutputLimitError,
-    communicate,
     communicate_bounded,
     record_unproven_cleanup,
     spawn_exec,
@@ -444,8 +440,9 @@ class SandboxRunner:
     but process grouping is never reported as a security boundary.
     """
 
-    def __init__(self, policy: SandboxPolicy) -> None:
+    def __init__(self, policy: SandboxPolicy, *, env_filter: Callable[[dict[str, str]], dict[str, str]] | None = None) -> None:
         self._policy = policy
+        self._env_filter = env_filter
         self._container_engine = ""
         self._container_cidfile: Path | None = None
         self._container_name = ""
@@ -453,7 +450,6 @@ class SandboxRunner:
         self._synthetic_mount_targets: list[_SyntheticMountTarget] = []
         self._synthetic_mount_overrides: dict[str, Path] = {}
         self._sandbox_ready_file: Path | None = None
-        self._low_integrity_temp_dir: Path | None = None
         self._windows_private_desktop: Any | None = None
         self._windows_native_temp_dir: Path | None = None
         self._windows_native_cwd: Path | None = None
@@ -629,7 +625,7 @@ class SandboxRunner:
             else list(argv)
         )
         command = (
-            subprocess.list2cmdline(effective_argv)
+            "& " + " ".join("'" + value.replace("'", "''") + "'" for value in effective_argv)
             if os.name == "nt"
             else shlex.join(effective_argv)
         )
@@ -640,11 +636,12 @@ class SandboxRunner:
         )
         process: asyncio.subprocess.Process | None = None
         try:
-            wrapped = self._wrap_command(
-                command,
-                capability,
-                cwd=cwd,
-                host_command=host_command,
+            wrapped = (
+                list(argv)
+                if capability.backend in {"full-access", "external-sandbox"}
+                else self._wrap_command(
+                    command, capability, cwd=cwd, host_command=host_command, argv=effective_argv,
+                )
             )
             spawn_kwargs = {
                 "stdin": stdin,
@@ -673,6 +670,7 @@ class SandboxRunner:
         command: str,
         *,
         cwd: str | Path | None = None,
+        host_command: str = "",
         stdin: Any = asyncio.subprocess.PIPE,
         stdout: Any = asyncio.subprocess.PIPE,
         stderr: Any = asyncio.subprocess.PIPE,
@@ -681,7 +679,7 @@ class SandboxRunner:
         """Start a long-lived shell command behind the declared sandbox."""
         if not str(command or "").strip():
             raise ValueError("Sandbox shell command must not be empty")
-        wrapped, _ = self.prepare_command(command, cwd=cwd, host_command=command)
+        wrapped, _ = self.prepare_command(command, cwd=cwd, host_command=host_command or command)
         process: asyncio.subprocess.Process | None = None
         try:
             spawn_kwargs = {
@@ -1183,7 +1181,7 @@ class SandboxRunner:
         env.setdefault("PYTHONUTF8", "1")
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("PYTHONUNBUFFERED", "1")
-        return env
+        return self._env_filter(env) if self._env_filter is not None else env
 
     def _wrap_command(
         self,
@@ -1192,6 +1190,7 @@ class SandboxRunner:
         *,
         cwd: str | Path | None = None,
         host_command: str = "",
+        argv: list[str] | None = None,
     ) -> str | list[str]:
         resolved = self._policy.resolve(cwd=cwd)
         if resolved.enforcement in {
@@ -1251,46 +1250,12 @@ class SandboxRunner:
                 workspace_roots=(self._policy.workspace_roots or (effective_cwd,)),
                 deny_read_paths=deny_read,
                 deny_write_paths=deny_write,
+                argv=argv,
             )
             self._windows_private_desktop = desktop
             self._windows_native_temp_dir = private_temp
             self._windows_native_cwd = effective_cwd
             return wrapped
-
-        if capability.backend == "low-integrity":
-            from backend.sandbox import win_low_integrity
-
-            effective_cwd = (
-                Path(cwd).expanduser().resolve()
-                if cwd
-                else (self._policy.workspace_root or Path.cwd()).expanduser().resolve()
-            )
-            deny_write = [
-                path
-                for path, access in _resolved_path_events(resolved)
-                if access is not FileSystemAccessMode.WRITE
-                and any(_policy_path_is_writable(resolved, parent) for parent in path.parents)
-            ]
-            # The child gets a private TEMP; labelling the host temp directory
-            # (a default writable root) would make every other process's temp
-            # files writable from the sandbox.
-            host_temp = Path(tempfile.gettempdir()).resolve()
-            labelled_roots = [
-                root.root for root in resolved.writable_roots
-                if root.root.expanduser().resolve() != host_temp
-            ]
-            try:
-                spec_path, temp_dir = win_low_integrity.prepare_launch(
-                    command_line=host_command or command,
-                    cwd=effective_cwd,
-                    writable_roots=labelled_roots,
-                    deny_write_paths=deny_write,
-                    allow_network=resolved.allow_network,
-                )
-            except win_low_integrity.LabelError as exc:
-                raise SandboxUnavailableError(str(exc)) from exc
-            self._low_integrity_temp_dir = temp_dir
-            return win_low_integrity.launcher_argv(spec_path)
 
         raise SandboxUnavailableError(
             capability.reason or f"Unsupported sandbox backend: {capability.backend}"
@@ -1432,10 +1397,6 @@ class SandboxRunner:
         if ready_file is not None:
             with suppress(OSError):
                 ready_file.unlink()
-        low_integrity_temp = self._low_integrity_temp_dir
-        self._low_integrity_temp_dir = None
-        if low_integrity_temp is not None:
-            shutil.rmtree(low_integrity_temp, ignore_errors=True)
         native_temp = self._windows_native_temp_dir
         private_desktop = self._windows_private_desktop
         if native_temp is not None and native_temp.exists():
@@ -2147,12 +2108,6 @@ def _policy_path_is_writable(
     path: Path,
 ) -> bool:
     return resolved.resolve_access(path) is FileSystemAccessMode.WRITE
-
-
-def _low_integrity_supported() -> bool:
-    from backend.sandbox import win_low_integrity
-
-    return win_low_integrity.is_supported()
 
 
 def _low_integrity_unavailable_reason(resolved: ResolvedSandboxPolicy) -> str:

@@ -16,7 +16,7 @@ from backend.agent.provider_protocol import usage_terminal_projection
 from backend.agent.response_utils import append_assistant_history
 from backend.agent.turn_kernel import _set_terminal_reason
 from backend.agent.terminal_projection import TurnTerminalProjection
-from backend.agent.tool_events import abandoned_tool_announcement_events
+from backend.agent.tool_events import abandoned_tool_announcement_events, cancelled_pending_tool_events
 
 
 PostStreamAction = Literal["proceed", "retry", "terminate"]
@@ -72,6 +72,11 @@ async def recover_provider_response(
         yield abandoned
 
     if normalized_finish_reason in {"pause_turn", "compaction"}:
+        for cancelled in cancelled_pending_tool_events(
+            stream_state, tool_tracker, iteration_id=stream_text.iteration_id,
+            reason="provider_retry",
+        ):
+            yield cancelled
         # Anthropic requires the complete assistant content to be submitted
         # back unchanged. A visible-text-only continuation would lose hosted
         # server tool/result blocks and thinking signatures, so fail closed if
@@ -178,6 +183,11 @@ async def recover_provider_response(
     # Claude Code's bounded continuation path then asks the provider to resume,
     # allowing it to re-issue any intended call with complete arguments.
     if is_max_output_finish_reason(finish_reason):
+        for cancelled in cancelled_pending_tool_events(
+            stream_state, tool_tracker, iteration_id=stream_text.iteration_id,
+            reason="provider_truncated",
+        ):
+            yield cancelled
         recovery = await recover_max_output(
             state=state,
             stream_text=stream_text,
@@ -204,6 +214,11 @@ async def recover_provider_response(
     if stream_state.saw_partial_tool_call and (
         not pending_tool_calls or not stream_state.final_tool_batch_received
     ):
+        for cancelled in cancelled_pending_tool_events(
+            stream_state, tool_tracker, iteration_id=stream_text.iteration_id,
+            reason="provider_truncated",
+        ):
+            yield cancelled
         tool_tracker.cancel_remaining()
         yield AgentEvent.error(
             message="The provider stream ended before the tool arguments were complete.",

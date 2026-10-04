@@ -312,7 +312,7 @@ def test_query_engine_resumes_native_checkpoint_without_readmitting_the_user_or_
             await builder.compact()
             snapshot = builder.export_snapshot()
             save_checkpoint(session_id="native-resume", conversation_id="native-conv", run_id="previous-run", user_message=original_request,
-                iterations=1, reply="", messages=snapshot["history"], context_snapshot=snapshot, tool_calls=[], active_skills=[], disabled_tools=set(), stopped_reason="timeout", last_mutation_index=0)
+                iterations=1, reply="", messages=snapshot["history"], context_snapshot=snapshot, tool_calls=[], active_skills=[], disabled_tools=set(), stopped_reason="timeout", last_mutation_index=0, base_dir=tmp_path)
             runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", swarm_store_dir=tmp_path / "swarm", enable_lease_heartbeat=False)
             journal = ExecutionJournal("native-resume", base_dir=tmp_path / "journals")
             session = AgentSession(llm=adapter, tool_registry=ToolRegistry(), artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),

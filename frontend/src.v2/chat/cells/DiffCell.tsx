@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, FileDiff, RotateCcw } from "lucide-react";
 import { fileIcon } from "../../lib/file-icons";
 import type { DiffCellState, DiffFileChange } from "./cellTypes";
@@ -10,6 +10,7 @@ import { initialDiffReviewPatch } from "../diffReviewState";
 import { commandResultSucceeded, sendClientCommandAwaitResult } from "../../protocol/ws-outbox";
 import { pushToast } from "../../overlays/ToastContainer";
 import { showConfirm } from "../../overlays/DialogService";
+import { normalizeWorkspaceRoot, workspaceRootsEqual } from "../../lib/workspace-path";
 import "./cells.css";
 
 export function DiffCell({ cell, showActions = true, conversationId, workspaceRoot }: { cell: DiffCellState; showActions?: boolean; conversationId?: string; workspaceRoot?: string }) {
@@ -17,7 +18,16 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
   const [reverting, setReverting] = useState(false);
   const [reverted, setReverted] = useState(false);
   const activeWorkspace = useAppStore((state) => state.workingDirectory);
+  const activeConversationId = useAppStore((state) => state.conversationId);
   const workingDirectory = workspaceRoot ?? activeWorkspace;
+  const ownerConversationId = conversationId ?? activeConversationId;
+  const visibleScope = useRef({ id: cell.id, conversationId: ownerConversationId, workspaceRoot: workingDirectory });
+  visibleScope.current = { id: cell.id, conversationId: ownerConversationId, workspaceRoot: workingDirectory };
+  useEffect(() => {
+    setShowAllFiles(false);
+    setReverting(false);
+    setReverted(false);
+  }, [cell.id, ownerConversationId, normalizeWorkspaceRoot(workingDirectory)]);
   const files = useMemo(() => cell.files.map((file) => ({
     ...file,
     path: workspaceRelativeDiffPath(file.path, workingDirectory) || file.path,
@@ -33,9 +43,10 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
     const reviewableFiles = files.filter((file) => Boolean(file.patch));
     if (reviewableFiles.length === 0) return;
     const selectedPath = path ?? reviewableFiles[0].path;
+    useAppStore.setState({ gitReviewRequest: null });
     useAppStore.getState().setDiffReviewState({
       requestId: `diff-cell-${cell.id}`,
-      conversationId,
+      conversationId: ownerConversationId ?? undefined,
       toolName: "助手修改",
       diff: initialDiffReviewPatch(reviewableFiles.map((file) => ({
         path: file.path,
@@ -59,19 +70,28 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
   };
 
   const revertDiffFiles = async () => {
-    if (!canRevert || reverting || reverted) return;
-    const ownerConversationId = conversationId ?? useAppStore.getState().conversationId;
+    const isSameCell = () => {
+      const scope = visibleScope.current;
+      return scope.id === cell.id && scope.conversationId === ownerConversationId
+        && workspaceRootsEqual(scope.workspaceRoot, workingDirectory);
+    };
+    const isCurrent = () => {
+      const state = useAppStore.getState();
+      return isSameCell() && state.conversationId === ownerConversationId
+        && workspaceRootsEqual(state.workingDirectory, workingDirectory);
+    };
+    if (!canRevert || reverting || reverted || !isCurrent()) return;
     const patch = files.map((file) => file.patch).join("\n");
-    const confirmed = await showConfirm({
-      title: "撤销更改",
-      message: `撤销此处显示的 ${files.length} 个文件更改？`,
-      confirmLabel: "撤销",
-      cancelLabel: "取消",
-      danger: true,
-    });
-    if (!confirmed) return;
     setReverting(true);
     try {
+      const confirmed = await showConfirm({
+        title: "撤销更改",
+        message: `撤销此处显示的 ${files.length} 个文件更改？`,
+        confirmLabel: "撤销",
+        cancelLabel: "取消",
+        danger: true,
+      });
+      if (!confirmed || !isCurrent()) return;
       const result = await sendClientCommandAwaitResult({
         type: "diff.git_revert_patch",
         conversation_id: ownerConversationId,
@@ -79,14 +99,15 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
         patch,
         confirmed: true,
       }, "diff.git_revert_patch");
+      if (!isCurrent()) return;
       if (!commandResultSucceeded(result)) throw new Error(result.message || "撤销更改失败");
       setReverted(true);
       useAppStore.getState().requestGitChanges();
       pushToast("显示的更改已撤销。", "success", 3000);
     } catch (error) {
-      pushToast(error instanceof Error ? error.message : "撤销更改失败", "error", 5000);
+      if (isCurrent()) pushToast(error instanceof Error ? error.message : "撤销更改失败", "error", 5000);
     } finally {
-      setReverting(false);
+      if (isSameCell()) setReverting(false);
     }
   };
 
@@ -105,7 +126,7 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
         </div>
         {showActions && !cell.historical && (
           <div className="diff-cell-header-actions">
-            <button
+            {activeConversationId === ownerConversationId && workspaceRootsEqual(activeWorkspace, workingDirectory) && <button
               type="button"
               className="diff-cell-action-button diff-cell-action-button-danger"
               onClick={() => void revertDiffFiles()}
@@ -114,7 +135,7 @@ export function DiffCell({ cell, showActions = true, conversationId, workspaceRo
             >
               <RotateCcw size={14} aria-hidden="true" />
               <span>{reverted ? "已撤销" : reverting ? "正在撤销" : "撤销"}</span>
-            </button>
+            </button>}
             <button
               type="button"
               className="diff-cell-action-button diff-cell-action-button-accent"

@@ -8,7 +8,7 @@ import type { ServerEvent } from "../protocol/events";
 import type { EmbeddedBrowserState } from "../desktop/runtime";
 import { BrowserPanel, normalizeBrowserInput } from "./BrowserPanel";
 import { ContextMenu } from "../components/ContextMenu";
-import { __resetOpenWebInBrowserForTests, openWebInBrowser } from "../chat/openWebInBrowser";
+import { __resetOpenWebInBrowserForTests, openWebInBrowser, returnToBrowserPage } from "../chat/openWebInBrowser";
 
 vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -96,6 +96,11 @@ const page = (id: string, title: string, url: string, active = false) => ({
   loading: false, canGoBack: false, canGoForward: false,
 });
 
+const openBrowserAction = (name: string) => {
+  fireEvent.click(screen.getByRole("button", { name: "更多浏览器操作" }));
+  fireEvent.click(screen.getByRole("menuitem", { name }));
+};
+
 describe("BrowserPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -115,7 +120,206 @@ describe("BrowserPanel", () => {
       previewVerification: null,
       browserAnnotations: [],
       selectedMentions: [],
+      messages: [],
+      turnDiffs: {},
+      diffReview: null,
     });
+  });
+
+  it("does not reactivate a native page when navigation resolves after the panel unmounts", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("a", "Page A", "https://a.example/", true)]);
+    const navigation = pending<ReturnType<typeof page>>();
+    const view = render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page A" });
+    runtimeMocks.navigate.mockReturnValueOnce(navigation.promise);
+    const address = screen.getByRole("textbox", { name: "地址栏" });
+    fireEvent.change(address, { target: { value: "https://late.example/" } });
+    fireEvent.submit(address.closest("form")!);
+    view.unmount(); runtimeMocks.activate.mockClear();
+    await act(async () => navigation.resolve(page("a", "Late page", "https://late.example/")));
+    expect(runtimeMocks.activate).not.toHaveBeenCalled();
+  });
+
+  it.each(["activate", "reconcile"])("reports an actual native %s failure while selecting a restored tab", async (operation) => {
+    runtimeMocks.list.mockResolvedValueOnce([page("a", "Page A", "https://a.example/", true)]);
+    if (operation === "activate") runtimeMocks.activate.mockRejectedValueOnce(new Error("Native tab no longer available"));
+    else {
+      runtimeMocks.activate.mockResolvedValueOnce(false);
+      runtimeMocks.list.mockRejectedValueOnce(new Error("Native tab no longer available"));
+    }
+    render(<BrowserPanel />);
+    expect((await screen.findByRole("alert")).textContent).toContain("Native tab no longer available");
+  });
+
+  it.each(["console", "element"])("shows the native semantic %s inspection failure instead of an empty result", async (kind) => {
+    runtimeMocks.list.mockResolvedValueOnce([page("a", "Page A", "https://a.example/", true)]);
+    runtimeMocks.inspect.mockResolvedValueOnce({ ok: false, error: "Native inspector refused this page", value: [] });
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page A" });
+    if (kind === "console") openBrowserAction("打开页面诊断");
+    else fireEvent.click(screen.getByRole("button", { name: "选择元素" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("Native inspector refused this page");
+  });
+
+  it("serializes site writes and keeps a committed setting when a reopened pane's older read completes", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("a", "Page A", "https://a.example/", true)]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page A" });
+    openBrowserAction("打开站点设置");
+    await screen.findByText("https://example.com");
+    const write = pending<{ downloadPolicy: "allow"; origin: string; permissions: string[] }>();
+    runtimeMocks.setSettings.mockReturnValueOnce(write.promise);
+    fireEvent.click(screen.getByRole("button", { name: "下载策略，当前：阻止" }));
+    fireEvent.click(screen.getByRole("option", { name: "保存到下载目录" }));
+    expect(screen.getByRole("checkbox", { name: "位置" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "清除站点数据" }).hasAttribute("disabled")).toBe(true);
+    openBrowserAction("打开站点设置");
+    const read = pending<{ downloadPolicy: "block"; origin: string; permissions: string[] }>();
+    runtimeMocks.getSettings.mockReturnValueOnce(read.promise);
+    openBrowserAction("打开站点设置");
+    await act(async () => write.resolve({ downloadPolicy: "allow", origin: "https://a.example", permissions: [] }));
+    await act(async () => read.resolve({ downloadPolicy: "block", origin: "https://a.example", permissions: [] }));
+    expect(screen.getByRole("button", { name: "下载策略，当前：保存到下载目录" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("uses browser tab keyboard navigation and keeps IME Enter from submitting the address form", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("a", "Page A", "https://a.example/", true), page("b", "Page B", "https://b.example/")]);
+    render(<BrowserPanel />);
+    const first = await screen.findByRole("tab", { name: "Page A" });
+    first.focus(); fireEvent.keyDown(first, { key: "ArrowRight" });
+    const second = screen.getByRole("tab", { name: "Page B" });
+    expect(second.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(second);
+    expect(first.tabIndex).toBe(-1);
+    const address = screen.getByRole("textbox", { name: "地址栏" });
+    expect(fireEvent.keyDown(address, { key: "Enter", isComposing: true })).toBe(false);
+    expect(fireEvent.keyDown(address, { key: "Enter", keyCode: 229 })).toBe(false);
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("starts element selection directly from the page toolbar and leaves the description for the user", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("design-page", "Design", "http://localhost:4173/", true)]);
+    runtimeMocks.inspect.mockResolvedValueOnce({ ok: true, value: { selector: "#save", text: "保存", rect: { x: 10, y: 10, width: 120, height: 32 }, viewport: { width: 1000, height: 800 } } });
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Design" });
+    expect(screen.queryByRole("region", { name: "页面批注" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "选择元素" }));
+    await screen.findByText("已选择 120 × 32 px");
+    expect(runtimeMocks.inspect).toHaveBeenCalledWith("conv-browser", "design-page", "element");
+    expect(screen.getByText("保存")).toBeTruthy();
+    const description = screen.getByRole("textbox", { name: "批注内容" });
+    expect((description as HTMLTextAreaElement).value).toBe("");
+    const selector = screen.getByRole("textbox", { name: "元素选择器" });
+    const details = selector.closest("details")!;
+    expect(details.open).toBe(false);
+    fireEvent.click(screen.getByText("高级元素信息"));
+    expect(details.open).toBe(true);
+    expect((selector as HTMLInputElement).value).toBe("#save");
+    await waitFor(() => expect(document.activeElement).toBe(description));
+    expect(useAppStore.getState().browserAnnotations).toEqual([]);
+  });
+
+  it("treats native Esc cancellation as a return to the unchanged description", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("design-page", "Design", "http://localhost:4173/", true)]);
+    const selection = pending<{ ok: boolean; value: unknown }>();
+    runtimeMocks.inspect.mockReturnValueOnce(selection.promise);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Design" });
+    fireEvent.click(screen.getByRole("button", { name: "添加页面批注" }));
+    const description = screen.getByRole("textbox", { name: "批注内容" });
+    fireEvent.change(description, { target: { value: "保留原说明" } });
+    fireEvent.click(screen.getByRole("button", { name: "选择元素" }));
+    await waitFor(() => expect(runtimeMocks.inspect).toHaveBeenCalledWith("conv-browser", "design-page", "element"));
+    await act(async () => selection.resolve({ ok: true, value: null }));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect((description as HTMLTextAreaElement).value).toBe("保留原说明");
+    expect((screen.getByRole("button", { name: "选择元素" }) as HTMLButtonElement).disabled).toBe(false);
+    await waitFor(() => expect(document.activeElement).toBe(description));
+  });
+
+  it("opens the current turn review from its real page while preserving the annotation draft", async () => {
+    const diff = "diff --git a/src/page.tsx b/src/page.tsx\n--- a/src/page.tsx\n+++ b/src/page.tsx\n@@ -4 +4 @@\n-old\n+new";
+    runtimeMocks.list.mockResolvedValueOnce([page("preview-tab", "Local preview", "http://localhost:4173/", true)]);
+    useAppStore.setState({
+      messages: [{ id: "answer", role: "assistant", content: "Done", artifacts: [], timestamp: 1, turnId: "turn-preview" }],
+      turnDiffs: { "conv-browser": { threadId: "conv-browser", turnId: "turn-preview", messageId: "answer", diff, updatedAt: 1 } },
+    });
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Local preview" });
+    fireEvent.click(screen.getByRole("button", { name: "添加页面批注" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), { target: { value: "缩小这个按钮的间距" } });
+    fireEvent.click(screen.getByRole("button", { name: "审阅本轮 1 个文件更改" }));
+    expect(useAppStore.getState().diffReview).toMatchObject({
+      conversationId: "conv-browser", turnId: "turn-preview", selectedPath: "src/page.tsx", mode: "view",
+      previewReturnTarget: { conversationId: "conv-browser", tab: "browser", targetId: "preview-tab", url: "http://localhost:4173/" },
+    });
+    expect((screen.getByRole("textbox", { name: "批注内容" }) as HTMLTextAreaElement).value).toBe("缩小这个按钮的间距");
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("does not offer another conversation's turn changes from the preview", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("preview-tab", "Local preview", "http://localhost:4173/", true)]);
+    useAppStore.setState({
+      messages: [{ id: "answer", role: "assistant", content: "Done", artifacts: [], timestamp: 1, turnId: "turn-other" }],
+      turnDiffs: { "conv-browser": { threadId: "another-owner", turnId: "turn-other", diff: "diff --git a/a.ts b/a.ts\n@@ -1 +1 @@\n-old\n+new", updatedAt: 1 } },
+    });
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Local preview" });
+    expect(screen.queryByRole("button", { name: /审阅本轮/ })).toBeNull();
+  });
+
+  it("restores the exact preview tab with its selected element and unfinished annotation", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([
+      page("preview-a", "Preview A", "http://localhost:4173/", true),
+      page("preview-b", "Preview B", "http://localhost:4173/"),
+    ]);
+    runtimeMocks.inspect.mockResolvedValueOnce({ ok: true, value: {
+      selector: "#save", text: "Save", rect: { x: 10, y: 20, width: 120, height: 36 }, viewport: { width: 1000, height: 800 },
+    } });
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Preview A" });
+    fireEvent.click(screen.getByRole("button", { name: "添加页面批注" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择元素" }));
+    await screen.findByText("已选择 120 × 36 px");
+    fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), { target: { value: "缩小按钮" } });
+    fireEvent.click(screen.getByRole("tab", { name: "Preview B" }));
+    expect(screen.queryByRole("region", { name: "页面批注" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "添加页面批注" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), { target: { value: "第二个标签的批注" } });
+
+    act(() => returnToBrowserPage({ conversationId: "conv-browser", targetId: "preview-a", url: "http://localhost:4173/" }));
+    expect(screen.getByRole("tab", { name: "Preview A" }).getAttribute("aria-selected")).toBe("true");
+    expect((screen.getByRole("textbox", { name: "批注内容" }) as HTMLTextAreaElement).value).toBe("缩小按钮");
+    fireEvent.click(screen.getByText("高级元素信息"));
+    expect((screen.getByRole("textbox", { name: "元素选择器" }) as HTMLInputElement).value).toBe("#save");
+    expect(screen.getByText("已选择 120 × 36 px")).toBeTruthy();
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "Preview B" }));
+    expect((screen.getByRole("textbox", { name: "批注内容" }) as HTMLTextAreaElement).value).toBe("第二个标签的批注");
+    expect(useAppStore.getState().browserAnnotations).toEqual([]);
+  });
+
+  it("returns to the saved page in its original tab after that tab navigated elsewhere", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([
+      page("preview-a", "Preview A", "https://example.com/other", true),
+      page("preview-b", "Preview B", "http://localhost:4173/"),
+    ]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Preview A" });
+    act(() => returnToBrowserPage({ conversationId: "conv-browser", targetId: "preview-a", url: "http://localhost:4173/" }));
+    await waitFor(() => expect(runtimeMocks.navigate).toHaveBeenCalledWith("conv-browser", "preview-a", "http://localhost:4173/"));
+    expect(screen.getAllByRole("tab")).toHaveLength(2);
+  });
+
+  it("reopens a closed preview and ignores a return request belonging to another conversation", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("other", "Other page", "https://example.com/", true)]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Other page" });
+    act(() => returnToBrowserPage({ conversationId: "someone-else", targetId: "closed", url: "http://localhost:4173/" }));
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    act(() => returnToBrowserPage({ conversationId: "conv-browser", targetId: "closed", url: "http://localhost:4173/" }));
+    await waitFor(() => expect(runtimeMocks.navigate).toHaveBeenCalledWith("conv-browser", expect.stringMatching(/^browser_/), "http://localhost:4173/"));
+    expect(screen.getAllByRole("tab")).toHaveLength(2);
   });
 
   afterEach(() => {
@@ -152,6 +356,19 @@ describe("BrowserPanel", () => {
     modal.unmount();
     await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ width: 300, height: 600 })));
     expect(runtimeMocks.navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the native page inside its own modal drawer visible while yielding to a separate dialog", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(700, 150, 300, 600));
+    runtimeMocks.list.mockResolvedValueOnce([page("drawer-page", "Drawer preview", "http://localhost:4173/", true)]);
+    render(<div role="dialog" aria-modal="true" aria-label="右侧面板"><BrowserPanel /></div>);
+    await screen.findByRole("tab", { name: "Drawer preview" });
+    await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ id: "drawer-page", width: 300, height: 600 })));
+    const externalDialog = render(<div role="dialog" aria-modal="true" aria-label="独立弹窗">需要处理的操作</div>);
+    await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ id: "drawer-page", width: 0, height: 0 })));
+    externalDialog.unmount();
+    await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenLastCalledWith(expect.objectContaining({ id: "drawer-page", width: 300, height: 600 })));
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
   });
 
   it("leaves the native view visible for non-overlapping popups and avoids IPC for streaming text", async () => {
@@ -638,7 +855,7 @@ describe("BrowserPanel", () => {
     render(<BrowserPanel />);
     await waitFor(() => expect(screen.getByRole("tab", { name: /Example/ })).toBeTruthy());
 
-    fireEvent.click(screen.getByRole("button", { name: "打开页面诊断" }));
+    openBrowserAction("打开页面诊断");
     await waitFor(() => expect(runtimeMocks.inspect).toHaveBeenCalledWith("conv-browser", "agent_browser", "console"));
     expect(screen.getByRole("tab", { name: /控制台/ })).toBeTruthy();
 
@@ -661,7 +878,7 @@ describe("BrowserPanel", () => {
     render(<BrowserPanel />);
     await waitFor(() => expect(screen.getByRole("tab", { name: /Example/ })).toBeTruthy());
 
-    fireEvent.click(screen.getByRole("button", { name: "打开站点设置" }));
+    openBrowserAction("打开站点设置");
     await waitFor(() => expect(runtimeMocks.getSettings).toHaveBeenCalledWith("https://example.com/"));
     fireEvent.click(screen.getByRole("button", { name: "下载策略，当前：阻止" }));
     fireEvent.click(screen.getByRole("option", { name: "每次询问" }));
@@ -670,6 +887,7 @@ describe("BrowserPanel", () => {
   });
 
   it("adds a dragged page region to the next agent turn", async () => {
+    const dispatch = vi.spyOn(window, "dispatchEvent");
     runtimeMocks.list.mockResolvedValueOnce([{
       id: "agent_browser",
       conversationId: "conv-browser",
@@ -690,14 +908,14 @@ describe("BrowserPanel", () => {
         text: "",
       },
     });
-    render(<BrowserPanel />);
+    render(<><BrowserPanel /><textarea data-composer-input aria-label="主对话输入" /></>);
     await waitFor(() => expect(screen.getByRole("tab", { name: /Example/ })).toBeTruthy());
 
     fireEvent.click(screen.getByRole("button", { name: "添加页面批注" }));
     fireEvent.click(screen.getByRole("button", { name: "框选区域" }));
     await waitFor(() => expect(runtimeMocks.inspect).toHaveBeenCalledWith("conv-browser", "agent_browser", "region"));
     fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), { target: { value: "调整这里的圆角" } });
-    fireEvent.click(screen.getByRole("button", { name: "加入智能体上下文" }));
+    fireEvent.click(screen.getByRole("button", { name: "加入对话" }));
 
     const annotation = useAppStore.getState().browserAnnotations[0];
     expect(annotation.note).toBe("调整这里的圆角");
@@ -706,6 +924,10 @@ describe("BrowserPanel", () => {
     expect(annotation.widthPercent).toBeCloseTo(0.2);
     expect(annotation.heightPercent).toBeCloseTo(0.2);
     expect(useAppStore.getState().selectedMentions[0]?.kind).toBe("browser_annotation");
+    expect(useAppStore.getState().panelSlots.find((slot) => slot.focused)?.kind).toBe("chat");
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "composer:focus" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "主对话输入" })));
+    expect((screen.getByRole("textbox", { name: "地址栏" }) as HTMLInputElement).value).toBe("https://example.com/");
   });
 
   it("keeps the selected tab visible when a background navigation completes", async () => {
@@ -828,6 +1050,7 @@ describe("BrowserPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "添加页面批注" }));
     fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), { target: { value: "Only for page A" } });
     fireEvent.click(screen.getByRole("button", { name: "选择元素" }));
+    await waitFor(() => expect(runtimeMocks.inspect).toHaveBeenCalledWith("conv-browser", "a", "element"));
     fireEvent.click(screen.getByRole("tab", { name: "Page B" }));
     fireEvent.click(screen.getByRole("button", { name: "添加页面批注" }));
 
@@ -835,9 +1058,10 @@ describe("BrowserPanel", () => {
     expect((screen.getByRole("button", { name: "选择元素" }) as HTMLButtonElement).disabled).toBe(false);
     await act(async () => selection.resolve({ ok: true, value: { selector: "#page-a", text: "Old A", rect: { x: 1, y: 2, width: 3, height: 4 }, viewport: { width: 100, height: 100 } } }));
 
+    fireEvent.click(screen.getByText("高级元素信息"));
     expect((screen.getByRole("textbox", { name: "元素选择器" }) as HTMLInputElement).value).toBe("");
     fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), { target: { value: "Only for page B" } });
-    fireEvent.click(screen.getByRole("button", { name: "加入智能体上下文" }));
+    fireEvent.click(screen.getByRole("button", { name: "加入对话" }));
     expect(useAppStore.getState().browserAnnotations[0]).toMatchObject({ targetId: "b", url: "https://b.example/", note: "Only for page B" });
     expect(useAppStore.getState().browserAnnotations[0].selector).toBeUndefined();
   });
@@ -848,7 +1072,7 @@ describe("BrowserPanel", () => {
     runtimeMocks.inspect.mockReturnValueOnce(consoleResult.promise).mockResolvedValueOnce({ ok: true, value: [{ url: "https://current-network.example/", statusCode: 200 }] });
     render(<BrowserPanel />);
     await screen.findByRole("tab", { name: "Page A" });
-    fireEvent.click(screen.getByRole("button", { name: "打开页面诊断" }));
+    openBrowserAction("打开页面诊断");
     fireEvent.click(screen.getByRole("tab", { name: "网络" }));
     await screen.findByText("https://current-network.example/");
 
@@ -870,9 +1094,9 @@ describe("BrowserPanel", () => {
     runtimeMocks.getSettings.mockReturnValueOnce(oldSettings.promise).mockResolvedValueOnce({ downloadPolicy: "block", origin: "https://b.example", permissions: [] });
     render(<BrowserPanel />);
     await screen.findByRole("tab", { name: "Page A" });
-    fireEvent.click(screen.getByRole("button", { name: "打开站点设置" }));
+    openBrowserAction("打开站点设置");
     fireEvent.click(screen.getByRole("tab", { name: "Page B" }));
-    fireEvent.click(screen.getByRole("button", { name: "打开站点设置" }));
+    openBrowserAction("打开站点设置");
     await screen.findByText("https://b.example");
 
     await act(async () => oldSettings.resolve({ downloadPolicy: "block", origin: "https://a.example", permissions: ["geolocation"] }));

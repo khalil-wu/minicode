@@ -86,13 +86,7 @@ class WorkspaceFileWatcher:
         self._debounce_tasks: dict[str, asyncio.Task] = {}
         self._running = False
         self._closed = False
-        try:
-            self._loop = asyncio.get_running_loop()
-        except RuntimeError:
-            try:
-                self._loop = asyncio.get_event_loop()
-            except RuntimeError:
-                self._loop = asyncio.new_event_loop()
+        self._loop = asyncio.get_running_loop()
 
         logger.info(
             f"Initialized file watcher for {workspace_root} "
@@ -144,7 +138,7 @@ class WorkspaceFileWatcher:
                 if self.watcher._closed:
                     return
                 loop = self.watcher._loop
-                if getattr(loop, "is_closed", lambda: False)():
+                if loop.is_closed():
                     return
 
                 changes: list[tuple[Path, str]] = []
@@ -178,6 +172,10 @@ class WorkspaceFileWatcher:
             path: 文件路径
             event_type: 事件类型（modified, created, deleted, moved）
         """
+        # A watchdog callback can already be queued when stop() closes this
+        # watcher. Check the owner after crossing onto its event loop.
+        if self._closed:
+            return
         path_str = str(path)
 
         # 取消之前的任务

@@ -15,14 +15,24 @@ export const PromptHistoryOverlay = ({ open, items, placement = "above", onSelec
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const filtered = useMemo(() => fuzzyFilter(items, query, (item) => item), [items, query]);
 
   useEffect(() => {
     if (!open) return;
+    let active = true;
     setQuery("");
     setActiveIndex(0);
-    queueMicrotask(() => inputRef.current?.focus());
+    queueMicrotask(() => { if (active) inputRef.current!.focus(); });
+    return () => { active = false; };
   }, [open]);
+
+  useEffect(() => {
+    setActiveIndex((index) => Math.min(index, Math.max(0, filtered.length - 1)));
+  }, [filtered.length]);
+  useEffect(() => {
+    if (open) listRef.current!.querySelector<HTMLElement>('[data-active="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex, filtered, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -70,7 +80,7 @@ export const PromptHistoryOverlay = ({ open, items, placement = "above", onSelec
             </button>
           )}
         </div>
-        <div role="listbox" aria-label="输入历史" className="prompt-history-list">
+        <div ref={listRef} role="listbox" aria-label="输入历史" className="prompt-history-list">
           {filtered.length === 0 ? (
             <div className="prompt-history-empty">{items.length === 0 ? "此工作区还没有输入记录" : "没有匹配的输入记录"}</div>
           ) : filtered.map((item, index) => (

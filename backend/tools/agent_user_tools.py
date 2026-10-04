@@ -88,17 +88,9 @@ class AskUserTool(BaseTool):
         question = args.get("question", "")
         if not question:
             return self._error_result("Missing question argument")
-        hook_mgr = (
-            context.run_context.hook_manager
-            if context is not None and context.run_context is not None
-            else None
+        return self._error_result(
+            "ask_user requires the host's user input handler. The question was not shown; do not assume an answer."
         )
-        if hook_mgr:
-            hook_result = await hook_mgr.run_elicitation(str(question), elicitation_id=self.name)
-            if hook_result.blocked:
-                message = hook_result.message or hook_result.feedback or "elicitation blocked by hook"
-                return ToolResult(content=f"Elicitation blocked by hook: {message}", is_error=True)
-        return self._success_result(f"[waiting for user answer] {question}")
 
 
 class BriefTool(BaseTool):

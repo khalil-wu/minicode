@@ -18,13 +18,12 @@ import logging
 import os
 import re
 import signal
-from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -54,7 +53,7 @@ from backend.api.auth import (
     _websocket_accept_subprotocol,
 )
 from backend.services.tool_registry_factory import build_tool_registry
-from backend.api.routes_health import _build_status_payload, get_mcp_status, get_mcp_manager
+from backend.api.routes_health import _build_status_payload, get_mcp_manager
 from backend.api.routes_chat import router as chat_router
 from backend.api.routes_llm import router as llm_router
 from backend.api.routes_skills import router as skills_router
@@ -123,21 +122,18 @@ async def _broadcast_mcp_status_change(
     else:
         get_mcp_status = getattr(_state.bootstrap, "get_mcp_status", None)
         servers = get_mcp_status() if callable(get_mcp_status) else []
+    from backend.ws.mcp_projection import send_mcp_projection
+
     for session in sessions:
-        await session.send_event(
-            AgentEvent(
-                type="mcp_status",
-                data={"servers": servers},
-            )
-        )
+        await send_mcp_projection(session, manager, {"type": "mcp_status", "servers": servers})
     lifecycle = manager.get_server_lifecycle(server_name)
     if lifecycle is not None:
         for session in sessions:
-            await session.send_event(AgentEvent(type="mcp.lifecycle", data=lifecycle))
+            await send_mcp_projection(session, manager, {"type": "mcp.lifecycle", **lifecycle})
     progress = manager.get_server_progress(server_name)
     if progress is not None:
         for session in sessions:
-            await session.send_event(AgentEvent(type="mcp.progress", data=progress))
+            await send_mcp_projection(session, manager, {"type": "mcp.progress", **progress})
 
     # Compatibility for pre-session manager doubles and integrations.  The
     # production WebSocketManager exposes concrete sessions above, where
@@ -160,7 +156,7 @@ async def _broadcast_mcp_status_change(
 async def lifespan(app: FastAPI):
     """Application lifecycle - delegates to AppBootstrap."""
 
-    _state.bootstrap = AppBootstrap(
+    bootstrap = AppBootstrap(
         build_tool_registry=build_tool_registry,
         build_status_payload=_build_status_payload,
         create_session_llm=_create_session_llm,
@@ -168,23 +164,27 @@ async def lifespan(app: FastAPI):
         on_mcp_status_change=_broadcast_mcp_status_change,
         status_cache_ttl_seconds=_state.STATUS_CACHE_TTL_SECONDS,
     )
-    await _state.bootstrap.startup()
-    logger.info("MiniCode Backend startup complete")
+    _state.bootstrap = bootstrap
     try:
+        await bootstrap.startup()
+        logger.info("MiniCode Backend startup complete")
         yield
     finally:
-        await _state.ws_manager.shutdown(reason="application_shutdown")
-        if _state.bootstrap is not None:
-            await _state.bootstrap.shutdown()
-        # The default AgentRuntime owns a process-scoped SQLite lease and a
-        # heartbeat thread. Relinquish both only after all sessions and
-        # background services have stopped, so a replacement process can
-        # recover immediately instead of waiting for lease expiry.
-        from backend.agent.runtime import default_runtime_if_initialized
+        try:
+            await _state.ws_manager.shutdown(reason="application_shutdown")
+        finally:
+            try:
+                await bootstrap.shutdown()
+            finally:
+                if _state.bootstrap is bootstrap:
+                    _state.bootstrap = None
+                # Relinquish the process lease after its session and service
+                # teardown, including interrupted startup.
+                from backend.agent.runtime import default_runtime_if_initialized
 
-        runtime = default_runtime_if_initialized()
-        if runtime is not None:
-            runtime.close(release_lease=True)
+                runtime = default_runtime_if_initialized()
+                if runtime is not None:
+                    runtime.close(release_lease=True)
         logger.info("MiniCode Backend shutdown complete")
 
 
@@ -450,7 +450,10 @@ async def index():
 async def get_ui_preferences(session_id: str = Query(..., min_length=1)) -> dict[str, Any]:
     """Get user UI preferences (layout, panel sizes, theme overrides)."""
     store = UIPreferencesStore(DATA_ROOT / "ui_preferences")
-    prefs = store.get(session_id)
+    try:
+        prefs = store.get(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return prefs.to_dict()
 
 
@@ -461,7 +464,10 @@ async def update_ui_preferences(
 ) -> dict[str, Any]:
     """Save UI preferences."""
     store = UIPreferencesStore(DATA_ROOT / "ui_preferences")
-    updated = store.update(session_id, preferences)
+    try:
+        updated = store.update(session_id, preferences)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": "ok", "preferences": updated.to_dict()}
 
 
@@ -475,9 +481,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         await websocket.close(code=1008)
         return
 
-    from backend.workspace.state import get_active_workspace_root
+    from backend.workspace.state import get_explicit_active_workspace_root
 
-    workspace_root = get_active_workspace_root(PROJECT_ROOT)
+    workspace_root = get_explicit_active_workspace_root()
     config = load_config(cwd=workspace_root)
 
     # Create LLM adapter

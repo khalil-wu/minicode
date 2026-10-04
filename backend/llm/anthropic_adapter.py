@@ -14,10 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
-import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 import httpx
@@ -29,7 +26,6 @@ from backend.llm.base import (
     LLMAdapter,
     LLMSideCallContext,
     LLMMessage,
-    ProviderActivityEvent,
     StreamEvent,
     StreamEventType,
     ToolCallDeltaEvent,
@@ -47,10 +43,6 @@ from backend.llm.capabilities import (
     capabilities_from_anthropic_adapter,
 )
 from backend.llm.errors import (
-    classify_llm_error,
-    llm_error_status_code,
-    llm_error_raw,
-    retry_after_seconds,
     sanitize_llm_error_message,
 )
 from backend.llm.openai_usage import _get_usage_cost_usd, _get_usage_field
@@ -59,9 +51,7 @@ from backend.llm.proxy_policy import (
     provider_httpx_proxy_kwargs,
 )
 from backend.llm.sse import SSEMalformedBudget, iter_sse_data
-from backend.secret_redaction import redact_secrets
 from backend.tools.catalog import canonicalize_tool_schemas
-logger = logging.getLogger(__name__)
 
 from backend.llm.anthropic_protocol import (
     anthropic_tool_input_schema,
@@ -93,6 +83,8 @@ from backend.llm.anthropic_protocol import (
     _json_fingerprint,
     _strip_excess_anthropic_media,
 )
+
+logger = logging.getLogger(__name__)
 
 _DELTA_DEBOUNCE_BYTES = 128
 
@@ -166,8 +158,7 @@ class AnthropicAdapter(LLMAdapter):
         self._reasoning_effort = self._configured_reasoning_effort
         self._reasoning_effort_levels = reasoning_effort_levels
         if self._reasoning_effort == "off":
-            self._reasoning_effort = ""
-            self._thinking_budget = None
+            self.apply_reasoning_policy(ReasoningPolicy(level="off"))
         self._use_auth_token = use_auth_token
         self._default_headers = {
             str(key): str(value)
@@ -431,9 +422,13 @@ class AnthropicAdapter(LLMAdapter):
             )
 
         # Extended thinking（Claude 4+）
-        if not (
+        disable_reasoning = self.current_reasoning_effort() == "off" or (
             side_options is not None and side_options.disable_reasoning
-        ) and max_output_tokens > 1 and self._should_enable_thinking(
+        )
+        if disable_reasoning:
+            # Omission preserves the provider default; explicit off must disable it.
+            kwargs["thinking"] = {"type": "disabled"}
+        elif max_output_tokens > 1 and self._should_enable_thinking(
             messages, anthropic_tools
         ):
             # Anthropic rejects budget_tokens >= max_tokens. Keep the requested
@@ -467,7 +462,7 @@ class AnthropicAdapter(LLMAdapter):
 
         if (
             self._reasoning_effort and model == self._model
-            and not (side_options is not None and side_options.disable_reasoning)
+            and not disable_reasoning
         ):
             kwargs.setdefault("output_config", {})["effort"] = self._reasoning_effort
 
@@ -1204,6 +1199,12 @@ class AnthropicAdapter(LLMAdapter):
                                     arguments_repaired = True
                                 else:
                                     arguments_repaired = False
+                                if not isinstance(arguments, dict):
+                                    yield _anthropic_stream_protocol_error(
+                                        "invalid_tool_input", event_type=event_type,
+                                        received_index=received_index, provider=self._provider_id,
+                                    )
+                                    return
                                 pending_tool_calls.append(
                                     ToolCallEvent(
                                         id=current_tool_id,
@@ -1544,6 +1545,8 @@ class AnthropicAdapter(LLMAdapter):
                     text_parts.append(event.content)
                 elif event.type == StreamEventType.DONE:
                     usage = event.usage or usage
+                    if event.finish_reason in {"max_tokens", "model_context_window_exceeded"}:
+                        raise RuntimeError(f"Incomplete Anthropic completion returned, reason: {event.finish_reason}")
                     saw_done = True
                     raw_sources = event.raw.get("search_sources")
                     if isinstance(raw_sources, list):
@@ -1840,14 +1843,21 @@ class AnthropicAdapter(LLMAdapter):
         from backend.llm.native_compaction import require_native_context_origin
         require_native_context_origin(messages)
         system_parts: list[str] = []
+        accepting_leading_instructions = True
         raw_messages: list[dict[str, Any]] = []
+        current_user = next((message for message in reversed(messages) if message.is_user_input), None)
+        if current_user is None:
+            current_user = next((message for message in reversed(messages) if message.role == "user"), None)
+        protected_media_ids: set[int] = set()
 
         # 第一遍：提取 system + 初步转换
         for msg in messages:
             if msg.role in {"system", "developer"}:
-                if msg.content:
+                if accepting_leading_instructions and msg.content:
                     system_parts.append(msg.content)
                 continue
+
+            accepting_leading_instructions = False
 
             if msg.role == "user":
                 text_parts = msg.user_text_parts()
@@ -1884,6 +1894,8 @@ class AnthropicAdapter(LLMAdapter):
                                 },
                             }
                         )
+                    if msg is current_user:
+                        protected_media_ids.update(id(part) for part in parts if part["type"] in {"image", "document"})
                     raw_messages.append(
                         {"role": "user", "content": parts or msg.content}
                     )
@@ -2041,7 +2053,7 @@ class AnthropicAdapter(LLMAdapter):
             api_messages.insert(0, {"role": "user", "content": "(conversation start)"})
 
         system_text = "\n\n".join(system_parts)
-        return system_text, _strip_excess_anthropic_media(api_messages)
+        return system_text, _strip_excess_anthropic_media(api_messages, protected_media_ids=protected_media_ids)
 
     def _should_enable_thinking(
         self,

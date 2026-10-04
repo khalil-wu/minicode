@@ -1,5 +1,7 @@
 import { Children, isValidElement, lazy, memo, Suspense, useState, useCallback, useEffect, useId, useMemo, useRef, createContext, useContext, useDeferredValue } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { decodeString } from "micromark-util-decode-string";
 import { StreamingMarkdownPartition, type MarkdownPart } from "./streamingMarkdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -9,7 +11,7 @@ import { fileIcon, folderIcon } from "../../lib/file-icons";
 import { useAppStore } from "../../stores";
 import type { Citation } from "../../stores/types";
 import { pushToast } from "../../overlays/ToastContainer";
-import { isPreviewableHttpUrl } from "../openWebInPreview";
+import { isPreviewableHttpUrl } from "../openWebInBrowser";
 import { openWebInBrowser } from "../openWebInBrowser";
 import { openWebTarget } from "../openWebTarget";
 import { openLocalFilePreview, openWorkspaceFilePreview } from "../openAttachmentPreview";
@@ -18,6 +20,9 @@ import { BrandIcon } from "../../components/BrandIcon";
 import { apiBase, workspaceRawResourceUrlWithToken } from "../../protocol/api";
 import { isDesktop, openPath, revealPath } from "../../desktop/runtime";
 import { useContextMenu } from "../../components/useContextMenu";
+import { copyText } from "../../lib/clipboard";
+import { isPreviewableMediaPath } from "../../lib/media-types";
+import { editorPathsEqual } from "../../stores/shared-helpers";
 import {
   isWindowsLikeWorkspacePath,
   normalizeWorkspacePath,
@@ -45,6 +50,7 @@ type MarkdownNode = {
   value?: string;
   url?: string;
   children?: MarkdownNode[];
+  position?: { start: { offset?: number }; end: { offset?: number } };
 };
 
 type ResolvedTheme = "light" | "dark";
@@ -78,6 +84,7 @@ const LazyCodeHighlighter = lazy(async () => {
     typescript,
     tsx,
     python,
+    powershell,
     bash,
     shellSession,
     json,
@@ -94,6 +101,7 @@ const LazyCodeHighlighter = lazy(async () => {
     import("react-syntax-highlighter/dist/esm/languages/prism/typescript"),
     import("react-syntax-highlighter/dist/esm/languages/prism/tsx"),
     import("react-syntax-highlighter/dist/esm/languages/prism/python"),
+    import("react-syntax-highlighter/dist/esm/languages/prism/powershell"),
     import("react-syntax-highlighter/dist/esm/languages/prism/bash"),
     import("react-syntax-highlighter/dist/esm/languages/prism/shell-session"),
     import("react-syntax-highlighter/dist/esm/languages/prism/json"),
@@ -108,6 +116,7 @@ const LazyCodeHighlighter = lazy(async () => {
     language: string;
     PreTag: string;
     showLineNumbers?: boolean;
+    lineNumberStyle?: React.CSSProperties;
     style: Record<string, React.CSSProperties>;
     wrapLongLines?: boolean;
   }> & {
@@ -119,6 +128,7 @@ const LazyCodeHighlighter = lazy(async () => {
   SyntaxHighlighter.registerLanguage("typescript", typescript.default);
   SyntaxHighlighter.registerLanguage("tsx", tsx.default);
   SyntaxHighlighter.registerLanguage("python", python.default);
+  SyntaxHighlighter.registerLanguage("powershell", powershell.default);
   SyntaxHighlighter.registerLanguage("bash", bash.default);
   SyntaxHighlighter.registerLanguage("shell-session", shellSession.default);
   SyntaxHighlighter.registerLanguage("json", json.default);
@@ -138,7 +148,23 @@ const LazyCodeHighlighter = lazy(async () => {
       const codeStyle = {
         ...base,
         'pre[class*="language-"]': { ...(base['pre[class*="language-"]'] as object), background: "transparent" },
-        'code[class*="language-"]': { ...(base['code[class*="language-"]'] as object), background: "transparent" },
+        'code[class*="language-"]': { ...(base['code[class*="language-"]'] as object), background: "transparent", fontFamily: "var(--editor-font-family)", fontSize: "var(--editor-font-size)", lineHeight: "var(--editor-line-height)", color: "var(--editor-foreground)" },
+        comment: { color: "var(--editor-syntax-comment)" },
+        prolog: { color: "var(--editor-syntax-comment)" },
+        doctype: { color: "var(--editor-syntax-comment)" },
+        cdata: { color: "var(--editor-syntax-comment)" },
+        punctuation: { color: "var(--editor-syntax-punctuation)" },
+        property: { color: "var(--editor-syntax-property)" },
+        tag: { color: "var(--editor-syntax-tag)" },
+        "attr-name": { color: "var(--editor-syntax-attribute)" },
+        "attr-value": { color: "var(--editor-syntax-string)" },
+        string: { color: "var(--editor-syntax-string)" },
+        keyword: { color: "var(--editor-syntax-keyword)" },
+        operator: { color: "var(--editor-syntax-punctuation)" },
+        number: { color: "var(--editor-syntax-number)" },
+        boolean: { color: "var(--editor-syntax-number)" },
+        function: { color: "var(--editor-syntax-function)" },
+        "class-name": { color: "var(--editor-syntax-type)" },
       };
       return (
         <SyntaxHighlighter
@@ -146,8 +172,9 @@ const LazyCodeHighlighter = lazy(async () => {
           style={codeStyle}
           PreTag="pre"
           showLineNumbers
+          lineNumberStyle={{ color: "var(--editor-line-number)", opacity: 0.8, paddingRight: "1.25em" }}
           wrapLongLines
-          customStyle={codeBlockStyle(hasLanguage)}
+          customStyle={{ ...codeBlockStyle(hasLanguage), fontFamily: "var(--editor-font-family)", fontSize: "var(--editor-font-size)", lineHeight: "var(--editor-line-height)", color: "var(--editor-foreground)" }}
         >
           {children}
         </SyntaxHighlighter>
@@ -161,29 +188,45 @@ const normalizeHighlightLanguage = (language: string): string => {
   if (normalized === "js") return "javascript";
   if (normalized === "ts") return "typescript";
   if (normalized === "py") return "python";
-  if (normalized === "sh" || normalized === "shell" || normalized === "zsh" || normalized === "ps1" || normalized === "powershell") return "bash";
+  if (normalized === "sh" || normalized === "shell" || normalized === "zsh") return "bash";
+  if (normalized === "ps1") return "powershell";
   if (normalized === "html" || normalized === "xml" || normalized === "svg") return "markup";
   if (normalized === "md") return "markdown";
   return normalized;
 };
 
-const fallbackStrongPattern = /\*\*([^*\n]+?)\*\*/g;
+const fallbackStrongPattern = /\*\*([^*\r\n]+?)\*\*/g;
 
-const splitFallbackStrongText = (value: string): MarkdownNode[] | null => {
+const splitFallbackStrongText = (value: string, source: string): MarkdownNode[] | null => {
   fallbackStrongPattern.lastIndex = 0;
   const parts: MarkdownNode[] = [];
   let lastIndex = 0;
+  let sourceIndex = 0;
   let match: RegExpExecArray | null;
 
-  while ((match = fallbackStrongPattern.exec(value)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push({ type: "text", value: value.slice(lastIndex, match.index) });
+  const isEscaped = (offset: number): boolean => {
+    let backslashes = 0;
+    while (offset > 0 && source[--offset] === "\\") backslashes += 1;
+    return backslashes % 2 === 1;
+  };
+  const decodedLength = (text: string): number => decodeString(text).length;
+
+  // Match literal delimiters in the source, then map only their ranges through
+  // the Markdown parser's escape/entity decoder into the accepted text node.
+  while ((match = fallbackStrongPattern.exec(source)) !== null) {
+    const sourceEnd = match.index + match[0].length;
+    if (isEscaped(match.index) || isEscaped(sourceEnd - 2)) continue;
+    const start = lastIndex + decodedLength(source.slice(sourceIndex, match.index));
+    const end = start + decodedLength(match[0]);
+    if (start > lastIndex) {
+      parts.push({ type: "text", value: value.slice(lastIndex, start) });
     }
     parts.push({
       type: "strong",
-      children: [{ type: "text", value: match[1] }],
+      children: [{ type: "text", value: value.slice(start + 2, end - 2) }],
     });
-    lastIndex = match.index + match[0].length;
+    lastIndex = end;
+    sourceIndex = sourceEnd;
   }
 
   if (parts.length === 0) return null;
@@ -193,7 +236,8 @@ const splitFallbackStrongText = (value: string): MarkdownNode[] | null => {
   return parts;
 };
 
-const normalizeFallbackStrongMarkers = () => (tree: MarkdownNode) => {
+const normalizeFallbackStrongMarkers = () => (tree: MarkdownNode, file: { toString(): string }) => {
+  const source = file.toString();
   const visit = (node: MarkdownNode): void => {
     const children = node.children;
     if (!children) return;
@@ -201,7 +245,8 @@ const normalizeFallbackStrongMarkers = () => (tree: MarkdownNode) => {
     const nextChildren: MarkdownNode[] = [];
     for (const child of children) {
       if (child.type === "text" && child.value?.includes("**")) {
-        const split = splitFallbackStrongText(child.value);
+        const split = splitFallbackStrongText(child.value,
+          source.slice(child.position!.start.offset!, child.position!.end.offset!));
         if (split) {
           nextChildren.push(...split);
           continue;
@@ -221,12 +266,14 @@ const CODE_FILE_EXTENSIONS = [
   "bash",
   "c",
   "cc",
+  "cjs",
   "cpp",
   "cs",
   "css",
   "go",
   "h",
   "hpp",
+  "htm",
   "html",
   "java",
   "js",
@@ -235,6 +282,7 @@ const CODE_FILE_EXTENSIONS = [
   "kt",
   "md",
   "mdx",
+  "mjs",
   "php",
   "ps1",
   "py",
@@ -261,9 +309,12 @@ const GENERIC_FILE_EXTENSIONS = [
 ].join("|");
 const anyFilePathPattern = new RegExp(String.raw`\.(?:${CODE_FILE_EXTENSIONS}|${GENERIC_FILE_EXTENSIONS})$`, "i");
 const externalDeliverablePathPattern = /\.(?:7z|aac|avif|bmp|csv|doc|docx|epub|flac|gif|ico|jpe?g|json|m4a|md|mov|mp3|mp4|odp|ods|odt|ogg|pdf|png|ppt|pptx|rtf|tar|tiff?|tsv|txt|wav|webm|webp|xls|xlsx|xml|ya?ml|zip)$/i;
+const fileLocationSuffix = String.raw`(?::\d+(?::\d+|[-–—]\d+)?|#L\d+(?:[-–—]L?\d+)?)`;
+const fileLineFragmentPattern = /^#L\d+(?:[-–—]L?\d+)?$/i;
+const fileLocationLabelPattern = new RegExp(String.raw`^(.+\.[^:\s#]+)(${fileLocationSuffix})$`, "i");
 
 const bareFileRefPattern = new RegExp(
-  String.raw`(^|[\s([{'",;!?，。；：、！？“”‘’（])((?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[/\\])?(?:[^\s` + "`" + String.raw`"'<>()[\]{}|:,;!?，。；：、！？“”‘’（）]+[\\/])*[^\s` + "`" + String.raw`"'<>()[\]{}|:,;!?，。；：、！？“”‘’（）]+\.(?:${CODE_FILE_EXTENSIONS}))(?::(\d+)(?::(\d+))?)?(?=$|[\s,，。;；:：)）\]}!?！？“”‘’])`,
+  String.raw`(^|[\s([{'",;!?，。；：、！？“”‘’（])((?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[/\\])?(?:[^\s` + "`" + String.raw`"'<>()[\]{}|:,;!?，。；：、！？“”‘’（）]+[\\/])*[^\s` + "`" + String.raw`"'<>()[\]{}|:,;!?，。；：、！？“”‘’（）]+\.(?:${CODE_FILE_EXTENSIONS}|${GENERIC_FILE_EXTENSIONS}))(${fileLocationSuffix})?(?=$|[\s.,，。;；:：、)）\]}!?！？“”‘’])`,
   "gi",
 );
 
@@ -273,8 +324,7 @@ const editorLinkUrl = (path: string, line: string, column?: string): string => {
   return `minicode-file-ref:${params.toString()}`;
 };
 
-const codeFilePathPattern = new RegExp(String.raw`\.(?:${CODE_FILE_EXTENSIONS})(?::\d+(?::\d+)?)?$`, "i");
-const editorTargetPattern = new RegExp(String.raw`^(.+\.(?:${CODE_FILE_EXTENSIONS}))(?::(\d+)(?::(\d+))?)?$`, "i");
+const editorTargetPattern = new RegExp(String.raw`^(.+\.(?:${CODE_FILE_EXTENSIONS}))(?::(\d+)(?::(\d+)|[-–—]\d+)?|#L(\d+)(?:[-–—]L?\d+)?)?$`, "i");
 
 const normalizeSlashes = (value: string): string => value.replace(/\\/g, "/").replace(/\/+/g, "/");
 
@@ -287,25 +337,25 @@ const isWorkspaceRelativeEditorPath = (path: string): boolean => {
   return !trimmed.split(/[\\/]+/).some((part) => part === "..");
 };
 
-const stripFileRefDecorations = (value: string): string => (
-  value.trim().replace(/[?#].*$/, "").replace(/[.,，。;；)）\]}]+$/, "")
-);
-
-const isCodeFilePath = (path: string): boolean => {
-  const clean = stripFileRefDecorations(path);
-  return codeFilePathPattern.test(clean);
+const stripFileRefDecorations = (value: string, preserveLineTarget = false): string => {
+  const clean = value.trim().replace(/[.,，。;；)）\]}]+$/, "");
+  const path = clean.split(/[?#]/, 1)[0];
+  const fragment = clean.match(/#.*$/)?.[0] ?? "";
+  return preserveLineTarget && fileLineFragmentPattern.test(fragment) ? `${path}${fragment}` : path;
 };
 
 const parseEditorPathTarget = (value: string): { path: string; line?: number; column?: number } | null => {
-  const clean = stripFileRefDecorations(value);
+  const clean = stripFileRefDecorations(value, true);
   const match = editorTargetPattern.exec(clean);
   if (!match) return null;
   return {
     path: match[1],
-    line: parsePositiveInt(match[2]),
+    line: parsePositiveInt(match[2] ?? match[4]),
     column: parsePositiveInt(match[3]),
   };
 };
+
+const isCodeFilePath = (path: string): boolean => parseEditorPathTarget(path) !== null;
 
 const splitBareFileRefs = (value: string, scope: MessageResourceScope): MarkdownNode[] | null => {
   bareFileRefPattern.lastIndex = 0;
@@ -316,19 +366,18 @@ const splitBareFileRefs = (value: string, scope: MessageResourceScope): Markdown
   while ((match = bareFileRefPattern.exec(value)) !== null) {
     const prefix = match[1] ?? "";
     const path = match[2] ?? "";
-    const line = match[3] ?? "";
-    const column = match[4];
-    const fullRef = line ? `${path}:${line}${column ? `:${column}` : ""}` : path;
+    const fullRef = `${path}${match[3] ?? ""}`;
     const refStart = match.index + prefix.length;
     if (!isWorkspaceRelativeEditorPath(path) && !/^[A-Za-z]:[/\\]/.test(path)) continue;
-    const knownTarget = knownFileTarget({ path }, scope, true);
+    const parsedTarget: EditorTarget = parseEditorPathTarget(fullRef) ?? { path };
+    const knownTarget = knownFileTarget(parsedTarget, scope, true);
     if (!knownTarget) continue;
     if (refStart > lastIndex) {
       parts.push({ type: "text", value: value.slice(lastIndex, refStart) });
     }
     parts.push({
       type: "link",
-      url: line ? editorLinkUrl(knownTarget.path, line, column) : knownTarget.path,
+      url: knownTarget.line ? editorLinkUrl(knownTarget.path, String(knownTarget.line), knownTarget.column?.toString()) : knownTarget.path,
       children: [{ type: "text", value: fullRef }],
     });
     lastIndex = refStart + fullRef.length;
@@ -362,7 +411,6 @@ const linkifyBareFileReferences = (scope: MessageResourceScope) => (tree: Markdo
   visit(tree);
 };
 
-const markdownCodeSegmentPattern = /(```[\s\S]*?```|`[^`\n]*`)/g;
 const windowsAbsolutePathPattern = /^[A-Za-z]:(?:[\\/]|%5[cC])/;
 
 const isExplicitLocalImageUrl = (url: string): boolean => (
@@ -475,31 +523,27 @@ const normalizeDollarMathSegment = (segment: string): string => {
 };
 
 const normalizeLatexDelimiters = (value: string): string => {
-  if (!value || !/[\\$]/.test(value)) return value;
-  return value
-    .split(markdownCodeSegmentPattern)
-    .map((segment) => {
-      if (!segment || segment.startsWith("`")) return segment;
-      return normalizeDollarMathSegment(segment)
-        .replace(/\\\[([\s\S]*?)\\\]/g, (_match, body: string) => {
-          const trimmed = String(body || "").trim();
-          return trimmed ? `\n\n$$\n${trimmed}\n$$\n\n` : "";
-        })
-        .replace(/\\\(([\s\S]*?)\\\)/g, (_match, body: string) => {
-          const trimmed = String(body || "").trim();
-          return trimmed ? `$${trimmed}$` : "";
-        });
+  return normalizeDollarMathSegment(value)
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_match, body: string) => {
+      const trimmed = body.trim();
+      return trimmed ? `\n\n$$\n${trimmed}\n$$\n\n` : "";
     })
-    .join("");
+    .replace(/\\\(([\s\S]*?)\\\)/g, (_match, body: string) => {
+      const trimmed = body.trim();
+      return trimmed ? `$${trimmed}$` : "";
+    });
 };
 
 const CopyButton = ({ text }: { text: string }) => {
-  const [copied, setCopied] = useState(false);
-  const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
+  const [copiedSource, setCopiedSource] = useState<{ text: string } | null>(null);
+  const copied = copiedSource?.text === text;
+  useEffect(() => {
+    if (!copiedSource) return;
+    const timer = window.setTimeout(() => setCopiedSource(null), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copiedSource]);
+  const handleCopy = useCallback(async () => {
+    if (await copyText(text, "代码")) setCopiedSource({ text });
   }, [text]);
 
   return (
@@ -520,23 +564,28 @@ const CopyButton = ({ text }: { text: string }) => {
 const InsertButton = ({ text }: { text: string }) => {
   const appMode = useAppStore((s) => s.appMode);
   const activeTabPath = useAppStore((s) => s.activeTabPath);
-  const insertIntoActiveEditor = useAppStore((s) => s.insertIntoActiveEditor);
-  const [inserted, setInserted] = useState(false);
-  const canInsert = appMode === "code" && Boolean(activeTabPath);
+  const editableTab = useAppStore((s) => s.editorTabs.some((tab) => editorPathsEqual(tab.path, s.activeTabPath, s.workingDirectory)
+    && !tab.loading && !tab.error && !tab.largeFile && !tab.readOnly && !isPreviewableMediaPath(tab.path)));
+  const [insertedSource, setInsertedSource] = useState<{ text: string; path: string | null } | null>(null);
+  const inserted = insertedSource?.text === text && insertedSource.path === activeTabPath;
+  const canInsert = appMode === "code" && editableTab;
+  useEffect(() => {
+    if (!insertedSource) return;
+    const timer = window.setTimeout(() => setInsertedSource(null), 1400);
+    return () => window.clearTimeout(timer);
+  }, [insertedSource]);
 
   const handleInsert = useCallback(() => {
     if (!canInsert) return;
     const event = new CustomEvent("editor:insert-text", { detail: { text, handled: false } });
     window.dispatchEvent(event);
-    const ok = event.detail.handled || insertIntoActiveEditor(text);
-    if (!ok) {
-      pushToast("请先打开可编辑文件，再插入代码。", "warning", 1800);
+    if (!event.detail.handled) {
+      pushToast("编辑器尚未就绪，请稍后重试。", "warning", 1800);
       return;
     }
-    setInserted(true);
+    setInsertedSource({ text, path: activeTabPath });
     pushToast(`已插入 ${activeTabPath}`, "success", 1200);
-    window.setTimeout(() => setInserted(false), 1400);
-  }, [activeTabPath, canInsert, insertIntoActiveEditor, text]);
+  }, [activeTabPath, canInsert, text]);
 
   if (!canInsert) return null;
   return (
@@ -561,9 +610,10 @@ const codeBlockStyle = (hasLanguage: boolean): React.CSSProperties => ({
   background: "var(--surface-soft)",
   border: "1px solid var(--border-subtle)",
   borderRadius: hasLanguage ? "0 0 var(--radius-sm, 6px) var(--radius-sm, 6px)" : "var(--radius-sm, 6px)",
-  fontSize: "var(--text-sm)",
-  fontFamily: "var(--font-mono)",
-  lineHeight: 1.5,
+  fontSize: "var(--editor-font-size)",
+  fontFamily: "var(--editor-font-family)",
+  lineHeight: "var(--editor-line-height)",
+  color: "var(--editor-foreground)",
 });
 
 const lineNumberColumnStyle: React.CSSProperties = {
@@ -588,7 +638,7 @@ const PlainCodeBlock = ({ hasLanguage, text }: { hasLanguage: boolean; text: str
         {lines.map((line, index) => (
           <span key={index} className="block">
             <span aria-hidden="true" style={lineNumberColumnStyle}>{index + 1}</span>
-            {line || " "}
+            {line}
           </span>
         ))}
       </code>
@@ -818,7 +868,7 @@ const workspacePathFromHref = (
     }
   }
 
-  candidate = normalizeSlashes(stripFileRefDecorations(candidate).replace(/%5[cC]/g, "/")).replace(/^\.\/+/, "");
+  candidate = normalizeSlashes(stripFileRefDecorations(candidate, options.allowLineTarget).replace(/%5[cC]/g, "/")).replace(/^\.\/+/, "");
   if (
     fromLocalFrontend
     && candidate.startsWith("/")
@@ -910,26 +960,6 @@ const editorTargetFromHref = (href: string, workspaceRoot?: string): { path: str
   return null;
 };
 
-const canUseLinkTextAsEditorTarget = (href: string): boolean => {
-  const trimmed = href.trim();
-  if (!trimmed) return true;
-  if (trimmed.startsWith("minicode-file-ref:")) return true;
-  if (/^[A-Za-z]:[/\\]/.test(trimmed)) return true;
-  if (trimmed.startsWith("/") || trimmed.startsWith("./") || trimmed.startsWith("../")) return true;
-  if (!/^[a-z][a-z\d+.-]*:/i.test(trimmed)) return true;
-  try {
-    const parsed = new URL(trimmed);
-    return parsed.protocol === "file:" || isLocalFrontendUrl(parsed);
-  } catch {
-    return false;
-  }
-};
-
-const editorTargetFromLinkText = (href: string, text: string, workspaceRoot?: string): EditorTarget | null => {
-  if (!canUseLinkTextAsEditorTarget(href)) return null;
-  return workspaceFileTargetFromHref(text, workspaceRoot);
-};
-
 const proseOptionListPattern = /^\s*[\p{L}\p{N}][\p{L}\p{N}\s&+.-]*(?:\s*\/\s*[\p{L}\p{N}][\p{L}\p{N}\s&+.-]*){1,}\s*$/u;
 const proseInlinePattern = /^[\p{L}\p{N}\s·,，.。:：;；!?！？'"“”‘’\-–—\/+&%℃°]+$/u;
 const codeLikeInlinePattern = /(?:[`\\{}[\]()<>=]|[_$]|&&|\|\||::|=>|->|[A-Za-z]:[\\/]|\.{1,2}[\\/]|(?:^|\s)[\\/][\w.-]+|[\w.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|json|md|css|scss|html|tsx?|ya?ml|toml|rs|go|java|kt|swift|php|rb|sh|ps1)\b|(?:^|\s)-{1,2}[\w-]+|^\s*(?:npm|pnpm|yarn|bun|node|npx|python|py|pip|uv|pytest|git|curl|docker|kubectl|powershell|cmd|rg)\b|\b(?:const|let|var|function|return|import|export|class|async|await|def|lambda|SELECT|UPDATE|INSERT|DELETE)\b|[a-z]+[A-Z][A-Za-z]*|\w+\.\w+\()/;
@@ -968,7 +998,7 @@ const fileChipClassName = "md-file-chip";
 const fileExtensionFromPath = (value: string): string => {
   const clean = stripFileRefDecorations(value).replace(/[\\/]+$/, "");
   const base = clean.split(/[\\/]/).pop() ?? "";
-  const match = /\.([^.:\s]+)(?::\d+(?::\d+)?)?$/i.exec(base);
+  const match = /\.([^.:\s]+)(?::\d+(?::\d+|[-–—]\d+)?)?$/i.exec(base);
   return match?.[1]?.toLowerCase() ?? "";
 };
 
@@ -990,10 +1020,10 @@ const displayPathParts = (value: string): { directory: string; name: string } =>
 
 const splitFileLabelMeta = (value: string): { fileName: string; meta: string } => {
   const trimmed = value.trim();
-  const lineLabel = /^(.+\.[^\s()]+)\s+(\(line\s+\d+(?::\d+)?\))$/i.exec(trimmed);
+  const lineLabel = /^(.+\.[^\s()]+)\s+(\(lines?\s+\d+(?::\d+|[-–—]\d+)?\))$/i.exec(trimmed);
   if (lineLabel) return { fileName: lineLabel[1], meta: lineLabel[2] };
-  const colonLine = /^(.+\.[^:\s]+)(:\d+(?::\d+)?)$/.exec(trimmed);
-  if (colonLine) return { fileName: colonLine[1], meta: colonLine[2] };
+  const locationLabel = fileLocationLabelPattern.exec(trimmed);
+  if (locationLabel) return { fileName: locationLabel[1], meta: locationLabel[2] };
   return { fileName: value, meta: "" };
 };
 
@@ -1056,7 +1086,7 @@ const FileReferenceChip = ({ target, children, workspaceRoot, conversationId }: 
       { label: "在资源管理器中显示", onClick: () => { void revealPath(titlePath); } },
     ] : []),
     { label: "", separator: true },
-    { label: "复制路径", onClick: () => { void navigator.clipboard.writeText(titlePath); } },
+    { label: "复制路径", onClick: () => { void copyText(titlePath, "路径"); } },
   ]);
 
   return (
@@ -1100,7 +1130,7 @@ const GenericFileReferenceChip = ({ target, children, workspaceRoot, conversatio
       { label: "在资源管理器中显示", onClick: () => { void revealPath(titlePath); } },
     ] : []),
     { label: "", separator: true },
-    { label: "复制路径", onClick: () => { void navigator.clipboard.writeText(titlePath); } },
+    { label: "复制路径", onClick: () => { void copyText(titlePath, "路径"); } },
   ]);
 
   return (
@@ -1251,7 +1281,7 @@ const MarkdownImage = ({ workspaceRoot, conversationId, ...props }: React.ImgHTM
     <img
       {...props}
       src={src}
-      className={`max-w-full max-h-[480px] rounded-[var(--radius-sm,6px)] border border-[var(--border-subtle)] my-2 block object-contain bg-[var(--surface-soft)]${previewable ? (opensInPreviewPanel ? " cursor-pointer" : " cursor-zoom-in") : ""}`}
+      className={`md-content-image max-w-full max-h-[480px] rounded-[var(--radius-sm,6px)] border border-[var(--border-subtle)] my-2 block object-contain bg-[var(--surface-soft)]${previewable ? (opensInPreviewPanel ? " cursor-pointer" : " cursor-zoom-in") : ""}`}
       loading="lazy"
       title={previewable ? previewTitle : props.title}
       onClick={props.onClick}
@@ -1279,15 +1309,17 @@ const mdComponents = (
   scopeId: string,
   headingId: ReturnType<typeof createMarkdownHeadingIdAssigner>,
 ): MarkdownComponents => {
-  const heading = (level: 1 | 2 | 3) => ({ node, ...props }: MarkdownPositionedProps<React.HTMLAttributes<HTMLHeadingElement>>) => {
+  const heading = (level: 1 | 2 | 3 | 4 | 5 | 6) => ({ node, ...props }: MarkdownPositionedProps<React.HTMLAttributes<HTMLHeadingElement>>) => {
     const base = markdownHeadingSlug(textFromReactNode(props.children));
     const id = headingId(base, node?.position?.start?.line);
-    const Tag: "h1" | "h2" | "h3" = level === 1 ? "h1" : level === 2 ? "h2" : "h3";
+    const Tag = `h${level}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
     const className = level === 1
       ? "text-[length:var(--text-2xl)] font-bold mt-5 mb-2.5 first:mt-0"
       : level === 2
         ? "text-[length:var(--text-xl)] font-semibold mt-5 mb-2 first:mt-0"
-        : "text-[length:var(--text-lg)] font-semibold mt-4 mb-1.5 first:mt-0";
+        : level === 3
+          ? "text-[length:var(--text-lg)] font-semibold mt-4 mb-1.5 first:mt-0"
+          : "text-[length:var(--text-base)] font-semibold mt-3 mb-1.5 first:mt-0";
     return <Tag {...props} id={id} data-markdown-heading={base} tabIndex={-1} className={className} style={{ scrollMarginTop: 16, ...props.style }} />;
   };
   return ({
@@ -1386,7 +1418,7 @@ const mdComponents = (
     const actionFilePath = actionFilePathFromHref(href, resourceScope.workspaceRoot);
     const parsedEditorTarget = actionFilePath
       ? workspaceFileTargetFromHref(actionFilePath, resourceScope.workspaceRoot)
-      : editorTargetFromHref(href, resourceScope.workspaceRoot) ?? editorTargetFromLinkText(href, childrenText, resourceScope.workspaceRoot);
+      : editorTargetFromHref(href, resourceScope.workspaceRoot);
     const editorTarget = href.startsWith("minicode-file-ref:") || actionFilePath
       ? knownFileTarget(parsedEditorTarget, resourceScope)
       : parsedEditorTarget;
@@ -1394,14 +1426,10 @@ const mdComponents = (
       ? null
       : actionFilePath
         ? knownFileTarget(workspaceGenericFileTargetFromHref(actionFilePath, resourceScope.workspaceRoot), resourceScope)
-        : workspaceGenericFileTargetFromHref(href, resourceScope.workspaceRoot) ?? (
-            canUseLinkTextAsEditorTarget(href) ? workspaceGenericFileTargetFromHref(childrenText, resourceScope.workspaceRoot) : null
-          );
+        : workspaceGenericFileTargetFromHref(href, resourceScope.workspaceRoot);
     const folderTarget = editorTarget || fileTarget
       ? null
-      : workspaceFolderTargetFromHref(href, resourceScope.workspaceRoot) ?? (
-          canUseLinkTextAsEditorTarget(href) ? workspaceFolderTargetFromHref(childrenText, resourceScope.workspaceRoot) : null
-        );
+      : workspaceFolderTargetFromHref(href, resourceScope.workspaceRoot);
     const opensInApp = isPreviewableHttpUrl(href);
     if (href.startsWith("minicode-file-ref:") && !editorTarget) {
       return <span className="font-[var(--font-mono)] text-[0.9em]">{props.children}</span>;
@@ -1469,6 +1497,9 @@ const mdComponents = (
   h1: heading(1),
   h2: heading(2),
   h3: heading(3),
+  h4: heading(4),
+  h5: heading(5),
+  h6: heading(6),
   hr: () => <hr className="border-0 h-px my-4 bg-gradient-to-r from-transparent via-[var(--border-subtle)] to-transparent" />,
   img: ({ node: _node, ...props }: MarkdownElementProps<React.ImgHTMLAttributes<HTMLImageElement>>) => {
     const resourceScope = useContext(MarkdownResourceContext);
@@ -1487,16 +1518,53 @@ const rehypePlugins: MarkdownRehypePlugins = [
   [rehypeKatex, { strict: false, throwOnError: false }],
 ];
 
-const markdownUrlTransform = (url: string) => (
-  url.startsWith("minicode-file-ref:") || url.startsWith("minicode-local-file:") || isInlineImageDataUrl(url) || isExplicitLocalImageUrl(url)
-    ? url
-    : defaultUrlTransform(url)
+const markdownUrlTransform = (url: string) => {
+  if (url.startsWith("minicode-file-ref:") || url.startsWith("minicode-local-file:") || isInlineImageDataUrl(url) || isExplicitLocalImageUrl(url)) return url;
+  const fileTarget = workspaceFileTargetFromHref(url);
+  // A basename followed by :line is a file location, not a URL protocol.
+  return fileTarget ? url : defaultUrlTransform(url);
+};
+
+const preserveWindowsMarkdownFileLinks = (content: string, codeRanges: { start: number; end: number }[]): string => content.replace(
+  /(?<!!)\[([^\]\n]+)\]\(\s*([A-Za-z]:\\[^)\n]+)\s*\)/g,
+  (match, label: string, path: string, offset: number) => {
+    const destinationStart = offset + match.lastIndexOf(path);
+    if (codeRanges.some((range) => destinationStart >= range.start && destinationStart < range.end)) return match;
+    return `[${label}](minicode-local-file:${encodeURIComponent(path.trim())})`;
+  },
 );
 
-const preserveWindowsMarkdownFileLinks = (content: string): string => content.replace(
-  /(?<!!)\[([^\]\n]+)\]\(\s*([A-Za-z]:\\[^)\n]+)\s*\)/g,
-  (_match, label: string, path: string) => `[${label}](minicode-local-file:${encodeURIComponent(path.trim())})`,
-);
+// Use the Markdown parser's source ranges so every code fence/span keeps its
+// literal contents, including tildes, nested backticks, and quoted code blocks.
+const markdownCodeRanges = (value: string): { start: number; end: number }[] => {
+  const tree = fromMarkdown(value);
+  const ranges: { start: number; end: number }[] = [];
+  const visit = (node: typeof tree | typeof tree.children[number]): void => {
+    if (node.type === "code" || node.type === "inlineCode") {
+      ranges.push({ start: node.position!.start.offset!, end: node.position!.end.offset! });
+    } else if ("children" in node) {
+      node.children.forEach(visit);
+    }
+  };
+  visit(tree);
+  return ranges;
+};
+
+const normalizeMarkdownSource = (value: string): string => {
+  if (!/[\\$]/.test(value)) return value;
+  let codeRanges = markdownCodeRanges(value);
+  // Rewrite the destination as a whole so code-formatted link labels remain
+  // valid, while Windows links shown inside literal code stay untouched.
+  const linked = preserveWindowsMarkdownFileLinks(value, codeRanges);
+  if (linked !== value) codeRanges = markdownCodeRanges(linked);
+  let output = "";
+  let cursor = 0;
+  for (const { start, end } of codeRanges) {
+    output += normalizeLatexDelimiters(linked.slice(cursor, start)) + linked.slice(start, end);
+    cursor = end;
+  }
+  return output + normalizeLatexDelimiters(linked.slice(cursor));
+};
 
 /**
  * Find the split point for incremental rendering during streaming.
@@ -1612,11 +1680,8 @@ export function findStableSplitPoint(content: string): number {
 // pipeline and render as a simple <p>. This covers the majority of short
 // assistant replies ("Sure, let me help with that.") and saves ~2-3ms of
 // parse + render per message. Mirrors cc's hasMarkdownSyntax() check.
-const MD_SYNTAX_RE = /[#*`|[>\-_~]|\n\n|^\d+\. |\n\d+\. /;
-const FILE_REF_HINT_RE = new RegExp(
-  String.raw`\.(?:${CODE_FILE_EXTENSIONS})(?::\d+(?::\d+)?)?(?=$|[\s,，。;；:：)）\]}])`,
-  "i",
-);
+const MD_SYNTAX_RE = /[#*`|[><\\&_$~\-]|[\n\t]|^ {4}|^ {0,3}(?:\d+[.)]|\+)\s|https?:\/\/|www\.|@/i;
+const FILE_REF_HINT_RE = new RegExp(bareFileRefPattern.source, "i");
 function hasMarkdownSyntax(s: string): boolean {
   return MD_SYNTAX_RE.test(s) || FILE_REF_HINT_RE.test(s);
 }
@@ -1647,7 +1712,7 @@ const MarkdownPiece = memo(({ part, scopeId, resources, resolved, plugins, openF
 }) => {
   const headingId = useMemo(() => createMarkdownHeadingIdAssigner(`${scopeId}-p${part.start}`), [scopeId, part.start]);
   const components = useMemo(() => mdComponents(resolved, scopeId, headingId), [resolved, scopeId, headingId]);
-  const content = useMemo(() => preserveWindowsMarkdownFileLinks(normalizeLatexDelimiters(part.content)), [part.content]);
+  const content = useMemo(() => normalizeMarkdownSource(part.content), [part.content]);
   headingId.reset();
   if (openFence === 0) {
     const newline = part.content.indexOf("\n");
@@ -1677,11 +1742,15 @@ function StreamingMarkdownView({ content, isStreaming, citations, workspaceRoot,
   const tail = isStreaming && view.tail.content.length > 8192 ? deferredTail : view.tail;
   const pathsKey = JSON.stringify(knownFilePaths);
   const resources = useMemo(() => ({ workspaceRoot, conversationId, knownFilePaths: pathsKey ? JSON.parse(pathsKey) : undefined }), [workspaceRoot, conversationId, pathsKey]);
-  const hasCitations = Boolean(citations?.length);
+  const boundCitationIndexes = useMemo(() => new Set(
+    (citations ?? []).flatMap((citation, index) => citation.source || citation.url ? [index + 1] : []),
+  ), [citations]);
   const plugins = useMemo<MarkdownRemarkPlugins>(() => {
     const fileRefs: MarkdownRemarkPlugins[number] = [linkifyBareFileReferences, resources];
-    return hasCitations ? [...remarkPlugins, fileRefs, removeCitationMarkers] : [...remarkPlugins, fileRefs];
-  }, [hasCitations, resources]);
+    return boundCitationIndexes.size
+      ? [...remarkPlugins, fileRefs, [removeCitationMarkers, boundCitationIndexes]]
+      : [...remarkPlugins, fileRefs];
+  }, [boundCitationIndexes, resources]);
   const shared = { scopeId, resources, resolved, plugins };
   return <MarkdownResourceContext.Provider value={resources}><div id={scopeId} className="md-body">
     {!view.wholeDocument && <CommittedMarkdown parts={view.parts} count={view.parts.length} {...shared} />}

@@ -77,12 +77,9 @@ def load_feature_flags(
     managed_requirements: Mapping[str, bool] | None = None,
 ) -> FeatureFlags:
     if settings_data is None:
-        try:
-            from backend.config import _load_effective_settings_json
+        from backend.config import _load_effective_settings_json
 
-            settings_data = _load_effective_settings_json()
-        except Exception:
-            settings_data = {}
+        settings_data = _load_effective_settings_json()
 
     flags: dict[str, bool] = dict(DEFAULT_FEATURE_FLAGS)
 
@@ -101,12 +98,9 @@ def load_feature_flags(
         flags[name] = coerce_feature_bool(raw_value, flags.get(name, False))
 
     if managed_requirements is None:
-        try:
-            from backend.config import get_config_requirements
+        from backend.config import get_config_requirements
 
-            managed_requirements = get_config_requirements().feature_requirements
-        except Exception:
-            managed_requirements = {}
+        managed_requirements = get_config_requirements().feature_requirements
     for raw_name, required in managed_requirements.items():
         name = normalize_feature_name(str(raw_name))
         if name:

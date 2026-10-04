@@ -855,8 +855,9 @@ class BackgroundCommandManager:
                     exc,
                 )
         output = command.output
-        truncated = len(output) > max_chars
-        return (output[-max_chars:] if truncated else output), truncated, ""
+        clipped = len(output) > max_chars
+        truncated = clipped or command.output_chars > len(output)
+        return (output[-max_chars:] if clipped else output), truncated, ""
 
     async def cancel(self, command_id: str, *, conversation_id: str) -> bool:
         owner = str(conversation_id or "").strip()

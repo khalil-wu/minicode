@@ -90,8 +90,6 @@ def build_agent_loop_components(
             continue
         if hook_result.has_feedback:
             pending_turn_context.append(hook_result.feedback)
-        if hook_result.has_additional_context:
-            pending_turn_context.append(hook_result.additional_context)
 
     configured_session_policy: ToolsetPolicy | None = None
     if SESSION_TOOLSET_POLICY_METADATA_KEY in metadata:

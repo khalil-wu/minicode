@@ -4,12 +4,32 @@ import {
   artifactSummaryForRecord,
   canonicalArtifactKind,
   isBrowserScreenshotRecord,
+  isExecutionResultArtifact,
   normalizeArtifactMediaType,
   normalizeArtifactPreview,
   recordHasImageArtifact,
 } from "./artifact-projection";
 
 describe("artifact projection contract", () => {
+  it("distinguishes stored code execution output from files emitted by the same call", () => {
+    const record = {
+      name: "tool_exec",
+      args: {},
+      artifactId: "script-output",
+      displaySummary: "Script completed",
+      summary: '{"cell_id":"cell-1","status":"completed","artifact_id":"script-output","output_preview":"test log"}',
+      outputFiles: [{ path: "reports/screenshot.png", size: 12, mimeType: "image/png" }],
+    };
+    expect(isExecutionResultArtifact(record)).toBe(true);
+    expect(artifactSummaryForRecord(record)).toBe("代码执行输出");
+    expect(isExecutionResultArtifact({ ...record, name: "tool_wait", artifactKind: "text" })).toBe(true);
+    expect(isExecutionResultArtifact({ ...record, artifactMediaType: "image/png" })).toBe(false);
+    expect(isExecutionResultArtifact({ ...record, artifactMediaType: "application/pdf" })).toBe(false);
+    expect(isExecutionResultArtifact({ ...record, artifactKind: "file" })).toBe(false);
+    expect(isExecutionResultArtifact({ ...record, name: "report_generator" })).toBe(false);
+    expect(artifactSummaryForRecord({ ...record, displaySummary: "测试审计输出" })).toBe("测试审计输出");
+  });
+
   it("canonicalizes an unknown declared kind when the MIME identifies an image", () => {
     expect(canonicalArtifactKind("browser_screenshot", "IMAGE/PNG; charset=binary")).toBe("image");
     expect(canonicalArtifactKind("legacy_kind", "image/webp")).toBe("image");

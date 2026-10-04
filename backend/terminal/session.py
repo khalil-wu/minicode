@@ -54,6 +54,11 @@ class TerminalSessionInfo:
     is_alive: bool = False
     conversation_id: str = ""
     terminal_mode: str = "pipe"
+    exit_code: int | None = None
+    exit_signal: int | str | None = None
+    exited_at: float | None = None
+    cleanup_pending: bool = False
+    cleanup_reason: str = ""
 
 
 class TerminalSession:
@@ -61,7 +66,7 @@ class TerminalSession:
         self,
         session_id: str,
         cwd: str | None = None,
-        on_output: Callable[[str, str], Coroutine[Any, Any, None]] | None = None,
+        on_output: Callable[[str, str, int, int], Coroutine[Any, Any, None]] | None = None,
         on_exit: Callable[[str, int], Coroutine[Any, Any, None]] | None = None,
         conversation_id: str = "",
     ) -> None:
@@ -74,6 +79,7 @@ class TerminalSession:
         self._shell_cmd: list[str] = []
         self._started_at = 0.0
         self._output_buffer: list[str] = []
+        self._output_cursor = 0
         self._MAX_OUTPUT_BUFFER_CHARS = TERMINAL_OUTPUT_MAX_CHARS
         self._stdout_reader_task: asyncio.Task[None] | None = None
         self._stderr_reader_task: asyncio.Task[None] | None = None
@@ -83,6 +89,9 @@ class TerminalSession:
         self._exit_notification_error: dict[str, str] = {}
         self._external_pid: int | None = None
         self._external_alive: bool | None = None
+        self._external_exit_code: int | None = None
+        self._external_exit_signal: int | str | None = None
+        self._exited_at: float | None = None
         # Set when a kill could not prove the shell tree exited. The session
         # then stays registered as the recovery handle for that process.
         self.cleanup_pending = False
@@ -107,6 +116,10 @@ class TerminalSession:
         return "pty" if self._process is None and self._external_pid is not None else "pipe"
 
     @property
+    def exit_code(self) -> int | None:
+        return self._process.returncode if self._process is not None else self._external_exit_code
+
+    @property
     def info(self) -> TerminalSessionInfo:
         return TerminalSessionInfo(
             session_id=self.session_id,
@@ -117,6 +130,11 @@ class TerminalSession:
             is_alive=self.is_alive,
             conversation_id=self.conversation_id,
             terminal_mode=self.terminal_mode,
+            exit_code=self.exit_code,
+            exit_signal=self._external_exit_signal,
+            exited_at=self._exited_at,
+            cleanup_pending=self.cleanup_pending,
+            cleanup_reason=self.cleanup_reason,
         )
 
     def snapshot(self, *, max_chars: int = TERMINAL_OUTPUT_DEFAULT_CHARS) -> dict[str, Any]:
@@ -124,6 +142,7 @@ class TerminalSession:
         output = "".join(self._output_buffer)
         truncated = limit > 0 and len(output) > limit
         bounded_output = output[-limit:] if limit > 0 else ""
+        output_chars = len(bounded_output.encode("utf-16-le", "surrogatepass")) // 2
         return {
             "session_id": self.session_id,
             "conversation_id": self.conversation_id,
@@ -133,9 +152,14 @@ class TerminalSession:
             "started_at": self._started_at,
             "is_alive": self.is_alive,
             "terminal_mode": self.terminal_mode,
+            "exit_code": self.exit_code,
+            "exit_signal": self._external_exit_signal,
+            "exited_at": self._exited_at,
             "output": bounded_output,
-            "output_chars": len(bounded_output),
-            "total_output_chars": len(output),
+            "output_chars": output_chars,
+            "total_output_chars": self._output_cursor,
+            "output_start_cursor": self._output_cursor - output_chars,
+            "output_end_cursor": self._output_cursor,
             "truncated": truncated,
             "exit_notification_error": dict(self._exit_notification_error),
             "cleanup_pending": bool(self.cleanup_pending),
@@ -149,6 +173,9 @@ class TerminalSession:
         shell: str | None = None,
         pid: int | None = None,
         is_alive: bool = True,
+        exit_code: int | None = None,
+        exit_signal: int | str | None = None,
+        exited_at: float | None = None,
     ) -> None:
         """Mirror metadata for a desktop PTY owned by the Electron process."""
         if cwd:
@@ -158,14 +185,32 @@ class TerminalSession:
         if pid is not None:
             self._external_pid = pid
         self._external_alive = is_alive
+        if not is_alive and (exit_code is not None or exit_signal is not None or exited_at is not None):
+            self._external_exit_code = exit_code
+            self._external_exit_signal = exit_signal
+            self._exited_at = exited_at
         if not self._started_at:
             self._started_at = time.time()
 
-    def append_external_output(self, data: str) -> None:
+    def set_external_snapshot(self, output: str, end_cursor: int) -> None:
+        if end_cursor < self._output_cursor:
+            return
+        self._output_buffer = [output] if output else []
+        self._output_cursor = end_cursor
+        self._trim_output_buffer()
+
+    def append_external_output(self, data: str, *, start_cursor: int | None = None, end_cursor: int | None = None) -> None:
         if not data:
             return
-        self._output_buffer.append(str(data))
-        self._trim_output_buffer()
+        if start_cursor is not None and end_cursor is not None:
+            if end_cursor <= self._output_cursor:
+                return
+            if start_cursor < self._output_cursor:
+                data = data.encode("utf-16-le", "surrogatepass")[(self._output_cursor - start_cursor) * 2:].decode("utf-16-le", "surrogatepass")
+            elif start_cursor > self._output_cursor:
+                self._output_buffer.clear()
+                self._output_cursor = start_cursor
+        self._append_output(str(data))
 
     def clear_output(self) -> None:
         """Forget reconnectable scrollback without stopping the shell."""
@@ -196,6 +241,7 @@ class TerminalSession:
         )
         self._started_at = time.time()
         self._output_buffer.clear()
+        self._output_cursor = 0
         self._exit_notified = False
         self._stdout_reader_task = asyncio.create_task(self._read_stdout())
         self._stderr_reader_task = asyncio.create_task(self._read_stderr())
@@ -309,6 +355,8 @@ class TerminalSession:
         if self._exit_notified:
             return
         self._exit_notified = True
+        if self._process is not None and self._process.returncode is not None:
+            self._exited_at = time.time() * 1000
 
         if self._on_exit and self._process and self._process.returncode is not None:
             try:
@@ -339,12 +387,22 @@ class TerminalSession:
             await self._notify_exit_once()
 
     def _trim_output_buffer(self) -> None:
-        total = sum(len(s) for s in self._output_buffer)
-        if total <= self._MAX_OUTPUT_BUFFER_CHARS:
-            return
-        while self._output_buffer and total > self._MAX_OUTPUT_BUFFER_CHARS:
-            removed = len(self._output_buffer.pop(0))
-            total -= removed
+        excess = sum(len(s) for s in self._output_buffer) - self._MAX_OUTPUT_BUFFER_CHARS
+        while excess > 0:
+            first = self._output_buffer[0]
+            if len(first) <= excess:
+                excess -= len(self._output_buffer.pop(0))
+            else:
+                self._output_buffer[0] = first[excess:]
+                break
+
+    def _append_output(self, data: str) -> tuple[int, int]:
+        start_cursor = self._output_cursor
+        # Match Electron/JavaScript string offsets, including non-BMP output.
+        self._output_cursor += len(data.encode("utf-16-le", "surrogatepass")) // 2
+        self._output_buffer.append(data)
+        self._trim_output_buffer()
+        return start_cursor, self._output_cursor
 
     async def _read_stdout(self) -> None:
         if not self._process or not self._process.stdout:
@@ -361,11 +419,10 @@ class TerminalSession:
                 decoded = decoder.decode(chunk)
                 if not decoded:
                     continue
-                self._output_buffer.append(decoded)
-                self._trim_output_buffer()
+                start_cursor, end_cursor = self._append_output(decoded)
                 if self._on_output:
                     try:
-                        await self._on_output(self.session_id, decoded)
+                        await self._on_output(self.session_id, decoded, start_cursor, end_cursor)
                     except Exception:
                         logger.debug("Terminal %s stdout callback failed", self.session_id, exc_info=True)
         except asyncio.CancelledError:
@@ -394,11 +451,10 @@ class TerminalSession:
                 decoded = decoder.decode(chunk)
                 if not decoded:
                     continue
-                self._output_buffer.append(decoded)
-                self._trim_output_buffer()
+                start_cursor, end_cursor = self._append_output(decoded)
                 if self._on_output:
                     try:
-                        await self._on_output(self.session_id, decoded)
+                        await self._on_output(self.session_id, decoded, start_cursor, end_cursor)
                     except Exception:
                         logger.debug("Terminal %s stderr callback failed", self.session_id, exc_info=True)
         except asyncio.CancelledError:
@@ -420,7 +476,7 @@ class TerminalSessionManager:
     async def create_session(
         self,
         cwd: str | None = None,
-        on_output: Callable[[str, str], Coroutine[Any, Any, None]] | None = None,
+        on_output: Callable[[str, str, int, int], Coroutine[Any, Any, None]] | None = None,
         on_exit: Callable[[str, int], Coroutine[Any, Any, None]] | None = None,
         conversation_id: str = "",
     ) -> TerminalSession:
@@ -555,6 +611,9 @@ class TerminalSessionManager:
         shell: str | None = None,
         pid: int | None = None,
         is_alive: bool = True,
+        exit_code: int | None = None,
+        exit_signal: int | str | None = None,
+        exited_at: float | None = None,
         conversation_id: str = "",
     ) -> TerminalSession:
         owner = _require_conversation_owner(conversation_id)
@@ -574,6 +633,9 @@ class TerminalSessionManager:
             shell=shell,
             pid=pid,
             is_alive=is_alive,
+            exit_code=exit_code,
+            exit_signal=exit_signal,
+            exited_at=exited_at,
         )
         return session
 
@@ -586,25 +648,31 @@ class TerminalSessionManager:
         shell: str | None = None,
         pid: int | None = None,
         conversation_id: str = "",
+        start_cursor: int | None = None,
+        end_cursor: int | None = None,
     ) -> TerminalSession:
         owner = _require_conversation_owner(conversation_id)
+        existing = self._sessions.get(session_id)
         session = self.upsert_external_session(
             session_id,
             cwd=cwd,
             shell=shell,
             pid=pid,
-            is_alive=True,
+            is_alive=existing.is_alive if existing is not None else True,
             conversation_id=owner,
         )
-        session.append_external_output(data)
+        session.append_external_output(data, start_cursor=start_cursor, end_cursor=end_cursor)
         return session
 
-    def mark_external_exit(self, session_id: str, *, conversation_id: str = "") -> bool:
+    def mark_external_exit(self, session_id: str, *, conversation_id: str = "",
+                           exit_code: int | None = None, exit_signal: int | str | None = None,
+                           exited_at: float | None = None) -> bool:
         session = self._sessions.get(session_id)
         owner = str(conversation_id or "").strip()
         if session is None or not owner or session.conversation_id != owner:
             return False
-        session.update_external_metadata(is_alive=False)
+        session.update_external_metadata(is_alive=False, exit_code=exit_code,
+                                         exit_signal=exit_signal, exited_at=exited_at)
         return True
 
     @property

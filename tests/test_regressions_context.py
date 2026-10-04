@@ -525,6 +525,7 @@ def test_context_builder_token_accounting_preserves_compact_guideline_reason(
         project_root_markers=None,
         project_doc_fallback_filenames=None,
         project_doc_max_bytes=None,
+        additional_directories=(),
         hook_manager=None,
     ) -> str:
         load_calls.append((workspace_root, load_reason))
@@ -1140,7 +1141,7 @@ def test_generated_image_context_round_trips_through_scoped_attachment_reference
     )
 
     history = restored._history  # type: ignore[attr-defined]
-    assert history[-1].images == [{"media_type": "image/png", "data": encoded}]
+    assert history[-1].images == [{"media_type": "image/png", "data": encoded, "artifact_id": "artifact-image-context"}]
 
 
 def test_user_authored_system_reminder_is_not_treated_as_runtime_provenance() -> None:

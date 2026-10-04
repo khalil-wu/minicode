@@ -606,8 +606,8 @@ class GetMcpPromptTool(_McpBridgeTool):
                     },
                     "arguments": {
                         "type": "object",
-                        "description": "Prompt arguments keyed by argument name.",
-                        "additionalProperties": True,
+                        "description": "String prompt arguments keyed by argument name, as required by the MCP prompt protocol.",
+                        "additionalProperties": {"type": "string"},
                     },
                 },
                 "required": ["server", "name"],

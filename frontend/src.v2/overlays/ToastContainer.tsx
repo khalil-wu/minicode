@@ -57,13 +57,22 @@ export const ToastContainer = ({ placement = "top" }: { placement?: "top" | "bot
   const [exiting, setExiting] = useState<Set<string>>(new Set());
   const [paused, setPaused] = useState<Set<string>>(new Set());
   const pausedAtRef = useRef(new Map<string, number>());
+  const exitTimersRef = useRef(new Set<number>());
+  useEffect(() => () => {
+    for (const timer of exitTimersRef.current) window.clearTimeout(timer);
+    exitTimersRef.current.clear();
+  }, []);
 
   const dismiss = useCallback((id: string) => {
     setExiting((prev) => new Set(prev).add(id));
-    setTimeout(() => {
+    const timer = window.setTimeout(() => {
+      exitTimersRef.current.delete(timer);
+      pausedAtRef.current.delete(id);
+      setPaused((prev) => { const next = new Set(prev); next.delete(id); return next; });
       setToasts((prev) => prev.filter((t) => t.id !== id));
       setExiting((prev) => { const next = new Set(prev); next.delete(id); return next; });
     }, 160);
+    exitTimersRef.current.add(timer);
   }, []);
 
   useEffect(() => {

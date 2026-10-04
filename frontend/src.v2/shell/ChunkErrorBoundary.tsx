@@ -3,6 +3,7 @@ import React from "react";
 interface ChunkErrorBoundaryProps {
   children: React.ReactNode;
   fallback?: React.ReactNode;
+  resetKey?: boolean | string;
 }
 
 interface ChunkErrorBoundaryState {
@@ -19,6 +20,12 @@ export class ChunkErrorBoundary extends React.Component<ChunkErrorBoundaryProps,
 
   static getDerivedStateFromError(error: Error): ChunkErrorBoundaryState {
     return { error };
+  }
+
+  componentDidUpdate(previous: ChunkErrorBoundaryProps) {
+    if (previous.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState({ error: null });
+    }
   }
 
   render() {

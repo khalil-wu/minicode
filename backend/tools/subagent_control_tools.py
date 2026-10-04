@@ -324,6 +324,7 @@ class TaskStatusTool(BaseTool):
                         else ""
                     ),
                     is_error=any(result.is_error for result in results),
+                    content_preview="\n\n".join(result.content_preview or result.content for result in results),
                     display_summary=display_summary,
                     result_kind="subagent",
                     status=overall_status,
@@ -390,15 +391,20 @@ class TaskStatusTool(BaseTool):
             lines.append(f"Task: {snapshot.get('prompt_summary')}")
 
         result = snapshot.get("result")
+        presentation = [f"{task_label}: {status}"]
+        if snapshot.get("cancel_requested"):
+            presentation.append("Cancellation has been requested.")
         if include_result and isinstance(result, dict):
             content = str(result.get("content") or "").strip()
             error = str(result.get("error") or "").strip()
             if error:
                 lines.append(f"Error: {error}")
+                presentation.append(f"Error: {error}")
             if content:
                 lines.append("Result:")
                 rendered, omitted = full_subagent_result(content)
                 lines.append(rendered)
+                presentation.append(rendered)
                 artifact_id = str(result.get("artifact_id") or "").strip()
                 if artifact_id:
                     lines.append(f"Full result artifact: {artifact_id}.")
@@ -423,14 +429,18 @@ class TaskStatusTool(BaseTool):
                 lines.append("Retained result cache released.")
         elif result_available:
             lines.append("Result is available. Call task_status with include_result=true to collect it.")
+            presentation.append("Result is available, but has not been collected.")
         else:
             if status in {"pending", "running"}:
                 lines.append("Result is not available yet.")
+                presentation.append("Result is not available yet.")
             else:
                 lines.append("No retained result is available.")
+                presentation.append("No retained result is available.")
 
         return ToolResult(
             content="\n".join(lines),
+            content_preview="\n".join(presentation),
             display_summary=f"{task_label}: {status}",
             result_kind="subagent",
             status=status,
@@ -495,6 +505,11 @@ class TaskStatusTool(BaseTool):
         )
         return ToolResult(
             content="\n".join(lines),
+            content_preview="\n".join(
+                f"- {item.get('prompt_summary') or item.get('objective') or 'Delegated task'} [{item.get('status') or 'running'}]"
+                + (" · result available" if item.get("result_available") else "")
+                for item in items
+            ),
             display_summary=f"{len(items)} background subagent(s)",
             result_kind="subagent",
             status=overall,

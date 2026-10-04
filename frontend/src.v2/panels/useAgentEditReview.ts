@@ -23,6 +23,7 @@ import {
 import { summarizeTurnDiff } from "../lib/turn-diff";
 import type { TurnDiffState } from "../stores/types";
 import { workspaceFilePathsEqual } from "../lib/workspace-path";
+import { withNativeModelUndoGroup, type NativeEditModel } from "./nativeModelUndoGroup";
 
 export interface AgentEditReviewModel {
   editor: {
@@ -30,9 +31,12 @@ export interface AgentEditReviewModel {
       getLineCount: () => number;
       getLineMaxColumn: (lineNumber: number) => number;
       getEOL?: () => string;
+      pushEOL?: (eol: 0 | 1) => void;
+      pushEditOperations?: NativeEditModel["pushEditOperations"];
     } | null;
     createDecorationsCollection?: (decorations: unknown[]) => { set: (d: unknown[]) => void; clear: () => void };
-    executeEdits: (source: string, edits: Array<{ range: unknown; text: string; forceMoveMarkers?: boolean }>) => void;
+    executeEdits: (source: string, edits: Array<{ range: unknown; text: string; forceMoveMarkers?: boolean; eol?: string }>) => void;
+    pushUndoStop?: () => unknown;
     setPosition?: (position: { lineNumber: number; column: number }) => void;
     revealLineInCenter?: (lineNumber: number) => void;
     focus: () => void;
@@ -90,10 +94,10 @@ export function useAgentEditReview({
     [turnDiff, path, workingDirectory],
   );
 
-  // Reset review bookkeeping when the file or the authoritative diff changes.
+  // Kept blocks keep their text identity while this turn's diff grows.
   useEffect(() => {
     setDismissed(new Set());
-  }, [path, turnDiff?.turnId, turnDiff?.revision]);
+  }, [workingDirectory, path, turnDiff?.threadId, turnDiff?.turnId]);
 
   const blocks = useMemo<AgentEditBlock[]>(() => {
     if (!patch || readOnly || content === undefined) return [];
@@ -162,7 +166,20 @@ export function useAgentEditReview({
     if (!block || !editor || !model) return;
     const eol = model.getEOL?.() ?? "\n";
     const edit = agentEditUndoEdit(block, model.getLineCount(), (line) => model.getLineMaxColumn(line), eol);
-    editor.executeEdits("agent-edit-undo", [{ range: edit.range, text: edit.text, forceMoveMarkers: true }]);
+    const applyEdit = () => editor.executeEdits("agent-edit-undo", [{ range: edit.range, text: edit.text, forceMoveMarkers: true, eol: block.removedEol }]);
+    editor.pushUndoStop?.();
+    if (block.removedEol && block.removedEol !== eol && model.pushEOL && model.pushEditOperations) {
+      withNativeModelUndoGroup([model as NativeEditModel], () => {
+        // Monaco 0.56.0 stores byte offsets per stack element. An EOL change
+        // and text edit need separate elements in one native group, otherwise
+        // Redo interprets LF offsets in the previous CRLF document.
+        model.pushEditOperations!([], [], () => []);
+        model.pushEOL!(block.removedEol === "\r\n" ? 1 : 0);
+        editor.pushUndoStop?.();
+        applyEdit();
+      });
+    } else applyEdit();
+    editor.pushUndoStop?.();
     setDismissed((prev) => new Set(prev).add(block.key));
     editor.focus();
   }, [blocks, currentIndex, editorRef]);
@@ -170,6 +187,8 @@ export function useAgentEditReview({
   return {
     total: blocks.length,
     currentIndex,
+    currentLine: blocks[currentIndex] ? blockAnchorLine(blocks[currentIndex]) : null,
+    reveal: () => revealBlock(currentIndex),
     onCursorLine: setCursorLine,
     next: goNext,
     prev: goPrev,

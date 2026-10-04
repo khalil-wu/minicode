@@ -17,6 +17,7 @@ interface Props {
   filter?: string;
   onSelect: (value: string) => void;
   placement?: "above" | "below";
+  workspaceRoot?: string;
 }
 
 type FileItem = MentionFileItem;
@@ -36,6 +37,7 @@ interface MenuItem {
   mcpDependencies?: string[];
   defaultPrompt?: string;
   skillPath?: string;
+  marketplace?: string;
 }
 
 const MENTION_SEARCH_DEBOUNCE_MS = 150;
@@ -44,13 +46,15 @@ const SLASH_MENU_LIMIT = 18;
 const ROOT_SLASH_SKILL_PREVIEW_LIMIT = 6;
 
 interface PluginMentionEntry {
+  id: string;
   name: string;
+  marketplace: string;
   displayName?: string;
   description?: string;
   shortDescription?: string;
   skill_count?: number;
   mcp_server_count?: number;
-  enabled?: boolean;
+  enabled: boolean;
 }
 
 const rememberMentionResults = (cache: Map<string, FileItem[]>, key: string, results: FileItem[]) => {
@@ -61,7 +65,7 @@ const rememberMentionResults = (cache: Map<string, FileItem[]>, key: string, res
   cache.set(key, results);
 };
 
-export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" }: Props) => {
+export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above", workspaceRoot }: Props) => {
   const [activeIndex, setActiveIndex] = useState(0);
   const [fileResults, setFileResults] = useState<FileItem[]>([]);
   const [pluginResults, setPluginResults] = useState<PluginMentionEntry[]>([]);
@@ -76,7 +80,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
   const storeCommands = useAppStore((s) => s.slashCommands);
   const availableSkills = useAppStore((s) => s.availableSkills);
   const selectedSkills = useAppStore((s) => s.selectedSkills);
-  const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const workingDirectory = useAppStore((s) => workspaceRoot ?? s.workingDirectory);
   const fileTreeVersion = useAppStore((s) => s.fileTreeVersion);
   const slashFilter = filter ?? "";
   const skillKey = (path: string | undefined, name: string): string => path
@@ -168,7 +172,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
   const mentionPluginItems: MenuItem[] = kind === "mention"
     ? fuzzyFilter(
         pluginResults
-          .filter((plugin) => plugin.enabled !== false)
+          .filter((plugin) => plugin.enabled)
           .map((plugin) => ({
             name: `@${plugin.displayName || plugin.name}`,
             displayName: plugin.displayName || plugin.name,
@@ -177,7 +181,8 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
               plugin.mcp_server_count ? `${plugin.mcp_server_count} 个 MCP 服务` : "",
             ].filter(Boolean).join(" · ") || "插件",
             type: "plugin" as const,
-            path: `plugin:${encodeURIComponent(plugin.name)}`,
+            path: `plugin:${encodeURIComponent(plugin.id)}`,
+            marketplace: plugin.marketplace,
             section: "插件",
           })),
         mentionSearchQuery,
@@ -198,7 +203,8 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
     setPluginLoading(true);
     const loadPlugins = async () => {
       try {
-        const response = await fetchWithTimeout(`${apiBase()}/api/plugins`, {
+        const query = new URLSearchParams({ workspace_root: workingDirectory });
+        const response = await fetchWithTimeout(`${apiBase()}/api/plugins?${query}`, {
           headers: authHeaders(), signal: controller.signal,
         });
         if (!response.ok) {
@@ -217,7 +223,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
       active = false;
       controller.abort();
     };
-  }, [open, kind, pluginRefresh]);
+  }, [open, kind, pluginRefresh, workingDirectory]);
 
   // File search effect for @ mentions
   useEffect(() => {
@@ -229,6 +235,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
     }
 
     const searchId = ++searchSequenceRef.current;
+    const invalidate = () => { searchSequenceRef.current += 1; };
     const desktopMode = isDesktop();
     const root = workingDirectory || "";
     const cacheScope = `${desktopMode ? "desktop" : "web"}:${root}:revision:${fileTreeVersion}`;
@@ -241,7 +248,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
       if (cached) {
         setFileResults(cached);
         setSearching(false);
-        return;
+        return invalidate;
       }
       setSearching(true);
       if (desktopMode && workingDirectory) {
@@ -270,7 +277,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
             if (searchId !== searchSequenceRef.current) return;
             setSearching(false);
           });
-        return;
+        return invalidate;
       }
       listWorkspaceTree(workingDirectory, ".")
         .then((tree) => {
@@ -295,7 +302,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
           if (searchId !== searchSequenceRef.current) return;
           setSearching(false);
         });
-      return;
+      return invalidate;
     }
 
     const cacheKey = `${cacheScope}:search:${mentionSearchQuery}`;
@@ -303,7 +310,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
     if (cached) {
       setFileResults(cached);
       setSearching(false);
-      return;
+      return invalidate;
     }
 
     setFileResults([]);
@@ -357,7 +364,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
       }
     }, MENTION_SEARCH_DEBOUNCE_MS);
 
-    return () => window.clearTimeout(timer);
+    return () => { window.clearTimeout(timer); invalidate(); };
   }, [open, kind, mentionSearchQuery, workingDirectory, fileTreeVersion]);
 
   const items: MenuItem[] =
@@ -454,7 +461,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
           items.map((it, i) => {
             const showSection = i === 0 || items[i - 1]?.section !== it.section;
             const displayName = displayMenuName(it, skillsPickerActive || explicitSkillPickerActive);
-            const sourceLabel = it.type === "skill" ? formatSourceLevel(it.sourceLevel) : "";
+            const sourceLabel = it.type === "skill" ? formatSourceLevel(it.sourceLevel) : it.marketplace ?? "";
             const skillPolicyLabel = it.type === "skill" ? formatSkillPolicy(it) : "";
             return (
               <div key={it.path ?? it.name}>

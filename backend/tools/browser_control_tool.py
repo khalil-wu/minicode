@@ -5,16 +5,12 @@ import base64
 import binascii
 import json
 import os
-from ipaddress import ip_address
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
-from urllib.request import url2pathname
 
 import httpx
 
 from backend.permissions.context import ToolExecutionContext
-from backend.permissions.network import assess_network_url
 from backend.tools.base import (
     TOOL_SIDE_EFFECT_EXTERNAL,
     TOOL_SIDE_EFFECT_NONE,
@@ -56,7 +52,6 @@ from backend.tools.browser_support import (
     _validate_ws_url,
     API_IMAGE_MAX_BASE64_SIZE,
     DEFAULT_CDP_ENDPOINT,
-    LOOPBACK_HOSTNAMES,
 )
 
 
@@ -126,11 +121,29 @@ class BrowserControlTool(BaseTool):
 
     name = "browser_control"
     description = (
-        "Inspect or control a local Chrome/Edge DevTools Protocol endpoint. "
-        "Supports discovery, navigation, screenshots, DOM/text/html inspection, "
-        "waiting for selectors, console capture, clicking, typing, scrolling, "
-        "key presses, and JavaScript evaluation. The cdp_endpoint must be local "
-        "loopback; remote endpoints are rejected."
+        "Inspect or control the configured MiniCode embedded browser, or an existing "
+        "local Chrome/Edge DevTools Protocol session. Supports discovery, navigation, "
+        "screenshots, DOM/text/html inspection, selector waits, console/network logs, "
+        "clicking, typing, scrolling, key presses, and page JavaScript evaluation. "
+        "Navigate to public HTTP(S) URLs without embedded credentials and resolving to "
+        "public addresses, subject to network policy, or pass an existing "
+        "workspace .html/.htm path directly: the tool starts an owned static preview "
+        "instead of opening file:// in the browser. Static launch is asynchronous; "
+        "starting means launch accepted, not ready or failed. Verify its current URL "
+        "with preview_server before claiming HTTP readiness. Local/private/unresolved "
+        "URLs need "
+        "an active preview owned by the current session, conversation and workspace, "
+        "or preview-origin metadata supplied by the host runtime. Ownership metadata "
+        "is not user authorization or a health check; never invent it or a preview URL, "
+        "or reuse a URL after its preview stopped, failed or restarted. A loopback "
+        "debugger endpoint does not authorize arbitrary localhost pages. Remote CDP "
+        "endpoints are rejected; this tool does not launch Chrome/Edge. Operate only "
+        "within the user's main task and current permission flow; do not evade a "
+        "policy denial with another endpoint, URL spelling, page script or tool. "
+        "For a blocked or policy-refused result, follow the provided guidance and preserve "
+        "diagnostic detail; a policy refusal alone does not prove a launch failure. "
+        "Navigation success means navigation was requested, not that the page is ready "
+        "or correct: inspect the actual URL, DOM/text and screenshot."
     )
     permission = PermissionLevel.AUTO
     read_only = True
@@ -189,30 +202,56 @@ class BrowserControlTool(BaseTool):
                     "action": {
                         "type": "string",
                         "enum": sorted(self._ACTIONS),
-                        "description": "Browser action to perform.",
+                        "description": (
+                            "Browser action. discover/list_targets identify pages; navigate only requests "
+                            "navigation. Inspect get_url/get_dom/get_text/screenshot for actual page state. "
+                            "Navigation, interaction, evaluation and page-content reads declare confirmation; "
+                            "the runtime applies the current permission policy."
+                        ),
                     },
                     "cdp_endpoint": {
                         "type": "string",
-                        "description": "Local DevTools endpoint, default http://127.0.0.1:9222.",
+                        "description": (
+                            "Optional local HTTP debugger endpoint, not a page/preview URL. Omit to use "
+                            "the embedded browser when configured; otherwise defaults to "
+                            "http://127.0.0.1:9222 for an existing CDP session. Remote endpoints are "
+                            "rejected. Setting this does not bypass page navigation policy."
+                        ),
                     },
                     "target_id": {
                         "type": "string",
-                        "description": "Optional page target id. Defaults to the first page target.",
+                        "description": (
+                            "Page id from a recent discover/list_targets result. Keep inspection and "
+                            "interaction on the same authorized page. External CDP defaults to the first "
+                            "page when omitted; that is not evidence that the page belongs to the task."
+                        ),
                     },
                     "url": {
                         "type": "string",
                         "description": (
-                            "HTTP or HTTPS URL to navigate to when action='navigate'. "
-                            "Serve workspace HTML first with preview_server(action='start', path='<file>.html')."
+                            "For navigate: a public HTTP(S) URL, or an existing .html/.htm file inside "
+                            "the active workspace (relative/absolute path or local file:// URL). Passing "
+                            "the file directly automatically starts an owned static preview; a separate "
+                            "preview_server start is not required. This launch is asynchronous: owned "
+                            "does not mean HTTP-ready. Check preview_server status/verify using the "
+                            "current returned URL before claiming readiness. For an explicit preview, "
+                            "use its "
+                            "fresh start/status URL exactly, including any port, token and file path. "
+                            "Never construct, alter or reuse a failed/stopped/restarted preview URL. "
+                            "A detected port or user-provided localhost URL alone does not establish "
+                            "runtime preview ownership; navigation remains subject to policy."
                         ),
                     },
                     "selector": {
                         "type": "string",
-                        "description": "CSS selector for click/type/scroll/wait_for_element.",
+                        "description": (
+                            "CSS selector observed on the selected page for click/type/scroll/wait_for_element. "
+                            "wait_for_element checks presence, not visibility, page health or rendering correctness."
+                        ),
                     },
                     "text": {
                         "type": "string",
-                        "description": "Text to type when action='type'.",
+                        "description": "Text for type; inserts into the selector, or the active element if selector is omitted.",
                     },
                     "key": {
                         "type": "string",
@@ -220,7 +259,11 @@ class BrowserControlTool(BaseTool):
                     },
                     "expression": {
                         "type": "string",
-                        "description": "JavaScript expression for action='evaluate'. Requires confirmation.",
+                        "description": (
+                            "Page JavaScript for evaluate, declared as requiring confirmation. This is "
+                            "not a general code-mode runtime. Do not use scripts, fetch or location "
+                            "changes to bypass task authorization or a navigation/network denial."
+                        ),
                     },
                     "x": {"type": "number", "description": "Viewport x coordinate for coordinate click."},
                     "y": {"type": "number", "description": "Viewport y coordinate for coordinate click."},
@@ -230,13 +273,17 @@ class BrowserControlTool(BaseTool):
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 5000,
-                        "description": "Optional wait after navigation or while collecting console events.",
+                        "description": (
+                            "Optional milliseconds after CDP navigation or for console/network event "
+                            "capture. Not an HTTP readiness check; log capture is not guaranteed to "
+                            "include requests or errors from before this action."
+                        ),
                     },
                     "timeout_ms": {
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 30000,
-                        "description": "Timeout for wait_for_element. Defaults to 5000.",
+                        "description": "Milliseconds for wait_for_element (CDP default 5000); not a preview health-check timeout.",
                     },
                     "max_chars": {
                         "type": "integer",
@@ -246,7 +293,7 @@ class BrowserControlTool(BaseTool):
                     },
                     "clear": {
                         "type": "boolean",
-                        "description": "Clear the target element before typing.",
+                        "description": "Clear the selected element before type when a selector is provided.",
                     },
                 },
                 "required": ["action"],
@@ -352,7 +399,25 @@ class BrowserControlTool(BaseTool):
             args = {**args, "url": resolved_url}
             navigation_error = await _navigation_policy_error(resolved_url, context)
             if navigation_error:
-                return self._error_result(navigation_error)
+                return ToolResult(
+                    content=(
+                        "Browser navigation was blocked: this target is not an active preview "
+                        "owned by the current session and conversation. For workspace HTML, "
+                        "navigate using the workspace-relative HTML path. For a preview URL, "
+                        "check preview_server(action='status'); start or restart the owned preview "
+                        "and verify its new URL before navigating. Do not guess a localhost port "
+                        "or bypass the private-network boundary. " + navigation_error
+                    ),
+                    is_error=True,
+                    status="blocked",
+                    result_kind=self.result_kind,
+                    error_kind="network_policy",
+                    user_summary="浏览器访问受限：目标不是当前会话正在运行的预览。请检查预览服务状态，或直接使用工作区内的 HTML 路径。",
+                    developer_detail=navigation_error,
+                    recoverable=True,
+                    projection="error",
+                    model_observation="Preview ownership or liveness must be established before local browser navigation. Check status/verify or navigate a workspace HTML path; do not bypass the boundary.",
+                )
         endpoint = _normalize_endpoint(str(args.get("cdp_endpoint") or DEFAULT_CDP_ENDPOINT))
         try:
             embedded_endpoint = str(os.environ.get("MINICODE_EMBEDDED_BROWSER_ENDPOINT") or "").strip()
@@ -656,7 +721,7 @@ class BrowserControlTool(BaseTool):
 
     async def _wait_for_element(self, endpoint: str, args: dict[str, Any]) -> ToolResult:
         selector = str(args.get("selector") or "").strip()
-        timeout_ms = int(args.get("timeout_ms") or 5000)
+        timeout_ms = int(args["timeout_ms"]) if args.get("timeout_ms") is not None else 5000
         target = await self._select_target(endpoint, str(args.get("target_id") or "").strip())
         target_ws = _validate_ws_url(str(target.get("webSocketDebuggerUrl") or ""))
         deadline = asyncio.get_running_loop().time() + (timeout_ms / 1000)
@@ -679,7 +744,7 @@ class BrowserControlTool(BaseTool):
     async def _get_console_logs(self, endpoint: str, args: dict[str, Any]) -> ToolResult:
         target = await self._select_target(endpoint, str(args.get("target_id") or "").strip())
         target_ws = _validate_ws_url(str(target.get("webSocketDebuggerUrl") or ""))
-        wait_ms = int(args.get("wait_ms") or 250)
+        wait_ms = int(args["wait_ms"]) if args.get("wait_ms") is not None else 250
         async with _cdp_session(target_ws) as session:
             await session.call("Runtime.enable")
             try:
@@ -699,7 +764,7 @@ class BrowserControlTool(BaseTool):
     async def _get_network_logs(self, endpoint: str, args: dict[str, Any]) -> ToolResult:
         target = await self._select_target(endpoint, str(args.get("target_id") or "").strip())
         target_ws = _validate_ws_url(str(target.get("webSocketDebuggerUrl") or ""))
-        wait_ms = int(args.get("wait_ms") or 250)
+        wait_ms = int(args["wait_ms"]) if args.get("wait_ms") is not None else 250
         async with _cdp_session(target_ws) as session:
             await session.call("Network.enable")
             if wait_ms > 0:

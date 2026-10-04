@@ -12,9 +12,10 @@ from backend.ws.utils import (
     normalize_permission_overrides,
     normalize_tool_patterns,
     permission_level_to_token,
-        )
-def _managed_permission_projection(mode: str, source: str) -> tuple[str, str, str, str]:
-    del source
+)
+
+
+def _managed_permission_projection(mode: str) -> tuple[str, str, str, str]:
     from backend.config import get_config_requirements
 
     requirements = get_config_requirements()
@@ -28,7 +29,7 @@ def _managed_permission_projection(mode: str, source: str) -> tuple[str, str, st
         effective_mode,
         requirements.approval_policy_for_mode(effective_mode),
         requirements.sandbox_mode_for_permission_mode(effective_mode),
-        str((violation.source if violation is not None else None) or requirement_source or ""),
+        str(requirement_source or ""),
     )
 
 
@@ -44,7 +45,7 @@ class SessionPermissionRuntimeMixin:
             or DEFAULT_CONVERSATION_PERMISSION_MODE
         )
         requested, approval_policy, sandbox_mode, requirements_source = _managed_permission_projection(
-            requested, source
+            requested
         )
         deny_rules = normalize_tool_patterns(getattr(conversation, "permission_deny_rules", []))
         overrides = normalize_permission_overrides(getattr(conversation, "permission_overrides", {}))
@@ -94,7 +95,7 @@ class SessionPermissionRuntimeMixin:
             or DEFAULT_CONVERSATION_PERMISSION_MODE
         )
         normalized_mode, approval_policy, sandbox_mode, requirements_source = _managed_permission_projection(
-            normalized_mode, source
+            normalized_mode
         )
         normalized_overrides = dict(session_overrides if session_overrides is not None else current.session_overrides)
         normalized_prompt_rules = tuple(
@@ -142,6 +143,7 @@ class SessionPermissionRuntimeMixin:
             sandbox_mode=sandbox_mode,
             requirements_source=requirements_source,
         )
+        self.session_lifecycle.schedule_runtime_capabilities(source=f"permission.{source}")
         return True
 
     def set_permission_context_mode(self, mode: str, *, source: str) -> bool:
@@ -187,6 +189,7 @@ class SessionPermissionRuntimeMixin:
     def sync_permission_mode_with_active_conversation(self, *, source: str) -> str:
         active = self.active_conversation
         self.permission_context = self.permission_context_for_conversation(active, source=source)
+        self.session_lifecycle.schedule_runtime_capabilities(source=f"workspace.activate.{source}")
         return self.permission_context.mode
 
     def build_permission_rules_payload(self, *, conversation: Any | None = None) -> dict[str, Any]:
@@ -204,7 +207,7 @@ class SessionPermissionRuntimeMixin:
                     or DEFAULT_CONVERSATION_PERMISSION_MODE
                 )
                 mode, _approval_policy, _sandbox_mode, _requirements_source = _managed_permission_projection(
-                    mode, context_source
+                    mode
                 )
                 context_source = "conversation.record"
                 deny_rules = normalize_tool_patterns(getattr(conversation, "permission_deny_rules", []))

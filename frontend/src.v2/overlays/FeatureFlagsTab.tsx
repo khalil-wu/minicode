@@ -42,6 +42,7 @@ const flagLabels: Record<string, { title: string; description: string; group: "R
   agent_editor: { title: "智能体编辑器", description: "启用自定义子智能体编辑界面。", group: "UI" },
   agent_trace_export_v1: { title: "智能体轨迹导出", description: "允许导出智能体轨迹用于诊断。", group: "Runtime" },
 };
+export const FEATURE_FLAG_LABELS = flagLabels;
 
 const GROUPS = ["Runtime", "Plugins", "MCP", "UI", "SDK"] as const;
 const GROUP_LABELS: Record<typeof GROUPS[number], string> = {
@@ -67,7 +68,7 @@ const draftToOverride = (value: DraftOverride): boolean | null => {
 const flagTitle = (flag: FeatureFlagEntry): string => flagLabels[flag.name]?.title ?? flag.name.replace(/_/g, " ");
 const flagGroup = (flag: FeatureFlagEntry): typeof GROUPS[number] => flagLabels[flag.name]?.group ?? "Runtime";
 
-export const FeatureFlagsTab = () => {
+export const FeatureFlagsTab = ({ active = true, searchTarget }: { active?: boolean; searchTarget?: string }) => {
   const [flags, setFlags] = useState<FeatureFlagEntry[]>([]);
   const [drafts, setDrafts] = useState<Record<string, DraftOverride>>({});
   const [loading, setLoading] = useState(false);
@@ -76,6 +77,10 @@ export const FeatureFlagsTab = () => {
   const [group, setGroup] = useState<typeof GROUPS[number]>("Runtime");
   const loadSeqRef = useRef(0);
   const operationRef = useRef<"" | "refresh" | "save">("");
+  useEffect(() => {
+    const flag = Object.values(flagLabels).find((flag) => flag.title === searchTarget);
+    if (flag) setGroup(flag.group);
+  }, [searchTarget]);
 
   const refresh = useCallback(async (options: { showToast?: boolean } = {}) => {
     if (operationRef.current) return;
@@ -105,8 +110,8 @@ export const FeatureFlagsTab = () => {
   }, []);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (active) void refresh();
+  }, [active, refresh]);
 
   const counts = useMemo(() => {
     const result = Object.fromEntries(GROUPS.map((name) => [name, 0])) as Record<typeof GROUPS[number], number>;

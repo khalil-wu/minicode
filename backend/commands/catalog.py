@@ -644,7 +644,7 @@ def get_builtin_command_names() -> list[str]:
     return [str(entry["name"]) for entry in _BUILTIN_COMMAND_CATALOG]
 
 
-_COMMAND_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+_COMMAND_FRONTMATTER_RE = re.compile(r"\A\ufeff?---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
 
 
 def _file_command_dirs(workspace_root: Path | None) -> list[tuple[Path, str]]:
@@ -664,13 +664,16 @@ def _parse_file_command(path: Path, source: str) -> dict[str, Any] | None:
         return None
     frontmatter: dict[str, Any] = {}
     match = _COMMAND_FRONTMATTER_RE.match(raw)
+    if match is None and re.match(r"\A\ufeff?---[ \t]*(?:\r?\n|\Z)", raw):
+        return None
     if match:
         try:
             parsed = yaml.safe_load(match.group(1))
         except yaml.YAMLError:
             return None
-        if isinstance(parsed, dict):
-            frontmatter = parsed
+        if parsed is not None and not isinstance(parsed, dict):
+            return None
+        frontmatter = parsed or {}
         raw = raw[match.end():]
     template = raw.strip()
     if not template:

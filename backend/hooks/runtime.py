@@ -96,59 +96,24 @@ async def run_config_change_hook(*, source: str, file_path: str = "") -> Any | N
     ``None`` return when no manager is bound, so existing service callbacks
     remain source-compatible.
     """
-    try:
-        from backend.hooks import get_hook_manager
+    from backend.hooks import get_hook_manager
 
-        hook_mgr = get_hook_manager()
-        if not hook_mgr:
-            return None
-        result = await hook_mgr.run_config_change(source=source, file_path=file_path)
-        # The manager reducer knows the hook entry source, not the changed
-        # file's provenance. Apply the policy-settings invariant at this
-        # outer boundary where the canonical source is available.
-        if (
-            result is not None
-            and _config_change_source(source, file_path) == "policy_settings"
-            and (
-                getattr(result, "blocked", False)
-                or str(getattr(result, "permission_decision", "") or "").strip().lower()
-                == "deny"
-            )
-        ):
-            try:
-                # HookResult is mutable today, but return a copy so a caller
-                # retaining the manager's diagnostic object does not observe a
-                # surprising policy rewrite.
-                return replace(
-                    result,
-                    blocked=False,
-                    permission_decision="",
-                    permission_decision_reason="",
-                )
-            except (TypeError, ValueError):
-                # Compatibility with test/integration hook result objects that
-                # are not dataclasses: mutate only when they expose writable
-                # attributes, otherwise leave the audit object untouched.
-                try:
-                    setattr(result, "blocked", False)
-                    setattr(result, "permission_decision", "")
-                    setattr(result, "permission_decision_reason", "")
-                except Exception:
-                    logger.warning(
-                        "Could not normalize ConfigChange hook result compatibility object",
-                        exc_info=True,
-                    )
-        return result
-    except Exception:
-        logger.warning(
-            "ConfigChange hook failed for %s (%s)",
-            source,
-            file_path or "no file path",
-            exc_info=True,
-        )
-        # A hook runtime failure is not a policy veto.  Callers can still
-        # surface diagnostics through their normal config mutation response.
+    hook_mgr = get_hook_manager()
+    if hook_mgr is None:
         return None
+    result = await hook_mgr.run_config_change(source=source, file_path=file_path)
+    # Managed policy changes remain authoritative; the hook still records them.
+    if (
+        _config_change_source(source, file_path) == "policy_settings"
+        and (result.blocked or result.permission_decision.strip().lower() == "deny")
+    ):
+        return replace(
+            result,
+            blocked=False,
+            permission_decision="",
+            permission_decision_reason="",
+        )
+    return result
 
 
 async def run_cwd_changed_hook(*, old_cwd: str, new_cwd: str, hook_manager: Any | None) -> None:
@@ -231,31 +196,37 @@ async def run_notification_hook_for_event(*, event_type: str, payload: dict[str,
 
 
 async def run_session_end_hook(*, session_id: str, reason: str = "") -> None:
-    """Notify SessionEnd hooks during best-effort session cleanup."""
+    """Finalize owned session hooks while retaining unfinished cleanup owners."""
     clean_session_id = str(session_id or "").strip()
     clean_reason = str(reason or "").strip()
     if not clean_session_id:
         return
-    try:
-        from backend.hooks.manager import pop_hook_managers_for_owner
+    from backend.hooks.manager import (
+        _release_hook_manager_for_owner,
+        iter_hook_managers_for_owner,
+    )
 
-        managers = pop_hook_managers_for_owner(clean_session_id)
-        for scope_id, hook_mgr in managers:
+    managers = iter_hook_managers_for_owner(clean_session_id)
+    seen: set[int] = set()
+    errors: list[Exception] = []
+    for scope_id, hook_mgr in managers:
+        identity = id(hook_mgr._session_runtime)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        try:
+            await hook_mgr.run_session_end(
+                session_id=scope_id or clean_session_id,
+                reason=clean_reason,
+            )
+        except Exception as exc:
+            errors.append(exc)
+        finally:
             try:
-                await hook_mgr.run_session_end(
-                    session_id=scope_id or clean_session_id,
-                    reason=clean_reason,
-                )
-            except Exception:
-                logger.debug(
-                    "session_end hook failed for scope %s",
-                    scope_id or clean_session_id,
-                    exc_info=True,
-                )
-            finally:
-                # MiniCode finalizes or kills every pending async hook at
-                # session teardown.  Do not leave command processes or stale
-                # rewake callbacks alive after their websocket owner is gone.
                 await hook_mgr.finalize_async_hooks()
-    except Exception:
-        logger.debug("session_end hook failed for %s", clean_session_id, exc_info=True)
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                _release_hook_manager_for_owner(clean_session_id, hook_mgr)
+    if errors:
+        raise ExceptionGroup(f"Session hooks failed during {clean_session_id} teardown", errors)

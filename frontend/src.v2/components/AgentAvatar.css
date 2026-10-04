@@ -5,7 +5,6 @@
  * 按 AgentDisplayStatus 派发（attention→rose、completed→green、running→blue、
  * waiting→amber）。因此色值一律引用 --state-* 语义 token，随主题翻转；
  * 此前的 7 个 hex 字面量脱离设计系统且在浅色主题下不跟随，已移除。
- * teal / violet 目前无调用点，保留为 AgentGlyphTone 联合类型的完整映射。
  */
 .mc-agent-avatar {
   --agent-avatar-color: var(--state-info);
@@ -27,8 +26,6 @@
 .mc-agent-avatar[data-tone="blue"]   { --agent-avatar-color: var(--state-info); }
 .mc-agent-avatar[data-tone="green"]  { --agent-avatar-color: var(--state-success); }
 .mc-agent-avatar[data-tone="rose"]   { --agent-avatar-color: var(--state-danger); }
-.mc-agent-avatar[data-tone="teal"]   { --agent-avatar-color: var(--accent-secondary); }
-.mc-agent-avatar[data-tone="violet"] { --agent-avatar-color: var(--accent-primary); }
 
 .mc-agent-avatar-art {
   display: block;

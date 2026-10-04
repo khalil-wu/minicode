@@ -11,7 +11,23 @@ from backend.permissions.context import ToolExecutionContext
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 
 
-class ScheduleCronTool(BaseTool):
+class _SchedulerTool(BaseTool):
+    def is_capability_available(self, context=None) -> bool:
+        from backend.tasks.scheduler import get_running_scheduler
+
+        return get_running_scheduler() is not None
+
+    @staticmethod
+    def _scheduler():
+        from backend.tasks.scheduler import get_running_scheduler
+
+        scheduler = get_running_scheduler()
+        if scheduler is None:
+            raise RuntimeError("This host has no running scheduler. Open the application to manage scheduled tasks.")
+        return scheduler
+
+
+class ScheduleCronTool(_SchedulerTool):
     """Register a recurring prompt task on a cron schedule."""
 
     name = "schedule_cron"
@@ -54,12 +70,12 @@ class ScheduleCronTool(BaseTool):
         permission_mode = "confirm"
 
         # Validate the cron expression via the scheduler's parser before registering.
-        from backend.tasks.scheduler import _parse_cron_expression, get_global_scheduler
+        from backend.tasks.scheduler import _parse_cron_expression
         if _parse_cron_expression(cron) is None:
             return self._error_result(f"Invalid cron expression: {cron}")
 
         try:
-            scheduler = get_global_scheduler()
+            scheduler = self._scheduler()
             workspace_root = str(getattr(context, "workspace_root", "") or "") if context else ""
             if not workspace_root:
                 return self._error_result("Open a workspace before scheduling a recurring task")
@@ -85,7 +101,7 @@ class ScheduleCronTool(BaseTool):
         )
 
 
-class ScheduleCronListTool(BaseTool):
+class ScheduleCronListTool(_SchedulerTool):
     """List scheduled cron jobs (cc: CronList)."""
 
     name = "schedule_cron_list"
@@ -106,8 +122,7 @@ class ScheduleCronListTool(BaseTool):
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         try:
-            from backend.tasks.scheduler import get_global_scheduler
-            scheduler = get_global_scheduler()
+            scheduler = self._scheduler()
             workspace_root = str(getattr(context, "workspace_root", "") or "") if context else ""
             if not workspace_root:
                 return self._error_result("Open a workspace before listing recurring tasks")
@@ -135,7 +150,7 @@ class ScheduleCronListTool(BaseTool):
         )
 
 
-class ScheduleCronDeleteTool(BaseTool):
+class ScheduleCronDeleteTool(_SchedulerTool):
     """Cancel a scheduled cron job by ID (cc: CronDelete)."""
 
     name = "schedule_cron_delete"
@@ -173,8 +188,7 @@ class ScheduleCronDeleteTool(BaseTool):
             return self._error_result("job_id is required")
 
         try:
-            from backend.tasks.scheduler import get_global_scheduler
-            scheduler = get_global_scheduler()
+            scheduler = self._scheduler()
             workspace_root = str(getattr(context, "workspace_root", "") or "") if context else ""
             if not workspace_root:
                 return self._error_result("Open a workspace before deleting recurring tasks")

@@ -124,6 +124,7 @@ def build_subagent_transcript_messages(
     current_assistant: dict[str, Any] | None = None
     tool_records: dict[str, dict[str, Any]] = {}
     run_started_at = 0
+    current_turn_id = ""
     final_text: str = ""
     terminal_event: dict[str, Any] | None = None
     last_error: dict[str, Any] | None = None
@@ -137,20 +138,19 @@ def build_subagent_transcript_messages(
                 "content": "",
                 "timestamp": run_started_at or timestamp,
                 "blocks": [],
-                "turn_id": str(transcript.get("agent_id") or "") or None,
+                "turn_id": current_turn_id or f"subagent-turn-{event_id}",
                 "is_streaming": True,
             }
-            if current_assistant["turn_id"] is None:
-                current_assistant.pop("turn_id")
         return current_assistant
 
     def _flush_run() -> None:
         nonlocal current_user, current_assistant, tool_records
-        nonlocal run_started_at, final_text, terminal_event, last_error
-        if current_user is None and current_assistant is None:
+        nonlocal run_started_at, current_turn_id, final_text, terminal_event, last_error
+        if current_user is None and current_assistant is None and terminal_event is None:
             current_assistant = None
             tool_records = {}
             run_started_at = 0
+            current_turn_id = ""
             final_text = ""
             terminal_event = None
             last_error = None
@@ -160,6 +160,7 @@ def build_subagent_transcript_messages(
             current_user = None
             tool_records = {}
             run_started_at = 0
+            current_turn_id = ""
             final_text = ""
             terminal_event = None
             last_error = None
@@ -176,7 +177,11 @@ def build_subagent_transcript_messages(
             # One authoritative final text block belongs at the end of the
             # assistant turn.  Repeated assistant journal observations update
             # this block instead of duplicating the answer on every refresh.
-            blocks[:] = [block for block in blocks if block.get("type") != "text"]
+            blocks[:] = [
+                block for block in blocks
+                if block.get("type") != "text"
+                or block.get("source") not in {"model_final", "reply", "recovery", "partial"}
+            ]
             blocks.append({
                 "type": "text",
                 "item_id": f"{assistant['id']}-final",
@@ -190,16 +195,23 @@ def build_subagent_transcript_messages(
             terminal_payload = terminal_event.get("payload")
             if not isinstance(terminal_payload, dict):
                 terminal_payload = {}
+            assistant["turn_id"] = current_turn_id or str(
+                terminal_payload.get("turn_id") or terminal_payload.get("run_id") or assistant["id"]
+            )
             raw_status = str(terminal_payload.get("status") or "completed").strip().lower()
             terminal_status = "interrupted" if raw_status in {"cancelled", "canceled"} else raw_status
             if terminal_status not in {"completed", "partial", "failed", "interrupted"}:
                 terminal_status = "failed"
             terminal_ts = _timestamp(terminal_event)
             raw_duration = terminal_payload.get("duration_ms")
+            # turn_started is the canonical start even when preflight fails
+            # before user_prompt. Legacy journals begin at their first retained
+            # assistant/tool observation, never at Unix epoch zero.
+            start_ts = run_started_at or int(assistant["timestamp"])
             try:
-                duration_ms = int(raw_duration) if raw_duration is not None else max(0, terminal_ts - run_started_at)
+                duration_ms = int(raw_duration) if raw_duration is not None else max(0, terminal_ts - start_ts)
             except (TypeError, ValueError):
-                duration_ms = max(0, terminal_ts - run_started_at)
+                duration_ms = max(0, terminal_ts - start_ts)
             assistant["completed_at"] = terminal_ts
             assistant["duration_ms"] = max(0, duration_ms)
             assistant["terminal_status"] = terminal_status
@@ -223,11 +235,19 @@ def build_subagent_transcript_messages(
                 ).strip()
             if failure_message:
                 assistant["failure_message"] = failure_message
+                recoverable = terminal_payload.get("failure_recoverable", (last_error or {}).get("recoverable"))
+                if isinstance(recoverable, bool):
+                    assistant["failure_recoverable"] = recoverable
             assistant["is_streaming"] = False
             if not final_text:
                 summary = public_text(terminal_payload.get("summary"), max_chars=262_144).strip()
                 if summary:
                     assistant["content"] = summary
+                    blocks[:] = [
+                        block for block in blocks
+                        if block.get("type") != "text"
+                        or block.get("source") not in {"model_final", "reply", "recovery", "partial"}
+                    ]
                     blocks.append({
                         "type": "text",
                         "item_id": f"{assistant['id']}-final",
@@ -255,6 +275,7 @@ def build_subagent_transcript_messages(
         current_assistant = None
         tool_records = {}
         run_started_at = 0
+        current_turn_id = ""
         final_text = ""
         terminal_event = None
         last_error = None
@@ -269,8 +290,15 @@ def build_subagent_transcript_messages(
         event_id = str(raw_event.get("event_id") or f"subagent-event-{index}")
         timestamp = _timestamp(raw_event)
 
-        if event_type == "user_prompt":
+        if event_type == "system" and payload.get("lifecycle") == "turn_started":
             _flush_run()
+            run_started_at = timestamp
+            current_turn_id = str(payload.get("turn_id") or payload.get("run_id") or "")
+            continue
+
+        if event_type == "user_prompt":
+            if current_user is not None or terminal_event is not None:
+                _flush_run()
             content = public_text(payload.get("content") or payload.get("prompt"), max_chars=262_144).strip()
             if not content:
                 continue
@@ -280,7 +308,10 @@ def build_subagent_transcript_messages(
                 "content": content,
                 "timestamp": timestamp,
             }
-            run_started_at = timestamp
+            if not current_turn_id:
+                current_turn_id = str(payload.get("turn_id") or payload.get("run_id") or "")
+            if not run_started_at:
+                run_started_at = timestamp
             continue
 
         if event_type == "assistant":

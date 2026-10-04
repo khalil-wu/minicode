@@ -27,23 +27,43 @@ try {
 }
 $expectedStamp = "$runtimeLayoutVersion`n$PythonVersion`n$requirementsHash"
 
-function Assert-WithinRuntime([string]$Path) {
+function Assert-WithinRuntime([string]$Path, [switch]$AllowRoot) {
   $candidate = [System.IO.Path]::GetFullPath($Path)
   $runtimePrefix = $runtimeFull.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-  if (-not $candidate.StartsWith($runtimePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+  $isRoot = [string]::Equals($candidate, $runtimeFull, [System.StringComparison]::OrdinalIgnoreCase)
+  if (-not (($AllowRoot -and $isRoot) -or $candidate.StartsWith($runtimePrefix, [System.StringComparison]::OrdinalIgnoreCase))) {
     throw "Refusing to remove a path outside the bundled Python runtime: $candidate"
   }
+  $ancestor = $candidate
+  while ($ancestor.StartsWith($desktopFull + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or [string]::Equals($ancestor, $desktopFull, [StringComparison]::OrdinalIgnoreCase)) {
+    if (Test-Path -LiteralPath $ancestor) {
+      $item = Get-Item -LiteralPath $ancestor -Force
+      if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Refusing to manage a runtime path through a reparse point: $ancestor"
+      }
+    }
+    if ([string]::Equals($ancestor, $desktopFull, [StringComparison]::OrdinalIgnoreCase)) { break }
+    $ancestor = Split-Path -Parent $ancestor
+  }
+  if (Test-Path -LiteralPath $candidate) {
+    $candidate = (Resolve-Path -LiteralPath $candidate).ProviderPath
+    if (-not (($AllowRoot -and [string]::Equals($candidate, $runtimeFull, [StringComparison]::OrdinalIgnoreCase)) -or $candidate.StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase))) {
+      throw "Resolved runtime target escaped the managed directory: $candidate"
+    }
+  }
+  return $candidate
 }
 
 function Remove-RuntimeBuildArtifacts {
-  $directories = Get-ChildItem -LiteralPath $runtimeRoot -Recurse -Force -Directory | Where-Object {
+  $checkedRuntime = Assert-WithinRuntime $runtimeRoot -AllowRoot
+  $directories = Get-ChildItem -LiteralPath $checkedRuntime -Recurse -Force -Directory | Where-Object {
     $_.Name -in @("__pycache__", ".pytest_cache", ".ruff_cache", "test", "tests")
   } | Sort-Object { $_.FullName.Length } -Descending
 
   foreach ($directory in $directories) {
-    Assert-WithinRuntime $directory.FullName
-    if (Test-Path -LiteralPath $directory.FullName) {
-      Remove-Item -LiteralPath $directory.FullName -Recurse -Force
+    $target = Assert-WithinRuntime $directory.FullName
+    if (Test-Path -LiteralPath $target) {
+      Remove-Item -LiteralPath $target -Recurse -Force
     }
   }
 
@@ -51,8 +71,8 @@ function Remove-RuntimeBuildArtifacts {
     $_.Extension -in @(".pyc", ".pyo")
   }
   foreach ($file in $compiledFiles) {
-    Assert-WithinRuntime $file.FullName
-    Remove-Item -LiteralPath $file.FullName -Force
+    $target = Assert-WithinRuntime $file.FullName
+    Remove-Item -LiteralPath $target -Force
   }
 }
 
@@ -73,7 +93,8 @@ if (-not (Test-Path -LiteralPath $archive)) {
   Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive
 }
 if (Test-Path -LiteralPath $runtimeRoot) {
-  Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
+  $target = Assert-WithinRuntime $runtimeRoot -AllowRoot
+  Remove-Item -LiteralPath $target -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
 Expand-Archive -LiteralPath $archive -DestinationPath $runtimeRoot -Force

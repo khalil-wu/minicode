@@ -446,6 +446,7 @@ def test_query_engine_cas_failure_keeps_resumable_checkpoint(tmp_path: Path, mon
         checkpoint = load_latest_checkpoint(
             session_id,
             conversation_id=conversation_id,
+            base_dir=runtime.state_root,
         )
         # The commit failed, so the deferred clear must not have run.
         assert checkpoint is not None

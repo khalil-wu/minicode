@@ -279,6 +279,14 @@ describe("handleSessionEvent", () => {
     expect(useAppStore.getState().effortLevel).toBe("high");
   });
 
+  it("shows the side owner's model without overwriting the main model", () => {
+    const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+    useAppStore.setState({ currentModel: "main-model", sideChats: { side: { id: "side", draft: "", messages: [], isStreaming: false } } });
+    handleSessionEvent({ type: "llm.model.updated", conversation_id: "side", current_model: "side-model" } as ServerEvent, buffers);
+    expect(useAppStore.getState().sideChats.side.model).toBe("side-model");
+    expect(useAppStore.getState().currentModel).toBe("main-model");
+  });
+
   it("records the backend hydration phase from conversation switched events", () => {
     const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
     useAppStore.setState({ pendingConversationSwitchId: "conv-hydrating" });
@@ -300,8 +308,11 @@ describe("handleSessionEvent", () => {
       updatedAt: expect.any(Number),
     });
     expect(useAppStore.getState().pendingConversationSwitchId).toBeNull();
-    expect(sendClientCommand).toHaveBeenCalledOnce();
+    expect(sendClientCommand).toHaveBeenCalledTimes(3);
     expect(sendClientCommand).toHaveBeenCalledWith({ type: "commands.list" });
+    expect(sendClientCommand).toHaveBeenCalledWith({ type: "skills.list", conversation_id: "conv-hydrating", workspace_root: "C:/repo" }, { silent: true });
+    expect(sendClientCommand).toHaveBeenCalledWith({ type: "mcp.list", conversation_id: "conv-hydrating",
+      workspace_root: "C:/repo" }, { silent: true });
   });
 
   it("does not refresh the command catalog for a replayed conversation switch", () => {
@@ -2852,6 +2863,7 @@ describe("handleSessionEvent", () => {
   });
 
   it("hydrates skill and command catalogs from session capabilities", () => {
+    useAppStore.setState({ conversationId: null, workingDirectory: "", editorTabs: [], activeTabPath: null, activeEditorPath: null });
     const textStreamBuffer = makeBuffer();
     const thinkingStreamBuffer = makeBuffer();
 
@@ -2859,6 +2871,8 @@ describe("handleSessionEvent", () => {
       type: "session.synced",
       session: {
         session_id: "session-1",
+        active_conversation_id: null,
+        workspace_root: "",
         capabilities: {
           skills: [{
             name: "frontend-dev",

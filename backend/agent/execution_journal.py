@@ -239,6 +239,17 @@ def execution_journal_owner(owner_kind: str, *identity_parts: object) -> str:
     return f"{kind}_{digest}"
 
 
+def conversation_projection_owner_fields(metadata: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Keep a terminal projection tied to its admitted user identities."""
+    run_id = str(metadata.get("run_id") or "")
+    user_ids = [str(metadata["user_message_id"])] if metadata.get("user_message_id") else []
+    user_ids.extend(
+        str(message_id) for message_id, boundary in snapshot.get("turn_admissions", {}).items()
+        if run_id and str(boundary.get("run_id") or "") == run_id
+    )
+    return {"run_id": run_id, "source_user_message_ids": list(dict.fromkeys(user_ids))}
+
+
 def _lock_for(path: Path) -> threading.Lock:
     key = canonical_file_path_key(path)
     with _WRITE_LOCKS_GUARD:
@@ -1256,6 +1267,8 @@ class ExecutionJournal:
                 committed = pending.pop(pending_id, None)
                 if committed is None:
                     continue
+                if event.payload.get("applied") is False:
+                    continue
                 message = committed.payload.get("assistant_message") or {}
                 message_id = str(message.get("id") or event.payload.get("message_id") or "")
                 conversation_id = committed.payload.get("conversation_id")
@@ -1268,6 +1281,9 @@ class ExecutionJournal:
                             earlier.seq < committed.seq
                             and earlier.payload.get("conversation_id") == conversation_id
                             and earlier_message.get("id") == message_id
+                            and str(earlier.payload.get("run_id") or "") == str(
+                                committed.payload.get("run_id") or event.payload.get("run_id") or ""
+                            )
                         ):
                             pending.pop(earlier_id)
         return list(pending.values())
@@ -1280,7 +1296,7 @@ class ExecutionJournal:
         """
 
         events = self.read_events()
-        covered_ids: set[str] = set()
+        covered_ids: set[tuple[str, str]] = set()
         for event in events:
             lifecycle = str(event.payload.get("lifecycle") or "")
             if lifecycle in {"conversation_projection_pending", "conversation_projection_delta"}:
@@ -1288,11 +1304,11 @@ class ExecutionJournal:
                 if isinstance(message, dict):
                     message_id = str(message.get("id") or "").strip()
                     if message_id:
-                        covered_ids.add(message_id)
+                        covered_ids.add((message_id, str(event.payload.get("run_id") or "")))
             elif lifecycle == "conversation_projection_committed":
                 message_id = str(event.payload.get("message_id") or "").strip()
                 if message_id:
-                    covered_ids.add(message_id)
+                    covered_ids.add((message_id, str(event.payload.get("run_id") or "")))
 
         committed_run_ids: set[str] = set()
         committed_intent_ids: set[str] = set()
@@ -1369,7 +1385,7 @@ class ExecutionJournal:
                 )
             if not eligible:
                 continue
-            if message_id in covered_ids:
+            if (message_id, run_id) in covered_ids:
                 continue
             assistant = assistants.get(message_id)
             if assistant is None:
@@ -1399,9 +1415,14 @@ class ExecutionJournal:
                     },
                     "context_snapshot": deepcopy(context_snapshot),
                     "summary": None,
+                    **conversation_projection_owner_fields(event.payload, context_snapshot),
+                    **({"source_user_message_ids": list(event.payload["source_user_message_ids"])}
+                       if "source_user_message_ids" in event.payload else {}),
+                    **({"context_delta": deepcopy(assistant.payload["context_delta"])}
+                       if "context_delta" in assistant.payload else {}),
                 }
             )
-            covered_ids.add(message_id)
+            covered_ids.add((message_id, run_id))
 
         # The process may crash after the runtime CAS receipt but before the
         # assistant/terminal pair is appended. The intent contains the exact
@@ -1414,7 +1435,8 @@ class ExecutionJournal:
             if not isinstance(assistant, dict):
                 continue
             message_id = str(assistant.get("id") or event.payload.get("message_id") or "").strip()
-            if not message_id or message_id in covered_ids:
+            run_id = str(event.payload.get("run_id") or "")
+            if not message_id or (message_id, run_id) in covered_ids:
                 continue
             context_snapshot = event.payload.get("context_snapshot")
             if not isinstance(context_snapshot, dict):
@@ -1426,9 +1448,14 @@ class ExecutionJournal:
                     "assistant_message": deepcopy(assistant),
                     "context_snapshot": deepcopy(context_snapshot),
                     "summary": None,
+                    **conversation_projection_owner_fields(event.payload, context_snapshot),
+                    **({"source_user_message_ids": list(event.payload["source_user_message_ids"])}
+                       if "source_user_message_ids" in event.payload else {}),
+                    **({"context_delta": deepcopy(event.payload["context_delta"])}
+                       if "context_delta" in event.payload else {}),
                 }
             )
-            covered_ids.add(message_id)
+            covered_ids.add((message_id, run_id))
         # End hooks may persist private extension state after the model's
         # terminal receipt. Apply only that private state to the same message;
         # never replace the already-committed assistant answer or history.
@@ -1447,6 +1474,8 @@ class ExecutionJournal:
             if count:
                 snapshot["extension_state"] = state
                 snapshot["extension_cursor"] = cursor
+                if "context_delta" in projection:
+                    projection["context_delta"]["set"].update(extension_state=state, extension_cursor=cursor)
         return projections
 
 

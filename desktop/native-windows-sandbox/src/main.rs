@@ -47,6 +47,8 @@ fn main() -> Result<()> {
                 && home_flag == "--codex-home" =>
         {
             let user = current_setup_user()?;
+            codex_windows_sandbox::validate_local_directory_path(Path::new(home))?;
+            std::fs::create_dir_all(home)?;
             bind_windows_sandbox_owner(Path::new(home), &user)?;
             run_elevated_provisioning_setup(
                 Path::new(home),
@@ -61,6 +63,8 @@ fn main() -> Result<()> {
                 && user_flag == "--user"
                 && home_flag == "--codex-home" =>
         {
+            codex_windows_sandbox::validate_local_directory_path(Path::new(home))?;
+            std::fs::create_dir_all(home)?;
             bind_windows_sandbox_owner(Path::new(home), user)?;
             run_elevated_provisioning_setup(
                 Path::new(home),

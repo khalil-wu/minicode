@@ -98,7 +98,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
         ? permissionRef.current
         : null;
     if (!root) return;
-    const trigger = root.querySelector<HTMLButtonElement>(':scope > button[aria-expanded]');
+    const trigger = root.querySelector<HTMLButtonElement>(effortOpen ? ':scope > button[data-effort-trigger]' : ':scope > button[aria-expanded]');
     const options = () => Array.from(root.querySelectorAll<HTMLButtonElement>('[role="option"]:not(:disabled)'));
     queueMicrotask(() => {
       const items = options();
@@ -258,7 +258,8 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   const capabilityEffortLevels = normalizeCapabilityEffortLevels(
     providerCapabilities?.reasoning_effort_levels,
   );
-  const supportsReasoningEffort = capabilityBool(
+  const supportsReasoningEffort = (providerCapabilities?.model === undefined || providerCapabilities.model === currentModel)
+    && capabilityBool(
     providerCapabilities?.reasoning_effort_supported ?? providerCapabilities?.reasoning_effort,
   ) && capabilityEffortLevels.length > 0;
   const composerEffortLevels = capabilityEffortLevels;
@@ -379,19 +380,32 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             type="button"
             onClick={() => {
               setPermissionOpen(false);
-              const open = !(modelOpen || effortOpen);
-              setEffortOpen(open && supportsReasoningEffort);
-              setModelOpen(open && !supportsReasoningEffort);
+              setEffortOpen(false);
+              setModelOpen((open) => !open);
             }}
             className="composer-model-select"
-            aria-expanded={modelOpen || effortOpen}
-            aria-haspopup={modelOpen || !supportsReasoningEffort ? "listbox" : "dialog"}
+            aria-expanded={modelOpen}
+            aria-haspopup="listbox"
             style={pill}
             title={currentModel || "选择模型"}
           >
             <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{modelLabel}</span>
-            {supportsReasoningEffort && <span className="composer-effort-label" title={effortTitle}>{effortLabel}</span>}
           </button>
+          {supportsReasoningEffort && <button
+            type="button"
+            data-effort-trigger
+            className="composer-effort-label"
+            aria-label={`推理强度：${effortLabel}`}
+            title={effortTitle}
+            aria-haspopup="dialog"
+            aria-expanded={effortOpen}
+            style={{ ...pill, color: "var(--accent-reasoning, var(--accent-primary))" }}
+            onClick={() => {
+              setPermissionOpen(false);
+              setModelOpen(false);
+              setEffortOpen((open) => !open);
+            }}
+          >{effortLabel}</button>}
           {modelOpen && (
             <div className="mc-dropdown-menu composer-picker-menu" role="listbox" aria-label="选择模型" style={dropdownStyle("right")}>
               <div className="composer-menu-heading">选择模型</div>
@@ -638,7 +652,7 @@ const ContextUsageRing = memo(() => {
     });
   }, [appMode, conversationId, currentModel]);
 
-  if (!contextUsage && budgetBuckets.length === 0) return null;
+  if (!contextUsage && budgetBuckets.length === 0 && totalBudgetPercent <= 0) return null;
 
   return (
     <button
@@ -648,8 +662,8 @@ const ContextUsageRing = memo(() => {
         conversation_id: conversationId || undefined,
         source: "usage_ring",
       })}
-       title="上下文用量，点击查看详情（/usage）"
-       aria-label="显示上下文和令牌用量"
+       title="查看上下文与任务预算详情（/usage）"
+       aria-label="查看上下文与任务预算详情"
       className="composer-context-usage"
       style={{ background: "transparent", border: 0, padding: 0, cursor: "pointer" }}
     >

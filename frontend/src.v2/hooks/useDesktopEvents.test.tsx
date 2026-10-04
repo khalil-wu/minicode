@@ -24,6 +24,7 @@ vi.hoisted(() => {
 
 vi.mock("../desktop/runtime", () => ({
   isDesktop: () => true,
+  desktop: () => null,
 }));
 
 vi.mock("../workspace/openWorkspaceFolder", () => ({

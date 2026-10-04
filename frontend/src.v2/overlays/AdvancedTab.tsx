@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
-import { CheckCircle2, CircleSlash2, FolderGit2, RefreshCw, FileOutput, FolderOpen, TerminalSquare } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { CheckCircle2, CircleSlash2, FolderGit2, RefreshCw, FileOutput, FolderOpen } from "lucide-react";
 import { useAppStore } from "../stores";
 import { pushToast } from "./ToastContainer";
-import { envDetect, exportDiagnostics, isDesktop, revealPath, type DesktopEnvInfo } from "../desktop/runtime";
+import { envDetect, exportDiagnostics, isDesktop, type DesktopEnvInfo } from "../desktop/runtime";
 import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { inputStyle, preStyle } from "./settingsShared";
 import { openRightPanelFromSettings } from "../lib/settings-navigation";
@@ -16,35 +16,67 @@ const TOOLS: { key: keyof Pick<DesktopEnvInfo, "git" | "python" | "node" | "dock
   { key: "ollama", label: "Ollama", detail: "本地模型服务" },
 ];
 
-export const AdvancedTab = () => {
+export const AdvancedTab = ({ active = true }: { active?: boolean }) => {
   const envVars = useAppStore((s) => s.envVars);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const workspaceGit = useAppStore((s) => s.workspaceGit);
+  const isConnected = useAppStore((s) => s.isConnected);
   const [environment, setEnvironment] = useState<DesktopEnvInfo | null>(null);
   const [environmentLoading, setEnvironmentLoading] = useState(false);
   const [environmentError, setEnvironmentError] = useState("");
   const [newEnvName, setNewEnvName] = useState("");
   const [newEnvValue, setNewEnvValue] = useState("");
   const [newEnvDescription, setNewEnvDescription] = useState("");
-  const [envSaving, setEnvSaving] = useState(false);
+  const [savingEnvName, setSavingEnvName] = useState("");
   const [deletingEnvNames, setDeletingEnvNames] = useState<Record<string, boolean>>({});
   const [diagResult, setDiagResult] = useState<Record<string, unknown> | null>(null);
   const [diagLoading, setDiagLoading] = useState(false);
+  const environmentRequestRef = useRef(0);
+  const envDraftRef = useRef({ name: newEnvName, value: newEnvValue, description: newEnvDescription });
+  envDraftRef.current = { name: newEnvName, value: newEnvValue, description: newEnvDescription };
+  const [envListState, setEnvListState] = useState<"loading" | "ready" | "error">("loading");
+  const [envListError, setEnvListError] = useState("");
+  const [envRefresh, setEnvRefresh] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    if (!isConnected) {
+      setEnvListState("error");
+      setEnvListError("后端连接尚未就绪，恢复连接后将重新读取。");
+      return;
+    }
+    setEnvListState("loading");
+    setEnvListError("");
+    void sendClientCommandAwaitResult({ type: "env.list" }, "env.list").then((result) => {
+      if (cancelled) return;
+      if (!commandResultSucceeded(result)) throw new Error(result.message || "无法读取环境变量。");
+      setEnvListState("ready");
+    }).catch((error) => {
+      if (cancelled) return;
+      setEnvListState("error");
+      setEnvListError(error instanceof Error ? error.message : "无法读取环境变量。");
+    });
+    return () => { cancelled = true; };
+  }, [active, isConnected, envRefresh]);
 
   const refreshEnvironment = async (showFeedback = false) => {
     if (!isDesktop()) return;
+    const request = ++environmentRequestRef.current;
     setEnvironmentLoading(true);
     setEnvironmentError("");
     try {
-      setEnvironment(await envDetect());
+      const detected = await envDetect();
+      if (request !== environmentRequestRef.current) return;
+      setEnvironment(detected);
       if (showFeedback) pushToast("运行环境检测完成", "success");
     } catch (error) {
+      if (request !== environmentRequestRef.current) return;
       const message = error instanceof Error ? error.message : String(error || "未知错误");
       setEnvironment(null);
       setEnvironmentError(message);
       if (showFeedback) pushToast(`运行环境检测失败：${message}`, "error");
     } finally {
-      setEnvironmentLoading(false);
+      if (request === environmentRequestRef.current) setEnvironmentLoading(false);
     }
   };
 
@@ -52,8 +84,9 @@ export const AdvancedTab = () => {
     const name = newEnvName.trim();
     const value = newEnvValue;
     const description = newEnvDescription.trim();
-    if (!name || !value || envSaving) return;
-    setEnvSaving(true);
+    if (!name || !value || savingEnvName || deletingEnvNames[name]) return;
+    const submittedDraft = envDraftRef.current;
+    setSavingEnvName(name);
     try {
       const result = await sendClientCommandAwaitResult(
         { type: "env.set", name, value, description },
@@ -63,29 +96,32 @@ export const AdvancedTab = () => {
         pushToast(`添加环境变量失败：${result.message || "后端未返回具体原因"}`, "error");
         return;
       }
-      setNewEnvName((current) => current === name ? "" : current);
-      setNewEnvValue((current) => current === value ? "" : current);
-      setNewEnvDescription((current) => current.trim() === description ? "" : current);
+      if (envDraftRef.current.name === submittedDraft.name && envDraftRef.current.value === submittedDraft.value
+        && envDraftRef.current.description === submittedDraft.description) {
+        setNewEnvName("");
+        setNewEnvValue("");
+        setNewEnvDescription("");
+      }
       pushToast(`已添加环境变量：${name}`, "success");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error || "未知错误");
       pushToast(`添加环境变量失败：${message}`, "error");
     } finally {
-      setEnvSaving(false);
+      setSavingEnvName("");
     }
   };
 
   const deleteEnvironmentVariable = async (name: string) => {
-    if (deletingEnvNames[name]) return;
-    const confirmed = await showConfirm({
-      title: "删除环境变量",
-      message: `确定删除“${name}”？依赖该变量的工具可能无法继续工作。`,
-      confirmLabel: "删除",
-      danger: true,
-    });
-    if (!confirmed) return;
+    if (deletingEnvNames[name] || savingEnvName === name) return;
     setDeletingEnvNames((current) => ({ ...current, [name]: true }));
     try {
+      const confirmed = await showConfirm({
+        title: "删除环境变量",
+        message: `确定删除“${name}”？依赖该变量的工具可能无法继续工作。`,
+        confirmLabel: "删除",
+        danger: true,
+      });
+      if (!confirmed) return;
       const result = await sendClientCommandAwaitResult(
         { type: "env.delete", name },
         "env.delete",
@@ -109,6 +145,7 @@ export const AdvancedTab = () => {
 
   useEffect(() => {
     void refreshEnvironment();
+    return () => { environmentRequestRef.current += 1; };
   }, []);
 
   return (
@@ -170,14 +207,19 @@ export const AdvancedTab = () => {
           <p className="settings-section-description">仅在工具执行时注入；敏感值不会在此处回显。</p>
         </div>
         <div className="settings-card settings-env-card">
+          {envListState === "loading" && <p role="status">正在读取环境变量…</p>}
+          {envListError && <div role="alert" className="settings-page-note">
+            读取环境变量失败：{envListError}
+            <button type="button" className="settings-action-button" onClick={() => setEnvRefresh((value) => value + 1)}>重试</button>
+          </div>}
           {envVars.map((variable) => (
             <div key={variable.name} className="settings-env-row">
-              <code>{variable.name}</code>
+              <code title={variable.name}>{variable.name}</code>
               <span>{variable.description || "没有说明"}</span>
               <em>{variable.scope}</em>
               <button
                 type="button"
-                disabled={Boolean(deletingEnvNames[variable.name])}
+                disabled={Boolean(deletingEnvNames[variable.name]) || savingEnvName === variable.name}
                 onClick={() => void deleteEnvironmentVariable(variable.name)}
                 aria-label={`删除环境变量 ${variable.name}`}
                 title={`删除环境变量 ${variable.name}`}
@@ -186,12 +228,12 @@ export const AdvancedTab = () => {
               </button>
             </div>
           ))}
-          {envVars.length === 0 && <div className="settings-empty-inline">尚未配置环境变量。</div>}
+          {envVars.length === 0 && envListState === "ready" && <div className="settings-empty-inline">尚未配置环境变量。</div>}
           <div className="settings-env-editor">
             <input placeholder="变量名" value={newEnvName} onChange={(event) => setNewEnvName(event.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ""))} style={inputStyle} />
             <input placeholder="变量值" type="password" value={newEnvValue} onChange={(event) => setNewEnvValue(event.target.value)} style={inputStyle} />
             <input placeholder="说明（可选）" value={newEnvDescription} onChange={(event) => setNewEnvDescription(event.target.value)} style={inputStyle} />
-            <button type="button" className="settings-action-button" disabled={!newEnvName.trim() || !newEnvValue || envSaving} onClick={() => void addEnvironmentVariable()}>{envSaving ? "正在添加…" : "添加"}</button>
+            <button type="button" className="settings-action-button" disabled={!newEnvName.trim() || !newEnvValue || Boolean(savingEnvName) || Boolean(deletingEnvNames[newEnvName])} onClick={() => void addEnvironmentVariable()}>{savingEnvName ? "正在添加…" : "添加"}</button>
           </div>
         </div>
       </section>
@@ -238,9 +280,6 @@ export const AdvancedTab = () => {
                     setDiagLoading(false);
                   }
                 }} disabled={diagLoading}><FileOutput aria-hidden="true" />{diagLoading ? "正在导出…" : "导出"}</button>
-                {diagResult && typeof diagResult.logPath === "string" && diagResult.logPath && <button type="button" className="settings-action-button" onClick={() => {
-                  void Promise.resolve(revealPath(diagResult.logPath as string)).catch(() => pushToast("无法打开日志位置", "error"));
-                }}><TerminalSquare aria-hidden="true" />打开日志</button>}
               </div>
             </div>
           </div>

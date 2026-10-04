@@ -1,0 +1,9 @@
+.mc-git-overview {
+  container-type: inline-size;
+  container-name: mc-git-overview;
+}
+
+@container mc-git-overview (max-width: 640px) {
+  .mc-git-overview > aside { grid-column: 1 / -1; }
+  .mc-git-overview > main { display: none; }
+}

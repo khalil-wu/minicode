@@ -196,7 +196,7 @@ def test_memory_writers_reject_linked_children(tmp_path: Path, directory_link, o
         )),
         "sync": ("rollout_summaries", lambda: coordinator._sync_phase2_inputs([])),
         "git_prepare": (".git", coordinator._ensure_git_workspace),
-        "git_commit": (".git", coordinator._commit_git_baseline),
+        "git_commit": (".git", lambda: coordinator._commit_git_baseline(root)),
     }[operation]
     directory_link(root / relative, outside)
 

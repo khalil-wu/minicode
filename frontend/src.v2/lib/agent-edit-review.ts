@@ -14,6 +14,9 @@ export interface AgentEditBlock {
   line: number;
   added: string[];
   removed: string[];
+  /** When a diff EOF marker establishes the removed side's newline state. */
+  removedFinalNewline?: boolean;
+  removedEol?: "\n" | "\r\n";
 }
 
 export interface AgentEditReview {
@@ -25,9 +28,12 @@ export interface AgentEditReview {
 interface PatchLine {
   kind: "context" | "add" | "del";
   text: string;
+  noNewline?: boolean;
+  eol?: "\n" | "\r\n";
 }
 
 interface PatchHunk {
+  oldStart: number;
   newStart: number;
   lines: PatchLine[];
 }
@@ -44,6 +50,11 @@ export function parsePatchHunks(patch: string): PatchHunk[] {
   let newRemaining = 0;
   for (const raw of patch.split("\n")) {
     const line = stripCr(raw);
+    if (line === "\\ No newline at end of file" && current?.lines.length) {
+      current.lines[current.lines.length - 1].noNewline = true;
+      delete current.lines[current.lines.length - 1].eol;
+      continue;
+    }
     if (current && (oldRemaining > 0 || newRemaining > 0)) {
       // Counted hunk bodies: content lines such as "---x" stay content.
       if (line.startsWith("\\")) continue;
@@ -53,7 +64,7 @@ export function parsePatchHunks(patch: string): PatchHunk[] {
         current.lines.push({ kind: "add", text });
         newRemaining -= 1;
       } else if (marker === "-") {
-        current.lines.push({ kind: "del", text });
+        current.lines.push({ kind: "del", text, eol: raw.endsWith("\r") ? "\r\n" : "\n" });
         oldRemaining -= 1;
       } else if (marker === " " || line === "") {
         current.lines.push({ kind: "context", text });
@@ -68,7 +79,7 @@ export function parsePatchHunks(patch: string): PatchHunk[] {
     if (!header) continue;
     oldRemaining = header[2] === undefined ? 1 : Number(header[2]);
     newRemaining = header[4] === undefined ? 1 : Number(header[4]);
-    current = { newStart: Number(header[3]), lines: [] };
+    current = { oldStart: Number(header[1]), newStart: Number(header[3]), lines: [] };
     hunks.push(current);
   }
   return hunks;
@@ -117,7 +128,6 @@ const hashText = (value: string): string => {
 export function reviewAgentEdits(patch: string, content: string): AgentEditReview {
   const lines = bufferLines(content);
   const blocks: AgentEditBlock[] = [];
-  const occurrences = new Map<string, number>();
   let unmatchedHunks = 0;
   let drift = 0;
   for (const hunk of parsePatchHunks(patch)) {
@@ -125,33 +135,44 @@ export function reviewAgentEdits(patch: string, content: string): AgentEditRevie
     const newSide = hunk.lines.filter((line) => line.kind !== "del").map((line) => line.text);
     // An empty new side ("+N,0") is positioned after new line N, not at it.
     const anchor = Math.max(0, newSide.length === 0 ? hunk.newStart : hunk.newStart - 1);
-    const found = locate(lines, newSide, anchor + drift);
+    const found = newSide.length === 0 && hunk.newStart === 0 && lines.length > 0
+      ? -1 : locate(lines, newSide, anchor + drift);
     if (found < 0) {
       unmatchedHunks += 1;
       continue;
     }
     drift = found - anchor;
     let cursor = found;
-    let pending: { line: number; added: string[]; removed: string[] } | null = null;
+    let oldLine = hunk.oldStart;
+    let pending: { oldLine: number; line: number; added: string[]; removed: string[]; removedFinalNewline?: boolean; removedEol?: "\n" | "\r\n" } | null = null;
     const flush = () => {
       if (!pending) return;
-      const identity = hashText(`${pending.removed.join("\n")}\u0000${pending.added.join("\n")}`);
-      const seen = occurrences.get(identity) ?? 0;
-      occurrences.set(identity, seen + 1);
-      blocks.push({ key: `${identity}.${seen}`, ...pending });
+      if (newSide.length === 0 && hunk.newStart === 0 && pending.removedFinalNewline === undefined) {
+        pending.removedFinalNewline = true;
+      }
+      const identity = hashText(`${pending.removed.join("\n")}\u0000${pending.added.join("\n")}\u0000${pending.removedFinalNewline ?? ""}\u0000${pending.removedEol ?? ""}`);
+      const { oldLine, ...block } = pending;
+      blocks.push({ key: `${identity}.${oldLine}`, ...block });
       pending = null;
     };
     for (const line of hunk.lines) {
       if (line.kind === "context") {
         flush();
         cursor += 1;
+        oldLine += 1;
         continue;
       }
-      pending ??= { line: cursor + 1, added: [], removed: [] };
+      pending ??= { oldLine, line: cursor + 1, added: [], removed: [] };
       if (line.kind === "del") {
         pending.removed.push(line.text);
+        oldLine += 1;
+        if (line.eol) pending.removedEol = line.eol;
+        if (line.noNewline) pending.removedFinalNewline = false;
       } else {
         pending.added.push(line.text);
+        if (line.noNewline && pending.removed.length > 0 && pending.removedFinalNewline === undefined) {
+          pending.removedFinalNewline = true;
+        }
         cursor += 1;
       }
     }
@@ -183,17 +204,20 @@ export function revertAgentEditBlock(content: string, block: AgentEditBlock): st
   for (let offset = 0; offset < block.added.length; offset += 1) {
     if (stripCr(bodyOf(segments[start + offset])) !== block.added[offset]) return null;
   }
-  const eol = content.includes("\r\n") ? "\r\n" : "\n";
+  const eol = block.removedEol ?? (content.includes("\r\n") ? "\r\n" : "\n");
   const replaced = segments.slice(start, start + block.added.length);
   const endsFile = start + block.added.length === segments.length;
+  const currentTerminator = replaced.length > 0 ? terminatorOf(replaced.at(-1)) : terminatorOf(segments.at(-1));
   // The file's final-newline state belongs to whatever ends up last.
   const finalTerminator = endsFile
-    ? (replaced.length > 0 ? terminatorOf(replaced.at(-1)) : terminatorOf(segments.at(-1)) || "")
+    ? (block.removedFinalNewline === undefined
+      ? (currentTerminator ? block.removedEol ?? currentTerminator : "")
+      : block.removedFinalNewline ? eol : "")
     : eol;
   const restored = block.removed.map((text, index) => {
     const own = terminatorOf(replaced[index]);
     const last = index === block.removed.length - 1;
-    return text + (last && endsFile ? finalTerminator : own || eol);
+    return text + (last && endsFile ? finalTerminator : block.removedEol || own || eol);
   });
   const before = segments.slice(0, start);
   if (endsFile && replaced.length === 0 && restored.length > 0 && before.length > 0) {
@@ -227,11 +251,12 @@ export function agentEditUndoEdit(
   lineMaxColumn: (lineNumber: number) => number,
   eol: string,
 ): AgentEditTextEdit {
+  eol = block.removedEol ?? eol;
   const after = block.line + block.added.length;
   if (after <= lineCount) {
     return {
       range: { startLineNumber: block.line, startColumn: 1, endLineNumber: after, endColumn: 1 },
-      text: block.removed.map((line) => line + eol).join(""),
+      text: block.removed.join(eol) + (block.removed.length && block.removedFinalNewline !== false ? eol : ""),
     };
   }
   const lastColumn = lineMaxColumn(lineCount);
@@ -239,7 +264,7 @@ export function agentEditUndoEdit(
     // Removed lines that used to follow an unterminated final line.
     return {
       range: { startLineNumber: lineCount, startColumn: lastColumn, endLineNumber: lineCount, endColumn: lastColumn },
-      text: eol + block.removed.join(eol),
+      text: eol + block.removed.join(eol) + (block.removedFinalNewline === true ? eol : ""),
     };
   }
   if (block.removed.length === 0 && block.line > 1) {
@@ -251,6 +276,6 @@ export function agentEditUndoEdit(
   }
   return {
     range: { startLineNumber: block.line, startColumn: 1, endLineNumber: lineCount, endColumn: lastColumn },
-    text: block.removed.join(eol),
+    text: block.removed.join(eol) + (block.removedFinalNewline === true ? eol : ""),
   };
 }

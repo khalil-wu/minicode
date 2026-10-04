@@ -27,6 +27,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from backend.async_cleanup import to_thread_cancel_safe
 from backend.permissions.context import ToolExecutionContext
 from backend.security.sensitive_files import is_protected_write_path
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
@@ -36,7 +37,6 @@ from backend.workspace.fuzzy_search import iter_search_paths
 from backend.tools.tree_sitter_parser import (
     find_definitions as _ts_find_definitions,
     find_references as _ts_find_references,
-    is_available as _ts_is_available,
     language_for_extension as _ts_language_for_ext,
 )
 
@@ -164,11 +164,11 @@ def _find_definitions_in_file(path: Path, name: str) -> list[dict[str, Any]]:
     else:
         # Try tree-sitter first for non-Python languages
         ts_lang = _ts_language_for_ext(ext)
-        ts_results: list[tuple[int, str]] = []
-        if ts_lang is not None and _ts_is_available():
+        ts_results: list[tuple[int, str]] | None = None
+        if ts_lang is not None:
             ts_results = _ts_find_definitions(content, name, ts_lang)
 
-        if ts_results:
+        if ts_results is not None:
             line_nums = [lineno for lineno, _ in ts_results]
         else:
             # Fall back to regex patterns
@@ -194,21 +194,13 @@ def _find_references_in_file(path: Path, name: str, include_defs: bool) -> list[
 
     ext = path.suffix.lower().lstrip(".")
     results: list[dict[str, Any]] = []
-    definition_lines = (
-        {int(item["line"]) for item in _find_definitions_in_file(path, name)}
-        if not include_defs
-        else set()
-    )
-
     # For non-Python files, try tree-sitter AST-based reference finding
     if ext not in {"py", "pyi"}:
         ts_lang = _ts_language_for_ext(ext)
-        if ts_lang is not None and _ts_is_available():
-            ts_refs = _ts_find_references(content, name, ts_lang)
-            if ts_refs:
+        if ts_lang is not None:
+            ts_refs = _ts_find_references(content, name, ts_lang, include_definitions=include_defs)
+            if ts_refs is not None:
                 for lineno, line_text in ts_refs:
-                    if lineno in definition_lines:
-                        continue
                     results.append({
                         "file": str(path),
                         "line": lineno,
@@ -217,6 +209,10 @@ def _find_references_in_file(path: Path, name: str, include_defs: bool) -> list[
                 return results
 
     # Fall back to regex word-boundary matching (works for all languages)
+    definition_lines = (
+        {int(item["line"]) for item in _find_definitions_in_file(path, name)}
+        if not include_defs else set()
+    )
     pattern = re.compile(r"\b" + re.escape(name) + r"\b")
     source_lines = content.splitlines()
 
@@ -264,7 +260,8 @@ class GoToDefinitionTool(BaseTool):
         "- You are searching for free-text, not a symbol name (use grep_files instead).\n\n"
         "Analysis method:\n"
         "- Python: precise AST parsing (ast module).\n"
-        "- JS/TS/Go/Rust/Java: tree-sitter AST when available, otherwise regex (~90% accuracy).\n\n"
+        "- JS/TS/Go/Rust/Java: tree-sitter AST when that grammar is installed.\n"
+        "- Other languages or unavailable grammars: approximate regex matching, which can include comments or strings.\n\n"
         "Returns file paths, line numbers, and code snippets. "
         "Example: go_to_definition(name='run_agent_loop')."
     )
@@ -298,6 +295,9 @@ class GoToDefinitionTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        return await to_thread_cancel_safe(self._execute, args, context)
+
+    def _execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         symbol_name = args.get("name", "").strip()
         directory = args.get("directory", "")
         file_extensions: list[str] = args.get("file_extensions", [])
@@ -379,8 +379,9 @@ class FindReferencesTool(BaseTool):
         "- You are searching for a string literal or pattern, not a symbol (use grep_files).\n"
         "- The symbol is too common (e.g. 'id', 'name') and will produce excessive results.\n\n"
         "Analysis method:\n"
-        "- JS/TS/Go/Rust/Java: tree-sitter identifier matching when available (precise).\n"
-        "- All languages: word-boundary regex fallback (user won't match username).\n\n"
+        "- JS/TS/Go/Rust/Java: tree-sitter identifier matching when that grammar is installed.\n"
+        "- Other languages or unavailable grammars: approximate word-boundary regex matching, including comments or strings.\n"
+        "- include_definitions=false excludes declaration identifiers with AST; regex excludes their entire lines.\n\n"
         "Returns file paths, line numbers, and code snippets (max 60). "
         "Example: find_references(name='ReadFileTool')."
     )
@@ -420,6 +421,9 @@ class FindReferencesTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        return await to_thread_cancel_safe(self._execute, args, context)
+
+    def _execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         symbol_name = args.get("name", "").strip()
         directory = args.get("directory", "")
         file_extensions: list[str] = args.get("file_extensions", [])

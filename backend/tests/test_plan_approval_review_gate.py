@@ -53,6 +53,8 @@ class _Teammate:
 
 @dataclass
 class _ParentRun:
+    parent_run_id: str = ""
+    role: str = "main"
     run_id: str = "run-parent"
     conversation_id: str = "conv-1"
 
@@ -60,8 +62,6 @@ class _ParentRun:
 class _FakeRuntime:
     def __init__(self) -> None:
         self.sent: list[dict[str, Any]] = []
-        self.reserved = 0
-        self.committed = 0
 
     def list_swarm_messages(self, **kwargs: Any) -> list[Any]:
         return [_request_message()]
@@ -72,19 +72,9 @@ class _FakeRuntime:
     def get_run(self, run_id: str) -> Any:
         return _ParentRun() if run_id == "run-parent" else None
 
-    def reserve_lifecycle_response(self, **kwargs: Any) -> str:
-        self.reserved += 1
-        return "token-1"
-
-    def release_lifecycle_response(self, **kwargs: Any) -> bool:
-        return True
-
-    def commit_lifecycle_response(self, **kwargs: Any) -> bool:
-        self.committed += 1
-        return True
-
-    def send_swarm_message(self, **kwargs: Any) -> None:
+    def respond_to_teammate_plan(self, **kwargs: Any) -> Any:
         self.sent.append(kwargs)
+        return kwargs
 
 
 def _run_context(mode: str) -> RunContext:
@@ -148,11 +138,11 @@ def test_bypass_mode_leader_answers_directly() -> None:
             run_context=_run_context("bypass"),
         )
         assert handled == 1
-        assert runtime.reserved == 1 and runtime.committed == 1
         assert len(runtime.sent) == 1
-        payload = json.loads(runtime.sent[0]["content"])
-        assert payload["approved"] is True
-        assert payload["permission_mode"] == "confirm"
+        assert runtime.sent[0] == {
+            "leader_run_id": "run-parent", "subagent_id": "t1", "conversation_id": "conv-1",
+            "request_id": "plan_approval:t1:abc", "mailbox_epoch": 3, "approved": True,
+        }
 
     asyncio.run(run())
 

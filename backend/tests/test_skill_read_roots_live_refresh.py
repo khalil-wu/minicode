@@ -37,6 +37,9 @@ class _Loader:
         matches = self.get_metas(name)
         return matches[0] if len(matches) == 1 else None
 
+    def get_invocation_meta(self, name: str):
+        return self.get_unambiguous_meta(name)
+
     def get_meta_by_path(self, path):
         if not path:
             return None

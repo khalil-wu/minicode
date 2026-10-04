@@ -27,6 +27,7 @@ from backend.llm.errors import (
     ProviderErrorType,
     classify_llm_error,
 )
+from backend.secret_redaction import redact_secrets
 
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,7 @@ def provider_error_details(event: Any):
         "error_type": classification.error_type,
         "provider_error_type": classification.provider_error_type,
         **({"protocol_error_code": raw["protocol_error_code"]} if raw.get("protocol_error_code") else {}),
+        **({"provider_event_type": redact_secrets(str(raw["event_type"]))[:128]} if raw.get("event_type") else {}),
         **({"status_code": status_code} if status_code is not None else {}),
         **({"provider_error_code": provider_error_code} if provider_error_code else {}),
         **(
@@ -171,6 +173,10 @@ async def handle_provider_error_event(
         retry_state.auth_recovery_attempted = True
         boundary = budget_runtime.consume_retry("provider_auth_refresh")
         if boundary is not None:
+            await turn_kernel.close_provider_attempt(
+                provider_attempt, status="failed", summary="Provider auth recovery budget exhausted",
+                data=provider_failure_data,
+            )
             yield ProviderErrorEventResult("finish", stream_attempt, boundary, stream_recovery_attempted)
             return
         await turn_kernel.close_provider_attempt(

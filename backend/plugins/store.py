@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from filelock import FileLock
 
-from .identity import is_valid_identifier, parse_plugin_id, parse_plugin_id_strict, plugin_id
+from .identity import is_valid_identifier, parse_plugin_id_strict, plugin_id
 from .layout import plugin_manifest_path
 
 

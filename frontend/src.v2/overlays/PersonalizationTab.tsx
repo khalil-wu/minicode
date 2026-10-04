@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Brain, Check, FileText, Info, LoaderCircle, RotateCcw, Save, ServerOff, ShieldAlert, Trash2 } from "lucide-react";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
 import { pushToast } from "./ToastContainer";
@@ -7,6 +7,7 @@ import { useAppStore } from "../stores";
 import { Section } from "./settingsShared";
 import { fetchJsonWithStartupRetry, formatSettingsLoadError } from "./settingsLoad";
 import { showConfirm } from "./DialogService";
+import { workspaceRootsEqual } from "../lib/workspace-path";
 
 type PersonalizationPayload = {
   instructions: string;
@@ -46,8 +47,9 @@ const pollutionSourceLabel = (source: string): string => {
   return source;
 };
 
-export const PersonalizationTab = () => {
+export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
   const conversationId = useAppStore((state) => state.conversationId);
+  const workingDirectory = useAppStore((state) => state.workingDirectory);
   const currentConversation = useAppStore((state) => state.conversations.find((conversation) => conversation.id === state.conversationId));
   const memoryPolluted = currentConversation?.memoryPolluted === true;
   const memoryMode = memoryPolluted
@@ -57,6 +59,11 @@ export const PersonalizationTab = () => {
   const [payload, setPayload] = useState<PersonalizationPayload | null>(null);
   const [draft, setDraft] = useState("");
   const [sources, setSources] = useState<GuidelineSource[]>([]);
+  const [sourcesLoading, setSourcesLoading] = useState(true);
+  const [sourcesError, setSourcesError] = useState("");
+  const sourcesEpoch = useRef(0);
+  const memoryOwner = useRef(conversationId);
+  memoryOwner.current = conversationId;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savingMemoryMode, setSavingMemoryMode] = useState(false);
@@ -68,19 +75,12 @@ export const PersonalizationTab = () => {
     setLoading(true);
     setLoadError("");
     try {
-      const [personalization, guidelines] = await Promise.all([
-        fetchJsonWithStartupRetry<PersonalizationPayload>(`${apiBase()}/api/settings/personalization`, {
+      const personalization = await fetchJsonWithStartupRetry<PersonalizationPayload>(`${apiBase()}/api/settings/personalization`, {
           cache: "no-store",
           headers: authHeaders(),
-        }, { cacheKey: "settings.personalization" }),
-        fetchJsonWithStartupRetry<GuidelinePayload>(`${apiBase()}/api/guidelines`, {
-          cache: "no-store",
-          headers: authHeaders(),
-        }, { cacheKey: "settings.guidelines" }).catch(() => ({ blocks: [] })),
-      ]);
+        }, { cacheKey: "settings.personalization" });
       setPayload(personalization);
       setDraft(personalization.instructions || "");
-      setSources(Array.isArray(guidelines.blocks) ? guidelines.blocks : []);
     } catch (error) {
       setLoadError(formatSettingsLoadError(error));
     } finally {
@@ -89,8 +89,45 @@ export const PersonalizationTab = () => {
   }, []);
 
   useEffect(() => {
+    if (!active) return;
     void load();
   }, [load]);
+
+  const loadSources = useCallback(async (force = false) => {
+    if (!workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)) return;
+    const epoch = ++sourcesEpoch.current;
+    const isCurrent = () => epoch === sourcesEpoch.current
+      && workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory);
+    const url = new URL(`${apiBase()}/api/guidelines`);
+    if (workingDirectory) url.searchParams.set("workspace_dir", workingDirectory);
+    setSources([]);
+    setSourcesLoading(true);
+    setSourcesError("");
+    try {
+      const guidelines = await fetchJsonWithStartupRetry<GuidelinePayload>(url.toString(), {
+        cache: "no-store", headers: authHeaders(),
+      }, { cacheKey: force ? undefined : `settings.guidelines:${workingDirectory}` });
+      if (isCurrent()) setSources(Array.isArray(guidelines.blocks) ? guidelines.blocks : []);
+    } catch (error) {
+      if (isCurrent()) setSourcesError(formatSettingsLoadError(error));
+    } finally {
+      if (isCurrent()) setSourcesLoading(false);
+    }
+  }, [workingDirectory]);
+
+  useEffect(() => {
+    if (!active) return;
+    void loadSources();
+    return () => { sourcesEpoch.current += 1; };
+  }, [loadSources, active]);
+
+  useEffect(() => {
+    setSavingMemoryMode(false);
+    setClearingPollution(false);
+  }, [conversationId]);
+
+  const isCurrentMemoryOwner = () => memoryOwner.current === conversationId
+    && useAppStore.getState().conversationId === conversationId;
 
   const byteCount = useMemo(() => new TextEncoder().encode(draft).length, [draft]);
   const maxBytes = payload?.max_bytes ?? 32 * 1024;
@@ -99,12 +136,13 @@ export const PersonalizationTab = () => {
 
   const save = async () => {
     if (!dirty || tooLarge || saving) return;
+    const savedDraft = draft;
     setSaving(true);
     try {
       const response = await fetchWithTimeout(`${apiBase()}/api/settings/personalization`, {
         method: "PUT",
         headers: authHeaders({ "content-type": "application/json" }),
-        body: JSON.stringify({ instructions: draft }),
+        body: JSON.stringify({ instructions: savedDraft }),
       }, { timeoutMessage: "保存自定义指令超时，请重试。" });
       if (!response.ok) {
         const message = errorMessageFromResponseText(await response.text().catch(() => ""), response.statusText);
@@ -112,16 +150,9 @@ export const PersonalizationTab = () => {
       }
       const next = await response.json() as PersonalizationPayload;
       setPayload(next);
-      setDraft(next.instructions || "");
+      setDraft((current) => current === savedDraft ? next.instructions || "" : current);
       pushToast("自定义指令已保存", "success");
-      const guidelines = await fetchWithTimeout(
-        `${apiBase()}/api/guidelines`,
-        { cache: "no-store", headers: authHeaders() },
-        { timeoutMessage: "刷新指令来源超时，请重试。" },
-      )
-        .then((result) => result.ok ? result.json() as Promise<GuidelinePayload> : null)
-        .catch(() => null);
-      if (guidelines?.blocks) setSources(guidelines.blocks);
+      void loadSources(true);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       pushToast(`自定义指令保存失败：${message}`, "error");
@@ -141,6 +172,7 @@ export const PersonalizationTab = () => {
         conversation_id: conversationId,
         memory_mode: nextMode,
       }, "conversation.memory_mode.set");
+      if (!isCurrentMemoryOwner()) return;
       if (!commandResultSucceeded(result)) {
         pushToast(`长期记忆设置失败：${result.message || "后端未返回具体原因"}`, "error");
         return;
@@ -148,9 +180,9 @@ export const PersonalizationTab = () => {
       pushToast(enabled ? "当前任务已启用长期记忆。" : "当前任务已关闭长期记忆。", "success");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error || "未知错误");
-      pushToast(`长期记忆设置失败：${message}`, "error");
+      if (isCurrentMemoryOwner()) pushToast(`长期记忆设置失败：${message}`, "error");
     } finally {
-      setSavingMemoryMode(false);
+      if (isCurrentMemoryOwner()) setSavingMemoryMode(false);
     }
   };
 
@@ -185,19 +217,20 @@ export const PersonalizationTab = () => {
 
   const clearPollution = async () => {
     if (!conversationId || clearingPollution) return;
-    const confirmed = await showConfirm({
-      title: "重新启用任务记忆",
-      message: "此任务包含联网、浏览器或 MCP 外部上下文。重新启用后，后续回复可以再次生成长期记忆。",
-      confirmLabel: "重新启用",
-    });
-    if (!confirmed) return;
     setClearingPollution(true);
     try {
+      const confirmed = await showConfirm({
+        title: "重新启用任务记忆",
+        message: "此任务包含联网、浏览器或 MCP 外部上下文。重新启用后，后续回复可以再次生成长期记忆。",
+        confirmLabel: "重新启用",
+      });
+      if (!confirmed || !isCurrentMemoryOwner()) return;
       const result = await sendClientCommandAwaitResult({
         type: "conversation.memory_mode.set",
         conversation_id: conversationId,
         memory_mode: "enabled",
       }, "conversation.memory_mode.set");
+      if (!isCurrentMemoryOwner()) return;
       if (!commandResultSucceeded(result)) {
         pushToast(`任务记忆恢复失败：${result.message || "后端未返回具体原因"}`, "error");
         return;
@@ -205,9 +238,9 @@ export const PersonalizationTab = () => {
       pushToast("当前任务已重新启用长期记忆。", "success");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error || "未知错误");
-      pushToast(`任务记忆恢复失败：${message}`, "error");
+      if (isCurrentMemoryOwner()) pushToast(`任务记忆恢复失败：${message}`, "error");
     } finally {
-      setClearingPollution(false);
+      if (isCurrentMemoryOwner()) setClearingPollution(false);
     }
   };
 
@@ -233,6 +266,7 @@ export const PersonalizationTab = () => {
               <span>{fileName(payload.path)}</span>
               <code title={payload.path}>{payload.path}</code>
             </div>
+            {dirty && <span className="settings-unsaved" aria-live="polite">未保存</span>}
             <button
               type="button"
               className="settings-action-button"
@@ -344,7 +378,12 @@ export const PersonalizationTab = () => {
       {!loading && !loadError && payload && (
         <Section title="当前指令来源" description="按作用域加载，项目指令优先。">
           <div className="settings-source-list">
-            {sources.length > 0 ? sources.map((source, index) => (
+            {sourcesLoading ? <div className="settings-empty-inline" role="status">正在读取指令来源…</div>
+              : sourcesError ? <div className="settings-load-state" role="alert">
+                <span>指令来源读取失败：{sourcesError}</span>
+                <button type="button" className="settings-action-button" onClick={() => void loadSources()}>重试读取指令来源</button>
+              </div>
+              : sources.length > 0 ? sources.map((source, index) => (
               <div className="settings-source-row" key={`${source.path}-${index}`}>
                 <span className="settings-source-icon" aria-hidden="true"><FileText /></span>
                 <div className="settings-source-copy">

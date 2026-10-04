@@ -189,24 +189,6 @@ describe("editor workspace isolation", () => {
     expect(useAppStore.getState().activeEditorPath).toBeNull();
   });
 
-  it("inserts generated code into the active editor tab without touching unloaded tabs", () => {
-    useAppStore.setState({
-      editorTabs: [
-        { id: "editor-fixture-2", path: "src/active.ts", content: "const a = 1;", original: "const a = 1;", loading: false, error: null },
-        { id: "editor-fixture-3", path: "src/loading.ts", content: "", original: "", loading: true, error: null },
-      ],
-      activeTabPath: "src/active.ts",
-      activeEditorPath: "src/active.ts",
-    });
-
-    const inserted = useAppStore.getState().insertIntoActiveEditor("const b = 2;");
-
-    expect(inserted).toBe(true);
-    expect(useAppStore.getState().editorTabs.find((tab) => tab.path === "src/active.ts")?.content)
-      .toBe("const a = 1;\nconst b = 2;");
-    expect(useAppStore.getState().editorTabs.find((tab) => tab.path === "src/loading.ts")?.content).toBe("");
-  });
-
   it("keeps editor tabs visible when a file load fails", () => {
     useAppStore.setState({
       workingDirectory: "C:\\projects\\demo",
@@ -228,28 +210,6 @@ describe("editor workspace isolation", () => {
     expect(state.activeEditorPath).toBe("missing.txt");
   });
 
-  it("keeps oversized editor tabs open but blocks generated inserts into them", () => {
-    useAppStore.getState().openEditorTab("data/images.md");
-    useAppStore.getState().markTabLoaded("data/images.md", "", null, undefined, {
-      largeFile: true,
-      loadWarning: "This file is too large to render safely in the editor.",
-      sizeBytes: 3 * 1024 * 1024,
-    });
-
-    const inserted = useAppStore.getState().insertIntoActiveEditor("new content");
-    const tab = useAppStore.getState().editorTabs.find((item) => item.path === "data/images.md");
-
-    expect(inserted).toBe(false);
-    expect(tab).toMatchObject({
-      path: "data/images.md",
-      content: "",
-      original: "",
-      loading: false,
-      error: null,
-      largeFile: true,
-      sizeBytes: 3 * 1024 * 1024,
-    });
-  });
 
   it("clears a stale external-change marker when reopening a media tab", () => {
     useAppStore.setState({

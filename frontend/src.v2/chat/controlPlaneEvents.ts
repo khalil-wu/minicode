@@ -172,12 +172,15 @@ export const handleControlPlaneProjectionEvent = (event: ServerEvent): boolean =
       const checkpoint = checkpointProjection(ev.checkpoint);
       projectCheckpoint(checkpoint, event);
       if (isActiveOwner(ev.conversation_id)) {
+        for (const path of checkpoint.paths) {
+          state.addFileChange({ path, event: "modify", timestamp: eventTime(event) });
+        }
         state.requestGitChanges();
         if (!isReplayed(event)) {
           const protectedFiles = checkpoint.paths.length === 1
             ? checkpoint.paths[0]
             : `${checkpoint.paths.length} 个文件`;
-          pushToast(`已回滚到检查点 ${checkpoint.id.slice(0, 12)}：${protectedFiles}`, "success", 5200);
+          pushToast(`已回滚到检查点：${protectedFiles}`, "success", 5200);
         }
       }
       return true;
@@ -239,7 +242,7 @@ export const handleControlPlaneProjectionEvent = (event: ServerEvent): boolean =
         if (!isReplayed(event)) {
           pushToast(
             ev.resumed
-              ? `已从运行 ${ev.checkpoint_run_id || "未知"} 的第 ${ev.iteration ?? 0} 轮恢复。`
+              ? "已恢复未完成的任务。"
               : ev.message || "没有可恢复的未完成运行。",
             ev.resumed ? "success" : "info",
             5200,

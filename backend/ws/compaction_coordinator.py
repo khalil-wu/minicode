@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from backend.async_cleanup import to_thread_cancel_safe
+
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
@@ -167,7 +169,7 @@ async def compact_conversation(
                 # committed snapshot on the transaction clone first, so bad
                 # serialized context never reaches disk or a live builder.
                 transaction_builder.load_snapshot(deepcopy(saved_snapshot))
-            committed = await asyncio.to_thread(
+            committed = await to_thread_cancel_safe(
                 session.conversation_repo.commit_compaction,
                 clean_id,
                 context_snapshot=saved_snapshot,
@@ -205,6 +207,21 @@ async def compact_conversation(
                     )
                 raise CompactionCommittedProjectionError(result) from exc
             return result
+    except asyncio.CancelledError:
+        # The blocking CAS may have committed before cancellation was delivered.
+        # Reserve the existing repository-hydration path before another query
+        # can use the shared builder's pre-compaction history.
+        conversation_runtime = getattr(session, "conversation_runtime", None)
+        if (
+            before_snapshot is not None
+            and context_builder is getattr(conversation_runtime, "_context_builder", None)
+            and conversation_runtime.active_conversation_id == clean_id
+        ):
+            conversation_runtime.defer_repository_hydration(
+                clean_id,
+                on_hydration_complete=session._on_conversation_hydration_complete,
+            )
+        raise
     except ConversationWriteConflict:
         current = await asyncio.to_thread(
             session.conversation_repo.get_conversation,

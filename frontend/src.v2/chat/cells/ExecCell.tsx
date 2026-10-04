@@ -1,16 +1,16 @@
 import { Check, ChevronDown, ChevronRight, Copy, Square, TerminalSquare } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ExecCellState } from "./cellTypes";
-import { ToolSourceBadge } from "./ToolSourceBadge";
 import { StatusIcon } from "../../components/icons";
 import {
-  cellStatusLabel,
   cellStatusTone,
   execCellStatus,
   formatCellDuration,
   isRunningCellStatus,
 } from "./cellStatus";
 import "./cells.css";
+import { useTranscriptSearch } from "../TranscriptSearchContext";
+import { toolCleanupNotice } from "../../lib/tool-call-reducer";
 
 /**
  * A command has one compact lifecycle row and one optional output panel. The
@@ -27,17 +27,13 @@ export function ExecCell({
 }) {
   const status = execCellStatus(cell.status);
   const statusColor = cellStatusTone(status);
-  const statusLabel = cell.status === "pending_approval"
-    ? "等待授权"
-    : cell.background && status === "success"
-      ? "后台运行"
-      : cellStatusLabel(status);
-  const statusMeta = cell.exitCode != null ? `exit ${cell.exitCode}` : statusLabel;
   const title = commandTitle(cell.status, Boolean(cell.background));
   const duration = cell.background ? "" : formatCellDuration(cell.durationMs);
+  const outputMeta = [cell.exitCode != null ? `exit ${cell.exitCode}` : "", duration].filter(Boolean).join(" · ");
   const running = isRunningCellStatus(status);
   const shouldAutoExpand = !cell.collapsed || cell.status === "failed" || cell.status === "partial";
-  const [expanded, setExpanded] = useState(shouldAutoExpand);
+  const [expansionPreference, setExpanded] = useState(shouldAutoExpand);
+  const expanded = useTranscriptSearch() || expansionPreference;
   const [copied, setCopied] = useState(false);
   const userToggled = useRef(false);
   const previousId = useRef(cell.id);
@@ -61,6 +57,7 @@ export function ExecCell({
   const stdout = cell.stdoutFull ?? cell.stdoutPreview.join("\n");
   const stderr = cell.stderrFull ?? cell.stderrPreview.join("\n");
   const hasOutput = Boolean(stdout.trim() || stderr.trim());
+  const cleanupNotice = toolCleanupNotice(cell.cleanupReceipt);
 
   return (
     <div
@@ -81,22 +78,21 @@ export function ExecCell({
           type="button"
           className="exec-cell-header-button"
           aria-expanded={expanded}
-          aria-label={expanded ? "收起命令详情" : "展开命令详情"}
+          aria-label={`${expanded ? "收起" : "展开"}命令详情：${title} ${cell.command}`}
           onClick={() => {
             userToggled.current = true;
             setExpanded((value) => !value);
           }}
         >
           <span className={`exec-cell-status-badge exec-cell-status-${statusColor}`}>
-            <TerminalSquare size={15} aria-hidden="true" />
+            {cell.status === "success" || cell.status === "running" ? (
+              <TerminalSquare size={15} aria-hidden="true" />
+            ) : (
+              <span aria-hidden="true"><StatusIcon status={cell.status} size={15} /></span>
+            )}
           </span>
-          <span className="exec-cell-title">{cell.status === "running" ? "正在运行" : title}</span>
+          <span className="exec-cell-title">{title}</span>
           <span className="exec-cell-command-preview" title={cell.command}>{cell.command}</span>
-          <ToolSourceBadge source={cell.callSource} />
-          {(status !== "success" || cell.background) && <span className="exec-cell-meta">
-            {statusMeta}
-            {duration ? ` · ${duration}` : ""}
-          </span>}
           <span className="exec-cell-toggle" aria-hidden="true">
             {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </span>
@@ -113,10 +109,13 @@ export function ExecCell({
           </button>
         )}
       </div>
+      {cleanupNotice && <div className="exec-cell-meta" role="status">{cleanupNotice}</div>}
       {expanded && (
         <div className="exec-cell-expanded" role="region" aria-label="命令输出">
           <div className="exec-cell-output-toolbar">
             <span>Shell</span>
+            {cell.cwd && <span className="exec-cell-meta" title={cell.cwd}>{cell.cwd}</span>}
+            {outputMeta && <span className="exec-cell-meta">{outputMeta}</span>}
             <button type="button" className="cell-action-btn" aria-label={copied ? "已复制命令输出" : "复制命令输出"} title={copied ? "已复制" : "复制命令输出"}
               onClick={() => navigator.clipboard.writeText([`$ ${cell.command}`, stdout, stderr].filter(Boolean).join("\n")).then(() => {
                 setCopied(true);
@@ -131,10 +130,6 @@ export function ExecCell({
             {stderr && <span className="exec-cell-output-stderr">{stderr}</span>}
             {!hasOutput && <span className="exec-cell-no-output">无输出</span>}
           </pre>
-          <div className="exec-cell-output-status" data-status={status}>
-            <StatusIcon status={cell.status} size={13} spinningClassName="exec-cell-spin-icon" />
-            <span>{statusLabel}{cell.exitCode != null ? ` · exit ${cell.exitCode}` : ""}{duration ? ` · ${duration}` : ""}</span>
-          </div>
         </div>
       )}
     </div>
@@ -142,11 +137,11 @@ export function ExecCell({
 }
 
 function commandTitle(status: ExecCellState["status"], background: boolean): string {
-  if (status === "pending_approval") return "等待运行命令";
-  if (status === "running") return "正在运行命令";
-  if (background && status === "success") return "已启动后台命令";
-  if (status === "partial") return "命令未完整结束";
-  if (status === "cancelled") return "命令已取消";
-  if (status === "failed") return "命令失败";
-  return "已运行命令";
+  if (status === "pending_approval") return "Run · Awaiting approval";
+  if (status === "running") return "Running";
+  if (background && status === "success") return "Run · Started in background";
+  if (status === "partial") return "Run · Partial";
+  if (status === "cancelled") return "Run · Cancelled";
+  if (status === "failed") return "Run · Failed";
+  return "Run";
 }

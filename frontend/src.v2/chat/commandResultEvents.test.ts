@@ -1,24 +1,30 @@
 /* @vitest-environment jsdom */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { handleCommandResultEvent } from "./commandResultEvents";
+import { handleCommandResultEvent as applyCommandResultEvent } from "./commandResultEvents";
 import { useAppStore } from "../stores";
 import type { ServerEvent } from "../protocol/events";
 import { pushToast } from "../overlays/ToastContainer";
 
 vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommand: vi.fn(() => true),
+  resolveClientCommandResult: vi.fn(() => false),
 }));
 
 vi.mock("../overlays/ToastContainer", () => ({
   pushToast: vi.fn(),
 }));
 
+const handleCommandResultEvent = (event: ServerEvent) => applyCommandResultEvent({
+  conversation_id: "conv-command", workspace_root: "", ...event,
+} as ServerEvent);
+
 describe("handleCommandResultEvent", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useAppStore.setState({
       conversationId: "conv-command",
+      workingDirectory: "",
       pendingConversationSwitchId: null,
       messages: [],
       conversationMessages: {},
@@ -147,11 +153,7 @@ describe("handleCommandResultEvent", () => {
     expect(state.contextUsage).toBeNull();
     expect(state.budgetBuckets).toEqual([]);
     expect(state.totalBudgetPercent).toBe(0);
-    expect(pushToast).toHaveBeenCalledWith(
-      "/usage — Usage: context 90/100 tokens",
-      "info",
-      expect.any(Number),
-    );
+    expect(pushToast).not.toHaveBeenCalled();
   });
 
   it("executes whitelisted plugin ui actions from command results", () => {

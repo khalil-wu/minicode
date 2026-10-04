@@ -70,75 +70,69 @@ class ClientCommandDedupStore:
             return []
 
         with self._locked():
-            self.last_load_error = None
-            if not self.path.exists():
-                return []
-            now = time.time()
-            ids: list[str] = []
-            should_rewrite = False
-            malformed_line_seen = False
-            try:
-                with self.path.open("r", encoding="utf-8") as handle:
-                    for line_number, line in enumerate(handle, start=1):
-                        raw = line.strip()
-                        if not raw:
-                            should_rewrite = True
-                            continue
-                        try:
-                            payload = json.loads(raw)
-                        except json.JSONDecodeError:
-                            malformed_line_seen = True
-                            recovered = _clean_command_id(
-                                _PARTIAL_COMMAND_ID_PATTERN.search(raw).group(1)
-                                if _PARTIAL_COMMAND_ID_PATTERN.search(raw)
-                                else ""
-                            )
-                            if recovered:
-                                ids.append(recovered)
-                            self.last_load_error = {
-                                "path": str(self.path),
-                                "reason": "malformed_json",
-                                "line": str(line_number),
-                            }
-                            logger.error(
-                                "Malformed client command log line in %s (line %s); "
-                                "preserving the file and recovering any visible command id.",
-                                self.path,
-                                line_number,
-                            )
-                            continue
-                        command_id = _clean_command_id(payload.get("client_command_id") if isinstance(payload, dict) else "")
-                        if not command_id:
-                            malformed_line_seen = True
-                            self.last_load_error = {
-                                "path": str(self.path),
-                                "reason": "invalid_record",
-                                "line": str(line_number),
-                            }
-                            continue
-                        created_at = payload.get("created_at") if isinstance(payload, dict) else None
-                        if isinstance(created_at, (int, float)) and max_age_seconds > 0 and now - float(created_at) > max_age_seconds:
-                            should_rewrite = True
-                            continue
-                        ids.append(command_id)
-            except OSError as exc:
-                self.last_load_error = {
-                    "path": str(self.path),
-                    "reason": type(exc).__name__,
-                    "detail": str(exc),
-                }
-                logger.debug("Failed to load client command log for %s: %s", self.session_id, exc)
-                return []
-
-            retained = list(dict.fromkeys(ids[-limit:]))
-            if len(ids) != len(retained) or len(ids) > limit:
-                should_rewrite = True
+            records, should_rewrite, malformed_line_seen = self._read_records_unlocked(max_age_seconds)
+            retained = records[-limit:]
+            should_rewrite = should_rewrite or len(records) > limit
             if should_rewrite and not malformed_line_seen:
                 try:
-                    self._rewrite_ids_unlocked(retained)
+                    self._rewrite_records_unlocked(retained)
                 except OSError as exc:
                     logger.debug("Failed to compact client command log for %s: %s", self.session_id, exc)
-            return retained
+            return [record["client_command_id"] for record in retained]
+
+    def _read_records_unlocked(self, max_age_seconds: float) -> tuple[list[dict[str, Any]], bool, bool]:
+        self.last_load_error = None
+        if not self.path.exists():
+            return [], False, False
+        now = time.time()
+        records: dict[str, dict[str, Any]] = {}
+        should_rewrite = False
+        malformed_line_seen = False
+        try:
+            with self.path.open("rb") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    raw = line.strip()
+                    if not raw:
+                        should_rewrite = True
+                        continue
+                    try:
+                        payload = json.loads(raw.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        malformed_line_seen = True
+                        matched = _PARTIAL_COMMAND_ID_PATTERN.search(raw.decode("utf-8", errors="replace"))
+                        recovered = _clean_command_id(matched.group(1) if matched else "")
+                        if recovered:
+                            records.pop(recovered, None)
+                            records[recovered] = {"client_command_id": recovered}
+                        self.last_load_error = {
+                            "path": str(self.path),
+                            "reason": "invalid_utf8" if isinstance(exc, UnicodeDecodeError) else "malformed_json",
+                            "line": str(line_number),
+                        }
+                        logger.error(
+                            "Malformed client command log line in %s (line %s); "
+                            "preserving the file and recovering any visible command id.",
+                            self.path, line_number,
+                        )
+                        continue
+                    command_id = _clean_command_id(payload.get("client_command_id") if isinstance(payload, dict) else "")
+                    if not command_id:
+                        malformed_line_seen = True
+                        self.last_load_error = {"path": str(self.path), "reason": "invalid_record", "line": str(line_number)}
+                        continue
+                    created_at = payload.get("created_at")
+                    if isinstance(created_at, (int, float)) and max_age_seconds > 0 and now - float(created_at) > max_age_seconds:
+                        should_rewrite = True
+                        continue
+                    if command_id in records:
+                        should_rewrite = True
+                        records.pop(command_id)
+                    records[command_id] = {"client_command_id": command_id, "created_at": created_at}
+        except OSError as exc:
+            self.last_load_error = {"path": str(self.path), "reason": type(exc).__name__, "detail": str(exc)}
+            logger.debug("Failed to load client command log for %s: %s", self.session_id, exc)
+            return list(records.values()), False, True
+        return list(records.values()), should_rewrite, malformed_line_seen
 
     def append(self, client_command_id: str, *, command_type: str = "") -> None:
         command_id = _clean_command_id(client_command_id)
@@ -151,25 +145,32 @@ class ClientCommandDedupStore:
                 "command_type": str(command_type or "")[:128],
                 "created_at": time.time(),
             }
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
-                handle.write("\n")
+            with self.path.open("a+b") as handle:
+                handle.seek(0, os.SEEK_END)
+                if handle.tell():
+                    handle.seek(-1, os.SEEK_END)
+                    if handle.read(1) != b"\n":
+                        handle.write(b"\n")
+                handle.write((json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
                 handle.flush()
                 os.fsync(handle.fileno())
 
     def rewrite_ids(self, client_command_ids: list[str]) -> None:
         with self._locked():
-            self._rewrite_ids_unlocked(client_command_ids)
+            records, _, malformed = self._read_records_unlocked(0)
+            if malformed:
+                return
+            previous = {record["client_command_id"]: record for record in records}
+            now = time.time()
+            retained = []
+            for command_id in client_command_ids:
+                clean = _clean_command_id(command_id)
+                if clean:
+                    retained.append(previous.get(clean, {"client_command_id": clean, "created_at": now}))
+            self._rewrite_records_unlocked(retained)
 
-    def _rewrite_ids_unlocked(self, client_command_ids: list[str]) -> None:
-        now = time.time()
-        lines: list[str] = []
-        for command_id in client_command_ids:
-            clean = _clean_command_id(command_id)
-            if not clean:
-                continue
-            payload = {"client_command_id": clean, "created_at": now}
-            lines.append(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    def _rewrite_records_unlocked(self, records: list[dict[str, Any]]) -> None:
+        lines = [json.dumps(record, ensure_ascii=False, separators=(",", ":")) for record in records]
         atomic_write_text(self.path, "".join(f"{line}\n" for line in lines))
 
 

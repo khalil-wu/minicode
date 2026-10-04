@@ -40,7 +40,7 @@ from backend.llm.native_compaction import (
     responses_context_origin, validate_compaction_window,
 )
 from backend.agent.lifecycle_errors import LifecycleStaleError
-from backend.agent.provider_lifecycle import LIFECYCLE_RUNTIME_METADATA_KEY
+from backend.agent.stream_sanitizer import ThinkingStreamSanitizer
 from backend.agent.prompting import (
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
     split_sys_prompt_prefix,
@@ -101,7 +101,6 @@ from backend.llm.openai_errors import (
     _error_text,
 )
 from backend.llm.openai_payloads import (
-    _normalize_schema_for_openai,
     strict_schema_for_openai,
     _strip_openai_unsupported_fields,
 )
@@ -109,9 +108,7 @@ from backend.llm.proxy_policy import (
     provider_proxy_url_for_base_url,
 )
 from backend.llm.openai_streaming import (
-    _ReasoningSplitter,
     _ToolCallAccumulator,
-    _splitter_events,
 )
 from backend.llm.sse import SSEMalformedBudget, iter_sse_data
 from backend.llm.openai_usage import (
@@ -126,6 +123,7 @@ from backend.llm.openai_usage import (
     _raw_usage_metadata,
 )
 from backend.tools.catalog import canonicalize_tool_schemas
+from backend.secret_redaction import redact_secrets
 from backend.llm.reasoning_effort import normalize_reasoning_effort
 from backend.llm.provider_contracts import ReasoningPolicy
 from backend.permissions.network import (
@@ -136,10 +134,6 @@ from backend.permissions.network import (
 logger = logging.getLogger(__name__)
 
 _DELTA_DEBOUNCE_BYTES = 128
-
-# ChatML/ChatGLM special tokens some gateways leak into content.
-_SPECIAL_TOKEN_RE = re.compile(r"<\|[^|]*\|>")
-
 
 _OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH = 64
 _OPENAI_EXPLICIT_PROMPT_CACHE_MIN_TOKENS = 1_024
@@ -178,13 +172,6 @@ def _reject_dedicated_image_agent_model(model: str) -> None:
             f"{model} is a dedicated Images API model and cannot be selected "
             "as the text/agent model"
         )
-
-
-def _strip_special_tokens(text: str) -> str:
-    """Remove leaked <|im_start|>/<|im_end|>/<|endoftext|>/<|user|>/... markers."""
-    if not text or "<|" not in text:
-        return text
-    return _SPECIAL_TOKEN_RE.sub("", text)
 
 
 # pi openai-completions.ts useMaxTokens: gateways that still require the
@@ -1389,14 +1376,16 @@ def _responses_provider_item_from_output(item: Any) -> dict[str, Any] | None:
         result["summary"] = detached_summary
         return result
     if item_type in {"function_call", "custom_tool_call"}:
-        call_id = str(_get_attr_or_item(item, "call_id", "") or item_id).strip()
-        name = str(_get_attr_or_item(item, "name", "") or "").strip()
+        call_id = _get_attr_or_item(item, "call_id", None)
+        name = _get_attr_or_item(item, "name", None)
         input_field = "input" if item_type == "custom_tool_call" else "arguments"
-        arguments = _get_attr_or_item(item, input_field, "")
-        if not call_id or not name or not isinstance(arguments, str):
-            if item_type == "custom_tool_call":
-                raise ValueError("provider_error_type=protocol: Invalid Responses custom tool input")
-            return None
+        arguments = _get_attr_or_item(item, input_field, None)
+        if (not isinstance(call_id, str) or not call_id.strip()
+                or not isinstance(name, str) or not name.strip()
+                or not isinstance(arguments, str)):
+            raise ValueError(f"provider_error_type=protocol: Invalid Responses {item_type} input")
+        call_id = call_id.strip()
+        name = name.strip()
         result = {
             "type": item_type,
             "id": item_id or call_id,
@@ -1440,11 +1429,9 @@ def _responses_tool_calls_from_provider_items(
             continue
         if str(item.get("type") or "") != "function_call":
             continue
-        call_id = str(item.get("call_id") or item.get("id") or "").strip()
-        name = str(item.get("name") or "").strip()
-        arguments_text = item.get("arguments")
-        if not call_id or not name or not isinstance(arguments_text, str):
-            continue
+        call_id = item["call_id"]
+        name = item["name"]
+        arguments_text = item["arguments"]
         arguments_repaired = False
         try:
             arguments = json.loads(arguments_text)
@@ -2461,23 +2448,16 @@ class OpenAIAdapter(LLMAdapter):
         """
         self.validate_context(messages)
         if is_gpt_image_model(self._settings.model):
-            async for event in self._stream_images_api(messages, metadata=metadata):
-                yield event
-            return
-        if self._settings.wire_api == "responses":
+            stream = self._stream_images_api(messages, metadata=metadata)
+        elif self._settings.wire_api == "responses":
             stream = self._stream_responses_api(messages, tools, metadata=metadata)
-            try:
-                async for event in stream:
-                    yield event
-            finally:
-                await _close_async_iterator(stream)
         else:
             stream = self._stream_chat_completions(messages, tools, metadata=metadata)
-            try:
-                async for event in stream:
-                    yield event
-            finally:
-                await _close_async_iterator(stream)
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await _close_async_iterator(stream)
 
     async def simple_chat(
         self,
@@ -2691,7 +2671,7 @@ class OpenAIAdapter(LLMAdapter):
             await response.aread()
             return _json_to_namespace(response.json())
 
-    async def generate_images(
+    async def _generate_images_response(
         self,
         prompt: str,
         *,
@@ -2699,13 +2679,8 @@ class OpenAIAdapter(LLMAdapter):
         quality: str | None = None,
         metadata: dict[str, Any] | None = None,
         wire_payload_sink: dict[str, Any] | None = None,
-    ) -> list[tuple[str, str]]:
-        """Generate and validate images without projecting chat text/events.
-
-        This is the shared boundary used by the dedicated-model chat route and
-        the optional ``generate_image`` function tool. It never sends text
-        token fields or local function schemas to the Images API.
-        """
+    ) -> Any:
+        """Capture one Images reply before image validation or remote download."""
 
         clean_prompt = str(prompt or "").strip()
         if not clean_prompt:
@@ -2734,32 +2709,50 @@ class OpenAIAdapter(LLMAdapter):
         if requested_quality:
             payload["quality"] = requested_quality
         try:
-            response = await self._create_images_generation(
-                payload,
-                metadata=metadata,
-                wire_payload_sink=wire_payload_sink,
+            return await self._create_images_generation(
+                payload, metadata=metadata, wire_payload_sink=wire_payload_sink,
             )
         except Exception as exc:
             status_code = _error_status_code(exc)
             error_text = _error_text(exc)
-            if (
-                status_code in {400, 422}
-                and "response_format" in error_text
-                and "response_format" in payload
-            ):
-                payload.pop("response_format", None)
-                response = await self._create_images_generation(
-                    payload,
-                    metadata=metadata,
-                    wire_payload_sink=wire_payload_sink,
-                )
-            else:
+            if not (status_code in {400, 422} and "response_format" in error_text and "response_format" in payload):
                 raise
-        return await _extract_images_api_images(
-            response,
-            proxy_mode=str(
-                getattr(self._settings, "proxy_mode", "inherit") or "inherit"
-            ),
+            payload.pop("response_format", None)
+            return await self._create_images_generation(
+                payload, metadata=metadata, wire_payload_sink=wire_payload_sink,
+            )
+
+    async def generate_images(
+        self, prompt: str, *, size: str | None = None, quality: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        wire_payload_sink: dict[str, Any] | None = None,
+        turn_context: LLMTurnContext | None = None,
+    ) -> list[tuple[str, str]]:
+        """Generate images and account for this auxiliary request's actual usage."""
+        sent_payload = wire_payload_sink if wire_payload_sink is not None else {}
+        provider = str(self._settings.provider or "openai")
+        image_model = str(self._settings.image_model or self._settings.model)
+
+        async def complete(_messages: list[LLMMessage], *, context: LLMSideCallContext) -> list[tuple[str, str]]:
+            self.annotate_side_call(context, provider=provider, model_id=image_model)
+            response = await self._generate_images_response(
+                prompt, size=size, quality=quality,
+                metadata={**(metadata or {}), **context.request_metadata()},
+                wire_payload_sink=sent_payload,
+            )
+            model_id = str(sent_payload.get("model") or image_model)
+            self.record_non_stream_usage(
+                _get_attr_or_item(response, "usage", None), provider=provider, model_id=model_id,
+                input_includes_cache_read=True, context=context,
+                model_cost=getattr(self, "_request_model_costs", {}).get(model_id),
+            )
+            return await _extract_images_api_images(response, proxy_mode=self._settings.proxy_mode)
+
+        return await self._run_auxiliary_call(
+            [], options=SideQueryOptions(
+                operation="image_generation", max_retries=0,
+                attempt_timeout_seconds=0, enable_prompt_cache=False,
+            ), turn_context=turn_context, complete=complete,
         )
 
     async def _stream_images_api(
@@ -2804,12 +2797,25 @@ class OpenAIAdapter(LLMAdapter):
         )
 
         sent_payload: dict[str, Any] = {}
+        usage: UsageInfo | None = None
+        reported_usage: Any = None
+        reported_model = ""
         try:
-            images = await self.generate_images(
+            response = await self._generate_images_response(
                 prompt,
                 metadata=metadata,
                 wire_payload_sink=sent_payload,
             )
+            reported_usage = _get_attr_or_item(response, "usage", None)
+            reported_model = str(sent_payload["model"])
+            if reported_usage is not None:
+                usage = usage_info_from_openai(reported_usage)
+                yield StreamEvent(
+                    type=StreamEventType.USAGE, usage=usage,
+                    raw={"provider": "openai_images", "model": reported_model,
+                         "usage": _raw_usage_metadata(reported_usage)},
+                )
+            images = await _extract_images_api_images(response, proxy_mode=self._settings.proxy_mode)
         except LifecycleStaleError:
             raise
         except Exception as exc:
@@ -2884,13 +2890,15 @@ class OpenAIAdapter(LLMAdapter):
         )
         yield StreamEvent(
             type=StreamEventType.DONE,
+            usage=usage,
             finish_reason="stop",
             raw={
                 "provider": "openai_images",
-                "model": str(
+                "model": reported_model or str(
                     getattr(self._settings, "image_model", "") or self._settings.model
                 ),
                 "finish_reason": "stop",
+                "usage": _raw_usage_metadata(reported_usage),
                 "request_summary": {
                     "request_param_keys": sorted(sent_payload),
                     "request_params": {
@@ -3033,8 +3041,10 @@ class OpenAIAdapter(LLMAdapter):
                 status = exc.response.status_code
                 await handshake(status, dict(exc.response.headers))
                 if status not in {200, 404, 405, 426, 501}:
-                    response = httpx.Response(status, headers=dict(exc.response.headers),
-                                              request=httpx.Request("GET", self._responses_url()))
+                    response = httpx.Response(
+                        status, headers=dict(exc.response.headers), content=bytes(exc.response.body),
+                        request=httpx.Request("GET", self._responses_url()),
+                    )
                     response.raise_for_status()
                     raise
                 # No response.create was sent: switching to HTTP cannot
@@ -3328,12 +3338,17 @@ class OpenAIAdapter(LLMAdapter):
                 or response_tool_items.get(item_id)
                 or {}
             )
-            call_id = str(slot.get("id") or event_call_id or item_id).strip()
+            call_id = str(slot.get("id") or event_call_id or "").strip()
             if not call_id:
                 return None, _responses_tool_protocol_error(
                     "missing_function_call_id",
                     event_type=event_type,
                     item_id=item_id,
+                )
+            if event_call_id and slot.get("id") and event_call_id != slot["id"]:
+                return None, _responses_tool_protocol_error(
+                    "conflicting_function_call_done", event_type=event_type,
+                    item_id=item_id, call_id=event_call_id,
                 )
             name = str(
                 _get_attr_or_item(value, "name", "") or slot.get("name", "") or ""
@@ -3865,7 +3880,7 @@ class OpenAIAdapter(LLMAdapter):
                     raw_done["model"] = str(sent_payload.get("model") or self._settings.model)
                     raw_done["request_summary"] = build_responses_request_summary(sent_payload)
                     request_summary_ready = True
-                event_type = str(getattr(event, "type", "") or "")
+                event_type = str(_get_attr_or_item(event, "type", "") or "")
                 response_usage = _get_attr_or_item(_get_attr_or_item(event, "response", None), "usage", None)
                 if response_usage is not None:
                     usage = usage_info_from_openai(response_usage)
@@ -3876,21 +3891,23 @@ class OpenAIAdapter(LLMAdapter):
                         raw={"provider": "openai_responses", "model": raw_done["model"], "usage": raw_done["usage"]},
                     )
                 if event_type not in _OPENAI_RESPONSE_STREAM_EVENT_TYPES:
-                    yield StreamEvent(
-                        type=StreamEventType.ERROR,
-                        content=(
-                            "Responses API returned an unknown stream event "
-                            f"that MiniCode cannot safely interpret: {event_type or 'missing'}"
-                        ),
-                        raw={
-                            "provider": "openai_responses",
-                            "provider_error_type": "protocol",
-                            "error_type": "api",
-                            "event_type": event_type or "missing",
-                            "protocol_error_code": "unknown_stream_event",
-                        },
+                    error = _get_attr_or_item(event, "error", None) or _get_attr_or_item(_get_attr_or_item(event, "response", None), "error", None)
+                    if error:
+                        message, error_raw = _responses_error_event_raw(event_type or "untyped_error", error, fallback="Responses API stream error")
+                        yield StreamEvent(type=StreamEventType.ERROR, content=f"Responses API stream error: {message}", raw=error_raw)
+                        return
+                    # Like Codex's SSE reader, observe forward-compatible or
+                    # untyped transport frames without interpreting their
+                    # payload as text, tools, permissions or success. A valid
+                    # authoritative terminal is still mandatory below.
+                    # Do not copy an unknown payload into diagnostic storage.
+                    _append_provider_timeline(
+                        provider_timeline,
+                        _safe_timeline_string(redact_secrets(event_type), limit=128) if event_type else "stream.event.untyped",
+                        unhandled=True,
+                        sequence_number=_get_attr_or_item(event, "sequence_number", None),
                     )
-                    return
+                    continue
                 if event_type:
                     if not accept_response_sequence(str(event_type), event):
                         continue
@@ -4320,12 +4337,10 @@ class OpenAIAdapter(LLMAdapter):
                         )
                     elif item_type in {"function_call", "custom_tool_call"}:
                         item_id = str(_get_attr_or_item(item, "id", "") or "").strip()
-                        call_id = str(
-                            _get_attr_or_item(item, "call_id", "") or item_id
-                        ).strip()
+                        call_id = str(_get_attr_or_item(item, "call_id", "") or "").strip()
                         name = str(_get_attr_or_item(item, "name", "") or "").strip()
-                        key = call_id or item_id
-                        if not key:
+                        key = call_id
+                        if not call_id:
                             yield _responses_tool_protocol_error(
                                 "missing_function_call_id",
                                 event_type=event_type,
@@ -4468,7 +4483,7 @@ class OpenAIAdapter(LLMAdapter):
                         ) or response_tool_items.get(item_id)
                         if slot is None:
                             slot = {
-                                "id": call_id,
+                                "id": event_call_id,
                                 "item_id": item_id,
                                 "name": str(
                                     _get_attr_or_item(event, "name", "") or ""
@@ -5077,6 +5092,11 @@ class OpenAIAdapter(LLMAdapter):
                     add_citations(event)
                 elif event_type == "response.completed":
                     response_obj = _get_attr_or_item(event, "response", None)
+                    if not response_obj:
+                        raise RuntimeError(
+                            "provider_error_type=protocol: Responses API sent "
+                            "response.completed without a response object"
+                        )
                     direct_text = _get_attr_or_item(response_obj, "output_text", "")
                     if isinstance(direct_text, str) and direct_text:
                         completed_text = direct_text
@@ -5262,7 +5282,7 @@ class OpenAIAdapter(LLMAdapter):
                                "description": native["description"], "format": native["format"]})
                 continue
             strict = bool(func.get("strict", False))
-            parameters = _normalize_schema_for_openai(func.get("parameters", {}))
+            parameters = func.get("parameters", {})
             if strict:
                 # pi: strict tools need required-all + null-wrap or OpenAI
                 # rejects every request; fall back to non-strict when the
@@ -5299,9 +5319,7 @@ class OpenAIAdapter(LLMAdapter):
             # makeStrictJsonSchema. A schema that cannot be expressed strictly
             # falls back to non-strict instead of a deterministic 400.
             strict = bool(function_def.get("strict", False))
-            parameters = _normalize_schema_for_openai(
-                function_def.get("parameters", {})
-            )
+            parameters = function_def.get("parameters", {})
             if strict:
                 strict_parameters = strict_schema_for_openai(
                     function_def.get("parameters", {})
@@ -5355,7 +5373,7 @@ class OpenAIAdapter(LLMAdapter):
         finish_reason = ""
         saw_terminal_event = False
         tool_prefetch_emitted = False
-        reasoning_splitter = _ReasoningSplitter()
+        content_sanitizer = ThinkingStreamSanitizer(hide_memory_citations=False)
         chat_reasoning_parts: list[str] = []
         chat_reasoning_field = ""
         stream_started_at = time.monotonic()
@@ -5430,6 +5448,8 @@ class OpenAIAdapter(LLMAdapter):
                         len(line),
                     )
                     continue
+                if not isinstance(chunk, dict):
+                    raise ValueError("provider_error_type=protocol: Chat stream event must be an object")
                 malformed_budget.accept()
 
                 usage_obj = chunk.get("usage")
@@ -5514,25 +5534,21 @@ class OpenAIAdapter(LLMAdapter):
                         "chat.content.delta",
                         delta_chars=len(str(content)),
                     )
-                    cleaned = _strip_special_tokens(str(content))
-                    for evt in _splitter_events(reasoning_splitter.feed(cleaned)):
-                        if evt.type == StreamEventType.TEXT_CHUNK:
-                            full_text += evt.content
-                            evt.raw = raw_text_delta
-                        yield evt
+                    visible = content_sanitizer.feed(str(content))
+                    if visible:
+                        full_text += visible
+                        yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content=visible, raw=raw_text_delta)
 
                 tool_call_deltas = delta.get("tool_calls") or []
                 if tool_call_deltas:
-                    # _ReasoningSplitter intentionally holds a short suffix so
-                    # split <think> tags cannot leak into visible text.  A tool
+                    # Release a partial delimiter before a tool boundary. A tool
                     # delta is a hard provider boundary: release that suffix
                     # before any tool event, otherwise the loop seals a visibly
                     # truncated narration and the held characters arrive late.
-                    for evt in _splitter_events(reasoning_splitter.flush()):
-                        if evt.type == StreamEventType.TEXT_CHUNK:
-                            full_text += evt.content
-                            evt.raw = raw_text_delta
-                        yield evt
+                    visible = content_sanitizer.finish()
+                    if visible:
+                        full_text += visible
+                        yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content=visible, raw=raw_text_delta)
 
                 for tool_call in tool_call_deltas:
                     idx = int(tool_call.get("index") or 0)
@@ -5580,11 +5596,10 @@ class OpenAIAdapter(LLMAdapter):
                         finish_reason=finish_reason,
                     )
                     if not tool_prefetch_emitted and finish_reason == "tool_calls":
-                        for evt in _splitter_events(reasoning_splitter.flush()):
-                            if evt.type == StreamEventType.TEXT_CHUNK:
-                                full_text += evt.content
-                                evt.raw = raw_text_delta
-                            yield evt
+                        visible = content_sanitizer.finish()
+                        if visible:
+                            full_text += visible
+                            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content=visible, raw=raw_text_delta)
                         # Never prefetch an incomplete batch: the guard after
                         # the loop fails the turn instead of letting half of
                         # what the model asked for reach the executor.
@@ -5643,10 +5658,10 @@ class OpenAIAdapter(LLMAdapter):
             max_sse_gap_ms,
         )
 
-        for evt in _splitter_events(reasoning_splitter.flush()):
-            if evt.type == StreamEventType.TEXT_CHUNK:
-                full_text += evt.content
-            yield evt
+        visible = content_sanitizer.finish()
+        if visible:
+            full_text += visible
+            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content=visible)
 
         tool_call_events = accumulator.finalize()
         incomplete_error = _chat_incomplete_tool_call_error(
@@ -5900,26 +5915,6 @@ class OpenAIAdapter(LLMAdapter):
         if tools:
             kwargs["tools"] = self._normalize_chat_tools(tools)
             kwargs["tool_choice"] = "auto"
-
-        def build_chat_request_summary(payload: dict[str, Any]) -> dict[str, Any]:
-            payload_messages = (
-                payload.get("messages")
-                if isinstance(payload.get("messages"), list)
-                else []
-            )
-            return _safe_request_summary(
-                model=str(payload.get("model") or model),
-                wire_api="chat",
-                instructions=_instruction_text_from_chat_payload(payload_messages),
-                tools=payload.get("tools")
-                if isinstance(payload.get("tools"), list)
-                else [],
-                request_metadata=payload.get("metadata")
-                if isinstance(payload.get("metadata"), dict)
-                else {},
-                input_items=_chat_payload_input_items(payload_messages),
-                request_params=payload,
-            )
 
         stream = self._stream_chat_completions_http(kwargs, metadata=metadata)
         try:

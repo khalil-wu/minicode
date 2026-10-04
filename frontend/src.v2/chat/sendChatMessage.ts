@@ -3,7 +3,7 @@ import { pushToast } from "../overlays/ToastContainer";
 import type { UserMessageCommand } from "../protocol/events";
 import { toBackendPermissionMode } from "../protocol/permissions";
 import { useAppStore } from "../stores";
-import type { ChatMessage, MessageAttachmentRef, MessageContextRef } from "../stores/types";
+import type { AgentMode, ChatMessage, ComposerQuote, MessageAttachmentRef, MessageContextRef } from "../stores/types";
 import { hasRuntimePendingUserAction, hasRuntimePendingUserActionForConversation } from "../lib/runtime-session";
 import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
 import { normalizeAgentErrorMessage } from "./errorMessages";
@@ -15,7 +15,10 @@ interface SendChatMessageOptions {
   attachments?: Record<string, unknown>[];
   attachmentRefs?: MessageAttachmentRef[];
   conversationId?: string;
+  primaryFile?: string;
+  agentMode?: AgentMode;
   contextRefs?: MessageContextRef[];
+  quotedMessage?: ComposerQuote | null;
   allowWhileStreaming?: boolean;
   busyBehavior?: "queue" | "steer";
   skipLocalAppend?: boolean;
@@ -47,7 +50,7 @@ const isAttachmentRef = (value: unknown): value is MessageAttachmentRef => {
   return Boolean(item.id && item.name && item.mediaType);
 };
 
-const attachmentRefFromPayload = (payload: Record<string, unknown>): MessageAttachmentRef | null => {
+export const attachmentRefFromPayload = (payload: Record<string, unknown>): MessageAttachmentRef | null => {
   const name = String(payload.file_name ?? payload.name ?? "").trim();
   const artifactId = String(payload.artifact_id ?? payload.artifactId ?? "").trim();
   if (!name || !artifactId) return null;
@@ -114,11 +117,13 @@ const contextRefSignature = (ref: MessageContextRef): Record<string, unknown> =>
       heightPercent: ref.heightPercent ?? null,
     };
   }
-  return { kind: ref.kind, path: ref.path };
+  return { kind: ref.kind, path: ref.path, range: ref.range, text: ref.text, workspaceRoot: ref.workspaceRoot };
 };
 
 const appendLocalUserTurn = ({
   content,
+  backendContent,
+  quotedMessage,
   conversationId,
   contextRefs,
   attachmentRefs,
@@ -128,6 +133,8 @@ const appendLocalUserTurn = ({
   queued,
 }: {
   content: string;
+  backendContent: string;
+  quotedMessage?: ComposerQuote | null;
   conversationId?: string;
   contextRefs: MessageContextRef[];
   attachmentRefs: MessageAttachmentRef[];
@@ -149,6 +156,8 @@ const appendLocalUserTurn = ({
       id: userMessageId,
       role: "user",
       content,
+      backendContent,
+      quotedMessage: quotedMessage ? { ...quotedMessage } : null,
       contextRefs,
       attachmentRefs,
       artifacts: [],
@@ -266,7 +275,6 @@ export const getChatSendBlockReason = (conversationId?: string): string | null =
         ...state.askUserQueue,
       ],
       targetConversationId,
-      state.conversationId,
     )
   ) {
     return "请先处理待确认的授权或问题。";
@@ -311,7 +319,10 @@ export const sendChatMessage = ({
   attachments = [],
   attachmentRefs = [],
   conversationId,
+  primaryFile,
+  agentMode,
   contextRefs = [],
+  quotedMessage = null,
   allowWhileStreaming = false,
   busyBehavior = "queue",
   skipLocalAppend = false,
@@ -346,7 +357,10 @@ export const sendChatMessage = ({
         attachments,
         attachmentRefs,
         conversationId,
+        primaryFile,
+        agentMode,
         contextRefs,
+        quotedMessage,
         allowWhileStreaming,
         busyBehavior,
         skipLocalAppend,
@@ -373,15 +387,23 @@ export const sendChatMessage = ({
   const targetConversation = targetConversationId
     ? state.conversations.find((item) => item.id === targetConversationId)
     : undefined;
-  const targetWorkspaceRoot = targetConversation?.worktreePath || targetConversation?.workspaceRoot || "";
-  const targetPermissionMode = !targetConversationId || targetConversationId === state.conversationId
+  const isMainConversation = !targetConversationId || targetConversationId === state.conversationId;
+  const targetWorkspaceRoot = state.sideChats[targetConversationId]?.workspaceRoot || targetConversation?.worktreePath || targetConversation?.workspaceRoot || "";
+  const targetPrimaryFile = primaryFile || (isMainConversation && targetWorkspaceRoot ? state.activeTabPath : undefined);
+  const targetPermissionMode = isMainConversation
     ? state.permissionMode
     : undefined;
+  const targetAgentMode = agentMode ?? state.agentMode;
 
   const sendSignature = JSON.stringify({
     conversationId: targetConversationId,
     workspaceRoot: targetWorkspaceRoot,
+    primaryFile: targetPrimaryFile,
+    permissionMode: targetPermissionMode,
+    agentMode: targetAgentMode,
     content: contentForBackend,
+    displayContent: contentForDisplay,
+    quotedMessage,
     attachments: attachments.map((item) => String(item.artifact_id ?? item.artifactId ?? item.id ?? "")).filter(Boolean),
     contextRefs: contextRefs.map(contextRefSignature),
     retryFromMessageId: retryFromMessageId || "",
@@ -406,11 +428,14 @@ export const sendChatMessage = ({
   const command: UserMessageCommand = {
     type: "user_message",
     content: contentForBackend,
+    display_content: contentForDisplay,
+    context_refs: contextRefs.map((ref) => ({ ...ref })),
+    quoted_message: quotedMessage ? { ...quotedMessage } : null,
     ...(targetWorkspaceRoot ? { workspace_root: targetWorkspaceRoot } : {}),
-    ...(targetWorkspaceRoot && targetConversationId === state.conversationId && state.activeTabPath
-      ? { primary_file: state.activeTabPath, active_tab_path: state.activeTabPath } : {}),
+    ...(targetPrimaryFile ? { primary_file: targetPrimaryFile } : {}),
+    ...(isMainConversation && targetWorkspaceRoot && state.activeTabPath ? { active_tab_path: state.activeTabPath } : {}),
     ...(targetPermissionMode ? { permission_mode: toBackendPermissionMode(targetPermissionMode) } : {}),
-    agent_mode: state.agentMode,
+    agent_mode: targetAgentMode,
     ...(targetConversationId ? { conversation_id: targetConversationId } : {}),
     ...(transportAttachments.length > 0 ? { attachments: transportAttachments } : {}),
     ...(contextRefs.some((ref) => ref.kind === "skill" && ref.path)
@@ -437,7 +462,9 @@ export const sendChatMessage = ({
 
   if (!skipLocalAppend && !isRetry) {
     appendLocalUserTurn({
-      content: contentForDisplay || contentForBackend,
+      content: contentForDisplay,
+      backendContent: contentForBackend,
+      quotedMessage,
       conversationId,
       contextRefs,
       attachmentRefs: displayAttachmentRefs,
@@ -457,7 +484,9 @@ export const sendChatMessage = ({
     }
     if (!skipLocalAppend && isRetry) {
       appendLocalUserTurn({
-        content: contentForDisplay || contentForBackend,
+        content: contentForDisplay,
+        backendContent: contentForBackend,
+        quotedMessage,
         conversationId,
         contextRefs,
         attachmentRefs: displayAttachmentRefs,

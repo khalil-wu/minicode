@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,10 +31,6 @@ PERSIST_THRESHOLD_CHARS = 50_000
 # Claude Code's tool-result storage keeps the first 2 KB inline. This is a
 # preview contract, not a second execution/output limit.
 PERSISTED_PREVIEW_CHARS = 2_000
-
-_LOCK = threading.Lock()
-_INITIALIZED = False
-
 
 def _effective_persist_threshold_chars() -> int:
     """Return Claude Code's character threshold for persisting tool results."""
@@ -90,16 +85,6 @@ def is_tool_result_path(
         return True
     except (OSError, RuntimeError, ValueError):
         return False
-
-
-def _ensure_dir() -> None:
-    global _INITIALIZED
-    if _INITIALIZED:
-        return
-    with _LOCK:
-        if not _INITIALIZED:
-            TOOL_RESULT_DATA_DIR.mkdir(parents=True, exist_ok=True)
-            _INITIALIZED = True
 
 
 @dataclass(frozen=True)
@@ -159,8 +144,6 @@ def persist_tool_result(
     """
     if not content or (not force and len(content) <= _effective_persist_threshold_chars()):
         return None
-    _ensure_dir()
-
     # Deterministic filename: hash of content so identical results are deduped.
     content_hash = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
     safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in (tool_call_id or "unknown"))

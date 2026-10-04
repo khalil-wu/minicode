@@ -1,6 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+
+
+def is_local_filename(name: str) -> bool:
+    """A platform filename token without directory or namespace syntax."""
+    return (
+        name not in {"", ".", ".."}
+        and "/" not in name and "\0" not in name
+        and (os.name != "nt" or ("\\" not in name and ":" not in name))
+    )
 
 _WINDOWS_RESERVED_DEVICE_NAMES = {
     "con",

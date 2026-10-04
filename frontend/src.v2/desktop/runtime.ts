@@ -35,11 +35,6 @@ export interface FsFileResponse {
   encoding?: "utf-8" | "utf-8-bom" | "utf-16le" | "utf-16be" | "gb18030" | string;
 }
 
-export type FsCompareWriteResult =
-  | { ok: true; file: FsFileResponse }
-  | { ok: false; conflict: true; message: string }
-  | { ok: false; conflict: false; message: string };
-
 export type FsDeletePathResult =
   | { needsConfirmation: true; path: string; entryCount: number }
   | { deleted: true; path: string; is_dir?: boolean; isDirectory?: boolean };
@@ -57,7 +52,8 @@ export interface PtySession {
   outputEndCursor?: number;
   truncated?: boolean;
   isAlive?: boolean;
-  exitCode?: number;
+  exitCode?: number | null;
+  exitSignal?: number | string | null;
   exitedAt?: number;
   terminalMode: "pty";
 }
@@ -238,10 +234,6 @@ interface MiniCodeDesktop {
     searchFiles(rootPath: string, query: string, limit?: number): Promise<FsSearchResult[]>;
     searchFilesByKind?(rootPath: string, query: string, limit?: number, kind?: "file" | "folder" | "all"): Promise<FsSearchResult[]>;
     readFile(path: string): Promise<FsFileResponse>;
-    writeFile(path: string, content: string): Promise<void>;
-    compareWriteFile?(path: string, expectedHash: string, content: string): Promise<FsFileResponse>;
-    createDirectory(path: string): Promise<void>;
-    renamePath(oldPath: string, newPath: string): Promise<void>;
     deletePath(path: string, recursive?: boolean, confirm?: boolean): Promise<FsDeletePathResult>;
   };
   pty: {
@@ -256,7 +248,7 @@ interface MiniCodeDesktop {
     clear(sessionId: string, conversationId: string): Promise<{ cleared?: boolean; outputCursor?: number }>;
     ackExit(sessionId: string, conversationId: string): Promise<boolean>;
     onData(cb: (data: { sessionId: string; conversationId: string; data: string; startCursor?: number; endCursor?: number }) => void): (() => void) | void;
-    onExit(cb: (data: { sessionId: string; conversationId: string; exitCode: number }) => void): (() => void) | void;
+    onExit(cb: (data: { sessionId: string; conversationId: string; exitCode: number | null; exitSignal?: number | string | null; exitedAt?: number }) => void): (() => void) | void;
   };
   env: {
     detect(): Promise<Partial<DesktopEnvInfo>>;
@@ -327,54 +319,10 @@ export const trustWorkspace = async (path: string): Promise<string | null> => {
 
 // --- Filesystem ---
 
-export const fsReadFile = async (path: string): Promise<string | null> => {
-  try {
-    const result = await desktop()?.fs.readFile(path);
-    return result?.content ?? null;
-  } catch {
-    return null;
-  }
-};
-
 export const fsReadFileInfo = async (path: string): Promise<FsFileResponse | null> => {
   const fs = desktop()?.fs;
   if (!fs) return null;
   return await fs.readFile(path);
-};
-
-export const fsWriteFile = async (path: string, content: string): Promise<boolean> => {
-  try {
-    await desktop()?.fs.writeFile(path, content);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-export const fsCompareWriteFile = async (
-  path: string,
-  expectedHash: string,
-  content: string,
-): Promise<FsCompareWriteResult> => {
-  try {
-    const fs = desktop()?.fs;
-    if (!fs) {
-      return { ok: false, conflict: false, message: "Save failed: desktop filesystem is unavailable." };
-    }
-    if (!fs?.compareWriteFile) {
-      await fs.writeFile(path, content);
-      return { ok: true, file: { path, content } };
-    }
-    return { ok: true, file: await fs.compareWriteFile(path, expectedHash, content) };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Save failed.";
-    const conflict =
-      message.toLowerCase().includes("changed on disk") ||
-      message.toLowerCase().includes("err_file_changed");
-    return conflict
-      ? { ok: false, conflict: true, message }
-      : { ok: false, conflict: false, message };
-  }
 };
 
 const normalizeFsEntry = (entry: unknown): FsEntry | null => {
@@ -517,11 +465,12 @@ const normalizePtySession = (session: unknown, fallbackCwd = ""): PtySession | n
     : typeof value.is_alive === "boolean"
       ? value.is_alive
       : undefined;
-  const exitCode = typeof value.exitCode === "number"
+  const exitCode = value.exitCode === null || typeof value.exitCode === "number"
     ? value.exitCode
-    : typeof value.exit_code === "number"
+    : value.exit_code === null || typeof value.exit_code === "number"
       ? value.exit_code
       : undefined;
+  const exitSignal = value.exitSignal !== undefined ? value.exitSignal : value.exit_signal;
   const exitedAt = typeof value.exitedAt === "number"
     ? value.exitedAt
     : typeof value.exited_at === "number"
@@ -547,6 +496,7 @@ const normalizePtySession = (session: unknown, fallbackCwd = ""): PtySession | n
     ...(typeof value.truncated === "boolean" ? { truncated: value.truncated } : {}),
     ...(isAlive !== undefined ? { isAlive } : {}),
     ...(exitCode !== undefined ? { exitCode } : {}),
+    ...(typeof exitSignal === "number" || typeof exitSignal === "string" || exitSignal === null ? { exitSignal } : {}),
     ...(exitedAt !== undefined ? { exitedAt } : {}),
     terminalMode: "pty",
   };

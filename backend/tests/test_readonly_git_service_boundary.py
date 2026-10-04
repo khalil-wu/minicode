@@ -79,8 +79,8 @@ def test_workspace_status_and_diff_share_canonical_boundary(monkeypatch, tmp_pat
 
     monkeypatch.setattr(git_support, "_run_git", canonical)
     status = workspace_api_service.workspace_git_status_payload(tmp_path)
-    assert status == {"branch": "main", "modified": ["tracked.txt"], "staged": [], "untracked": ["new.txt"]}
-    assert workspace_api_service.workspace_git_diff_payload(tmp_path, "") == {"diff": "tracked patch\nnew patch\n"}
+    assert status == {"is_git_repo": True, "branch": "main", "modified": ["tracked.txt"], "staged": [], "untracked": ["new.txt"]}
+    assert workspace_api_service.workspace_git_diff_payload(tmp_path, "") == {"is_git_repo": True, "diff": "tracked patch\nnew patch\n"}
     assert (("hash-object", "-t", "tree", "--stdin") in calls) == unborn
 
 
@@ -136,6 +136,8 @@ def test_handoff_mutations_keep_explicit_control_plane(monkeypatch, tmp_path):
         if args[:2] == ("stash", "push"):
             marker = args[-1]
             return True, "Saved working directory"
+        if args[:2] == ("stash", "list"):
+            return True, f"{'a' * 40}\0On main: {marker}\n"
         return True, ""
 
     async def canonical(argv, *, root, cwd, sandbox_policy, timeout):
@@ -152,8 +154,8 @@ def test_handoff_mutations_keep_explicit_control_plane(monkeypatch, tmp_path):
     assert handoff.switch_main_checkout(tmp_path, "next")[0]
     assert handoff.restore_main_checkout(tmp_path, branch="main")[0]
     assert handoff.delete_local_branch(tmp_path, "next")[0]
-    assert len(reads) == 1
-    assert [args[:2] for args in writes] == [("stash", "push"), ("stash", "apply"), ("switch", "next"), ("switch", "main"), ("branch", "-D")]
+    assert reads == []
+    assert [args[:2] for args in writes] == [("stash", "push"), ("stash", "list"), ("stash", "apply"), ("switch", "next"), ("switch", "main"), ("branch", "-D")]
 
 
 def test_namespace_unavailable_is_not_an_empty_success(monkeypatch, tmp_path):
@@ -214,7 +216,10 @@ def test_readonly_metadata_grant_comes_from_trusted_original_registry(monkeypatc
     assert policy.allow_network is False
 
 
-def test_workspace_subdirectory_keeps_captured_owner_and_policy(monkeypatch, tmp_path):
+@pytest.mark.parametrize("backend", ["windows-elevated-wfp", "docker", "linux-bwrap"])
+def test_workspace_subdirectory_keeps_captured_owner_and_policy(monkeypatch, tmp_path, backend):
+    from backend.sandbox import SandboxRunner
+
     child = tmp_path / "sub"
     child.mkdir()
     policies = []
@@ -226,13 +231,18 @@ def test_workspace_subdirectory_keeps_captured_owner_and_policy(monkeypatch, tmp
         return builder(owner)
 
     async def canonical(argv, *, root, cwd, sandbox_policy, timeout):
-        assert root == tmp_path and cwd == child
+        assert root == tmp_path
+        if backend == "windows-elevated-wfp":
+            assert cwd == tmp_path and argv[:3] == ["git", "-C", str(child)]
+        else:
+            assert cwd == child and "-C" not in argv
         policies.append(sandbox_policy)
         if "--show-prefix" in argv:
             return _result(argv, "sub/\n")
         return _result(argv, "## main\0 M sub/tracked.txt\0")
 
     monkeypatch.setattr(git_support, "_run_git", canonical)
+    monkeypatch.setattr(SandboxRunner, "capability", lambda self, **kwargs: SimpleNamespace(backend=backend))
     monkeypatch.setattr(workspace_api_service, "readonly_git_policy", capture)
     result = workspace_api_service.workspace_git_status_payload(child, workspace_root=tmp_path)
     assert result["modified"] == ["tracked.txt"]

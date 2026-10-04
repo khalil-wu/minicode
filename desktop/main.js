@@ -166,6 +166,8 @@ if (process.env.MINICODE_ENABLE_EMBEDDED_BROWSER_CDP === "1") {
 }
 if (process.env.MINICODE_USER_DATA_DIR) {
   app.setPath("userData", process.env.MINICODE_USER_DATA_DIR);
+} else {
+  app.setPath("userData", path.join(app.getPath("appData"), require("./package.json").name));
 }
 crashReporting.init({ crashReporter, app, logger: appendDesktopLog });
 

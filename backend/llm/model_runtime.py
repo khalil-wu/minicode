@@ -27,7 +27,6 @@ from backend.config import (
     get_anthropic_settings,
     get_custom_settings,
     get_openai_settings,
-    get_provider_model_metadata,
     resolve_context_window_details,
 )
 from backend.llm.reasoning_effort import normalize_reasoning_effort
@@ -66,7 +65,6 @@ from backend.llm.model_runtime_definitions import (
     _declared_optional_boolean,
     _declared_finite_number,
     _extension_model_extra,
-    _finite_number,
     _merge_headers,
     _merge_model_cost,
     _minicode_network_allowed,
@@ -120,14 +118,14 @@ class ModelRuntime:
         self._dynamic_refresh_task: asyncio.Task[None] | None = None
         self._dynamic_refresh_provider_generations: dict[str, int] = {}
         self._dynamic_refresh_guard = threading.RLock()
-        self._errors: dict[str, str] = {}
+        self._errors: dict[str, str | Exception] = {}
         self._composition_errors: dict[str, str] = {}
         self._availability_error: str | None = None
         self._config_error: str | None = None
         self._resolved_api_key_auth: dict[str, dict[str, Any] | None] = {}
         self._api_key_auth_status: dict[str, dict[str, Any] | None] = {}
         self._resolved_oauth_auth: dict[str, dict[str, Any]] = {}
-        self._resolved_oauth_credential: dict[str, dict[str, Any]] = {}
+        self._resolved_auth_credential: dict[str, dict[str, Any] | None] = {}
         # Model modifiers use the credential captured by the most recent
         # provider refresh so catalog publication remains transactional.
         self._oauth_model_credentials: dict[str, dict[str, Any]] = {}
@@ -179,7 +177,7 @@ class ModelRuntime:
         self._resolved_api_key_auth.clear()
         self._api_key_auth_status.clear()
         self._resolved_oauth_auth.clear()
-        self._resolved_oauth_credential.clear()
+        self._resolved_auth_credential.clear()
         self._oauth_model_credentials.clear()
 
 
@@ -271,23 +269,23 @@ class ModelRuntime:
 
     def _invalidate_provider_auth(self, provider_id: str) -> None:
         self._resolved_oauth_auth.pop(provider_id, None)
-        self._resolved_oauth_credential.pop(provider_id, None)
+        self._resolved_auth_credential.pop(provider_id, None)
         self._oauth_model_credentials.pop(provider_id, None)
         self._resolved_api_key_auth.pop(provider_id, None)
         self._api_key_auth_status.pop(provider_id, None)
 
     def _stored_credential(self, provider_id: str) -> dict[str, Any] | None:
         from backend.llm.provider_auth import ProviderCredentialCorruptError
+        from backend.vault.store import VaultReadError
 
         clean_id = _clean_text(provider_id)
         try:
             value = self._provider_auth_storage().get(clean_id)
-        except ProviderCredentialCorruptError as exc:
-            # The provider is unusable, but "unauthenticated" is the wrong story:
-            # record why so get_error() can report it instead of silently
-            # offering the user a fresh login.
-            self._errors[clean_id] = str(exc) or type(exc).__name__
-            return None
+        except (ProviderCredentialCorruptError, VaultReadError) as exc:
+            self._errors[clean_id] = exc
+            raise
+        if isinstance(self._errors.get(clean_id), (ProviderCredentialCorruptError, VaultReadError)):
+            self._errors.pop(clean_id)
         return dict(value) if isinstance(value, Mapping) else None
 
 
@@ -480,7 +478,7 @@ class ModelRuntime:
                 )
                 continue
             self._resolved_oauth_auth.pop(clean_id, None)
-            self._resolved_oauth_credential.pop(clean_id, None)
+            self._resolved_auth_credential.pop(clean_id, None)
             api_key_provider = self._api_key_provider(clean_id)
             if api_key_provider is None:
                 continue
@@ -530,6 +528,7 @@ class ModelRuntime:
                     raise ProviderRegistrationError(f'Provider "{clean_id}" credential changed during auth resolution')
                 normalized = self._normalize_api_key_result(clean_id, resolved, explicit_env)
                 self._resolved_api_key_auth[clean_id] = normalized
+                self._resolved_auth_credential[clean_id] = deepcopy(credential)
                 if normalized is None:
                     self._api_key_auth_status[clean_id] = None
                     continue
@@ -551,11 +550,14 @@ class ModelRuntime:
                 raise
             self._availability_error = None
 
-    def _resolve_modern_api_key_sync(self, provider_id: str) -> dict[str, Any] | None:
+    def _resolve_modern_api_key_sync(self, provider_id: str, stored: dict[str, Any] | None) -> dict[str, Any] | None:
         clean_id = _clean_text(provider_id)
-        if clean_id in self._resolved_api_key_auth:
+        credential = self._configured_api_key_credential(clean_id, stored)
+        if clean_id in self._resolved_api_key_auth and self._resolved_auth_credential.get(clean_id) == credential:
             cached = self._resolved_api_key_auth[clean_id]
             return deepcopy(cached) if isinstance(cached, Mapping) else None
+        self._resolved_api_key_auth.pop(clean_id, None)
+        self._api_key_auth_status.pop(clean_id, None)
         provider_generation = self._provider_generation(clean_id)
         provider = self._api_key_provider(clean_id)
         if provider is None:
@@ -565,10 +567,8 @@ class ModelRuntime:
             raise ProviderRegistrationError(
                 f'Provider "{clean_id}" API-key auth does not expose resolve'
             )
-        stored = self._stored_credential(clean_id)
         if stored is not None and stored.get("type") == "oauth":
             return None
-        credential = self._configured_api_key_credential(clean_id, stored)
         explicit_env = (
             credential.get("env")
             if isinstance(credential, Mapping)
@@ -596,6 +596,7 @@ class ModelRuntime:
             if status is None:
                 self._resolved_api_key_auth[clean_id] = None
                 self._api_key_auth_status[clean_id] = None
+                self._resolved_auth_credential[clean_id] = deepcopy(credential)
                 return None
         resolved = resolve(input_value)
         if inspect.isawaitable(resolved):
@@ -607,12 +608,15 @@ class ModelRuntime:
                 "refresh provider auth before constructing its adapter"
             )
         self._assert_provider_generation(clean_id, provider_generation)
+        if self._configured_api_key_credential(clean_id, self._stored_credential(clean_id)) != credential:
+            raise ProviderRegistrationError(f'Provider "{clean_id}" credential changed during auth resolution')
         normalized = self._normalize_api_key_result(
             clean_id,
             resolved,
             explicit_env,
         )
         self._resolved_api_key_auth[clean_id] = normalized
+        self._resolved_auth_credential[clean_id] = deepcopy(credential)
         self._api_key_auth_status[clean_id] = (
             status
             or {
@@ -714,7 +718,7 @@ class ModelRuntime:
                     f'Provider "{clean_id}" API-key credential changed during login'
                 )
             self._resolved_oauth_auth.pop(clean_id, None)
-            self._resolved_oauth_credential.pop(clean_id, None)
+            self._resolved_auth_credential.pop(clean_id, None)
             self._oauth_model_credentials.pop(clean_id, None)
             self._resolved_api_key_auth.pop(clean_id, None)
             self._api_key_auth_status.pop(clean_id, None)
@@ -769,7 +773,7 @@ class ModelRuntime:
                 f'Provider "{clean_id}" OAuth credential changed during login'
             )
         self._resolved_oauth_auth[clean_id] = dict(resolved_auth)
-        self._resolved_oauth_credential[clean_id] = dict(latest or {})
+        self._resolved_auth_credential[clean_id] = dict(latest or {})
         self._resolved_api_key_auth.pop(clean_id, None)
         self._api_key_auth_status.pop(clean_id, None)
         await self.refresh_dynamic_models(
@@ -801,7 +805,7 @@ class ModelRuntime:
         credentials = self._stored_credential(clean_id)
         if not credentials or credentials.get("type") != "oauth" or not callable(refresh):
             self._resolved_oauth_auth.pop(clean_id, None)
-            self._resolved_oauth_credential.pop(clean_id, None)
+            self._resolved_auth_credential.pop(clean_id, None)
             return False
 
         refreshed = False
@@ -841,7 +845,7 @@ class ModelRuntime:
         canonical = _provider_credential_payload(post)
         if not canonical or canonical.get("type") != "oauth":
             self._resolved_oauth_auth.pop(clean_id, None)
-            self._resolved_oauth_credential.pop(clean_id, None)
+            self._resolved_auth_credential.pop(clean_id, None)
             return False
         resolved_auth = await self._derive_oauth_auth(clean_id, provider, canonical)
         self._assert_provider_generation(clean_id, provider_generation)
@@ -855,7 +859,7 @@ class ModelRuntime:
             # credential. This older derivation owns no newer cache entry.
             return False
         self._resolved_oauth_auth[clean_id] = dict(resolved_auth)
-        self._resolved_oauth_credential[clean_id] = dict(canonical)
+        self._resolved_auth_credential[clean_id] = dict(canonical)
         self._resolved_api_key_auth.pop(clean_id, None)
         self._api_key_auth_status.pop(clean_id, None)
         if refreshed:
@@ -895,7 +899,7 @@ class ModelRuntime:
             async with self._provider_lock(clean_id, oauth=True):
                 removed = bool(storage.delete(clean_id))
         self._resolved_oauth_auth.pop(clean_id, None)
-        self._resolved_oauth_credential.pop(clean_id, None)
+        self._resolved_auth_credential.pop(clean_id, None)
         self._oauth_model_credentials.pop(clean_id, None)
         self._resolved_api_key_auth.pop(clean_id, None)
         self._api_key_auth_status.pop(clean_id, None)
@@ -1127,6 +1131,7 @@ class ModelRuntime:
                     {
                         "baseUrl": "base_url",
                         "contextWindow": "context_window",
+                        "maxContextWindow": "max_context_window",
                         "maxTokens": "max_tokens",
                         "thinkingLevelMap": "thinking_level_map",
                     },
@@ -1167,9 +1172,9 @@ class ModelRuntime:
                         model.get("reasoning"),
                         field=f"Provider {provider_id}, model {model_label}: reasoning",
                     )
-                for key in ("context_window", "max_tokens"):
+                for key in ("context_window", "max_context_window", "max_tokens"):
                     if key in model:
-                        _finite_number(
+                        _declared_finite_number(
                             model[key],
                             field=f"Provider {provider_id}, model {model_label}: {key}",
                         )
@@ -1209,6 +1214,7 @@ class ModelRuntime:
                 override,
                 {
                     "contextWindow": "context_window",
+                    "maxContextWindow": "max_context_window",
                     "maxTokens": "max_tokens",
                     "thinkingLevelMap": "thinking_level_map",
                 },
@@ -1247,9 +1253,9 @@ class ModelRuntime:
                 field=f"Provider {provider_id}, model {model_id}: override cost",
                 partial=True,
             )
-            for key in ("context_window", "max_tokens"):
+            for key in ("context_window", "max_context_window", "max_tokens"):
                 if key in override:
-                    _finite_number(
+                    _declared_finite_number(
                         override[key],
                         field=f"Provider {provider_id}, model {model_id}: override {key}",
                     )
@@ -1416,7 +1422,12 @@ class ModelRuntime:
                 else None
             )
             auth_error: str | None = None
-            stored_before_auth = self._stored_credential(provider_id)
+            from backend.llm.provider_auth import ProviderCredentialCorruptError
+            from backend.vault.store import VaultReadError
+            try:
+                stored_before_auth = self._stored_credential(provider_id)
+            except (ProviderCredentialCorruptError, VaultReadError):
+                continue
             # Pi's offline refresh uses a stored OAuth credential as-is. It
             # does not rotate an expired token merely because an extension or
             # provider registration requested a cache/model refresh.
@@ -1441,7 +1452,7 @@ class ModelRuntime:
                     ):
                         return
                     auth_error = str(exc) or type(exc).__name__
-                    self._errors[provider_id] = auth_error
+                    self._errors[provider_id] = exc
             if _signal_is_aborted(signal) or refresh_epoch != self._dynamic_refresh_epoch:
                 # OAuth/API-key resolution owns the same refresh transaction.
                 # Once it observes cancellation, do not invoke extension code
@@ -1807,6 +1818,12 @@ class ModelRuntime:
                 model.get("parallel_tool_calls"),
                 field=f"Provider {provider_id}, model {model_id}: parallel_tool_calls",
             )
+            if model.get("cost") != {}:
+                _validate_model_cost(
+                    model.get("cost"),
+                    field=f"Provider {provider_id}, model {model_id}: cost",
+                    partial=False,
+                )
 
     def register_provider(self, provider_id: str, config: Any) -> None:
         self.assert_active()
@@ -1877,43 +1894,27 @@ class ModelRuntime:
                 f'Provider {provider_id}: "base_url" is required when defining custom models'
             )
         context_window = (
-            _finite_number(
-                definition.get("context_window"),
-                field=f"Provider {provider_id}, model {model_id}: context_window",
-            )
+            int(definition["context_window"])
             if definition.get("context_window") is not None
             else DEFAULT_CONTEXT_WINDOW
         )
-        if context_window <= 0:
-            raise ProviderRegistrationError(
-                f"Provider {provider_id}, model {model_id}: invalid context_window"
-            )
-        if float(context_window).is_integer():
-            context_window = int(context_window)
-        declared_max_context = _declared_finite_number(
-            definition.get("max_context_window"),
-            field=f"Provider {provider_id}, model {model_id}: max_context_window",
+        declared_max_context = (
+            int(definition["max_context_window"])
+            if definition.get("max_context_window") is not None else None
         )
         max_context_window = declared_max_context if declared_max_context is not None else context_window
+        if declared_max_context is not None:
+            context_window = min(context_window, max_context_window)
         max_tokens = (
-            _finite_number(
-                definition.get("max_tokens"),
-                field=f"Provider {provider_id}, model {model_id}: max_tokens",
-            )
+            int(definition["max_tokens"])
             if definition.get("max_tokens") is not None
             else DEFAULT_MAX_OUTPUT_TOKENS
         )
-        if max_tokens <= 0:
-            raise ProviderRegistrationError(
-                f"Provider {provider_id}, model {model_id}: invalid max_tokens"
-            )
         if max_tokens > context_window:
             raise ProviderRegistrationError(
                 f"Provider {provider_id}, model {model_id}: "
                 "max_tokens must not exceed context_window"
             )
-        if float(max_tokens).is_integer():
-            max_tokens = int(max_tokens)
         raw_input = definition.get("input")
         input_types = (
             tuple(str(item) for item in raw_input)
@@ -1955,8 +1956,8 @@ class ModelRuntime:
                 else {}
             ),
             context_window=context_window,
-            context_window_source="models_json" if definition.get("context_window") is not None else "fallback",
-            context_window_verified=definition.get("context_window") is not None,
+            context_window_source="models_json" if definition.get("context_window") is not None or declared_max_context is not None else "fallback",
+            context_window_verified=definition.get("context_window") is not None or declared_max_context is not None,
             max_context_window=max_context_window,
             max_context_window_source="models_json" if declared_max_context is not None or definition.get("context_window") is not None else "fallback",
             max_context_window_verified=declared_max_context is not None or definition.get("context_window") is not None,
@@ -2092,29 +2093,22 @@ class ModelRuntime:
                 else model.input
             )
             context_window = (
-                _finite_number(
-                    override.get("context_window"),
-                    field=(
-                        f"Provider {provider_id}, model {model.id}: "
-                        "override context_window"
-                    ),
-                )
+                int(override["context_window"])
                 if override.get("context_window") is not None
                 else model.context_window
             )
-            if float(context_window).is_integer():
-                context_window = int(context_window)
-            max_context_window = model.max_context_window or context_window
+            max_context_window = (
+                int(override["max_context_window"])
+                if override.get("max_context_window") is not None
+                else model.max_context_window or context_window
+            )
+            if override.get("max_context_window") is not None:
+                context_window = min(context_window, max_context_window)
             max_tokens = (
-                _finite_number(
-                    override.get("max_tokens"),
-                    field=f"Provider {provider_id}, model {model.id}: override max_tokens",
-                )
+                int(override["max_tokens"])
                 if override.get("max_tokens") is not None
                 else model.max_tokens
             )
-            if float(max_tokens).is_integer():
-                max_tokens = int(max_tokens)
             configured_headers = self._configured_model_headers(
                 provider_id,
                 model.id,
@@ -2171,14 +2165,26 @@ class ModelRuntime:
                     context_window_source=(
                         "models_json_override"
                         if override.get("context_window") is not None
+                        or context_window != model.context_window
                         else model.context_window_source
                     ),
                     context_window_verified=(
                         True
                         if override.get("context_window") is not None
+                        or context_window != model.context_window
                         else model.context_window_verified
                     ),
                     max_context_window=max_context_window,
+                    max_context_window_source=(
+                        "models_json_override"
+                        if override.get("max_context_window") is not None
+                        else model.max_context_window_source
+                    ),
+                    max_context_window_verified=(
+                        True
+                        if override.get("max_context_window") is not None
+                        else model.max_context_window_verified
+                    ),
                     max_tokens=max_tokens,
                     max_output_tokens=(
                         max_tokens if override.get("max_tokens") is not None
@@ -2320,6 +2326,10 @@ class ModelRuntime:
                 max_context_window = declared_max_context_window
                 max_context_window_source = "extension"
                 max_context_window_verified = True
+                if context_window > max_context_window:
+                    context_window = max_context_window
+                    context_window_source = "extension"
+                    context_window_verified = True
             elif defaults is not None and defaults.max_context_window > 0:
                 max_context_window = defaults.max_context_window
                 max_context_window_source = defaults.max_context_window_source
@@ -2647,12 +2657,17 @@ class ModelRuntime:
         return "stored", None
 
     def has_configured_auth(self, provider_or_model: str | ModelDefinition) -> bool:
+        from backend.llm.provider_auth import ProviderCredentialCorruptError
+        from backend.vault.store import VaultReadError
         provider_id = (
             provider_or_model.provider
             if isinstance(provider_or_model, ModelDefinition)
             else _clean_text(provider_or_model)
         )
-        credentials = self._stored_credential(provider_id)
+        try:
+            credentials = self._stored_credential(provider_id)
+        except (ProviderCredentialCorruptError, VaultReadError):
+            return False
         if credentials is not None:
             credential_type = credentials.get("type")
             if credential_type == "oauth":
@@ -2822,10 +2837,15 @@ class ModelRuntime:
         return tuple(self._extension_providers)
 
     def get_provider_auth_status(self, provider_id: str) -> dict[str, Any]:
+        from backend.llm.provider_auth import ProviderCredentialCorruptError
+        from backend.vault.store import VaultReadError
         clean_id = _clean_text(provider_id)
         oauth = self._oauth_provider(clean_id)
         api_key_provider = self._api_key_provider(clean_id)
-        credentials = self._stored_credential(clean_id)
+        try:
+            credentials = self._stored_credential(clean_id)
+        except (ProviderCredentialCorruptError, VaultReadError):
+            return {"configured": False, "oauth_supported": oauth is not None}
         if credentials is not None and credentials.get("type") == "oauth":
             return {
                 "configured": oauth is not None,
@@ -2880,7 +2900,7 @@ class ModelRuntime:
             if oauth is None:
                 return None
             cached_auth = self._resolved_oauth_auth.get(clean_id)
-            cached_credential = self._resolved_oauth_credential.get(clean_id)
+            cached_credential = self._resolved_auth_credential.get(clean_id)
             current_credential = _provider_credential_payload(credentials)
             if (
                 isinstance(cached_auth, Mapping)
@@ -2892,7 +2912,7 @@ class ModelRuntime:
                     auth["headers"] = dict(auth["headers"])
                 return {"auth": auth, "source": "oauth"}
             self._resolved_oauth_auth.pop(clean_id, None)
-            self._resolved_oauth_credential.pop(clean_id, None)
+            self._resolved_auth_credential.pop(clean_id, None)
             stored_auth = credentials.get("_minicode_auth")
             if isinstance(stored_auth, Mapping):
                 credential_environment = _normalize_provider_env(
@@ -2970,7 +2990,7 @@ class ModelRuntime:
         if credentials is not None and credentials.get("type") not in {"api_key"}:
             return None
         if self._api_key_provider(clean_id) is not None:
-            return self._resolve_modern_api_key_sync(clean_id)
+            return self._resolve_modern_api_key_sync(clean_id, credentials)
         if credentials is not None and credentials.get("type") == "api_key":
             api_key = str(credentials.get("key") or "")
             environment = _normalize_provider_env(
@@ -3154,12 +3174,6 @@ class ModelRuntime:
             clean_provider in self._extension_providers
             or clean_provider in self._model_configs
         )
-        base_model_metadata = get_provider_model_metadata(base, model.id)
-        selected_reasoning_levels = (
-            tuple(model.reasoning_effort_levels)
-            if extension_defined
-            else tuple(base_model_metadata["reasoning_effort_levels"])
-        )
         resolved_base_url = (
             _clean_text(auth.get("base_url")) or model.base_url
         )
@@ -3192,7 +3206,7 @@ class ModelRuntime:
             prompt_cache_retention=_clean_text(
                 base.get("prompt_cache_retention")
             ),
-            reasoning_effort_levels=selected_reasoning_levels,
+            reasoning_effort_levels=model.reasoning_effort_levels,
             context_window=model.context_window,
             context_window_source=model.context_window_source,
             context_window_verified=model.context_window_verified,
@@ -3223,49 +3237,45 @@ class ModelRuntime:
             return {}
         model = self.get_model(provider_id, model_id) if model_id else None
         base = self._base_providers.get(provider_id, {})
-        extension_defined = (
-            provider_id in self._extension_providers
-            or provider_id in self._model_configs
+        levels = (
+            model_thinking_levels(model)
+            if model is not None and model.reasoning else ()
         )
-        metadata = (
-            get_provider_model_metadata(base, model.id)
-            if model is not None and not extension_defined
-            else {
-                "reasoning_effort_levels": [],
-                "context_window": model.context_window if model is not None else 0,
-                "context_window_source": (
-                    model.context_window_source if model is not None else ""
-                ),
-                "context_window_verified": (
-                    model.context_window_verified if model is not None else False
-                ),
-                "max_context_window": (
-                    model.max_context_window if model is not None else 0
-                ),
-                "max_context_window_source": (
-                    model.max_context_window_source if model is not None else ""
-                ),
-                "max_context_window_verified": (
-                    model.max_context_window_verified if model is not None else False
-                ),
-                "max_output_tokens": (
-                    model.max_output_tokens if model is not None else 0
-                ),
-                "max_output_tokens_source": (
-                    model.max_output_tokens_source if model is not None else ""
-                ),
-                "max_output_tokens_verified": (
-                    model.max_output_tokens_verified if model is not None else False
-                ),
-                "default_reasoning_effort": (
-                    model.default_reasoning_effort if model is not None else ""
-                ),
-                "default_reasoning_summary": (
-                    model.default_reasoning_summary if model is not None else ""
-                ),
-            }
-        )
-        levels = list(metadata["reasoning_effort_levels"])
+        metadata = {
+            "reasoning_effort_levels": list(levels),
+            "context_window": model.context_window if model is not None else 0,
+            "context_window_source": (
+                model.context_window_source if model is not None else ""
+            ),
+            "context_window_verified": (
+                model.context_window_verified if model is not None else False
+            ),
+            "max_context_window": (
+                model.max_context_window if model is not None else 0
+            ),
+            "max_context_window_source": (
+                model.max_context_window_source if model is not None else ""
+            ),
+            "max_context_window_verified": (
+                model.max_context_window_verified if model is not None else False
+            ),
+            "max_output_tokens": (
+                model.max_output_tokens if model is not None else 0
+            ),
+            "max_output_tokens_source": (
+                model.max_output_tokens_source if model is not None else ""
+            ),
+            "max_output_tokens_verified": (
+                model.max_output_tokens_verified if model is not None else False
+            ),
+            "default_reasoning_effort": (
+                default_model_thinking_level(model, levels) if model is not None else ""
+            ),
+            "default_reasoning_summary": (
+                model.default_reasoning_summary if model is not None else ""
+            ),
+        }
+        levels = metadata["reasoning_effort_levels"]
         configured_effort = _clean_text(base.get("reasoning_effort")).lower()
         wire_api = model.api if model is not None else ""
         normalized_wire_api = {
@@ -3273,12 +3283,15 @@ class ModelRuntime:
             "openai-responses": "responses",
             "openai-completions": "chat",
         }.get(wire_api, wire_api)
-        effective_effort = normalize_reasoning_effort(
-            model.id if model is not None else "",
-            normalized_wire_api,
-            configured_effort,
-            levels,
-            metadata["default_reasoning_effort"],
+        effective_effort = (
+            normalize_reasoning_effort(
+                model.id if model is not None else "",
+                normalized_wire_api,
+                configured_effort,
+                levels,
+                metadata["default_reasoning_effort"],
+            )
+            if levels else ""
         )
         return {
             "provider_id": provider.id,

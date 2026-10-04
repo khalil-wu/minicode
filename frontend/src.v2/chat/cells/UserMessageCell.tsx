@@ -12,7 +12,10 @@ import { useAppStore } from "../../stores";
 import { openAttachmentPreview, openLocalFilePreview } from "../openAttachmentPreview";
 import { buildInterruptCommand } from "../../lib/interrupt-command";
 import { pushToast } from "../../overlays/ToastContainer";
+import { MessageQuote } from "../components/MessageQuote";
+import { contextReferenceLabel, openContextReference } from "../contextReferenceActions";
 import "./cells.css";
+import { useTranscriptSearch } from "../TranscriptSearchContext";
 
 const COLLAPSE_CHAR_THRESHOLD = 900;
 const COLLAPSE_LINE_THRESHOLD = 14;
@@ -27,10 +30,12 @@ export function UserMessageCell({
   conversationId?: string;
 }) {
   const [copied, setCopied] = useState(false);
-  const [expanded, setExpanded] = useState(false);
+  const [expansionPreference, setExpanded] = useState(false);
+  const expanded = useTranscriptSearch() || expansionPreference;
   const [cancelPending, setCancelPending] = useState(false);
   const recallMessage = useAppStore((s) => s.recallMessage);
   const ownerConversationId = String(conversationId || "").trim();
+  const canRecall = useAppStore((s) => !ownerConversationId || s.conversationId === ownerConversationId);
 
   const cancelQueuedMessage = useCallback(async () => {
     if (!ownerConversationId || !cell.queueMessageId || cancelPending) return;
@@ -63,6 +68,8 @@ export function UserMessageCell({
 
   const recall = useCallback(async () => {
     const state = useAppStore.getState();
+    const requestConversationId = ownerConversationId || state.conversationId;
+    if (!requestConversationId || state.conversationId !== requestConversationId) return;
     const index = state.messages.findIndex((item) => item.id === cell.id);
     const removeCount = index >= 0 ? state.messages.length - index : 1;
     const { showConfirm } = await import("../../overlays/DialogService");
@@ -74,6 +81,7 @@ export function UserMessageCell({
     });
     if (!ok) return;
     const latest = useAppStore.getState();
+    if (latest.conversationId !== requestConversationId) return;
     if (latest.isStreaming) {
       const sent = sendClientCommand(buildInterruptCommand(latest));
       if (!sent) return;
@@ -82,7 +90,7 @@ export function UserMessageCell({
     }
     const recalled = await recallMessage(cell.id);
     if (recalled) queueMicrotask(() => window.dispatchEvent(new Event("composer:focus")));
-  }, [cell.id, recallMessage]);
+  }, [cell.id, ownerConversationId, recallMessage]);
 
   const openFilePreview = useCallback((
     attachment: NonNullable<UserMessageCellState["attachments"]>[number],
@@ -120,22 +128,20 @@ export function UserMessageCell({
   }, [cell.id, cell.content]);
 
   return (
-    <div className="user-cell-wrap">
+    <div className="user-cell-wrap" data-message-id={cell.id}>
       {cell.messageSource?.kind === "scheduled_task" ? (
         <div
           className="user-cell-source"
           data-message-source="scheduled_task"
-          title={sourceTitle(cell.messageSource)}
+          title="定时任务"
         >
           <Clock3 size={13} aria-hidden="true" />
           <span>定时任务</span>
-          {cell.messageSource.runId ? (
-            <span className="user-cell-source-id">运行 {compactSourceId(cell.messageSource.runId)}</span>
-          ) : null}
         </div>
       ) : null}
       <div className="edit-bubble-wrap">
         <div className="user-cell-bubble md-prose">
+          {cell.quotedMessage && <MessageQuote message={cell.quotedMessage} />}
           {visibleContent ? (
             <>
               <div
@@ -172,6 +178,20 @@ export function UserMessageCell({
               <span>已引导当前任务</span>
             </div>
           ) : null}
+          {Boolean(cell.contextRefs?.length) && (
+            <div className="user-cell-attachments" aria-label="消息上下文">
+              {cell.contextRefs?.map((ref, index) => (
+                <button type="button" key={ref.kind + ":" + ref.path + ":" + index} className="user-cell-attachment-chip"
+                  onClick={() => openContextReference(ref, ownerConversationId)}
+                  disabled={!["file", "url", "browser_annotation"].includes(ref.kind)}
+                  aria-label={`打开引用 ${contextReferenceLabel(ref)}`}
+                  title={ref.kind === "browser_annotation" ? ref.url + "\n" + ref.note : ref.path}>
+                  {fileIcon(ref.kind === "skill" ? "SKILL.md" : ref.name, { size: 15, className: "user-cell-attachment-file-icon" })}
+                  <span>{(ref.kind === "skill" ? "$" : "@") + contextReferenceLabel(ref)}</span>
+                </button>
+              ))}
+            </div>
+          )}
           {cell.attachments && cell.attachments.length > 0 && (
             <div className={`user-cell-attachments${visibleContent ? "" : " user-cell-attachments-only"}`}>
               {cell.attachments.map((attachment, index) => {
@@ -206,12 +226,12 @@ export function UserMessageCell({
           <button type="button" onClick={() => void cancelQueuedMessage()} disabled={cancelPending} aria-busy={cancelPending} title="取消排队消息" aria-label="取消排队消息" className="cell-action-btn">
             <X size={14} />
           </button>
-        ) : (
+        ) : canRecall ? (
           <button type="button" onClick={recall} title="撤回到输入框编辑" aria-label="撤回到输入框" className="cell-action-btn user-cell-edit-action">
             <RotateCcw size={14} />
             <span>编辑</span>
           </button>
-        )}
+        ) : null}
       </div>}
     </div>
   );
@@ -228,17 +248,4 @@ function attachmentKey(
     attachment.name,
     index,
   ].filter(Boolean).join(":");
-}
-
-function compactSourceId(value: string): string {
-  const id = value.trim();
-  return id.length > 16 ? `${id.slice(0, 8)}...${id.slice(-5)}` : id;
-}
-
-function sourceTitle(source: NonNullable<UserMessageCellState["messageSource"]>): string {
-  const details = [
-    source.taskId ? `任务 ${source.taskId}` : "",
-    source.runId ? `运行 ${source.runId}` : "",
-  ].filter(Boolean);
-  return details.length ? `定时任务 · ${details.join(" · ")}` : "定时任务";
 }

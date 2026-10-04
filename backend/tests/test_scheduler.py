@@ -444,7 +444,7 @@ def test_scheduler_claim_persistence_failure_never_releases_worker(monkeypatch, 
         task = scheduler.add_task("Durable claim", "run", "* * * * *")
         due_at = datetime.now(UTC) - timedelta(minutes=1)
         task.next_run_at = due_at.isoformat()
-        monkeypatch.setattr(scheduler, "_save", lambda: (_ for _ in ()).throw(OSError("disk full")))
+        monkeypatch.setattr(scheduler, "_save", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
 
         scheduler._tick(datetime.now(UTC))
         await asyncio.sleep(0)

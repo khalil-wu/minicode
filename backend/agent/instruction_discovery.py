@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.workspace.path_filters import is_local_filename as _is_local_instruction_filename
+
 import asyncio
 from dataclasses import dataclass, field
 import logging
@@ -40,7 +42,10 @@ class GuidelineBlock:
     content: str
 
     def to_markdown(self) -> str:
-        return f"## Project Guideline ({self.label}): {self.path.name}\n{self.content}"
+        return (
+            f"## Project Guideline ({self.label}): {self.path}\n"
+            f"Scope: {self.scope}\n{self.content}"
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -55,7 +60,7 @@ class GuidelineBlock:
 
 @dataclass(frozen=True)
 class GuidelineBundle:
-    workspace_dir: Path
+    workspace_dir: Path | None
     additional_directories: tuple[Path, ...]
     blocks: tuple[GuidelineBlock, ...]
     rendered_markdown: str
@@ -64,7 +69,7 @@ class GuidelineBundle:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "workspace_dir": str(self.workspace_dir),
+            "workspace_dir": str(self.workspace_dir) if self.workspace_dir is not None else "",
             "additional_directories": [
                 str(path) for path in self.additional_directories
             ],
@@ -102,16 +107,16 @@ def guideline_change_metadata(path: str | Path) -> dict[str, str] | None:
         resolved = Path(path).expanduser().resolve()
     except OSError:
         resolved = Path(path).expanduser().absolute()
-    normalized_parts = {part.lower() for part in resolved.parts}
+    normalized_parts = {os.path.normcase(part) for part in resolved.parts}
     direct = (
-        resolved.name
-        in {
+        os.path.normcase(resolved.name)
+        in {os.path.normcase(name) for name in (
             PROJECT_INSTRUCTIONS_FILENAME.name,
             PROJECT_INSTRUCTIONS_LOCAL_FILENAME.name,
             SHARED_INSTRUCTIONS_FILENAME,
             SHARED_INSTRUCTIONS_OVERRIDE_FILENAME,
-        }
-        or (resolved.suffix.lower() == ".md" and ".minicode" in normalized_parts)
+        )}
+        or (os.path.normcase(resolved.suffix) == ".md" and ".minicode" in normalized_parts)
     )
     with _GUIDELINE_CACHE_LOCK:
         parent = _INCLUDE_PARENT_PATHS.get(os.path.normcase(str(resolved)), "")
@@ -131,7 +136,7 @@ def _normalize_directory(value: str | Path | None) -> Path:
 
 
 def _normalize_additional_directories(
-    workspace_dir: Path,
+    workspace_dir: Path | None,
     additional_directories: list[str | Path] | tuple[str | Path, ...] | None = None,
 ) -> tuple[Path, ...]:
     normalized: list[Path] = []
@@ -143,10 +148,7 @@ def _normalize_additional_directories(
         except OSError:
             canonical = path
         key = os.path.normcase(str(canonical))
-        try:
-            workspace_key = os.path.normcase(str(workspace_dir.resolve()))
-        except OSError:
-            workspace_key = os.path.normcase(str(workspace_dir))
+        workspace_key = os.path.normcase(str(workspace_dir)) if workspace_dir is not None else ""
         if key in seen or key == workspace_key:
             continue
         seen.add(key)
@@ -176,32 +178,39 @@ TEXT_FILE_EXTENSIONS = frozenset(
     }
 )
 _INCLUDE_RE = re.compile(r"(?:^|\s)@((?:[^\s\\]|\\ )+)")
-_FRONTMATTER_RE = re.compile(r"\A---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|\Z)", re.DOTALL)
+_FRONTMATTER_RE = re.compile(
+    r"\A---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|\Z)",
+    re.DOTALL | re.MULTILINE,
+)
 
 
 def _parse_rule_content(raw_content: str) -> tuple[str, tuple[str, ...]]:
     """Return the Markdown body and CC-compatible ``paths`` frontmatter."""
     match = _FRONTMATTER_RE.match(raw_content)
     if match is None:
+        if re.match(r"\A---[ \t]*(?:\r?\n|\Z)", raw_content):
+            raise ValueError("unterminated YAML frontmatter")
         return raw_content.strip(), ()
     try:
-        payload = yaml.safe_load(match.group(1)) or {}
-    except yaml.YAMLError:
-        return raw_content.strip(), ()
+        payload = yaml.safe_load(match.group(1))
+    except yaml.YAMLError as exc:
+        raise ValueError("invalid YAML frontmatter") from exc
+    if payload is None:
+        payload = {}
     if not isinstance(payload, dict):
-        return raw_content.strip(), ()
+        raise ValueError("rule frontmatter must be an object")
     raw_paths = payload.get("paths")
-    if isinstance(raw_paths, str):
-        paths = [part.strip() for part in raw_paths.split(",")]
-    elif isinstance(raw_paths, list):
-        paths = [str(part).strip() for part in raw_paths]
-    else:
+    if raw_paths is None:
         paths = []
-    normalized = tuple(
-        path[:-3] if path.endswith("/**") else path
-        for path in paths
-        if path and path != "**"
-    )
+    elif isinstance(raw_paths, str):
+        paths = [part.strip() for part in raw_paths.split(",")]
+    elif isinstance(raw_paths, list) and all(isinstance(part, str) for part in raw_paths):
+        paths = [part.strip() for part in raw_paths]
+    else:
+        raise ValueError("rule paths must be a string or a list of strings")
+    normalized = tuple(path for path in paths if path)
+    if normalized == ("**",):
+        normalized = ()
     return raw_content[match.end() :].strip(), normalized
 
 
@@ -214,6 +223,7 @@ def _normalize_project_root_markers(
         marker.strip()
         for marker in project_root_markers
         if isinstance(marker, str) and marker.strip()
+        and _is_local_instruction_filename(marker.strip())
     )
 
 
@@ -230,6 +240,9 @@ def _normalize_project_doc_fallback_filenames(
             or name in {"INSTRUCTIONS.local.md", "INSTRUCTIONS.md"}
             or name in normalized
         ):
+            continue
+        if not _is_local_instruction_filename(name):
+            logger.warning("Ignoring project instruction fallback that is not a filename")
             continue
         normalized.append(name)
     return tuple(normalized)
@@ -318,15 +331,6 @@ def _instruction_candidates(
     project_doc_fallback_filenames: tuple[str, ...],
 ) -> list[tuple[Path, str, str, int]]:
     """Resolve MiniCode's project instruction hierarchy for a scope."""
-    # Filename configuration crosses into filesystem access here. Reject path
-    # syntax before any probes: Windows UNC probes can send ambient credentials.
-    fallback_names = []
-    for filename in project_doc_fallback_filenames:
-        if (filename in {".", ".."} or "/" in filename or "\0" in filename
-                or (os.name == "nt" and ("\\" in filename or ":" in filename))):
-            logger.warning("Ignoring project instruction fallback that is not a filename")
-            continue
-        fallback_names.append(filename)
     chain = _instruction_scope_chain(scope_dir, project_root_markers)
     candidates: list[tuple[Path, str, str, int]] = []
     for depth, directory in enumerate(chain):
@@ -337,8 +341,9 @@ def _instruction_candidates(
             directory / SHARED_INSTRUCTIONS_OVERRIDE_FILENAME,
             directory / SHARED_INSTRUCTIONS_FILENAME,
             *(
-                directory / ".minicode" / filename
-                for filename in fallback_names
+                base / filename
+                for filename in project_doc_fallback_filenames
+                for base in (directory / ".minicode", directory)
             ),
         ):
             if candidate.exists() and candidate.is_file():
@@ -352,7 +357,7 @@ def _instruction_candidates(
 
 
 def _iter_guideline_specs(
-    workspace_dir: Path,
+    workspace_dir: Path | None,
     additional_directories: tuple[Path, ...],
     *,
     project_root_markers: tuple[str, ...],
@@ -419,28 +424,25 @@ def _iter_guideline_specs(
         # informational only — sorting by it would interleave scopes and break
         # per-scope grouping when additional_directories are present). So the
         # order here IS the contract: managed -> user -> project-root -> cwd.
-        candidates: list[tuple[Path, str, str, int]] = []
-        candidates += list(
-            _instruction_candidates(
-                scope_dir,
-                project_root_markers=project_root_markers,
-                project_doc_fallback_filenames=project_doc_fallback_filenames,
-            )
-        )
         for depth, directory in enumerate(
             _instruction_scope_chain(scope_dir, project_root_markers)
         ):
+            for path, source_kind, label, priority in _instruction_candidates(
+                directory,
+                project_root_markers=(),
+                project_doc_fallback_filenames=project_doc_fallback_filenames,
+            ):
+                add_candidate(path, source_kind, label, priority + depth, str(directory))
             base_priority = 100 + depth * 10
             rules_dir = directory / ".minicode" / "rules"
             for rule_file in _rule_files(rules_dir):
-                candidates.append(
-                    (rule_file, "project_rule", "Project Rule", base_priority + 2)
+                add_candidate(
+                    rule_file, "project_rule", "Project Rule", base_priority + 2,
+                    str(directory),
                 )
 
-        for path, source_kind, label, priority in candidates:
-            add_candidate(path, source_kind, label, priority, str(scope_dir))
-
-    register_scope(workspace_dir)
+    if workspace_dir is not None:
+        register_scope(workspace_dir)
     for directory in additional_directories:
         register_scope(directory)
     return specs
@@ -493,7 +495,9 @@ def _extract_include_paths(content: str, source_path: Path) -> list[Path]:
             parsed = Path(raw)
             candidate = parsed if parsed.is_absolute() else source_path.parent / parsed
         try:
-            resolved = candidate.expanduser().resolve()
+            # Parse imports without filesystem probes. The scope owner rejects
+            # outside paths before resolving them, including Windows UNC paths.
+            resolved = Path(os.path.abspath(candidate.expanduser()))
         except OSError:
             continue
         key = os.path.normcase(str(resolved))
@@ -507,7 +511,7 @@ def _expand_guideline_imports(
     specs: list[tuple[Path, str, str, int, str]],
     *,
     project_root_markers: tuple[str, ...],
-    workspace_dir: Path,
+    workspace_dir: Path | None,
     matched_targets: list[Path] | None = None,
 ) -> list[tuple[Path, str, str, int, str]]:
     """Expand MiniCode instruction imports with bounded depth and deduplication."""
@@ -531,15 +535,18 @@ def _expand_guideline_imports(
             return
         expanded.append((resolved, source_kind, label, priority, scope))
         try:
-            content = resolved.read_text(encoding="utf-8", errors="ignore")
+            content = resolved.read_text(encoding="utf-8-sig", errors="ignore")
         except OSError:
             return
         if source_kind.endswith("_rule"):
-            _, conditional_paths = _parse_rule_content(content)
+            try:
+                _, conditional_paths = _parse_rule_content(content)
+            except ValueError:
+                return
             if conditional_paths:
                 if matched_targets is None:
                     return
-                if not _matching_rule_target(resolved, source_kind, conditional_paths, workspace_dir, matched_targets):
+                if not _matching_rule_target(scope, source_kind, conditional_paths, workspace_dir, matched_targets):
                     expanded.pop()
                     return
         scope_dir = Path(scope).resolve()
@@ -547,6 +554,13 @@ def _expand_guideline_imports(
         if source_kind.startswith("project_"):
             allowed_root = _find_project_root(scope_dir, project_root_markers) or scope_dir
         for included in _extract_include_paths(content, resolved):
+            if not included.is_relative_to(allowed_root):
+                logger.warning("Skipping instruction import outside its scope: %s", included)
+                continue
+            try:
+                included = included.resolve()
+            except OSError:
+                continue
             suffix = included.suffix.lower()
             if suffix and suffix not in TEXT_FILE_EXTENSIONS:
                 logger.warning("Skipping non-text instruction import: %s", included)
@@ -607,7 +621,7 @@ def _read_blocks(
                 blocks.append(_unreadable_block(path, source_kind, label, priority, scope, exc))
                 continue
             truncated = raw_content[:remaining]
-            content = truncated.decode("utf-8", errors="replace")
+            content = truncated.decode("utf-8-sig", errors="replace")
             if not content.strip():
                 continue
             if len(raw_content) > remaining:
@@ -619,14 +633,19 @@ def _read_blocks(
             project_instruction_bytes_used += len(truncated)
         else:
             try:
-                content = path.read_text(encoding="utf-8", errors="ignore").strip()
+                content = path.read_text(encoding="utf-8-sig", errors="ignore").strip()
             except FileNotFoundError:
                 continue
             except OSError as exc:
                 blocks.append(_unreadable_block(path, source_kind, label, priority, scope, exc))
                 continue
         if source_kind.endswith("_rule"):
-            content, conditional_paths = _parse_rule_content(content)
+            try:
+                content, conditional_paths = _parse_rule_content(content)
+            except ValueError as exc:
+                logger.warning("Instruction rule %s could not be loaded: %s", path, exc)
+                content = f"[This rule has invalid frontmatter ({exc}); its guidance is not included.]"
+                conditional_paths = ()
             # Conditional rules enter context only after a touched path matches.
             if conditional_paths and not include_conditional_rules:
                 continue
@@ -735,7 +754,7 @@ def load_project_guideline_bundle(
     project_doc_max_bytes: int | None = None,
     hook_manager: Any | None = None,
 ) -> GuidelineBundle:
-    workspace_path = _normalize_directory(workspace_dir)
+    workspace_path = _normalize_directory(workspace_dir) if workspace_dir is not None else None
     extra_paths = _normalize_additional_directories(
         workspace_path, additional_directories
     )
@@ -817,15 +836,10 @@ def load_project_guidelines(
 
 
 def _matching_rule_target(
-    path: Path, source_kind: str, patterns: tuple[str, ...],
+    scope: str, source_kind: str, patterns: tuple[str, ...],
     workspace_path: Path, targets: list[Path],
 ) -> str:
-    base_dir = workspace_path
-    if source_kind == "project_rule":
-        for parent in path.parents:
-            if parent.name == ".minicode":
-                base_dir = parent.parent
-                break
+    base_dir = Path(scope) if source_kind == "project_rule" else workspace_path
     matcher = GitIgnoreSpec.from_lines(patterns)
     for target in targets:
         try:
@@ -876,13 +890,16 @@ def load_matching_project_rules(
         if not source_kind.endswith("_rule"):
             continue
         try:
-            raw_content = path.read_text(encoding="utf-8", errors="ignore")
+            raw_content = path.read_text(encoding="utf-8-sig", errors="ignore")
         except OSError:
             continue
-        content, patterns = _parse_rule_content(raw_content)
+        try:
+            content, patterns = _parse_rule_content(raw_content)
+        except ValueError:
+            continue
         if not content or not patterns:
             continue
-        matched_target = _matching_rule_target(path, source_kind, patterns, workspace_path, resolved_targets)
+        matched_target = _matching_rule_target(scope, source_kind, patterns, workspace_path, resolved_targets)
         key = os.path.normcase(str(path.resolve()))
         if not matched_target or key in seen:
             continue

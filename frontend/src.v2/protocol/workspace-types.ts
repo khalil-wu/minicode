@@ -93,6 +93,8 @@ export interface FileChangedEvent extends WorkspaceOwnedEvent {
 
 export interface CommandResultEvent {
   type: "command.result";
+  conversation_id?: string;
+  workspace_root?: string;
   command: string;
   level: string;
   message: string;
@@ -124,6 +126,7 @@ export interface GitDiffFilePayload {
 
 export interface GitDiffWorkingTreeEvent extends WorkspaceOwnedEvent {
   type: "diff.git_working_tree";
+  is_git_repo?: boolean;
   files?: GitDiffFilePayload[];
   untracked?: string[];
   preview?: boolean;
@@ -133,6 +136,7 @@ export interface GitDiffWorkingTreeEvent extends WorkspaceOwnedEvent {
 
 export interface GitDiffStagedEvent extends WorkspaceOwnedEvent {
   type: "diff.git_staged";
+  is_git_repo?: boolean;
   files?: GitDiffFilePayload[];
 }
 

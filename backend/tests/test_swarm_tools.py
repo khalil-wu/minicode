@@ -796,7 +796,7 @@ async def _test_swarm_team_create_rejects_second_team_for_same_leader(tmp_path) 
 
     assert not first.is_error
     assert second.is_error
-    assert 'Already leading team "audit"' in second.content
+    assert 'This conversation already has team "audit"' in second.content
     teams = runtime.list_swarm_teams(conversation_id="conversation-1")
     assert len(teams) == 1
     assert teams[0].members[0].id == "team-lead@audit"

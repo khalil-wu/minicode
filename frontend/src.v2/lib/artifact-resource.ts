@@ -1,12 +1,13 @@
 import {
   artifactRawResourceUrlWithToken,
   attachmentRawResourceUrlWithToken,
+  workspaceRawResourceUrlWithToken,
 } from "../protocol/api";
 
 /** Sources whose bytes are protected by the session/conversation owner scope. */
 export type ScopedArtifactSource = "artifact" | "attachment";
 
-export interface ArtifactImageResourceInput {
+export interface ArtifactResourceInput {
   artifactId?: string;
   conversationId?: string;
   sessionId?: string;
@@ -40,20 +41,24 @@ export const isInlineImageResourceUrl = (value?: unknown): boolean =>
   Boolean(inlineImageResourceUrl(value));
 
 /**
- * Build the one canonical URL for a preview image. Persisted artifacts never
+ * Build the canonical URL for preview bytes. Persisted artifacts never
  * reuse a supplied URL: a reconnect must rebuild the signed owner-scoped URL
  * from the current transport session instead of retaining a stale credential.
  */
-export const artifactImageResourceUrl = ({
+export const artifactResourceUrl = ({
   artifactId,
   conversationId,
   sessionId,
   source,
   originalUrl,
   isConnected,
-}: ArtifactImageResourceInput): string => {
+}: ArtifactResourceInput): string => {
   const inlineUrl = inlineImageResourceUrl(originalUrl);
   if (inlineUrl) return inlineUrl;
+  if (source === "workspace") {
+    const resource = new URL(originalUrl!);
+    return workspaceRawResourceUrlWithToken(resource.searchParams.get("path")!, resource.searchParams.get("workspace_root")!);
+  }
 
   const id = String(artifactId || "").trim();
   const owner = String(conversationId || "").trim();

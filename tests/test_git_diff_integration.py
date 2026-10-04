@@ -7,10 +7,32 @@ from pathlib import Path
 
 import pytest
 
-from backend.diff.git_integration import GitCommandError, get_working_tree_diff
+from backend.diff.git_integration import GitCommandError, get_working_tree_diff, is_git_worktree
 from backend.diff.git_integration import get_staged_diff, get_untracked_files, stage_file, unstage_all, unstage_file
-from backend.services.workspace_api_service import workspace_git_diff_payload, workspace_git_status_payload
+from backend.services.workspace_api_service import workspace_git_diff_payload, workspace_git_status_payload, workspace_git_worktree_payload
 from backend.workspace.worktree import WorktreeManager
+
+
+@pytest.fixture(autouse=True)
+def run_real_git_without_platform_sandbox(monkeypatch, tmp_path):
+    """Test Git semantics with real Git; sandbox authority has its own suite."""
+    from backend.runtime_env import sanitized_git_env
+
+    def isolated_git_env(directory):
+        env = sanitized_git_env(directory)
+        env["GIT_CEILING_DIRECTORIES"] = str(tmp_path.parent)
+        return env
+
+    monkeypatch.setattr("backend.diff.git_integration.sanitized_git_env", isolated_git_env)
+
+    async def run(argv, *, root, cwd=None, timeout=None, **_kwargs):
+        directory = cwd or root
+        return await asyncio.to_thread(
+            subprocess.run, argv, cwd=directory, env=isolated_git_env(directory),
+            capture_output=True, timeout=timeout,
+        )
+
+    monkeypatch.setattr("backend.tools.git_support._run_git", run)
 
 
 def test_git_diff_uses_supported_safety_flags_and_returns_changes(tmp_path) -> None:
@@ -122,12 +144,116 @@ def test_workspace_status_preserves_unicode_and_rename_destinations(audit_repo: 
     assert "error" not in result
 
 
-def test_workspace_git_failure_is_not_reported_as_clean(tmp_path: Path) -> None:
+def test_workspace_git_reads_report_plain_folders_as_not_using_git(tmp_path: Path) -> None:
     result = workspace_git_status_payload(tmp_path)
     diff = workspace_git_diff_payload(tmp_path, "")
+    worktree = workspace_git_worktree_payload(tmp_path)
 
-    assert "not a git repository" in result["error"].lower()
-    assert "not a git repository" in diff["error"].lower()
+    for payload in (result, diff, worktree):
+        assert payload["is_git_repo"] is False
+        assert "error" not in payload
+    assert result["modified"] == result["staged"] == result["untracked"] == []
+    assert diff["diff"] == ""
+    assert worktree["worktrees"] == []
+
+
+def _diff_session(root: Path):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    return SimpleNamespace(
+        active_conversation_id="git-owner",
+        session_lifecycle=SimpleNamespace(workspace_root=root, current_workspace_root=lambda: root),
+        resolve_requested_workspace=lambda _requested: root,
+        send_event=AsyncMock(),
+    )
+
+
+def test_automatic_git_diff_reads_skip_plain_folders_without_command_errors(tmp_path: Path, monkeypatch) -> None:
+    from backend.diff import git_integration
+    from backend.ws.handlers.diff import handle_diff_git_working_tree, handle_diff_git_staged
+
+    session = _diff_session(tmp_path)
+    commands = []
+    run_git = git_integration._run_git
+
+    async def record(root, *args):
+        commands.append(args)
+        return await run_git(root, *args)
+
+    monkeypatch.setattr(git_integration, "_run_git", record)
+
+    async def scenario():
+        await handle_diff_git_working_tree(session, {"request_id": "working-query"})
+        await handle_diff_git_staged(session, {"request_id": "staged-query"})
+
+    asyncio.run(scenario())
+    events = [call.args[0] for call in session.send_event.await_args_list]
+    assert [event.type for event in events] == ["diff.git_working_tree", "diff.git_staged"]
+    assert commands == [("rev-parse", "--is-inside-work-tree")] * 2
+    for event, request_id in zip(events, ("working-query", "staged-query"), strict=True):
+        assert event.data["is_git_repo"] is False
+        assert event.data["files"] == []
+        assert event.data["conversation_id"] == "git-owner"
+        assert event.data["workspace_root"] == str(tmp_path)
+        assert event.data["request_id"] == request_id
+    assert events[0].data["untracked"] == []
+
+
+@pytest.mark.parametrize("kind", ["repository", "subdirectory", "linked-worktree"])
+def test_git_worktree_detection_uses_git_discovery(audit_repo: Path, tmp_path: Path, kind: str) -> None:
+    root = audit_repo
+    if kind == "subdirectory":
+        root = audit_repo / "nested"
+        root.mkdir()
+    elif kind == "linked-worktree":
+        root = tmp_path / "linked"
+        _git(audit_repo, "worktree", "add", "-b", "discovery-linked", str(root))
+
+    assert asyncio.run(is_git_worktree(str(root))) is True
+
+
+@pytest.mark.parametrize("kind", ["repository-error", "missing-git"])
+def test_automatic_git_diff_reads_still_report_real_failures(tmp_path: Path, monkeypatch, kind: str) -> None:
+    from backend.diff import git_integration
+    from backend.ws.handlers.diff import handle_diff_git_working_tree, handle_diff_git_staged
+
+    failure = GitCommandError(("rev-parse", "--is-inside-work-tree"), 128, "fatal: detected dubious ownership in repository")
+    if kind == "missing-git":
+        failure = FileNotFoundError("Git executable is missing")
+
+    async def fail(_root, *_args):
+        raise failure
+
+    monkeypatch.setattr(git_integration, "_run_git", fail)
+    session = _diff_session(tmp_path)
+
+    async def scenario():
+        await handle_diff_git_working_tree(session, {})
+        await handle_diff_git_staged(session, {})
+
+    asyncio.run(scenario())
+    events = [call.args[0] for call in session.send_event.await_args_list]
+    assert len(events) == 2
+    for event in events:
+        assert event.type == "command.result"
+        assert event.data["level"] == "error"
+        assert str(failure) in event.data["message"]
+        assert event.data["data"]["error_type"] == "git_command"
+
+
+def test_broken_git_metadata_remains_an_error(tmp_path: Path) -> None:
+    (tmp_path / ".git").write_text("gitdir: missing-metadata\n", encoding="utf-8")
+
+    with pytest.raises(GitCommandError):
+        asyncio.run(is_git_worktree(str(tmp_path)))
+    for payload in (
+        workspace_git_status_payload(tmp_path),
+        workspace_git_diff_payload(tmp_path, ""),
+        workspace_git_worktree_payload(tmp_path),
+    ):
+        assert payload["error"]
+        assert payload.get("is_git_repo") is not False
 
 
 def test_workspace_diff_uses_literal_pathspecs(audit_repo: Path) -> None:

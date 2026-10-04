@@ -65,14 +65,6 @@ def plan_permission_mode_update(
         )
 
     conversation_id = str(explicit_conversation_id or active_id).strip()
-    if not conversation_id:
-        return PermissionModePlan(
-            requested=requested,
-            source=source,
-            conversation_id="",
-            session_only=False,
-            error_event=AgentEvent.error("No active conversation to update", recoverable=True, error_type="tool"),
-        )
 
     auto_approve_reason = ""
     if requested == "bypass":

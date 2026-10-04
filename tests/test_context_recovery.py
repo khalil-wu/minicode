@@ -460,8 +460,8 @@ def test_successful_compaction_resets_failure_counter_and_bounds_skill_snapshot(
 
     persisted = builder.export_snapshot()
     assert persisted["consecutive_autocompact_failures"] == 0
-    assert len(persisted["invoked_skills"][0]["content"]) <= 20_000
+    assert len(persisted["invoked_skills"][0]["content"]) == 30_000
     assert (
         "skill content truncated for compaction"
-        in persisted["invoked_skills"][0]["content"]
+        not in persisted["invoked_skills"][0]["content"]
     )

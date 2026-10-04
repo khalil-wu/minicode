@@ -1,14 +1,11 @@
 """UI preferences storage and retrieval."""
 import json
-import logging
 import re
-from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.atomic_io import atomic_write_text, file_mutation_locks
-
-logger = logging.getLogger(__name__)
 
 # Session ids are embedded directly into filenames, so reject anything that is
 # not a safe path segment to prevent traversal outside data_dir.
@@ -18,10 +15,10 @@ _SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9_.\-]{1,128}$")
 FontSize = Literal["xs", "sm", "base", "md", "lg"]
 
 
-@dataclass
-class UIPreferences:
+class UIPreferences(BaseModel):
     """User UI preferences."""
-    sidebar_width: int = 280
+    model_config = ConfigDict(strict=True, extra="forbid")
+    sidebar_width: int = Field(default=280, gt=0)
     runtime_rail_visible: bool = True
     message_font_size: FontSize = "base"
     code_font_size: FontSize = "sm"
@@ -29,12 +26,12 @@ class UIPreferences:
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
-        return asdict(self)
+        return self.model_dump()
 
     @classmethod
     def from_dict(cls, data: dict) -> "UIPreferences":
         """Create from dictionary."""
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        return cls.model_validate(data)
 
 
 class UIPreferencesStore:
@@ -43,7 +40,6 @@ class UIPreferencesStore:
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self._cache: dict[str, UIPreferences] = {}
 
     def _get_path(self, session_id: str) -> Path:
         """Get path for session preferences."""
@@ -54,57 +50,35 @@ class UIPreferencesStore:
 
     def get(self, session_id: str) -> UIPreferences:
         """Get preferences for session."""
-        try:
-            path = self._get_path(session_id)
-        except ValueError:
-            logger.warning("rejected ui preferences lookup for unsafe session_id")
-            prefs = UIPreferences()
-            self._cache[session_id] = prefs
-            return prefs
+        path = self._get_path(session_id)
         with file_mutation_locks([path]):
             return self._read_unlocked(session_id, path)
 
     def save(self, session_id: str, preferences: UIPreferences) -> None:
         """Save preferences for session."""
-        try:
-            path = self._get_path(session_id)
-        except ValueError:
-            logger.warning("rejected ui preferences save for unsafe session_id")
-            return
+        path = self._get_path(session_id)
         with file_mutation_locks([path]):
             self._write_unlocked(session_id, path, preferences)
 
     def update(self, session_id: str, updates: dict) -> UIPreferences:
         """Update preferences for session."""
-        try:
-            path = self._get_path(session_id)
-        except ValueError:
-            logger.warning("rejected ui preferences update for unsafe session_id")
-            return UIPreferences()
+        path = self._get_path(session_id)
+        validated = UIPreferences.from_dict(updates).model_dump(exclude_unset=True)
         # Read-modify-write must be one critical section.  The API creates a
         # store per request, so an instance-local cache or separately locked
         # get/save pair can otherwise lose concurrent panel preference edits.
         with file_mutation_locks([path]):
             prefs = self._read_unlocked(session_id, path)
-            for key, value in updates.items():
-                if hasattr(prefs, key):
-                    setattr(prefs, key, value)
-            self._write_unlocked(session_id, path, prefs)
-            return prefs
+            updated = prefs.model_copy(update=validated)
+            self._write_unlocked(session_id, path, updated)
+            return updated
 
     def _read_unlocked(self, session_id: str, path: Path) -> UIPreferences:
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    prefs = UIPreferences.from_dict(data)
-                    self._cache[session_id] = prefs
-                    return prefs
-            except (OSError, ValueError, TypeError):
-                logger.warning("invalid ui preferences file ignored: %s", path)
-        prefs = UIPreferences()
-        self._cache[session_id] = prefs
-        return prefs
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return UIPreferences()
+        return UIPreferences.from_dict(data)
 
     def _write_unlocked(
         self,
@@ -116,4 +90,3 @@ class UIPreferencesStore:
             path,
             json.dumps(preferences.to_dict(), ensure_ascii=False, indent=2) + "\n",
         )
-        self._cache[session_id] = preferences

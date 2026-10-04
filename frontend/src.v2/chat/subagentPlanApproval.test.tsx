@@ -107,9 +107,9 @@ describe("teammate plan approval prompt", () => {
     handleRuntimeEvent(planApprovalEvent() as unknown as ServerEvent, "conv-plan");
     render(<InlineAgentPrompt />);
 
-    expect(screen.getByText("子智能体 builder 提交了计划，需要你批准后才能开始实现。")).toBeTruthy();
+    expect(screen.getByText("builder 提交了计划，需要你批准后才能开始实现。")).toBeTruthy();
     expect(screen.getByText("补齐审批链路")).toBeTruthy();
-    expect(screen.getByText("Plan 文件：/repo/.minicode/plans/builder.md")).toBeTruthy();
+    expect(screen.getByText("计划文件：/repo/.minicode/plans/builder.md")).toBeTruthy();
   });
 
   it("approves with subagent.plan_review and clears the prompt", async () => {

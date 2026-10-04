@@ -7,11 +7,11 @@ import { DiffPanel } from "./DiffPanel";
 import { EditorPanel } from "./EditorPanel";
 import { useAgentEditReview } from "./useAgentEditReview";
 
-const seams = vi.hoisted(() => ({ send: vi.fn(), confirm: vi.fn(), toast: vi.fn(), write: vi.fn() }));
+const seams = vi.hoisted(() => ({ send: vi.fn(), awaitSend: vi.fn(), confirm: vi.fn(), toast: vi.fn(), write: vi.fn() }));
 vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommand: seams.send,
-  sendClientCommandAwaitResult: vi.fn(), sendPromptResponseCommand: vi.fn(),
-  commandResultSucceeded: (r: any) => r?.status === "success",
+  sendClientCommandAwaitResult: seams.awaitSend, sendPromptResponseCommand: vi.fn(),
+  commandResultSucceeded: (r: any) => r?.level === "info",
 }));
 vi.mock("../overlays/DialogService", () => ({ showConfirm: seams.confirm }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: seams.toast }));
@@ -27,6 +27,7 @@ const patch = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@
 const original = useAppStore.getState();
 beforeEach(() => {
   vi.clearAllMocks(); seams.send.mockReturnValue(true);
+  seams.awaitSend.mockResolvedValue({ type: "command.result", level: "info", message: "" });
   useAppStore.setState({
     ...original, conversationId: "conv-A", workingDirectory: "C:/audit/A", messages: [], diffReview: null,
     gitChanges: { ...original.gitChanges, loading: false, workingTree: [{ path: "a.txt", patch, additions: 1, deletions: 1 }], staged: [], untracked: [] },
@@ -45,16 +46,16 @@ describe("business diff and editor ownership", () => {
     await waitFor(() => expect(seams.confirm).toHaveBeenCalledOnce());
     act(() => useAppStore.setState({ workingDirectory: "C:/audit/B", conversationId: "conv-B" }));
     await act(async () => finish(true));
-    console.log("discard commands after owner switch", JSON.stringify(seams.send.mock.calls));
     expect(seams.send).not.toHaveBeenCalled();
+    expect(seams.awaitSend).not.toHaveBeenCalled();
   });
 
   it("still discards the explicitly confirmed file for the original owner", async () => {
     seams.confirm.mockResolvedValue(true); render(<DiffPanel />);
     fireEvent.click(screen.getByRole("button", { name: "放弃 a.txt 的更改" }));
-    await waitFor(() => expect(seams.send).toHaveBeenCalledWith(expect.objectContaining({
+    await waitFor(() => expect(seams.awaitSend).toHaveBeenCalledWith(expect.objectContaining({
       type: "diff.git_revert_file", path: "a.txt", workspace: "C:/audit/A", conversation_id: "conv-A", confirmed: true,
-    })));
+    }), "diff.git_revert_file", { silent: true }));
   });
 
   it("opens review comments with the keyboard and does not submit an IME confirmation", async () => {

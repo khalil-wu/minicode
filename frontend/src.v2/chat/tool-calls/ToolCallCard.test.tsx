@@ -4,7 +4,6 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ToolCallCard } from "./ToolCallCard";
-import { __resetOpenWebInPreviewDedupeForTests } from "../openWebInPreview";
 import {
   __resetOpenWebInBrowserForTests,
   subscribeBrowserRequests,
@@ -55,6 +54,13 @@ vi.mock("../../overlays/ToastContainer", () => ({
 }));
 
 describe("ToolCallCard", () => {
+  it("shows the projected MCP label when server and tool protocol separators are ambiguous", () => {
+    const record = { id: "mcp-qualified", name: "mcp__team__internal__find__notes", displayHint: "team__internal.find__notes",
+      args: { query: "read_file.ts" }, status: "success" as const, activityKind: "mcpToolCall", summary: "[]" };
+    render(<ToolCallCard record={record} viewMode="normal" />);
+    expect(screen.getByRole("button", { name: /team__internal\.find__notes/ })).toBeTruthy();
+    expect(record.name).toBe("mcp__team__internal__find__notes");
+  });
   afterEach(() => {
     cleanup();
     sendMock.mockClear();
@@ -63,7 +69,6 @@ describe("ToolCallCard", () => {
     mockStoreState.rightStackTab = "tasks";
     mockStoreState.rightPanelOpen = false;
     mockStoreState.runtimeCapabilities = null;
-    __resetOpenWebInPreviewDedupeForTests();
     __resetOpenWebInBrowserForTests();
   });
 
@@ -85,7 +90,7 @@ describe("ToolCallCard", () => {
       },
     }));
 
-    fireEvent.click(screen.getByRole("button", { name: /运行命令/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Run/ }));
 
     expect(screen.getByText("$")).toBeTruthy();
     expect(screen.getAllByText("npx tsc --noEmit").length).toBeGreaterThanOrEqual(1);
@@ -161,7 +166,7 @@ describe("ToolCallCard", () => {
       },
     }));
 
-    expect(screen.getByText("运行命令")).toBeTruthy();
+    expect(screen.getByText("Run")).toBeTruthy();
     expect(screen.getByText("npm test")).toBeTruthy();
     expect(screen.queryByTestId("tool-call-summary-command")).toBeNull();
     expect(screen.queryByText("all tests passed")).toBeNull();
@@ -219,7 +224,7 @@ describe("ToolCallCard", () => {
       },
     }));
 
-    expect(screen.getByText("获取网页")).toBeTruthy();
+    expect(screen.getByText("Fetch")).toBeTruthy();
     expect(document.body.textContent).not.toContain("web_fetch");
   });
 
@@ -239,7 +244,7 @@ describe("ToolCallCard", () => {
       },
     }));
 
-    expect(screen.getByText("搜索网页")).toBeTruthy();
+    expect(screen.getByText("Search")).toBeTruthy();
     expect(screen.getAllByText("MiniCode documentation").length).toBeGreaterThanOrEqual(1);
     expect(document.body.textContent).not.toContain("web_search");
   });
@@ -289,9 +294,9 @@ describe("ToolCallCard", () => {
       },
     }));
 
-    expect(screen.getByText("文件更改")).toBeTruthy();
-    expect(screen.getByText("编辑文件")).toBeTruthy();
-    expect(screen.getAllByText("frontend/src.v2/chat/tool-calls/ToolCallCard.tsx").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("Diff")).toBeTruthy();
+    expect(screen.getByText("Edit")).toBeTruthy();
+    expect(screen.getAllByText(/frontend\/src\.v2\/chat\/tool-calls\/ToolCallCard\.tsx$/).length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("+2").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("-1").length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText(/^结果$/)).toBeNull();

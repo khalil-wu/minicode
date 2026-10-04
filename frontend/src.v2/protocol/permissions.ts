@@ -1,5 +1,4 @@
 import type { PermissionMode } from "../stores/types";
-import { sendClientCommand } from "./ws-outbox";
 
 export type BackendPermissionMode = PermissionMode;
 export const DEFAULT_UI_PERMISSION_MODE: PermissionMode = "confirm";
@@ -25,18 +24,4 @@ export const toBackendPermissionMode = (mode: PermissionMode): BackendPermission
 
 export const fromBackendPermissionMode = (mode: string): PermissionMode => {
   return normalizeUiPermissionMode(mode);
-};
-
-export const syncPermissionMode = (
-  mode: PermissionMode,
-  source = "frontend.ui",
-  conversationId?: string | null,
-): boolean => {
-  const targetConversationId = String(conversationId ?? "").trim();
-  return sendClientCommand({
-    type: "conversation.permission_mode.set",
-    mode: toBackendPermissionMode(mode),
-    source,
-    ...(targetConversationId ? { conversation_id: targetConversationId } : {}),
-  });
 };

@@ -75,7 +75,7 @@ export function stripLegacyContentFields(message: ChatMessage): ChatMessage {
 }
 
 export function getContentBlocks(message: ChatMessage): ContentBlock[] {
-  if (message.blocks && message.blocks.length > 0) {
+  if (message.blocks) {
     return message.blocks;
   }
   const legacy = legacyFields(message);
@@ -100,7 +100,7 @@ export function getContentBlocks(message: ChatMessage): ContentBlock[] {
 }
 
 export function getThinkingFromMessage(message: ChatMessage): string {
-  if (message.blocks && message.blocks.length > 0) {
+  if (message.blocks) {
     return message.blocks
       .filter((block): block is Extract<ContentBlock, { type: "thinking" }> => block.type === "thinking")
       .map((block) => block.content)
@@ -110,7 +110,7 @@ export function getThinkingFromMessage(message: ChatMessage): string {
 }
 
 export function getToolCallsFromMessage(message: ChatMessage): ToolCallRecord[] {
-  if (message.blocks && message.blocks.length > 0) {
+  if (message.blocks) {
     return message.blocks
       .filter((block): block is Extract<ContentBlock, { type: "tool_call" }> => block.type === "tool_call")
       .map((block) => block.record);

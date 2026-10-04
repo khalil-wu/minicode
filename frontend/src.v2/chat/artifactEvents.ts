@@ -208,6 +208,7 @@ export const handleArtifactEvent = (e: ServerEvent, conversationId?: string): bo
       s.addInspectorEntry({
         targetKind: ev.target_kind,
         targetId: ev.target_id,
+        conversationId: owner,
         payload: ev.payload,
         timestamp: Date.now(),
       });

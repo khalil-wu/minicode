@@ -5,9 +5,11 @@ import {
   Crosshair,
   Download,
   ExternalLink,
+  FileDiff,
   Globe2,
   LoaderCircle,
   MessageSquarePlus,
+  MoreHorizontal,
   Network,
   Plus,
   RefreshCw,
@@ -18,7 +20,9 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent } from "react";
+import { ContextMenu } from "../components/ContextMenu";
 import {
   embeddedBrowserActivate,
   embeddedBrowserClearSiteData,
@@ -36,12 +40,13 @@ import {
   type EmbeddedBrowserState,
   type EmbeddedBrowserSettings,
 } from "../desktop/runtime";
-import { assessNetworkTargetUrl } from "../lib/network-target";
+import { parseHttpUrl } from "../lib/network-target";
 import { previewUrlsShareOrigin } from "../lib/preview-projection";
 import { normalizeWorkspaceRoot } from "../lib/workspace-path";
 import { BrandIcon } from "../components/BrandIcon";
 import { SelectMenu } from "../components/SelectMenu";
 import { useAppStore } from "../stores";
+import { useTurnChanges } from "../chat/useTurnChanges";
 import {
   acknowledgeBrowserRequest,
   subscribeBrowserRequests,
@@ -64,6 +69,16 @@ type InspectorKind = "console" | "network";
 
 const RENDERER_OVERLAYS = '[role="menu"], [role="listbox"], [role="dialog"], [role="tooltip"]';
 
+const navigateTabList = (event: KeyboardEvent<HTMLDivElement>) => {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+  const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+  const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+    : (current + (event.key === "ArrowLeft" ? -1 : 1) + buttons.length) % buttons.length;
+  buttons[next].focus(); buttons[next].click();
+};
+
 interface BrowserDiagnosticItem {
   timestamp?: number;
   level?: number | string;
@@ -84,6 +99,15 @@ interface PickedElement {
   viewport: { width: number; height: number; devicePixelRatio?: number };
   text?: string;
 }
+
+interface AnnotationDraft {
+  open: boolean;
+  note: string;
+  selector: string;
+  pickedElement: PickedElement | null;
+}
+
+const EMPTY_ANNOTATION_DRAFT: AnnotationDraft = { open: false, note: "", selector: "", pickedElement: null };
 
 const DEFAULT_BROWSER_SETTINGS: EmbeddedBrowserSettings = {
   downloadPolicy: "block",
@@ -145,15 +169,14 @@ export const BrowserPanel = () => {
   const conversationId = useAppStore((state) => state.conversationId) || "";
   const addBrowserAnnotation = useAppStore((state) => state.addBrowserAnnotation);
   const addSelectedMention = useAppStore((state) => state.addSelectedMention);
+  const { summary: turnChanges, openReview } = useTurnChanges();
   const [tabs, setRenderedTabs] = useState<BrowserTab[]>(() => [blankTab()]);
   const [activeId, setActiveId] = useState(() => tabs[0].id);
   const [hydratedConversationId, setHydratedConversationId] = useState<string | null>(null);
   const browserHydrated = hydratedConversationId === conversationId;
-  const [annotationPage, setAnnotationPage] = useState<string | null>(null);
-  const [annotationNote, setAnnotationNote] = useState("");
-  const [annotationSelector, setAnnotationSelector] = useState("");
-  const [pickedElement, setPickedElement] = useState<PickedElement | null>(null);
+  const [annotationDrafts, setAnnotationDrafts] = useState<Record<string, AnnotationDraft>>({});
   const [pickerMode, setPickerMode] = useState<"element" | "region" | null>(null);
+  const [moreMenuPosition, setMoreMenuPosition] = useState<{ x: number; y: number } | null>(null);
   const [inspectorPage, setInspectorPage] = useState<string | null>(null);
   const [inspectorKind, setInspectorKind] = useState<InspectorKind>("console");
   const [diagnostics, setDiagnostics] = useState<BrowserDiagnosticItem[]>([]);
@@ -161,9 +184,12 @@ export const BrowserPanel = () => {
   const [inspectorError, setInspectorError] = useState("");
   const [settingsPage, setSettingsPage] = useState<string | null>(null);
   const [browserSettings, setBrowserSettings] = useState<EmbeddedBrowserSettings>(DEFAULT_BROWSER_SETTINGS);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const overlaysRef = useRef(new Set<HTMLElement>());
   const addressRef = useRef<HTMLInputElement>(null);
+  const annotationNoteRef = useRef<HTMLTextAreaElement>(null);
   const activeIdRef = useRef(activeId);
   const tabsRef = useRef(tabs);
   const setTabs = useCallback((update: BrowserTab[] | ((current: BrowserTab[]) => BrowserTab[])) => {
@@ -177,30 +203,38 @@ export const BrowserPanel = () => {
   const ownerGenerationRef = useRef(0);
   const pageGenerationRef = useRef(0);
   const inspectorRequestRef = useRef(0);
+  const settingsRevisionRef = useRef(0);
   const navigationRequestsRef = useRef(new Map<string, number>());
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeId) ?? tabs[0],
     [activeId, tabs],
   );
   const pageKey = JSON.stringify([conversationId, activeId, activeTab.url]);
-  const annotationOpen = annotationPage === pageKey;
+  const annotationDraft = annotationDrafts[pageKey] ?? EMPTY_ANNOTATION_DRAFT;
+  const { open: annotationOpen, note: annotationNote, selector: annotationSelector, pickedElement } = annotationDraft;
+  const updateAnnotationDraft = (patch: Partial<AnnotationDraft>) => {
+    setAnnotationDrafts((drafts) => ({
+      ...drafts,
+      [pageKey]: { ...(drafts[pageKey] ?? EMPTY_ANNOTATION_DRAFT), ...patch },
+    }));
+  };
   const inspectorOpen = inspectorPage === pageKey;
   const settingsOpen = settingsPage === pageKey;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     pageGenerationRef.current += 1;
     inspectorRequestRef.current += 1;
-    setAnnotationPage(null);
-    setAnnotationNote("");
-    setAnnotationSelector("");
-    setPickedElement(null);
     setPickerMode(null);
+    setMoreMenuPosition(null);
     setInspectorPage(null);
     setInspectorLoading(false);
     setInspectorError("");
     setDiagnostics([]);
     setSettingsPage(null);
     setBrowserSettings(DEFAULT_BROWSER_SETTINGS);
+    setSettingsLoading(false);
+    setSettingsSaving(false);
+    settingsRevisionRef.current += 1;
   }, [conversationId, activeId, activeTab.url]);
 
   useEffect(() => {
@@ -231,7 +265,6 @@ export const BrowserPanel = () => {
     setTabs([initialTab]);
     setActiveId(initialTab.id);
     setHydratedConversationId(null);
-    setAnnotationPage(null);
     setInspectorPage(null);
     setSettingsPage(null);
     setPickerMode(null);
@@ -296,6 +329,7 @@ export const BrowserPanel = () => {
     // Yield its surface to overlapping menus and modal backdrops; retain the
     // same tab and navigation state when the renderer overlay closes.
     const obscured = Array.from(overlaysRef.current).some((overlay) => {
+      if (overlay.contains(element)) return false;
       const bounds = overlay.getBoundingClientRect();
       return bounds.width > 0 && bounds.height > 0 && getComputedStyle(overlay).visibility !== "hidden"
         && (overlay.getAttribute("aria-modal") === "true"
@@ -356,13 +390,16 @@ export const BrowserPanel = () => {
       setTabs((current) => current.map((tab) => (
         tab.id === tabId ? updateTabFromEvent(tab, state) : tab
       )));
-      if (activeIdRef.current !== tabId) {
+      if (activeIdRef.current === tabId) {
+        await embeddedBrowserActivate(owner, tabId);
+      } else {
         if (createdIdsRef.current.has(activeIdRef.current)) {
           await embeddedBrowserActivate(owner, activeIdRef.current);
         } else {
           await embeddedBrowserSetBounds({ id: tabId, conversationId: owner, x: 0, y: 0, width: 0, height: 0 });
         }
       }
+      if (!isCurrent()) return false;
       syncBounds();
       return true;
     } catch (error) {
@@ -436,9 +473,17 @@ export const BrowserPanel = () => {
     const owner = ownerRef.current;
     const generation = ownerGenerationRef.current;
     if (!owner) return;
-    void Promise.resolve(embeddedBrowserActivate(owner, activeId)).then((activated) => {
-      if (ownerRef.current !== owner || ownerGenerationRef.current !== generation) return;
-      if (!activated) void reconcileNativeTab(activeId);
+    const navigationRequest = navigationRequestsRef.current.get(activeId);
+    const isCurrent = () => ownerRef.current === owner && ownerGenerationRef.current === generation
+      && activeIdRef.current === activeId && navigationRequestsRef.current.get(activeId) === navigationRequest;
+    void Promise.resolve(embeddedBrowserActivate(owner, activeId)).then(async (activated) => {
+      if (!isCurrent()) return;
+      if (!activated) await reconcileNativeTab(activeId);
+    }).catch((error) => {
+      if (!isCurrent()) return;
+      setTabs((current) => current.map((tab) => tab.id === activeId
+        ? { ...tab, error: error instanceof Error ? error.message : "无法激活浏览器标签页。" }
+        : tab));
     });
     if (visibleIdsRef.current.has(activeId)) window.requestAnimationFrame(syncBounds);
   }, [activeId, browserHydrated, reconcileNativeTab, syncBounds]);
@@ -494,6 +539,9 @@ export const BrowserPanel = () => {
   }, [openTab]);
 
   useEffect(() => () => {
+    ownerGenerationRef.current += 1;
+    pageGenerationRef.current += 1;
+    inspectorRequestRef.current += 1;
     const owner = ownerRef.current;
     for (const id of createdIdsRef.current) {
       if (owner) {
@@ -506,10 +554,10 @@ export const BrowserPanel = () => {
   const navigate = async (tabId: string, rawValue: string) => {
     const normalized = normalizeBrowserInput(rawValue);
     if (!normalized) return;
-    const target = assessNetworkTargetUrl(normalized);
-    if (target.risk === "invalid") {
+    const target = parseHttpUrl(normalized);
+    if (!target) {
       setTabs((current) => current.map((tab) => (
-        tab.id === tabId ? { ...tab, error: target.reason } : tab
+        tab.id === tabId ? { ...tab, error: "仅支持不包含登录凭据的 HTTP(S) 地址。" } : tab
       )));
       return;
     }
@@ -518,10 +566,10 @@ export const BrowserPanel = () => {
     // crosses the same security boundary exactly once.
     setTabs((current) => current.map((tab) => (
       tab.id === tabId
-        ? { ...tab, draftUrl: target.normalizedUrl, loading: true, error: undefined }
+        ? { ...tab, draftUrl: target.toString(), loading: true, error: undefined }
         : tab
     )));
-    await performNativeNavigation(tabId, target.normalizedUrl);
+    await performNativeNavigation(tabId, target.toString());
   };
 
   const runNavigationAction = useCallback(async (
@@ -564,6 +612,17 @@ export const BrowserPanel = () => {
         openTab(request.url);
         return;
       }
+      if (request.kind === "resume") {
+        const tab = tabsRef.current.find((candidate) => candidate.id === request.targetId);
+        if (tab) {
+          activeIdRef.current = tab.id;
+          setActiveId(tab.id);
+          if (tab.url !== request.url) void performNativeNavigation(tab.id, request.url);
+        } else {
+          openTab(request.url);
+        }
+        return;
+      }
       if (request.workspaceRoot !== normalizeWorkspaceRoot(useAppStore.getState().workingDirectory)) return;
       for (const tab of tabsRef.current) {
         if (createdIdsRef.current.has(tab.id) && previewUrlsShareOrigin(tab.url, request.url)) {
@@ -571,7 +630,7 @@ export const BrowserPanel = () => {
         }
       }
     });
-  }, [browserHydrated, conversationId, openTab, runNavigationAction]);
+  }, [browserHydrated, conversationId, openTab, performNativeNavigation, runNavigationAction]);
 
   const closeTab = async (tabId: string) => {
     const index = tabs.findIndex((tab) => tab.id === tabId);
@@ -579,7 +638,7 @@ export const BrowserPanel = () => {
     const owner = ownerRef.current;
     const generation = ownerGenerationRef.current;
     if (!owner) return;
-    if (createdIdsRef.current.has(tabId)) {
+    if (createdIdsRef.current.has(tabId) || navigationRequestsRef.current.has(tabId)) {
       try {
         const closed = await embeddedBrowserClose(owner, tabId);
         if (ownerRef.current !== owner || ownerGenerationRef.current !== generation) return;
@@ -663,10 +722,32 @@ export const BrowserPanel = () => {
       viewportWidth: annotation.viewportWidth,
       viewportHeight: annotation.viewportHeight,
     });
-    setAnnotationPage(null);
-    setAnnotationNote("");
-    setAnnotationSelector("");
-    setPickedElement(null);
+    updateAnnotationDraft(EMPTY_ANNOTATION_DRAFT);
+    const store = useAppStore.getState();
+    const chatPanel = store.panelSlots.find((slot) => slot.kind === "chat");
+    if (chatPanel) store.focusPanel(chatPanel.id);
+    else store.addPanel({ id: "main-chat", kind: "chat", label: "Chat" });
+    window.dispatchEvent(new Event("composer:focus"));
+    const workspaceRoot = store.workingDirectory;
+    requestAnimationFrame(() => {
+      const current = useAppStore.getState();
+      if (current.conversationId !== conversationId || current.workingDirectory !== workspaceRoot) return;
+      document.querySelector<HTMLTextAreaElement>("[data-composer-input]")?.focus();
+    });
+  };
+
+  const reviewPageChanges = () => {
+    openReview();
+    const store = useAppStore.getState();
+    store.setDiffReviewState({
+      ...store.diffReview!,
+      previewReturnTarget: {
+        conversationId,
+        tab: "browser",
+        url: activeTab.url,
+        targetId: activeTab.id,
+      },
+    });
   };
 
   const pickPageTarget = async (kind: "element" | "region") => {
@@ -675,14 +756,22 @@ export const BrowserPanel = () => {
     const generation = pageGenerationRef.current;
     const tabId = activeTab.id;
     setPickerMode(kind);
+    updateAnnotationDraft({ open: true });
+    setInspectorPage(null);
+    setSettingsPage(null);
     try {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
       const result = await embeddedBrowserInspect(owner, tabId, kind);
       if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
+      if (!result?.ok) throw new Error(result?.error || "页面目标选取失败。");
       const value = result?.value as PickedElement | null | undefined;
+      if (value === null) return;
       if (!value?.rect || !value.viewport) throw new Error("页面没有返回可用的选取结果。");
-      setPickedElement(value);
-      setAnnotationSelector(value.selector || "");
-      if (!annotationNote.trim() && value.text) setAnnotationNote(value.text);
+      updateAnnotationDraft({
+        pickedElement: value,
+        selector: value.selector || "",
+      });
     } catch (error) {
       if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
       setTabs((current) => current.map((tab) => tab.id === tabId
@@ -691,6 +780,9 @@ export const BrowserPanel = () => {
     } finally {
       if (pageGenerationRef.current === generation && activeIdRef.current === tabId) {
         setPickerMode(null);
+        requestAnimationFrame(() => {
+          if (pageGenerationRef.current === generation && activeIdRef.current === tabId) annotationNoteRef.current?.focus();
+        });
       }
     }
   };
@@ -699,19 +791,24 @@ export const BrowserPanel = () => {
     const generation = pageGenerationRef.current;
     const tabId = activeTab.id;
     const url = activeTab.url;
+    settingsRevisionRef.current += 1;
+    setSettingsSaving(true);
     try {
       const next = await embeddedBrowserSetSettings(payload);
       if (
         pageGenerationRef.current !== generation
         || activeIdRef.current !== tabId
-        || !next
       ) return;
+      if (!next) throw new Error("桌面浏览器未确认站点设置更新。");
+      settingsRevisionRef.current += 1;
       setBrowserSettings(next);
     } catch (error) {
       if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
       setTabs((current) => current.map((tab) => tab.id === tabId && tab.url === url
         ? { ...tab, error: error instanceof Error ? error.message : "站点设置更新失败。" }
         : tab));
+    } finally {
+      if (pageGenerationRef.current === generation && activeIdRef.current === tabId) setSettingsSaving(false);
     }
   };
 
@@ -721,6 +818,8 @@ export const BrowserPanel = () => {
     const tabId = activeTab.id;
     const url = activeTab.url;
     if (!owner || !url) return;
+    settingsRevisionRef.current += 1;
+    setSettingsSaving(true);
     try {
       const cleared = await embeddedBrowserClearSiteData(owner, tabId);
       if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
@@ -730,12 +829,14 @@ export const BrowserPanel = () => {
         pageGenerationRef.current === generation
         && activeIdRef.current === tabId
         && settings
-      ) setBrowserSettings(settings);
+      ) { settingsRevisionRef.current += 1; setBrowserSettings(settings); }
     } catch (error) {
       if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
       setTabs((current) => current.map((tab) => tab.id === tabId && tab.url === url
         ? { ...tab, error: error instanceof Error ? error.message : "清除站点数据失败。" }
         : tab));
+    } finally {
+      if (pageGenerationRef.current === generation && activeIdRef.current === tabId) setSettingsSaving(false);
     }
   };
 
@@ -750,7 +851,8 @@ export const BrowserPanel = () => {
     try {
       const result = await embeddedBrowserInspect(owner, tabId, inspectorKind);
       if (inspectorRequestRef.current !== request) return;
-      setDiagnostics(Array.isArray(result?.value) ? result.value as BrowserDiagnosticItem[] : []);
+      if (!result?.ok) throw new Error(result?.error || "页面诊断读取失败。");
+      setDiagnostics(result.value as BrowserDiagnosticItem[]);
     } catch (error) {
       if (inspectorRequestRef.current !== request) return;
       setInspectorError(error instanceof Error ? error.message : "页面诊断读取失败。");
@@ -774,19 +876,22 @@ export const BrowserPanel = () => {
     const generation = pageGenerationRef.current;
     const tabId = activeTab.id;
     const url = activeTab.url;
+    const revision = settingsRevisionRef.current;
+    setSettingsLoading(true);
     void Promise.resolve(embeddedBrowserGetSettings(url)).then((settings) => {
       if (
         !cancelled
         && pageGenerationRef.current === generation
         && activeIdRef.current === tabId
         && settings
+        && settingsRevisionRef.current === revision
       ) setBrowserSettings(settings);
     }).catch((error) => {
       if (cancelled || pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
       setTabs((current) => current.map((tab) => tab.id === tabId && tab.url === url
         ? { ...tab, error: error instanceof Error ? error.message : "无法读取站点设置。" }
         : tab));
-    });
+    }).finally(() => { if (!cancelled && pageGenerationRef.current === generation && activeIdRef.current === tabId) setSettingsLoading(false); });
     window.requestAnimationFrame(syncBounds);
     return () => { cancelled = true; };
   }, [activeTab.id, activeTab.url, settingsOpen, syncBounds]);
@@ -830,7 +935,7 @@ export const BrowserPanel = () => {
 
   return (
     <div className="mc-browser-panel">
-      <div className="mc-browser-tabs" role="tablist" aria-label="浏览器标签页">
+      <div className="mc-browser-tabs" role="tablist" aria-label="浏览器标签页" onKeyDown={navigateTabList}>
         <div className="mc-browser-tabs-scroll">
           {tabs.map((tab) => (
             <div key={tab.id} className="mc-browser-tab" data-active={tab.id === activeId ? "true" : "false"}>
@@ -838,6 +943,7 @@ export const BrowserPanel = () => {
                 type="button"
                 role="tab"
                 aria-selected={tab.id === activeId}
+                tabIndex={tab.id === activeId ? 0 : -1}
                 title={tab.title}
                 onClick={() => setActiveId(tab.id)}
               >
@@ -903,17 +1009,22 @@ export const BrowserPanel = () => {
             onFocus={(event) => event.currentTarget.select()}
             placeholder="输入网址或搜索内容"
             aria-label="地址栏"
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
+            }}
             spellCheck={false}
           />
         </form>
         <button
           type="button"
-          aria-label="在系统浏览器中打开"
-          title="在系统浏览器中打开"
-          disabled={!activeTab.url}
-          onClick={() => activeTab.url && void openExternal(activeTab.url)}
+          className="mc-browser-select-target"
+          aria-label="选择元素"
+          title={pickerMode === "element" ? "在页面中点击目标，按 Esc 退出" : "选择页面元素并描述修改"}
+          disabled={!activeTab.url || pickerMode != null}
+          onClick={() => void pickPageTarget("element")}
         >
-          <ExternalLink size={16} />
+          {pickerMode === "element" ? <LoaderCircle className="mc-browser-spin" size={15} /> : <Crosshair size={15} />}
+          <span className="mc-browser-select-label">{pickerMode === "element" ? "点击目标…" : "选择元素"}</span>
         </button>
         <button
           type="button"
@@ -921,42 +1032,34 @@ export const BrowserPanel = () => {
           title="添加页面批注"
           disabled={!activeTab.url}
           onClick={() => {
-            setAnnotationPage(annotationOpen ? null : pageKey);
+            updateAnnotationDraft({ open: !annotationOpen });
             setInspectorPage(null);
             setSettingsPage(null);
           }}
         >
           <MessageSquarePlus size={16} />
         </button>
-        <button
-          type="button"
-          aria-label="打开页面诊断"
-          title="页面诊断"
-          disabled={!activeTab.url}
-          aria-pressed={inspectorOpen}
-          onClick={() => {
-            setInspectorPage(inspectorOpen ? null : pageKey);
-            setAnnotationPage(null);
-            setSettingsPage(null);
-          }}
-        >
-          <Bug size={16} />
-        </button>
-        <button
-          type="button"
-          aria-label="打开站点设置"
-          title="站点设置"
-          disabled={!activeTab.url}
-          aria-pressed={settingsOpen}
-          onClick={() => {
-            setSettingsPage(settingsOpen ? null : pageKey);
-            setAnnotationPage(null);
-            setInspectorPage(null);
-          }}
-        >
-          <Settings2 size={16} />
-        </button>
+        {activeTab.url && turnChanges && (
+          <button
+            type="button"
+            aria-label={`审阅本轮 ${turnChanges.files.length} 个文件更改`}
+            title={`审阅本轮更改 · ${turnChanges.files.length} 个文件 · +${turnChanges.additions} -${turnChanges.deletions}`}
+            onClick={reviewPageChanges}
+          >
+            <FileDiff size={16} />
+          </button>
+        )}
+        <button type="button" aria-label="更多浏览器操作" title="更多浏览器操作" aria-haspopup="menu" aria-expanded={moreMenuPosition != null} onClick={(event) => {
+          const bounds = event.currentTarget.getBoundingClientRect();
+          setMoreMenuPosition(moreMenuPosition ? null : { x: bounds.right - 190, y: bounds.bottom + 4 });
+        }}><MoreHorizontal size={16} /></button>
       </div>
+
+      {moreMenuPosition && <ContextMenu position={moreMenuPosition} onClose={() => setMoreMenuPosition(null)} items={[
+        { label: "在系统浏览器中打开", icon: <ExternalLink size={14} />, disabled: !activeTab.url, onClick: () => void openExternal(activeTab.url) },
+        { label: "打开页面诊断", icon: <Bug size={14} />, disabled: !activeTab.url, onClick: () => { setInspectorPage(inspectorOpen ? null : pageKey); updateAnnotationDraft({ open: false }); setSettingsPage(null); } },
+        { label: "打开站点设置", icon: <Settings2 size={14} />, disabled: !activeTab.url, onClick: () => { setSettingsPage(settingsOpen ? null : pageKey); updateAnnotationDraft({ open: false }); setInspectorPage(null); } },
+      ]} />}
 
       {settingsOpen && activeTab.url && (
         <section className="mc-browser-settings" aria-label="站点设置">
@@ -967,29 +1070,32 @@ export const BrowserPanel = () => {
               type="button"
               aria-label="清除站点数据"
               title="清除站点数据"
+              disabled={settingsLoading || settingsSaving}
               onClick={() => void clearActiveSiteData()}
             >
               <Trash2 size={14} />
             </button>
           </div>
-          <label className="mc-browser-setting-row">
+          <div className="mc-browser-setting-row">
             <span><Download size={14} /> 下载</span>
             <SelectMenu
               ariaLabel="下载策略"
               value={browserSettings.downloadPolicy}
+              disabled={settingsLoading || settingsSaving}
               onValueChange={(value) => void updateBrowserSettings({ downloadPolicy: value as EmbeddedBrowserSettings["downloadPolicy"] })}
             >
               <option value="block">阻止</option>
               <option value="ask">每次询问</option>
               <option value="allow">保存到下载目录</option>
             </SelectMenu>
-          </label>
+          </div>
           <div className="mc-browser-permissions" aria-label="站点权限">
             {sitePermissionOptions.map(([permission, label]) => (
               <label className="mc-browser-setting-row" key={permission}>
                 <span>{label}</span>
                 <input
                   type="checkbox"
+                  disabled={settingsLoading || settingsSaving}
                   checked={browserSettings.permissions.includes(permission)}
                   onChange={(event) => void updateBrowserSettings({
                     origin: browserSettings.origin || activeTab.url,
@@ -1006,11 +1112,12 @@ export const BrowserPanel = () => {
       {inspectorOpen && activeTab.url && (
         <section className="mc-browser-inspector" aria-label="页面诊断">
           <div className="mc-browser-inspector-heading">
-            <div role="tablist" aria-label="诊断类别">
+            <div role="tablist" aria-label="诊断类别" onKeyDown={navigateTabList}>
               <button
                 type="button"
                 role="tab"
                 aria-selected={inspectorKind === "console"}
+                tabIndex={inspectorKind === "console" ? 0 : -1}
                 onClick={() => setInspectorKind("console")}
               >
                 <Bug size={14} /> 控制台
@@ -1019,6 +1126,7 @@ export const BrowserPanel = () => {
                 type="button"
                 role="tab"
                 aria-selected={inspectorKind === "network"}
+                tabIndex={inspectorKind === "network" ? 0 : -1}
                 onClick={() => setInspectorKind("network")}
               >
                 <Network size={14} /> 网络
@@ -1060,23 +1168,7 @@ export const BrowserPanel = () => {
             <span>页面批注</span>
             <small>{activeTab.title || activeTab.url}</small>
           </div>
-          <input
-            value={annotationSelector}
-            onChange={(event) => setAnnotationSelector(event.target.value)}
-            placeholder="元素选择器（可选，例如 #save）"
-            aria-label="元素选择器"
-            spellCheck={false}
-          />
           <div className="mc-browser-picker-actions">
-            <button
-              type="button"
-              className="mc-browser-picker-button"
-              disabled={pickerMode != null}
-              onClick={() => void pickPageTarget("element")}
-            >
-              {pickerMode === "element" ? <LoaderCircle className="mc-browser-spin" size={14} /> : <Crosshair size={14} />}
-              {pickerMode === "element" ? "在页面中点击目标…" : "选择元素"}
-            </button>
             <button
               type="button"
               className="mc-browser-picker-button"
@@ -1087,22 +1179,28 @@ export const BrowserPanel = () => {
               {pickerMode === "region" ? "在页面中拖拽区域…" : "框选区域"}
             </button>
           </div>
+          {pickedElement && <div className="mc-browser-selected-target" title={pickedElement.selector || "页面区域"}><Crosshair size={14} /><strong>{pickedElement.text || pickedElement.selector || "选中的区域"}</strong></div>}
           {pickedElement && (
             <small className="mc-browser-picker-result">
               已选择 {Math.round(pickedElement.rect.width)} × {Math.round(pickedElement.rect.height)} px
             </small>
           )}
           <textarea
+            ref={annotationNoteRef}
             value={annotationNote}
-            onChange={(event) => setAnnotationNote(event.target.value)}
+            onChange={(event) => updateAnnotationDraft({ note: event.target.value })}
             placeholder="描述需要修复或验证的内容"
             aria-label="批注内容"
             rows={3}
-            autoFocus
+            autoFocus={pickerMode == null}
           />
+          <details className="mc-browser-element-details">
+            <summary>高级元素信息</summary>
+            <input value={annotationSelector} onChange={(event) => updateAnnotationDraft({ selector: event.target.value, pickedElement: null })} placeholder="元素选择器（可选，例如 #save）" aria-label="元素选择器" spellCheck={false} />
+          </details>
           <div className="mc-browser-annotation-actions">
-            <button type="button" onClick={() => setAnnotationPage(null)}>取消</button>
-            <button type="button" disabled={!annotationNote.trim()} onClick={saveAnnotation}>加入智能体上下文</button>
+            <button type="button" onClick={() => updateAnnotationDraft({ open: false })}>收起</button>
+            <button type="button" disabled={!annotationNote.trim()} onClick={saveAnnotation}>加入对话</button>
           </div>
         </div>
       )}

@@ -33,9 +33,13 @@ export function Tip({ content, side = "top", children }: TipProps) {
       });
     };
     place();
+    const observer = new ResizeObserver(place);
+    observer.observe(anchor.current!);
+    observer.observe(bubble.current!);
     window.addEventListener("resize", place);
     window.addEventListener("scroll", place, true);
     return () => {
+      observer.disconnect();
       window.removeEventListener("resize", place);
       window.removeEventListener("scroll", place, true);
     };
@@ -47,7 +51,12 @@ export function Tip({ content, side = "top", children }: TipProps) {
       onFocus={() => setFocused(true)} onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);
       }}
-      onKeyDown={(event) => { if (event.key === "Escape") { setHovered(false); setFocused(false); } }}>
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && open) {
+          if (focused) { event.preventDefault(); event.stopPropagation(); }
+          setHovered(false); setFocused(false);
+        }
+      }}>
       {children}
       {open && createPortal(<span ref={bubble} className="mc-tip-bubble" data-focused={focused} style={position} aria-hidden="true">
         {content}

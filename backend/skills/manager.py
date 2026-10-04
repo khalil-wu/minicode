@@ -12,6 +12,7 @@ from typing import Any
 from backend.skills.loader import SkillLoader, SkillFull, SkillMeta
 
 logger = logging.getLogger(__name__)
+_KEEP_PROJECT_ROOT = object()
 
 @dataclass(frozen=True)
 class SkillDetection:
@@ -48,26 +49,17 @@ class SkillManager:
         self._discovered = False
         self.discover()
 
-    def snapshot(self, project_root: Path | str | None = None) -> SkillManager:
+    def snapshot(self, project_root: Path | str | None | object = _KEEP_PROJECT_ROOT) -> SkillManager:
         """Capture discovery for a task without rebinding the window's loader."""
         loader = deepcopy(self._loader)
         snapshot = SkillManager(loader)
         snapshot._discovered = self._discovered
-        if isinstance(loader, SkillLoader) and project_root is not None:
-            root = Path(project_root).expanduser().resolve()
-            if root != loader._project_root:
-                loader.set_project_root(root)
+        if isinstance(loader, SkillLoader) and project_root is not _KEEP_PROJECT_ROOT:
+            loader.set_project_root(project_root)
         # Discovery belongs to the turn boundary. A new turn sees installed,
         # edited and removed skills; the in-flight snapshot remains stable.
         snapshot.discover()
         return snapshot
-
-    def _resolve_invocation_meta(self, skill_name: str) -> SkillMeta | None:
-        """Resolve a name while keeping lightweight loader doubles compatible."""
-        resolver = getattr(self._loader, "get_invocation_meta", None)
-        if callable(resolver):
-            return resolver(skill_name)
-        return self._loader.get_unambiguous_meta(skill_name)
 
     def detect(
         self,
@@ -95,19 +87,30 @@ class SkillManager:
         msg_lower = user_message.lower()
         candidates: list[SkillDetection] = []
         selected_paths: set[str] = set()
+        selected_names: set[str] = set()
 
         for selected in selected_skills or []:
             if not isinstance(selected, dict):
                 continue
             name = str(selected.get("name") or "").strip()
             source_path = str(selected.get("path") or "").strip()
+            selected_names.add(name)
             meta = self._loader.get_meta_by_path(source_path)
-            if meta is None or not meta.user_invocable or (name and meta.name != name):
+            if meta is None:
+                candidates.append(SkillDetection(
+                    name=name,
+                    trigger_mode="explicit",
+                    reason=f"用户显式选择 ${name}",
+                    source_path=source_path,
+                ))
                 continue
+            if not meta.user_invocable or (name and meta.name != name):
+                raise ValueError(f"Selected Skill '{name}' at '{source_path}' is not available for this invocation")
             key = self._skill_key(meta.source_path)
             if key in selected_paths:
                 continue
             selected_paths.add(key)
+            selected_names.add(meta.name)
             candidates.append(SkillDetection(
                 name=meta.name,
                 trigger_mode="explicit",
@@ -117,7 +120,9 @@ class SkillManager:
 
         all_skills = self._loader.list_skill_names()
         for name in all_skills:
-            meta = self._resolve_invocation_meta(name)
+            if name in selected_names:
+                continue
+            meta = self._loader.get_invocation_meta(name)
             if meta is None:
                 continue
             if not meta.user_invocable:
@@ -145,7 +150,7 @@ class SkillManager:
         if not self._discovered:
             self.discover()
 
-        meta = self._loader.get_meta_by_path(source_path) if source_path else self._resolve_invocation_meta(skill_name)
+        meta = self._loader.get_meta_by_path(source_path) if source_path else self._loader.get_invocation_meta(skill_name)
         if meta is None:
             logger.warning("Skill '%s' 不存在或名称不唯一", skill_name)
             return None
@@ -247,25 +252,23 @@ class SkillManager:
 
         result: list[dict[str, Any]] = []
         for meta in self._loader.list_metas():
-            if meta:
-                entry = {
-                    "name": meta.name,
-                    "description": meta.description,
-                    "display_name": getattr(meta, "display_name", ""),
-                    "short_description": getattr(meta, "short_description", ""),
-                    "icon": getattr(meta, "icon", ""),
-                    "icon_large": getattr(meta, "icon_large", ""),
-                    "brand_color": getattr(meta, "brand_color", ""),
-                    "path": str(meta.source_path),
-                    "active": False,
-                    "level": meta.source_level,
-                    "source_level": meta.source_level,
-                    "mcp_dependencies": getattr(meta, "mcp_dependencies", []),
-                    "allow_implicit_invocation": getattr(meta, "allow_implicit_invocation", True),
-                    "user_invocable": getattr(meta, "user_invocable", True),
-                    "default_prompt": getattr(meta, "default_prompt", ""),
-                }
-                result.append(entry)
+            result.append({
+                "name": meta.name,
+                "description": meta.description,
+                "display_name": meta.display_name,
+                "short_description": meta.short_description,
+                "icon": meta.icon,
+                "icon_large": meta.icon_large,
+                "brand_color": meta.brand_color,
+                "path": str(meta.source_path),
+                "active": False,
+                "level": meta.source_level,
+                "source_level": meta.source_level,
+                "mcp_dependencies": meta.mcp_dependencies,
+                "allow_implicit_invocation": meta.allow_implicit_invocation,
+                "user_invocable": meta.user_invocable,
+                "default_prompt": meta.default_prompt,
+            })
         return result
 
     @staticmethod

@@ -74,3 +74,17 @@ def test_ui_preferences_use_the_configured_runtime_data_root(monkeypatch, tmp_pa
     assert json.loads(saved.read_text(encoding="utf-8"))["sidebar_width"] == 420
     assert client.get("/api/ui/preferences?session_id=session_audit").json()["sidebar_width"] == 420
     assert not (tmp_path / "data" / "ui_preferences").exists()
+
+
+def test_ui_preferences_real_error_routes_return_422_without_changing_state(monkeypatch, tmp_path) -> None:
+    import backend.main as main_module
+
+    monkeypatch.setattr(main_module, "DATA_ROOT", tmp_path / "state-data")
+    client = TestClient(main_module.app)
+    assert client.put("/api/ui/preferences?session_id=owner", json={"sidebar_width": 420}).status_code == 200
+    saved = tmp_path / "state-data/ui_preferences/ui_prefs_owner.json"
+    original = saved.read_bytes()
+    invalid = client.put("/api/ui/preferences?session_id=owner", json={"compact_mode": "false"})
+    assert invalid.status_code == 422
+    assert saved.read_bytes() == original
+    assert client.get("/api/ui/preferences", params={"session_id": "../owner"}).status_code == 422

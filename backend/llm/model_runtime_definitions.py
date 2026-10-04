@@ -29,6 +29,7 @@ from backend.llm.model_selection import REASONING_LEVEL_ORDER
 from backend.llm.provider_models import ProviderModelsStorage
 from backend.llm.provider_contracts import (
     ModelDefinition,
+    MAX_SAFE_INTEGER,
     ProviderRegistrationError,
     TokenNumber,
     UnsupportedProviderCapabilityError,
@@ -49,7 +50,6 @@ _ENV_PREFIX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 DEFAULT_CONTEXT_WINDOW = MODEL_CONTEXT_WINDOW_DEFAULT
 DEFAULT_MAX_OUTPUT_TOKENS = 16_384
 SUPPORTED_REASONING_LEVELS = REASONING_LEVEL_ORDER
-MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _EXTENSION_OVERRIDE_UNSET = object()
 _DEFAULT_MODELS_CONFIG_FILE = STATE_ROOT / ".minicode" / "models.json"
 _MAX_MODELS_CONFIG_BYTES = 4 * 1024 * 1024
@@ -436,13 +436,14 @@ def _declared_optional_boolean(value: Any, *, field: str) -> bool | None:
     return None if value is None else _declared_boolean(value, field=field)
 
 
-def _finite_number(value: Any, *, field: str) -> float:
+def _nonnegative_finite_number(value: Any, *, field: str) -> float:
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
         or not math.isfinite(float(value))
+        or value < 0
     ):
-        raise ProviderRegistrationError(f"{field} must be a finite number")
+        raise ProviderRegistrationError(f"{field} must be a nonnegative finite number")
     return float(value)
 
 
@@ -496,10 +497,10 @@ def _validate_model_cost(
             )
     for key in _MODEL_COST_RATE_KEYS:
         if key in value:
-            _finite_number(value[key], field=f"{field}.{key}")
-    tiers = value.get("tiers")
-    if tiers is None:
+            _nonnegative_finite_number(value[key], field=f"{field}.{key}")
+    if "tiers" not in value:
         return
+    tiers = value["tiers"]
     if not isinstance(tiers, Sequence) or isinstance(
         tiers,
         (str, bytes, bytearray),
@@ -519,7 +520,7 @@ def _validate_model_cost(
                 f"{', '.join(sorted(missing_tier))}"
             )
         for key in _MODEL_COST_TIER_KEYS:
-            _finite_number(raw_tier[key], field=f"{field}.tiers[{index}].{key}")
+            _nonnegative_finite_number(raw_tier[key], field=f"{field}.tiers[{index}].{key}")
 
 
 def _normalize_api(value: Any) -> str:

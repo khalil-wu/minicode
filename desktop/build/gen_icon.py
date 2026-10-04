@@ -1,9 +1,11 @@
 """Generate MiniCode desktop icon — modern terminal prompt on deep gradient."""
 from PIL import Image, ImageDraw, ImageFilter
 import math
+from pathlib import Path
 
 SIZE = 512
 RADIUS = 108
+BUILD_DIR = Path(__file__).resolve().parent
 
 def make_gradient(size):
     """Create a deep indigo-to-purple radial gradient background."""
@@ -96,14 +98,14 @@ def main():
     result = Image.alpha_composite(result, sharp)
 
     # Save PNG
-    out_png = r"C:\Desktop\MiniCode\desktop\build\icon.png"
+    out_png = BUILD_DIR / "icon.png"
     result.save(out_png, "PNG")
     print(f"Saved {out_png} ({SIZE}x{SIZE})")
 
     # Generate ICO with multiple sizes
     ico_sizes = [256, 128, 64, 48, 32, 16]
     frames = [result.resize((s, s), Image.LANCZOS) for s in ico_sizes]
-    out_ico = r"C:\Desktop\MiniCode\desktop\build\icon.ico"
+    out_ico = BUILD_DIR / "icon.ico"
     frames[0].save(out_ico, format="ICO", sizes=[(s, s) for s in ico_sizes], append_images=frames[1:])
     print(f"Saved {out_ico} (sizes: {ico_sizes})")
 

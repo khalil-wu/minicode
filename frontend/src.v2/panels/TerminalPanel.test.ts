@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   mergeTerminalOutputByCursor,
-  mergeTerminalOutputSnapshot,
   terminalExitCodeLabel,
   terminalSessionLabel,
 } from "./TerminalPanel";
@@ -33,8 +32,9 @@ describe("terminal scrollback hydration", () => {
       .toBe(`${snapshot}-after`);
   });
 
-  it("keeps legacy metadata-only runtimes compatible", () => {
-    expect(mergeTerminalOutputSnapshot("hello ", "world")).toBe("hello world");
+  it("uses the authoritative snapshot when a runtime supplies no cursor", () => {
+    expect(mergeTerminalOutputByCursor("hello ", undefined, undefined, "world", undefined))
+      .toEqual({ output: "hello " });
   });
 
   it("uses an authoritative empty snapshot after the terminal was cleared", () => {

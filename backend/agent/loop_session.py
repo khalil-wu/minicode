@@ -9,7 +9,6 @@ only the public turn entrypoint and session-context facade.
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,9 +20,6 @@ from backend.agent.state import AgentState
 from backend.permissions.context import PermissionContext
 from backend.tools.toolset_runtime import resolve_context_toolset_policy
 from backend.tools.toolsets import ToolsetPolicy
-
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -94,49 +90,13 @@ def prepare_turn_state(
 
 
 def collect_mcp_instructions(manager: Any | None = None) -> dict[str, str]:
-    """Fetch server-declared MCP instructions, tolerant only of no manager.
-
-    An initialized manager is part of the prompt/tool contract for the turn.
-    If it cannot provide its instructions, continuing with an empty block can
-    make the model operate against a stale or incomplete MCP registry.  Keep
-    the no-manager case compatible with startup/tests, but propagate real
-    manager failures so the caller fails closed.
-    """
-
-    try:
-        if manager is None:
-            from backend.api.routes_health import get_mcp_manager
-
-            manager = get_mcp_manager()
-        if manager is not None:
-            return manager.get_server_instructions()
-    except Exception:
-        logger.exception("Failed to collect instructions from the MCP manager")
-        raise
-    return {}
+    """Read instructions from the manager owned by this session."""
+    return manager.get_server_instructions() if manager is not None else {}
 
 
-_MCP_MANAGER_UNSET = object()
-
-
-def mcp_registry_version(manager: Any | None = _MCP_MANAGER_UNSET) -> int:
-    """Return the MCP registry generation for tool-schema cache invalidation.
-
-    A registry read failure must not be converted into generation ``0``:
-    doing so can reuse a tool-schema cache built for a different MCP state.
-    """
-
-    try:
-        if manager is _MCP_MANAGER_UNSET:
-            from backend.api.routes_health import get_mcp_manager
-
-            manager = get_mcp_manager()
-        if manager is not None:
-            return int(getattr(manager, "registry_version", 0) or 0)
-    except Exception:
-        logger.exception("Failed to read the MCP registry version")
-        raise
-    return 0
+def mcp_registry_version(manager: Any | None = None) -> int:
+    """Read the session's MCP generation for schema cache invalidation."""
+    return manager.registry_version if manager is not None else 0
 
 
 def active_toolset_policy_for_context(
@@ -182,6 +142,12 @@ def populate_prompt_context(
         environment = {}
     cwd = str(workspace_root or "")
     environment["cwd"] = cwd
+    for key in ("primary_file", "active_tab_path"):
+        value = str(metadata.get(key) or "").strip()
+        if value:
+            environment[key] = value
+        else:
+            environment.pop(key, None)
     if workspace_root is not None:
         environment["workspace_roots"] = [str(workspace_root)]
     else:
@@ -241,6 +207,8 @@ def populate_prompt_context(
     agent_mode = str(
         metadata.get("agent_mode") or "build"
     ).strip().lower()
+    if agent_mode == "subagent":
+        agent_mode = str(metadata.get("agent_role") or "").removeprefix("subagent:")
     prompt_context["agent_mode"] = (
         agent_mode if agent_mode in {"build", "plan", "review", "explore"} else "build"
     )

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Ban, Check, CheckCheck, ChevronDown, ChevronRight, LogIn, LogOut, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { parseArgsStringToArgv } from "string-argv";
 import { useAppStore } from "../stores";
@@ -9,7 +9,6 @@ import {
   sendClientCommandAwaitResult,
 } from "../protocol/ws-outbox";
 import type {
-  ClientCommand,
   McpAddCommand,
   McpInventoryPayload,
   McpServerMutationPayload,
@@ -22,6 +21,7 @@ import { pushToast } from "./ToastContainer";
 import { showConfirm } from "./DialogService";
 import { SelectMenu } from "../components/SelectMenu";
 import { reportCommandFailure } from "./commandFeedback";
+import { normalizeWorkspaceRoot } from "../lib/workspace-path";
 import {
   Section,
   inputStyle,
@@ -108,6 +108,9 @@ const inventoryFailureMessage = (result: CommandResultEvent): string => {
 export const ConnectorsTab = () => {
   const mcpServers = useAppStore((s) => s.mcpServers);
   const conversationId = useAppStore((s) => s.conversationId);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const inventoryScope = JSON.stringify([conversationId, normalizeWorkspaceRoot(workingDirectory)]);
+  const inventoryKey = (name: string) => `${inventoryScope}:${name}`;
   const [newServerName, setNewServerName] = useState("");
   const [newServerCommand, setNewServerCommand] = useState("");
   const [newServerArgs, setNewServerArgs] = useState("");
@@ -127,17 +130,46 @@ export const ConnectorsTab = () => {
   const [pendingServerActions, setPendingServerActions] = useState<Record<string, string>>({});
   const [refreshingServers, setRefreshingServers] = useState(false);
   const [inventoryViews, setInventoryViews] = useState<Record<string, InventoryViewState>>({});
+  const currentDraft = { newServerName, newServerCommand, newServerArgs, newServerTransport, newServerUrl, newServerCwd,
+    newServerEnv, newServerHeaders, newServerHeadersHelper, newServerOAuthClientId, newServerOAuthCallbackPort,
+    newServerEnvVars, newServerAutoStart, editingServerName };
+  const currentDraftRef = useRef(currentDraft);
+  currentDraftRef.current = currentDraft;
+  const draftScope = useRef(inventoryScope);
+  const scopedDrafts = useRef(new Map<string, { selected: string; drafts: Map<string, typeof currentDraft> }>());
+  if (draftScope.current === inventoryScope) {
+    const scope = scopedDrafts.current.get(inventoryScope) || { selected: "new", drafts: new Map<string, typeof currentDraft>() };
+    scope.selected = editingServerName || "new";
+    scope.drafts.set(scope.selected, currentDraft);
+    scopedDrafts.current.set(inventoryScope, scope);
+  }
+  const restoreDraft = (draft: typeof currentDraft) => {
+    setNewServerName(draft.newServerName); setNewServerCommand(draft.newServerCommand); setNewServerArgs(draft.newServerArgs);
+    setNewServerTransport(draft.newServerTransport); setNewServerUrl(draft.newServerUrl); setNewServerCwd(draft.newServerCwd);
+    setNewServerEnv(draft.newServerEnv); setNewServerHeaders(draft.newServerHeaders); setNewServerHeadersHelper(draft.newServerHeadersHelper);
+    setNewServerOAuthClientId(draft.newServerOAuthClientId); setNewServerOAuthCallbackPort(draft.newServerOAuthCallbackPort);
+    setNewServerEnvVars(draft.newServerEnvVars); setNewServerAutoStart(draft.newServerAutoStart); setEditingServerName(draft.editingServerName);
+  };
+  useLayoutEffect(() => {
+    draftScope.current = inventoryScope;
+    const scope = scopedDrafts.current.get(inventoryScope);
+    const draft = scope?.drafts.get(scope.selected);
+    if (draft) restoreDraft(draft);
+    else clearEditor();
+  }, [inventoryScope]);
+  useEffect(() => setInventoryViews({}), [inventoryScope]);
   const canAddServer = Boolean(
     newServerName.trim()
     && (newServerTransport === "stdio" ? newServerCommand.trim() : newServerUrl.trim()),
   );
 
   const loadServerInventory = async (server: typeof mcpServers[number]) => {
+    const key = inventoryKey(server.name);
     const connected = (server.phase ?? server.status) === "connected";
     if (!connected) {
       setInventoryViews((current) => ({
         ...current,
-        [server.name]: {
+        [key]: {
           expanded: true,
           status: "error",
           error: server.phase === "auth_required" || server.phase === "expired"
@@ -151,11 +183,12 @@ export const ConnectorsTab = () => {
     const operationId = inventoryOperationId();
     setInventoryViews((current) => ({
       ...current,
-      [server.name]: { expanded: true, status: "loading", operationId },
+      [key]: { expanded: true, status: "loading", operationId },
     }));
     try {
       const result = await sendClientCommandAwaitResult(
-        { type: "mcp.inventory.list", name: server.name, operation_id: operationId },
+        { type: "mcp.inventory.list", name: server.name, operation_id: operationId,
+          conversation_id: conversationId || undefined, workspace_root: workingDirectory || undefined },
         "mcp.inventory.list",
         { timeoutMs: MCP_INVENTORY_COMMAND_TIMEOUT_MS },
       );
@@ -166,27 +199,28 @@ export const ConnectorsTab = () => {
           ? ""
           : "MCP 服务返回了无效的目录响应。";
       setInventoryViews((current) => {
-        if (current[server.name]?.operationId !== operationId) return current;
+        if (current[key]?.operationId !== operationId) return current;
         return {
           ...current,
-          [server.name]: failure
+          [key]: failure
             ? { expanded: true, status: "error", error: failure }
             : { expanded: true, status: "loaded", data: inventory ?? undefined },
         };
       });
     } catch (error) {
       setInventoryViews((current) => {
-        if (current[server.name]?.operationId !== operationId) return current;
+        if (current[key]?.operationId !== operationId) return current;
         return {
           ...current,
-          [server.name]: { expanded: true, status: "error", error: operationError(error) },
+          [key]: { expanded: true, status: "error", error: operationError(error) },
         };
       });
     }
   };
 
   const toggleServerInventory = (server: typeof mcpServers[number]) => {
-    const current = inventoryViews[server.name];
+    const key = inventoryKey(server.name);
+    const current = inventoryViews[key];
     if (current?.expanded) {
       if (current.status === "loading" && current.operationId) {
         sendClientCommand({
@@ -197,21 +231,21 @@ export const ConnectorsTab = () => {
       }
       setInventoryViews((views) => ({
         ...views,
-        [server.name]: { ...views[server.name], expanded: false, operationId: undefined },
+        [key]: { ...views[key], expanded: false, operationId: undefined },
       }));
       return;
     }
     if (current?.data) {
       setInventoryViews((views) => ({
         ...views,
-        [server.name]: { ...views[server.name], expanded: true },
+        [key]: { ...views[key], expanded: true },
       }));
       return;
     }
     void loadServerInventory(server);
   };
 
-  const resetEditor = () => {
+  const clearEditor = () => {
     setEditingServerName(null);
     setNewServerName("");
     setNewServerCommand("");
@@ -226,6 +260,12 @@ export const ConnectorsTab = () => {
     setNewServerOAuthCallbackPort("");
     setNewServerEnvVars([]);
     setNewServerAutoStart(true);
+  };
+  const resetEditor = () => {
+    scopedDrafts.current.get(inventoryScope)?.drafts.delete(editingServerName || "new");
+    const newDraft = editingServerName ? scopedDrafts.current.get(inventoryScope)?.drafts.get("new") : undefined;
+    if (newDraft) restoreDraft(newDraft);
+    else clearEditor();
   };
 
   const changeServerTransport = (transport: McpTransport) => {
@@ -250,6 +290,8 @@ export const ConnectorsTab = () => {
   };
 
   const editServer = (server: typeof mcpServers[number]) => {
+    const draft = scopedDrafts.current.get(inventoryScope)?.drafts.get(server.name);
+    if (draft) { restoreDraft(draft); return; }
     setEditingServerName(server.name);
     setNewServerName(server.name);
     setNewServerTransport(server.transport ?? "stdio");
@@ -271,6 +313,7 @@ export const ConnectorsTab = () => {
   };
 
   const saveServer = async () => {
+    const submittedDraft = JSON.stringify(currentDraft);
     const name = newServerName.trim();
     const command = newServerCommand.trim();
     const argsText = newServerArgs;
@@ -344,7 +387,7 @@ export const ConnectorsTab = () => {
         result,
         editingServerName ? `已保存 MCP 服务：${name}` : `已添加 MCP 服务：${name}`,
       ), "success");
-      resetEditor();
+      if (draftScope.current === inventoryScope && JSON.stringify(currentDraftRef.current) === submittedDraft) resetEditor();
     } catch (error) {
       pushToast(`${editingServerName ? "保存" : "添加"} MCP 服务失败：${operationError(error)}`, "error");
     } finally {
@@ -374,14 +417,17 @@ export const ConnectorsTab = () => {
   const runServerAction = async (
     name: string,
     action: "mcp.oauth.login" | "mcp.oauth.logout" | "mcp.restart" | "mcp.remove",
-    command: ClientCommand,
     successMessage: string,
   ) => {
     if (pendingServerActions[name]) return;
     setPendingServerActions((current) => ({ ...current, [name]: action }));
     try {
       const result = await sendClientCommandAwaitResult(
-        command,
+        { type: action, name,
+          ...(action === "mcp.remove" ? {} : {
+            conversation_id: conversationId || undefined, workspace_root: workingDirectory || undefined,
+          }),
+        },
         action,
         { timeoutMs: LONG_COMMAND_RESULT_TIMEOUT_MS },
       );
@@ -410,7 +456,6 @@ export const ConnectorsTab = () => {
     await runServerAction(
       name,
       "mcp.remove",
-      { type: "mcp.remove", name },
       `已删除 MCP 服务：${name}`,
     );
   };
@@ -468,7 +513,7 @@ export const ConnectorsTab = () => {
             <div className="settings-mcp-list">
             {mcpServers.length === 0 && <div style={emptyInlineStyle}>尚未配置 MCP 服务。</div>}
             {mcpServers.map((server) => {
-              const inventoryView = inventoryViews[server.name];
+              const inventoryView = inventoryViews[inventoryKey(server.name)];
               const inventory = inventoryView?.data;
               return (
               <div key={server.name} className="settings-mcp-server-row" style={mcpServerRowStyle}>
@@ -658,7 +703,6 @@ export const ConnectorsTab = () => {
                       onClick={() => void runServerAction(
                         server.name,
                         "mcp.oauth.login",
-                        { type: "mcp.oauth.login", name: server.name },
                         `已登录 MCP 服务：${server.name}`,
                       )}
                       disabled={Boolean(pendingServerActions[server.name])}
@@ -673,7 +717,6 @@ export const ConnectorsTab = () => {
                         onClick={() => void runServerAction(
                           server.name,
                           "mcp.restart",
-                          { type: "mcp.restart", name: server.name },
                           `已重启 MCP 服务：${server.name}`,
                         )}
                         disabled={Boolean(pendingServerActions[server.name]) || server.phase === "connecting" || server.phase === "reconnecting"}
@@ -686,7 +729,6 @@ export const ConnectorsTab = () => {
                         onClick={() => void runServerAction(
                           server.name,
                           "mcp.oauth.logout",
-                          { type: "mcp.oauth.logout", name: server.name },
                           `已清除 MCP 登录：${server.name}`,
                         )}
                         disabled={Boolean(pendingServerActions[server.name])}
@@ -700,7 +742,6 @@ export const ConnectorsTab = () => {
                       onClick={() => void runServerAction(
                         server.name,
                         "mcp.restart",
-                        { type: "mcp.restart", name: server.name },
                         `已重启 MCP 服务：${server.name}`,
                       )}
                       disabled={Boolean(pendingServerActions[server.name]) || server.phase === "connecting" || server.phase === "reconnecting"}

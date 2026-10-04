@@ -10,7 +10,7 @@ from contextlib import closing, contextmanager
 from hashlib import sha256
 from pathlib import Path
 from backend.agent.runtime_records import _string_list, epoch_ms
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from uuid import uuid4
 from backend.agent.swarm_migrations import (
     MIGRATION_REPORT_KEY,
@@ -271,6 +271,7 @@ class FileSwarmStore:
         try:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = FULL")
+            connection.execute("BEGIN IMMEDIATE")
             version = SchemaMigrationRunner(SCHEMA_MIGRATIONS).run(connection)
             if version != SCHEMA_VERSION:
                 raise RuntimeError(f"schema migration stopped at v{version}, expected v{SCHEMA_VERSION}")
@@ -577,6 +578,18 @@ class FileSwarmStore:
                 values,
             ).fetchall()
         return [json.loads(row["payload_json"]) for row in rows]
+
+    def latest_main_run(self, conversation_id: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM agent_runs WHERE conversation_id = ? AND parent_run_id = '' ORDER BY rowid DESC",
+                (conversation_id,),
+            ).fetchall()
+        records = [json.loads(row["payload_json"]) for row in rows]
+        return max(
+            (record for record in records if str(record.get("role") or "main") == "main"),
+            key=lambda record: int(record.get("started_at") or 0), default=None,
+        )
 
     def upsert_subagent(
         self,
@@ -1450,6 +1463,7 @@ class FileSwarmStore:
     @staticmethod
     def _new_task(payload: dict[str, Any], seq: int) -> dict[str, Any]:
         now = epoch_ms()
+        status = str(payload.get("status") or "pending")
         return {
             "task_id": str(payload.get("task_id") or _new_id("swarm_task")),
             "title": str(payload.get("title") or ""),
@@ -1461,13 +1475,13 @@ class FileSwarmStore:
             "objective": str(payload.get("objective") or ""),
             "read_only": bool(payload.get("read_only", False)),
             "write_scope": _string_list(payload.get("write_scope")),
-            "status": str(payload.get("status") or "pending"),
+            "status": status,
             "priority": str(payload.get("priority") or "normal"),
             "team_name": str(payload.get("team_name") or ""),
             "created_by": str(payload.get("created_by") or ""),
             "created_at": int(payload.get("created_at") or now),
             "updated_at": int(payload.get("updated_at") or now),
-            "completed_at": payload.get("completed_at"),
+            "completed_at": payload.get("completed_at") or (now if status in {"completed", "cancelled"} else None),
             "blocks": _string_list(payload.get("blocks")),
             "blocked_by": _string_list(payload.get("blocked_by")),
             "outputs": list(payload.get("outputs") or []),
@@ -1935,6 +1949,7 @@ class FileSwarmStore:
         conversation_id: str,
         *,
         allowed_active_owner_tokens: set[str] | None = None,
+        before_delete: Callable[[dict[str, list[str]]], list[dict[str, str]]] | None = None,
     ) -> dict[str, Any]:
         """Delete every durable swarm/runtime record owned by a conversation."""
         owner = str(conversation_id or "").strip()
@@ -1962,17 +1977,25 @@ class FileSwarmStore:
                         str(row["owner_token"] or "")
                         for row in connection.execute(
                             """
-                            SELECT owner_token FROM agent_runs
-                            WHERE conversation_id = ? AND owner_token != ''
-                            UNION
-                            SELECT owner_token FROM subagent_runs
-                            WHERE owner_token != '' AND (
-                                parent_run_id IN (
+                            WITH RECURSIVE owned_subagents(subagent_id) AS (
+                                SELECT subagent_id FROM subagent_runs
+                                WHERE parent_run_id IN (
                                     SELECT run_id FROM agent_runs WHERE conversation_id = ?
                                 ) OR task_id IN (
                                     SELECT task_id FROM tasks WHERE conversation_id = ?
                                 )
+                                UNION
+                                SELECT child.subagent_id
+                                FROM subagent_runs AS child
+                                JOIN owned_subagents AS parent
+                                  ON child.parent_run_id = parent.subagent_id
                             )
+                            SELECT owner_token FROM agent_runs
+                            WHERE conversation_id = ? AND owner_token != ''
+                            UNION
+                            SELECT owner_token FROM subagent_runs
+                            WHERE owner_token != ''
+                              AND subagent_id IN (SELECT subagent_id FROM owned_subagents)
                             """,
                             (owner, owner, owner),
                         ).fetchall()
@@ -2030,6 +2053,20 @@ class FileSwarmStore:
                 ).fetchall()
             ]
 
+            if before_delete is not None:
+                cleanup_errors = before_delete({
+                    "run_ids": run_ids, "subagent_ids": subagent_ids,
+                    "task_ids": task_ids, "message_ids": message_ids, "team_ids": team_ids,
+                })
+                if cleanup_errors:
+                    # Keep the durable ownership index until all associated
+                    # files are removed. A later purge can retry those exact ids.
+                    return {**empty, "cleanup_errors": cleanup_errors, "cleanup_pending": True}
+
+            connection.executemany(
+                "DELETE FROM lifecycle_response_fences WHERE participant_id = ?",
+                ((subagent_id,) for subagent_id in subagent_ids),
+            )
             connection.execute(
                 """
                 WITH RECURSIVE owned_subagents(subagent_id) AS (

@@ -37,6 +37,46 @@
   animation: settings-page-in var(--transition-fast) both;
 }
 
+.settings-workspace.settings-center[hidden], .settings-tab-pane[hidden] { display: none; }
+.settings-tab-pane { display: grid; gap: 28px; min-width: 0; }
+.settings-search-results { display: grid; gap: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--border-subtle); }
+.settings-search-result { display: grid; gap: 4px; padding: 9px; text-align: left; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-primary); }
+.settings-search-result:hover, .settings-search-result:focus-visible { background: var(--surface-soft); }
+.settings-search-result strong { font-size: var(--mc-font-secondary); font-weight: var(--fw-medium); }
+.settings-search-result span { color: var(--text-muted); font-size: var(--mc-font-caption); line-height: var(--leading-snug); }
+.settings-search-highlight { outline: 2px solid color-mix(in oklch, var(--accent-primary) 55%, transparent); outline-offset: 5px; border-radius: var(--radius-sm); }
+.settings-unsaved { display: inline-block; margin-left: 9px; color: var(--text-muted); font-size: var(--mc-font-caption); font-weight: var(--fw-normal); }
+.scheduler-task-title { border: 0; padding: 0; background: transparent; color: var(--text-primary); font-weight: var(--fw-medium); font-size: var(--mc-font-body); text-align: left; }
+.scheduler-task-title:hover { color: var(--accent-primary); }
+.scheduler-task-next, .scheduler-run-date { display: block; color: var(--text-muted); font-size: var(--mc-font-caption); padding-top: 3px; }
+.scheduler-cron-detail { font-size: var(--mc-font-caption); color: var(--text-muted); }
+.scheduler-cron-detail code { display: block; padding: 8px 0; }
+.settings-archive-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 18px; }
+.settings-archive-filters .settings-search { flex: 1 1 240px; }
+.settings-archive-filters > label:not(.settings-search) { display: flex; gap: 5px; align-items: center; color: var(--text-muted); font-size: var(--mc-font-caption); }
+.settings-archive-filters select, .settings-archive-filters input[type="date"] { min-width: 0; max-width: 180px; }
+.settings-archive-count { margin-left: auto; color: var(--text-muted); font-size: var(--mc-font-caption); font-variant-numeric: tabular-nums; }
+.settings-archive-title { border: 0; padding: 0; color: var(--text-primary); background: transparent; text-align: left; font-weight: var(--fw-medium); font-size: var(--mc-font-body); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-archive-title:hover { color: var(--accent-primary); }
+.settings-archive-copy time { color: var(--text-muted); font-size: var(--mc-font-caption); }
+.settings-archive-more { position: relative; }
+.settings-archive-more summary { display: grid; place-items: center; width: 32px; height: 32px; color: var(--text-muted); cursor: pointer; border-radius: var(--radius-sm); list-style: none; }
+.settings-archive-more summary::-webkit-details-marker { display: none; }
+.settings-archive-more summary:hover, .settings-archive-more summary:focus-visible { background: var(--surface-soft); color: var(--text-primary); }
+.settings-archive-more > button { position: absolute; z-index: 1; top: 36px; right: 0; background: var(--surface-base); box-shadow: var(--shadow-soft); white-space: nowrap; }
+.settings-archive-preview { margin-bottom: 8px; padding: 12px 0 20px 40px; border-bottom: 1px solid var(--border-subtle); }
+.settings-archive-preview-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 8px; color: var(--text-secondary); font-size: var(--mc-font-secondary); }
+.settings-archive-transcript { max-height: 520px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 8px 16px 0 0; }
+.settings-archive-transcript article { padding: 14px 0; font-size: var(--mc-font-body); }
+.settings-archive-transcript article[data-role="user"] { margin-left: 20%; }
+.settings-archive-message-label { color: var(--text-muted); font-size: var(--mc-font-caption); margin-bottom: 6px; }
+@media (max-width: 760px) {
+  .scheduler-task-row { flex-wrap: wrap; }
+  .scheduler-task-row > .flex-1 { flex-basis: calc(100% - 22px); }
+  .scheduler-task-last { display: none; }
+  .settings-archive-preview { padding-left: 0; }
+}
+
 .settings-workspace-sidebar {
   grid-column: 1;
   grid-row: 1 / span 2;
@@ -207,8 +247,8 @@
 
 .settings-page-heading {
   display: grid;
-  gap: 8px;
-  margin-bottom: 30px;
+  gap: 6px;
+  margin-bottom: 32px;
 }
 
 .settings-page-heading h2 {
@@ -226,12 +266,12 @@
   gap: 28px;
 }
 
-/* Groups read as cards: soft surface, hairline, large radius, whisper shadow. */
+/* Group headers and their rows share one edge; only the group has a frame. */
 .settings-group,
 .settings-section {
   display: grid;
-  gap: 9px;
-  padding: 20px 22px;
+  gap: 12px;
+  padding: 20px 24px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   background: var(--surface-page);
@@ -240,15 +280,11 @@
 
 .settings-group-title,
 .settings-section-title {
-  position: sticky;
-  top: 0;
-  z-index: 1;
   margin: 0;
-  padding: 6px 0 14px;
-  background: var(--surface-page);
+  padding: 0;
   color: var(--text-primary);
   font-size: var(--text-md);
-  font-weight: var(--fw-bold);
+  font-weight: var(--fw-semibold);
   line-height: var(--leading-tight);
 }
 
@@ -270,29 +306,22 @@
 }
 
 .settings-row {
-  min-height: 72px;
+  min-height: 68px;
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(220px, auto);
+  grid-template-columns: minmax(220px, 1fr) minmax(0, max-content);
   align-items: center;
-  gap: 24px;
-  padding: 15px 18px;
+  gap: 32px;
+  padding: 14px 0;
   box-sizing: border-box;
   border-bottom: 1px solid var(--border-subtle);
 }
 
-/* Row controls lift a hair on hover — cheap "precious" feel for the most
-   visited secondary surface. */
+/* Hover keeps controls on their baseline while changing only the surface. */
 .settings-row .settings-action-button,
 .settings-row .settings-card button {
-  transition: transform var(--duration-slow) var(--easing-spring),
-              background-color var(--duration-fast) var(--easing-standard),
+  transition: background-color var(--duration-fast) var(--easing-standard),
               border-color var(--duration-fast) var(--easing-standard),
               color var(--duration-fast) var(--easing-standard);
-}
-
-.settings-row .settings-action-button:hover:not(:disabled),
-.settings-row .settings-card button:hover:not(:disabled) {
-  transform: translateY(-1px);
 }
 
 .settings-row:last-child {
@@ -317,7 +346,7 @@
 .settings-row-description,
 .settings-page-note {
   color: color-mix(in oklch, var(--text-secondary) 72%, var(--text-muted));
-  font-weight: var(--fw-medium);
+  font-weight: var(--fw-normal);
 }
 
 .settings-section-description,
@@ -332,7 +361,7 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
@@ -1187,7 +1216,7 @@
 .settings-env-row {
   min-height: 48px;
   display: grid;
-  grid-template-columns: 180px minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 12px;
   padding: 0 18px;
@@ -1196,6 +1225,9 @@
 
 .settings-env-row code {
   color: var(--text-primary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding-block: 8px;
 }
 
 .settings-env-row span {
@@ -1560,6 +1592,12 @@
   gap: 4px;
 }
 
+.settings-browser-summary > .settings-browser-summary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .settings-browser-summary strong {
   color: var(--text-primary);
   font-size: var(--text-sm);
@@ -1602,10 +1640,10 @@
 .settings-archive-row {
   min-height: 64px;
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) auto;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  padding: 10px 14px;
+  padding: 12px 0;
   border-bottom: 1px solid var(--border-subtle);
 }
 
@@ -1614,8 +1652,10 @@
 }
 
 .settings-archive-icon {
-  width: 34px;
-  height: 34px;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
 }
 
 .settings-archive-icon > svg {
@@ -1641,7 +1681,7 @@
 .settings-archive-copy > span {
   overflow: hidden;
   color: var(--text-muted);
-  font-weight: var(--fw-medium);
+  font-weight: var(--fw-normal);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2233,7 +2273,12 @@
   .settings-row {
     grid-template-columns: 1fr;
     gap: 12px;
-    padding: 14px 16px;
+    padding: 14px 0;
+  }
+
+  .settings-group,
+  .settings-section {
+    padding: 18px;
   }
 
   .settings-row-control {
@@ -2315,7 +2360,7 @@
   }
 
   .settings-archive-row {
-    grid-template-columns: 34px minmax(0, 1fr);
+    grid-template-columns: 28px minmax(0, 1fr);
   }
 
   .settings-archive-actions {

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { workspaceRootsEqual } from "../lib/workspace-path";
 import { useAppStore } from "../stores";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
@@ -24,39 +25,75 @@ const isModalTarget = (target: EventTarget | null): boolean =>
   target instanceof HTMLElement
   && Boolean(target.closest("[role='dialog'], .modal-content, .overlay-backdrop, .settings-workspace"));
 
+const isTopLevelModalOpen = (state: ReturnType<typeof useAppStore.getState>): boolean =>
+  state.commandPaletteOpen || state.quickOpenVisible || state.settingsOpen
+  || state.shortcutsHelpOpen || state.liveArtifactsOpen
+  || (state.agentEditorOpen && capabilityFeatureEnabled(state.runtimeCapabilities, "agent_editor", true));
+
 export const useKeyboardShortcuts = () => {
   const sidebarWidthRef = useRef(280);
   useEffect(() => {
+    const onFileSearch = (event: KeyboardEvent) => {
+      const state = useAppStore.getState();
+      if (state.settingsOpen && state.settingsTab === "shortcuts" && document.querySelector('[data-shortcut-recording="true"]')) return;
+      if (event.isComposing || event.keyCode === 229 || !matchesShortcut(event, state.shortcutBindings.globalSearch)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (capabilityFeatureEnabled(state.runtimeCapabilities, "global_search", true)) state.toggleQuickOpen();
+    };
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented) return;
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
       const mod = e.metaKey || e.ctrlKey;
       const s = useAppStore.getState();
       const createConversationInCurrentMode = () => {
         s.createConversation({ appMode: s.appMode, bindWorkspace: Boolean(s.workingDirectory) });
       };
       const match = (action: ShortcutActionId) => matchesShortcut(e, s.shortcutBindings[action]);
+      const modalOpen = isTopLevelModalOpen(s);
+      const routeToComposer = (action: () => void) => {
+        window.dispatchEvent(new Event("composer:focus"));
+        if (s.skillsMarketplaceOpen) useAppStore.setState({ skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app" });
+        const chat = s.panelSlots.find((slot) => slot.kind === "chat");
+        if (s.appMode === "code" && chat) s.focusPanel(chat.id);
+        requestAnimationFrame(() => {
+          const current = useAppStore.getState();
+          if (current.conversationId !== s.conversationId
+            || !workspaceRootsEqual(current.workingDirectory, s.workingDirectory)
+            || isTopLevelModalOpen(current)) return;
+          action();
+        });
+      };
 
       // The topmost dialog owns its keyboard context. Individual dialogs
       // handle Enter/Escape and navigation locally. Modal-routing shortcuts
       // remain global so users can close or switch top-level surfaces while a
       // search field is focused; workspace mutations stay blocked.
-      if (isModalTarget(e.target) && e.key !== "Escape") {
+      if ((modalOpen || isModalTarget(e.target)) && e.key !== "Escape") {
         if (match("commandPalette")) { e.preventDefault(); s.toggleCommandPalette(); return; }
         if (match("settings")) { e.preventDefault(); s.toggleSettings(); return; }
         if (match("shortcutHelp")) { e.preventDefault(); s.toggleShortcutsHelp(); return; }
+        if (match("globalSearch")) {
+          e.preventDefault();
+          if (capabilityFeatureEnabled(s.runtimeCapabilities, "global_search", true)) s.toggleQuickOpen();
+          return;
+        }
         if (match("openGeneralSettings")) { e.preventDefault(); openSettings("general"); return; }
         return;
       }
 
       // Alt+1/2/3 for mode switching (no Ctrl required)
       if (e.altKey && !mod) {
-        if (e.key === "1") { e.preventDefault(); s.setAppMode("chat"); return; }
-        if (e.key === "2") { e.preventDefault(); s.setAppMode("code"); return; }
-        if (e.key === "3") { e.preventDefault(); s.setAppMode("cowork"); return; }
+        const mode = e.key === "1" ? "chat" : e.key === "2" ? "code" : e.key === "3" ? "cowork" : null;
+        if (mode) {
+          e.preventDefault();
+          useAppStore.setState({ skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app" });
+          s.setAppMode(mode);
+          return;
+        }
       }
 
       if (e.key === "Escape") {
-        if (isModalTarget(e.target)) return;
+        if (modalOpen || isModalTarget(e.target)) return;
         // Only an actually-running turn can be interrupted. Without this gate a
         // stray Escape while idle ran finishStreaming with no target message,
         // which cancels the plan and blocks every in-progress todo.
@@ -82,13 +119,13 @@ export const useKeyboardShortcuts = () => {
 
       if (match("promptHistory")) {
         e.preventDefault();
-        window.dispatchEvent(new Event("composer:history-search"));
+        routeToComposer(() => window.dispatchEvent(new Event("composer:history-search")));
         return;
       }
       if (match("clearComposer")) {
         e.preventDefault();
         s.setDraft("");
-        document.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+        routeToComposer(() => document.querySelector<HTMLTextAreaElement>("[data-composer-input]")?.focus());
         return;
       }
       if (match("processDetail")) {
@@ -100,9 +137,8 @@ export const useKeyboardShortcuts = () => {
       }
       if (match("toggleDiff")) {
         e.preventDefault();
-        const diffPanels = s.panelSlots.filter((panel) => panel.kind === "diff");
-        if (diffPanels.length) diffPanels.forEach((panel) => s.removePanel(panel.id));
-        else s.addPanel({ id: `diff-${Date.now()}`, kind: "diff" });
+        if (s.rightPanelOpen && s.rightStackTab === "diff") s.toggleRightPanel();
+        else { s.setAppMode("code"); s.setRightStackTab("diff"); }
         return;
       }
       if (match("openPreview")) {
@@ -118,12 +154,12 @@ export const useKeyboardShortcuts = () => {
       }
       if (match("permissionMenu")) {
         e.preventDefault();
-        document.dispatchEvent(new CustomEvent("open-permission-menu"));
+        routeToComposer(() => document.dispatchEvent(new CustomEvent("open-permission-menu")));
         return;
       }
       if (match("modelMenu")) {
         e.preventDefault();
-        document.dispatchEvent(new CustomEvent("open-model-menu"));
+        routeToComposer(() => document.dispatchEvent(new CustomEvent("open-model-menu")));
         return;
       }
       if (match("openGeneralSettings")) {
@@ -151,7 +187,7 @@ export const useKeyboardShortcuts = () => {
       if (match("terminal")) {
         e.preventDefault();
         s.setAppMode("code");
-        if (!s.dockCollapsed && s.activeBottomTab === "terminal") s.closeBottomDock();
+        if (!s.rightPanelExpanded && !s.panelSlots.some((slot) => slot.maximized) && !s.dockCollapsed && s.activeBottomTab === "terminal") s.closeBottomDock();
         else s.openBottomTab("terminal");
         return;
       }
@@ -173,6 +209,7 @@ export const useKeyboardShortcuts = () => {
       }
       if (match("sideChat")) { e.preventDefault(); s.toggleSideChat(); return; }
       if (match("saveFile")) { e.preventDefault(); window.dispatchEvent(new Event("editor:save")); return; }
+      if (match("saveAllFiles")) { e.preventDefault(); window.dispatchEvent(new Event("editor:save-all")); return; }
       if (match("closeEditor")) { e.preventDefault(); window.dispatchEvent(new Event("editor:close-tab")); return; }
       const reverseConversation = matchesShiftedShortcutVariant(e, s.shortcutBindings.nextConversation);
       if (match("nextConversation") || reverseConversation) {
@@ -186,7 +223,11 @@ export const useKeyboardShortcuts = () => {
         if (next) s.requestConversationSwitch(next.id);
       }
     };
+    window.addEventListener("keydown", onFileSearch, true);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onFileSearch, true);
+      window.removeEventListener("keydown", onKey);
+    };
   }, []);
 };

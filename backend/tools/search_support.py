@@ -6,9 +6,9 @@ transport and path filtering helpers are independent of the tool classes.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 
+from backend.async_cleanup import to_thread_cancel_safe
 from backend.subprocesses import (
     SubprocessOutputLimitError,
     communicate_bounded,
@@ -40,9 +40,6 @@ import os
 import re
 import subprocess
 import time
-
-
-logger = logging.getLogger(__name__)
 
 
 class RegexSafetyLimitError(RuntimeError):
@@ -84,8 +81,6 @@ REGEX_SEARCH_TIMEOUT_SECONDS = 0.75
 REGEX_FILE_BUDGET_SECONDS = 5.0
 
 RIPGREP_TIMEOUT_SECONDS = 20.0
-
-REGEX_MAX_PATTERN_CHARS = 4096
 
 REGEX_MAX_LINE_CHARS = 1_000_000
 
@@ -139,52 +134,10 @@ _GREP_TYPE_EXTENSIONS: dict[str, tuple[str, ...]] = {
 }
 
 
-_NESTED_QUANTIFIER_RE = re.compile(
-    r"\((?:[^()\\]|\\.){0,512}(?:[*+]|\{\d+(?:,\d*)?\})(?:[^()\\]|\\.){0,512}\)"
-    r"\s*(?:[*+]|\{\d+(?:,\d*)?\})",
-)
-
-
-def _regex_pattern_is_unsafe(pattern: str) -> bool:
-    """Reject the small class of catastrophic stdlib-re patterns.
-
-    The normal ``regex`` dependency enforces a runtime timeout.  Minimal
-    installations can fall back to ``re``, which has no interruptible match
-    API; rejecting nested quantifiers and oversized patterns keeps that path
-    fail-closed instead of allowing a ReDoS payload to pin the agent worker.
-    """
-
-    if len(pattern) > REGEX_MAX_PATTERN_CHARS:
-        return True
-    return bool(_NESTED_QUANTIFIER_RE.search(pattern))
-
-
-def _stdlib_regex_pattern_is_unsafe(pattern: str) -> bool:
-    """Fail closed when the interruptible ``regex`` engine is unavailable.
-
-    Python's stdlib ``re`` cannot cancel a match that has entered exponential
-    backtracking.  A wall-clock check after ``re.search`` is therefore not a
-    safety boundary.  In the defensive no-dependency fallback, allow only
-    non-repeating expressions (anchors, character classes, groups and plain
-    alternation remain useful and run in bounded time) and reject backrefs.
-    Normal installations use the declared ``regex`` dependency and retain the
-    full syntax with engine-enforced timeouts.
-    """
-
-    if _regex_pattern_is_unsafe(pattern):
-        return True
-    if any(token in pattern for token in ("*", "+", "?", "{")):
-        return True
-    return bool(re.search(r"\\(?:[1-9]|g<|k<)", pattern))
-
-
 def _check_ripgrep() -> bool:
     """Check if ripgrep (rg) is available on the system PATH."""
-    try:
-        import shutil
-        return shutil.which("rg") is not None
-    except Exception:
-        return False
+    import shutil
+    return shutil.which("rg") is not None
 
 
 _HAS_RIPGREP = _check_ripgrep()
@@ -597,16 +550,10 @@ def _grep_file_matches(
             remaining = file_deadline - time.monotonic()
             if remaining <= 0:
                 raise RegexSafetyLimitError("Regex search exceeded the per-file safety budget")
-            try:
-                regex_matches = regex.finditer(
-                    content,
-                    timeout=min(REGEX_SEARCH_TIMEOUT_SECONDS, remaining),
-                )
-            except TypeError:
-                # ``re.Pattern`` has no timeout keyword.  Unsafe nested
-                # quantifiers are rejected before compilation; the file-level
-                # deadline below still protects the normal bounded patterns.
-                regex_matches = regex.finditer(content)
+            regex_matches = regex.finditer(
+                content,
+                timeout=min(REGEX_SEARCH_TIMEOUT_SECONDS, remaining),
+            )
         except TimeoutError as exc:
             raise RegexSafetyLimitError(
                 f"Regex search exceeded the {REGEX_SEARCH_TIMEOUT_SECONDS:.2f}s safety limit"
@@ -788,14 +735,7 @@ def _regex_search(regex: Any, value: str, *, timeout_seconds: float = REGEX_SEAR
     try:
         # The third-party ``regex`` package enforces a hard timeout inside the
         # matching engine, unlike asyncio.wait_for around a worker thread.
-        return regex.search(value, timeout=timeout_seconds)
-    except TypeError:
-        # Defensive compatibility for a stdlib ``re.Pattern`` in minimal
-        # environments.  The dependency is installed in normal builds.
-        try:
-            return regex.search(value)
-        except (RecursionError, MemoryError) as exc:
-            raise RegexSafetyLimitError("Regex search exceeded the safety limit") from exc
+        return regex.search(value, timeout=min(REGEX_SEARCH_TIMEOUT_SECONDS, timeout_seconds))
     except TimeoutError as exc:
         raise RegexSafetyLimitError(
             f"Regex search exceeded the {REGEX_SEARCH_TIMEOUT_SECONDS:.2f}s safety limit"
@@ -920,6 +860,7 @@ async def _grep_with_ripgrep(
     offset: int = 0,
     output_mode: str = "content",
     multiline: bool = False,
+    fixed_strings: bool = False,
     file_type: str | None = None,
     file_extensions: list[str] | None = None,
     exclude_globs: list[str] | None = None,
@@ -952,6 +893,9 @@ async def _grep_with_ripgrep(
 
     if not case_sensitive:
         cmd.append("--ignore-case")
+
+    if fixed_strings:
+        cmd.append("--fixed-strings")
 
     if output_mode == "content":
         # Claude Code gives explicit symmetric context (-C/context) precedence;
@@ -1032,7 +976,7 @@ async def _grep_with_ripgrep(
             batches = _ripgrep_path_batches(cmd, candidates, deadline, search_root, is_allowed)
         else:
             batches = iter([[str(search_root)]])
-        while (batch := await asyncio.to_thread(next, batches, None)) is not None:
+        while (batch := await to_thread_cancel_safe(next, batches, None)) is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise asyncio.TimeoutError
@@ -1052,9 +996,15 @@ async def _grep_with_ripgrep(
             if proc.returncode not in (0, 1):
                 return f"ripgrep error: {decode_process_output(stderr)}", True
             outputs.append(stdout)
-    except (asyncio.TimeoutError, SearchResourceLimitError):
+    except asyncio.TimeoutError as exc:
+        if getattr(exc, "cleanup_pending", False):
+            raise
         return f"ripgrep search exceeded the {RIPGREP_TIMEOUT_SECONDS:.0f}s time or command-line budget", True
-    except SubprocessOutputLimitError:
+    except SearchResourceLimitError:
+        return f"ripgrep search exceeded the {RIPGREP_TIMEOUT_SECONDS:.0f}s time or command-line budget", True
+    except SubprocessOutputLimitError as exc:
+        if exc.cleanup_pending:
+            raise
         return "search output exceeded the 20 MB ripgrep transport limit; narrow the path/pattern or use pagination", True
     except OSError as exc:
         return f"ripgrep search failed: {exc}", True
@@ -1066,7 +1016,7 @@ async def _grep_with_ripgrep(
         output_lines = [_relativize_prefixed_line(line, search_root) for line in output.splitlines()]
         if output_mode == "files_with_matches":
             # A permitted path batch is only transport, not a new result page.
-            output_lines = await asyncio.to_thread(_sort_glob_matches, search_root, output_lines)
+            output_lines = await to_thread_cancel_safe(_sort_glob_matches, search_root, output_lines)
             output_lines.reverse()
         output_lines, truncated = _apply_pagination(output_lines, offset=offset, head_limit=limit)
         output = "\n".join(output_lines) or "(no matches on this page)"
@@ -1122,13 +1072,17 @@ async def _glob_with_ripgrep(
             stdout_limit_bytes=RIPGREP_TRANSPORT_LIMIT_BYTES,
             stderr_limit_bytes=RIPGREP_TRANSPORT_LIMIT_BYTES,
         )
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as exc:
+        if getattr(exc, "cleanup_pending", False):
+            raise
         return (
             [],
             False,
             f"ripgrep file search exceeded the {RIPGREP_TIMEOUT_SECONDS:.0f}s time limit",
         )
-    except SubprocessOutputLimitError:
+    except SubprocessOutputLimitError as exc:
+        if exc.cleanup_pending:
+            raise
         return (
             [],
             False,
@@ -1140,20 +1094,17 @@ async def _glob_with_ripgrep(
         error = decode_process_output(stderr).strip()
         return [], False, f"ripgrep file search error: {error or proc.returncode}"
 
-    all_matches = [
-        _relativize_prefixed_line(line, search_root)
-        for line in decode_process_output(stdout).split("\0")
-        if line and (is_allowed is None or is_allowed(search_root / line))
-    ]
-    # Normalize the order ourselves because rg's modified-time ordering is
-    # not consistent across runner platforms. This is CC's oldest-first
-    # contract, with a stable path tie-breaker.
-    all_matches = _sort_glob_matches(search_root, all_matches)
-    display_matches, truncated = _apply_pagination(
-        all_matches,
-        offset=offset,
-        head_limit=limit,
-    )
+    def select_matches() -> tuple[list[str], bool]:
+        all_matches = [
+            _relativize_prefixed_line(line, search_root)
+            for line in decode_process_output(stdout).split("\0")
+            if line and (is_allowed is None or is_allowed(search_root / line))
+        ]
+        # Normalize rg's modified-time order, then page only permitted files.
+        all_matches = _sort_glob_matches(search_root, all_matches)
+        return _apply_pagination(all_matches, offset=offset, head_limit=limit)
+
+    display_matches, truncated = await to_thread_cancel_safe(select_matches)
     return display_matches, truncated, None
 
 

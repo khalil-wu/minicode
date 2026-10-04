@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { fetchWorkspaceGitWorktree } from "../protocol/workspace";
 import { useAppStore } from "../stores";
+import { workspaceRootsEqual } from "../lib/workspace-path";
 
 export const useWorkspaceGit = () => {
   const workingDirectory = useAppStore((s) => s.workingDirectory);
@@ -8,12 +9,13 @@ export const useWorkspaceGit = () => {
 
   useEffect(() => {
     let cancelled = false;
+    setWorkspaceGit(null);
     if (!workingDirectory) {
-      setWorkspaceGit(null);
       return;
     }
+    const isCurrentWorkspace = () => !cancelled && workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory);
     fetchWorkspaceGitWorktree(workingDirectory).then((result) => {
-      if (cancelled) return;
+      if (!isCurrentWorkspace()) return;
       setWorkspaceGit({
         branch: result.current_branch ?? "",
         isWorktree: Boolean(result.is_worktree),
@@ -24,7 +26,7 @@ export const useWorkspaceGit = () => {
         error: result.error,
       });
     }).catch((error: unknown) => {
-      if (cancelled) return;
+      if (!isCurrentWorkspace()) return;
       setWorkspaceGit({
         branch: "",
         isWorktree: false,

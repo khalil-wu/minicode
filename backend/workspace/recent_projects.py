@@ -43,8 +43,11 @@ class RecentProject:
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> RecentProject:
+        path = data.get("path")
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("A recent project requires a non-empty path")
         return RecentProject(
-            path=str(data.get("path", "")),
+            path=path,
             name=str(data.get("name", "")),
             project_type=str(data.get("project_type", "unknown")),
             last_opened=float(data.get("last_opened", 0)),
@@ -68,10 +71,9 @@ class RecentProjectStore:
         try:
             raw = self._store_path.read_text(encoding="utf-8")
             data = json.loads(raw)
-            if isinstance(data, list):
-                self._projects = [RecentProject.from_dict(item) for item in data if isinstance(item, dict)]
-            else:
-                self._projects = []
+            if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+                raise ValueError("Recent workspace metadata must contain a list of project records")
+            self._projects = [RecentProject.from_dict(item) for item in data]
         except FileNotFoundError:
             self._projects = []
         except (OSError, ValueError, TypeError) as exc:
@@ -79,23 +81,20 @@ class RecentProjectStore:
                 "Recent workspace metadata could not be read"
             ) from exc
 
-    def _save(self, *, strict: bool = False) -> bool:
-        """保存到文件；显式删除操作可要求失败向上传播。"""
+    def _save(self, projects: list[RecentProject]) -> None:
+        """Publish the in-memory list only after its atomic save succeeds."""
         try:
             self._store_path.parent.mkdir(parents=True, exist_ok=True)
-            data = [p.to_dict() for p in self._projects]
+            data = [p.to_dict() for p in projects]
             atomic_write_text(
                 self._store_path,
                 json.dumps(data, ensure_ascii=False, indent=2),
             )
-        except Exception as exc:
-            logger.warning("Failed to save recent projects: %s", exc)
-            if strict:
-                raise RecentProjectPersistenceError(
-                    "Recent workspace metadata could not be saved"
-                ) from exc
-            return False
-        return True
+        except OSError as exc:
+            raise RecentProjectPersistenceError(
+                "Recent workspace metadata could not be saved"
+            ) from exc
+        self._projects = projects
 
     def add(self, path: str, name: str, project_type: str = "unknown") -> None:
         """记录打开的项目；更新元数据不会改变现有项目的位置。"""
@@ -106,18 +105,18 @@ class RecentProjectStore:
             existing_index = next((index for index, project in enumerate(self._projects)
                                    if canonical_file_path_key(project.path) == identity), len(self._projects))
             # Canonical aliases share one saved project and its stable position.
-            self._projects = [
+            candidate = [
                 project
                 for project in self._projects
                 if canonical_file_path_key(project.path) != identity
             ]
-            self._projects.insert(existing_index, RecentProject(
+            candidate.insert(existing_index, RecentProject(
                 path=normalized,
                 name=name,
                 project_type=project_type,
                 last_opened=time.time(),
             ))
-            self._save()
+            self._save(candidate)
 
     def list(self, limit: int | None = None, clean: bool = False) -> list[RecentProject]:
         """读取已保存项目；只有显式清理才移除不可用目录。"""
@@ -136,9 +135,8 @@ class RecentProjectStore:
                         # to this process. Treat them as unavailable instead of
                         # aborting the websocket command without a response.
                         logger.debug("Recent project path is unavailable: %s", project.path)
-                self._projects = existing
-                if len(self._projects) != before:
-                    self._save()
+                if len(existing) != before:
+                    self._save(existing)
 
         return self._projects[:limit]
 
@@ -155,12 +153,7 @@ class RecentProjectStore:
                 if canonical_file_path_key(project.path) != identity
             ]
             if len(candidate) != len(original):
-                self._projects = candidate
-                try:
-                    self._save(strict=True)
-                except RecentProjectPersistenceError:
-                    self._projects = original
-                    raise
+                self._save(candidate)
                 return True
             return False
 
@@ -169,11 +162,5 @@ class RecentProjectStore:
         with file_mutation_locks([self._store_path]):
             self._load()
             removed = len(self._projects)
-            original = list(self._projects)
-            self._projects.clear()
-            try:
-                self._save(strict=True)
-            except RecentProjectPersistenceError:
-                self._projects = original
-                raise
+            self._save([])
             return removed

@@ -1,4 +1,5 @@
 import { useAppStore } from "../stores";
+import { mcpProjectionMatches } from "./mcpProjectionScope";
 import type {
   BackgroundCompletedEvent,
   BackgroundStalledEvent,
@@ -153,7 +154,9 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
       if (!terminalEventTargetsActiveConversation(e)) return true;
       const current = useAppStore.getState().terminalSessions.find((session) => session.id === e.session_id);
       if (e.session_id && current) {
-        s.upsertTerminalSession({ ...current, status: "exited" });
+        const exit = e as unknown as { exit_code?: number | null; exit_signal?: number | string | null; exited_at?: number };
+        s.upsertTerminalSession({ ...current, status: "exited", exitCode: exit.exit_code,
+          exitSignal: exit.exit_signal, exitedAt: exit.exited_at ?? eventTimestampMs(e) });
       }
       return true;
     }
@@ -166,6 +169,11 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
           cwd?: string;
           is_alive?: boolean;
           started_at?: number;
+          exit_code?: number | null;
+          exit_signal?: number | string | null;
+          exited_at?: number;
+          cleanup_pending?: boolean;
+          cleanup_reason?: string;
           terminal_mode?: string;
           conversation_id?: string;
         }[];
@@ -188,6 +196,11 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
             cwd: session.cwd ?? "",
             status: session.is_alive === false ? "exited" : "running",
             createdAt: session.started_at ? session.started_at * 1000 : undefined,
+            exitCode: session.exit_code,
+            exitSignal: session.exit_signal,
+            exitedAt: session.exited_at,
+            cleanupPending: session.cleanup_pending,
+            cleanupReason: session.cleanup_reason,
             terminalMode: session.terminal_mode === "pty" ? "pty" : "pipe",
           }));
         s.setTerminalSessions(sessions);
@@ -213,7 +226,14 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
         terminal_mode?: string;
         output?: string;
         output_chars?: number;
+        exit_code?: number | null;
+        exit_signal?: number | string | null;
+        exited_at?: number;
+        cleanup_pending?: boolean;
+        cleanup_reason?: string;
         total_output_chars?: number;
+        output_start_cursor?: number;
+        output_end_cursor?: number;
         truncated?: boolean;
         error?: string;
         conversation_id?: string;
@@ -229,17 +249,31 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
         shell: ev.shell ?? "",
         cwd: ev.cwd ?? "",
         status: ev.is_alive === false ? "exited" : "running",
+        exitCode: ev.exit_code,
+        exitSignal: ev.exit_signal,
+        exitedAt: ev.exited_at,
+        cleanupPending: ev.cleanup_pending,
+        cleanupReason: ev.cleanup_reason,
         terminalMode: ev.terminal_mode === "pty" ? "pty" : "pipe",
         output: ev.output ?? "",
         outputChars: ev.output_chars,
         totalOutputChars: ev.total_output_chars,
+        outputStartCursor: ev.output_start_cursor,
+        outputEndCursor: ev.output_end_cursor,
         truncated: ev.truncated,
         capturedAt: Date.now(),
         error: ev.error,
       });
+      const current = s.terminalSessions.find((session) => session.id === id && session.conversationId === snapshotOwner);
+      if (current) {
+        s.upsertTerminalSession({ ...current, status: ev.is_alive === false ? "exited" : current.status,
+          exitCode: ev.exit_code, exitSignal: ev.exit_signal, exitedAt: ev.exited_at,
+          cleanupPending: ev.cleanup_pending, cleanupReason: ev.cleanup_reason });
+      }
       return true;
     }
     case "mcp_status": {
+      if (!mcpProjectionMatches(e, s.conversationId, s.workingDirectory)) return true;
       const ev = e as unknown as {
         servers?: {
           name: string;
@@ -471,6 +505,9 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
         command: cmd,
         status,
         exitCode: ev.exit_code,
+        cleanupPending,
+        cleanupReason: ev.cleanup_reason,
+        terminalStatus: ev.status,
         duration: ev.duration,
         timestamp: existing?.timestamp ?? (ev.started_at ? ev.started_at * 1000 : eventTimestampMs(e)),
         completedAt: ev.completed_at ? ev.completed_at * 1000 : eventTimestampMs(e),

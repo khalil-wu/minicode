@@ -120,7 +120,7 @@ def test_memory_citation_is_hidden_across_stream_chunks_and_parsed() -> None:
     ]
     visible = "".join(sanitizer.feed(chunk) for chunk in chunks)
     assert visible == "before  after"
-    assert scrub_thinking_tags("x<minicode-memory-citation>hidden</minicode-memory-citation>y") == "xy"
+    assert scrub_thinking_tags(f"x<minicode-memory-citation>{sanitizer.citations[0]}</minicode-memory-citation>y") == "xy"
     assert parse_memory_citation(sanitizer.citations) == {
         "entries": [
             {

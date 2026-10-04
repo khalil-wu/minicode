@@ -9,6 +9,8 @@ import { Check, ChevronDown, ChevronUp, Undo2, X } from "../lib/icons";
 export interface AgentEditReviewBarProps {
   total: number;
   currentIndex: number;
+  currentLine: number | null;
+  onReveal: () => void;
   onPrev: () => void;
   onNext: () => void;
   onKeep: () => void;
@@ -19,6 +21,8 @@ export interface AgentEditReviewBarProps {
 export function AgentEditReviewBar({
   total,
   currentIndex,
+  currentLine,
+  onReveal,
   onPrev,
   onNext,
   onKeep,
@@ -28,8 +32,10 @@ export function AgentEditReviewBar({
   if (total <= 0) return null;
   const position = Math.min(Math.max(currentIndex + 1, 1), total);
   return (
-    <div className="agent-edit-review-bar" role="toolbar" aria-label="Agent edit review">
-      <span className="agent-edit-review-count">{position}/{total} 处改动</span>
+    <div className="agent-edit-review-bar" role="toolbar" aria-label="代码改动审阅">
+      <button type="button" className="agent-edit-review-btn agent-edit-review-count" onClick={onReveal} title={`定位当前改动 · 第 ${currentLine} 行`} aria-label={`定位第 ${position} 处改动，共 ${total} 处，第 ${currentLine} 行`}>
+        {position}/{total} · L{currentLine}
+      </button>
       <div className="agent-edit-review-group">
         <button type="button" className="agent-edit-review-btn" onClick={onPrev} aria-label="上一处" title="上一处改动">
           <ChevronUp size={14} />

@@ -79,7 +79,7 @@ def load_minicode_managed_settings(
     """
 
     accumulated_errors: list[str] = []
-    if remote_settings:
+    if remote_settings is not None:
         remote_payload = _validated_settings_mapping(
             remote_settings,
             source="remote managed settings",
@@ -163,7 +163,7 @@ def load_minicode_managed_file_settings(directory: Path) -> ManagedSettingsResul
                 key=lambda entry: entry.name,
             )
         )
-    except (FileNotFoundError, NotADirectoryError):
+    except FileNotFoundError:
         pass
     except OSError as exc:
         logger.error("Failed to enumerate MiniCode managed settings %s: %s", drop_in_dir, exc)
@@ -171,13 +171,14 @@ def load_minicode_managed_file_settings(directory: Path) -> ManagedSettingsResul
         sources.append(str(drop_in_dir))
         present = True
     for path in paths:
-        if path.exists() or path.is_symlink():
+        errors_before = len(errors)
+        payload = _load_json_settings(path, errors=errors)
+        if payload is not None or len(errors) != errors_before:
             present = True
             # Preserve the actual managed source even when its payload is
             # empty or malformed.  A policy error must identify the source
             # that blocked lower-precedence settings.
             sources.append(str(path))
-        payload = _load_json_settings(path, errors=errors)
         if payload is None or not payload:
             continue
         _merge_settings(merged, payload)
@@ -312,7 +313,9 @@ def _load_windows_registry_settings(hive_name: str) -> ManagedSettingsResult:
 def _load_json_settings(path: Path, *, errors: list[str]) -> dict[str, Any] | None:
     try:
         raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
+        if path.is_symlink():
+            errors.append(f"{path}: failed to read settings: {exc}")
         return None
     except (OSError, UnicodeDecodeError) as exc:
         logger.error("Failed to read MiniCode settings %s: %s", path, exc)
@@ -582,8 +585,8 @@ def _sandbox_validation_error(sandbox: Any) -> str:
             if value is not None and (
                 isinstance(value, bool)
                 or not isinstance(value, (int, float))
+                or not 1 <= value <= 65535
                 or int(value) != value
-                or not 1 <= int(value) <= 65535
             ):
                 return f"sandbox.network.{field_name} must be a valid port"
 

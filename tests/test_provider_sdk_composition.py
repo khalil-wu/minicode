@@ -99,7 +99,7 @@ def test_tool_registry_freezes_workspace_and_config_snapshot(monkeypatch, tmp_pa
     assert registry.get_tool("fuzzy_search").workspace_root == workspace.resolve()
     assert registry.get_tool("git_status")._workspace_root == workspace.resolve()
     assert registry.get_tool("preview_server")._workspace_root == str(workspace.resolve())
-    assert registry.get_tool("enter_plan_mode")._workspace_root == workspace.resolve()
+    assert task_tool._schema_workspace_root == workspace.resolve()
 
 
 def test_tool_registry_loads_config_once_for_the_composed_workspace(monkeypatch, tmp_path) -> None:

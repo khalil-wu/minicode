@@ -166,9 +166,9 @@ def record_provider_attempt_usage(*, llm, provider_attempt, stream_state, provid
     from backend.llm.cost_tracker import CostTracker
 
     request_raw = raw if raw is not None else provider_raw_done
-    summary = request_raw.get("request_summary") or {}
+    summary = request_raw.get("request_summary") or provider_raw_done.get("request_summary") or {}
     capabilities = capabilities_for_adapter(llm)
-    model_id = str(summary.get("model") or request_raw.get("model") or capabilities.model or "")
+    model_id = str(summary.get("model") or request_raw.get("model") or provider_raw_done.get("model") or capabilities.model or "")
     request_usage = stream_state.usage
     price_source = CostTracker.get_instance().record_usage_info(
         request_usage,
@@ -182,6 +182,8 @@ def record_provider_attempt_usage(*, llm, provider_attempt, stream_state, provid
     provider_attempt.usage_settled = True
     request_raw["price_source"] = price_source
     request_raw.setdefault("model", model_id)
+    if summary:
+        request_raw.setdefault("request_summary", summary)
     if "usage" in provider_raw_done:
         request_raw.setdefault("usage", provider_raw_done["usage"])
     provider_raw_done["price_source"] = price_source

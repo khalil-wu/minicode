@@ -59,19 +59,12 @@ class ReadTerminalTool(BaseTool):
         conv_id = getattr(context, "conversation_id", "") or ""
         session_id = str(args.get("session_id") or "").strip()
         if not session_id:
-            try:
-                sessions = manager.list_sessions(conversation_id=conv_id)
-            except TypeError:
-                sessions = manager.list_sessions()
+            sessions = manager.list_sessions(conversation_id=conv_id)
             session_id = sessions[-1].session_id if sessions else ""
         if not session_id:
             return self._error_result("No terminal session is available for this conversation.")
 
-        try:
-            max_chars = int(args.get("max_chars") or TERMINAL_OUTPUT_DEFAULT_CHARS)
-        except (TypeError, ValueError):
-            max_chars = TERMINAL_OUTPUT_DEFAULT_CHARS
-        max_chars = max(1, min(max_chars, TERMINAL_OUTPUT_MAX_CHARS))
+        max_chars = args.get("max_chars", TERMINAL_OUTPUT_DEFAULT_CHARS)
         snapshot = manager.snapshot(
             session_id,
             max_chars=max_chars,

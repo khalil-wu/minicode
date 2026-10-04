@@ -21,13 +21,7 @@ function ensureRunning(): void {
   intervalId = setInterval(() => {
     const now = Date.now();
     for (const fn of [...listeners]) {
-      try {
-        fn(now);
-      } catch (error) {
-        // One unmounted or faulty consumer must not stop the shared clock for
-        // every running tool. Report it without changing subscription state.
-        console.error("[shared-tick] subscriber failed", error);
-      }
+      fn(now);
     }
   }, 1000);
 }
@@ -40,7 +34,7 @@ function maybeStop(): void {
 }
 
 /** Subscribe to the shared 1s tick. Returns an unsubscribe function. */
-export function subscribeSecondTick(fn: SecondTickListener): () => void {
+function subscribeSecondTick(fn: SecondTickListener): () => void {
   listeners.add(fn);
   ensureRunning();
   return () => {

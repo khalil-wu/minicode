@@ -9,6 +9,7 @@
 .mc-pdf-toolbar {
   display: flex;
   min-height: 32px;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
   padding: 4px 8px;

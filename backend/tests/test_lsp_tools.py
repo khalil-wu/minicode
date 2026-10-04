@@ -5,7 +5,6 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from backend.lsp import client as lsp_client
 from backend.lsp.client import LSPClient, LSPLocation, _lsp_sandbox_runner, _parse_locations, _uri_to_path
 from backend.sandbox.policy import SandboxPolicy
 from backend.sandbox.runner import SandboxRunner
@@ -401,7 +400,7 @@ def test_runtime_review_lsp_standalone_uses_existing_canonical_constructor(monke
     context = ToolExecutionContext(permission=permission, workspace_root=tmp_path)
     with patch.object(module, "sandbox_policy_for_permission_context", wraps=module.sandbox_policy_for_permission_context) as canonical:
         policy = module._lsp_request_policy(str(tmp_path), context)
-        canonical.assert_called_once_with(tmp_path, permission)
+        canonical.assert_called_once_with(tmp_path, context.permission)
         assert isinstance(policy, SandboxPolicy)
     with patch.object(module, "sandbox_policy_for_permission_context", wraps=module.sandbox_policy_for_permission_context) as canonical:
         policy = module._lsp_request_policy(str(tmp_path), None)

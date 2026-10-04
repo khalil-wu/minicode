@@ -69,6 +69,9 @@ class _FakeMcpManager:
         self.registry_version = 0
         self.connected: set[str] = set()
 
+    def get_all_status(self) -> list[dict[str, object]]:
+        return []
+
 
 class _FakeBootstrap:
     """Rebuilds a registry that mirrors the manager's currently connected tools."""
@@ -341,7 +344,7 @@ def test_runtime_snapshot_includes_compact_mcp_summary(monkeypatch, tmp_path) ->
     _install_fake_bootstrap(monkeypatch)
     session = _make_session(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        "backend.api.routes_health.get_mcp_status",
+        session.mcp_manager, "get_all_status",
         lambda: [
             {"name": "a", "status": "connected", "phase": "connected"},
             {"name": "b", "status": "error", "phase": "auth_required"},

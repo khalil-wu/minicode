@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from backend.agent.loop_preflight import hook_manager_has_hooks
 from backend.agent.message import AgentEvent
 from backend.agent.response_utils import (
     append_assistant_history,
@@ -40,7 +39,7 @@ async def apply_stop_hook_policy(
     subagent_id = str(prompt_context.get("subagent_id") or "").strip()
     agent_type = str(prompt_context.get("subagent") or "").strip()
     hook_event = HookEvent.SUBAGENT_STOP if subagent_id else HookEvent.STOP
-    if not hook_manager or not hook_manager_has_hooks(hook_manager, hook_event):
+    if not hook_manager or not hook_manager.has_hooks(hook_event):
         return AcceptanceResult("accept")
     if subagent_id:
         prompt_context.pop("subagent_stop_prevented_continuation", None)

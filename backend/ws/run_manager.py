@@ -14,6 +14,7 @@ from backend.agent.parent_notification_outbox import (
     subscribe_parent_notification_enqueued,
 )
 from backend.agent.message import UserCommand
+from backend.ws.utils import USER_INPUT_METADATA_KEYS
 from backend.agent.run_context import RunContext
 from backend.agent.conversation_query_guard import (
     ConversationQueryClaim,
@@ -24,7 +25,6 @@ from backend.agent.turn_input import TurnInput, TurnInputQueue
 from backend.async_cleanup import (
     CANCELLATION_DRAIN_TIMEOUT_SECONDS,
     await_with_deadline,
-    cancel_and_drain,
     cancel_and_drain_receipt,
     cancel_and_drain_to_completion,
     retain_cleanup_task,
@@ -64,11 +64,22 @@ class SessionRunManager:
         conversation_dir = getattr(conversation_repo, "_base_dir", None)
         queue_root = Path(conversation_dir or CONVERSATION_DATA_DIR).parent / "user-message-queue"
         queue_store = (
-            DurableUserMessageQueue(session_id=session_id, root_dir=queue_root)
+            DurableUserMessageQueue(session_id="shared", root_dir=queue_root / "conversations")
             if session_id
             else None
         )
+        self._durable_client_commands = (
+            DurableUserMessageQueue(session_id=session_id, root_dir=queue_root)
+            if session_id else None
+        )
         self._durable_queue = queue_store
+        self._legacy_queue_paths = set(queue_root.glob("*.json"))
+        if queue_store is not None:
+            try:
+                self._migrate_legacy_user_queues()
+            except BaseException:
+                self.close_durable_queue()
+                raise
         loaded_queues, loaded_inflight = queue_store.load() if queue_store is not None else ({}, {})
         self._user_message_queues: dict[str, deque[Any]] = {
             conversation_id: deque(commands)
@@ -81,6 +92,7 @@ class SessionRunManager:
         self._queue_owned_runs: dict[str, str] = {}
         self._queue_owned_run_releases: dict[str, asyncio.Future[bool]] = {}
         self._queue_steering: set[str] = set()
+        self._paused_user_queues: dict[str, str] = {}
         # TurnWaitState is the owner of turn-local interaction state.  The
         # manager provides durable queue operations, but it must not create a
         # second queue registry beside the session's wait state.
@@ -111,11 +123,25 @@ class SessionRunManager:
     def durable_queue(self) -> DurableUserMessageQueue | None:
         return self._durable_queue
 
+    @property
+    def durable_client_commands(self) -> DurableUserMessageQueue | None:
+        return self._durable_client_commands
+
     def close_durable_queue(self) -> None:
-        queue = self._durable_queue
-        if queue is None:
-            return
-        queue.close()
+        for queue in (self._durable_queue, self._durable_client_commands):
+            if queue is not None:
+                queue.close()
+
+    def _migrate_legacy_user_queues(self) -> None:
+        for path in sorted(self._legacy_queue_paths):
+            legacy = self._durable_client_commands if path == self._durable_client_commands.path else DurableUserMessageQueue(session_id=path.stem, root_dir=path.parent)
+            try:
+                transferred = legacy.migrate_user_messages_to(self._durable_queue)
+            finally:
+                if legacy is not self._durable_client_commands:
+                    legacy.close()
+            if transferred is not None:
+                self._legacy_queue_paths.discard(path)
 
     def _persist_user_queues(
         self,
@@ -177,10 +203,25 @@ class SessionRunManager:
         )
 
     def enqueue_user_message(self, conversation_id: str, command: Any) -> int:
-        queue = deque(self._user_message_queues.get(conversation_id, ()))
+        queue = deque(self.queued_user_messages(conversation_id))
         queue.append(command)
         self._persist_user_queues(queues={**self._user_message_queues, conversation_id: queue})
         return len(queue)
+
+    def set_user_queue_paused(self, conversation_id: str, stopped_message_id: str) -> None:
+        if self._durable_queue is not None:
+            self._durable_queue.set_user_queue_paused(conversation_id, stopped_message_id)
+        elif stopped_message_id:
+            self._paused_user_queues[conversation_id] = stopped_message_id
+        else:
+            self._paused_user_queues.pop(conversation_id, None)
+
+    def user_queue_paused(self, conversation_id: str) -> bool:
+        return bool(self.user_queue_pause_token(conversation_id))
+
+    def user_queue_pause_token(self, conversation_id: str) -> str:
+        paused = self._durable_queue.paused_user_queues() if self._durable_queue is not None else self._paused_user_queues
+        return paused.get(conversation_id, "")
 
     def dequeue_user_message(self, conversation_id: str) -> Any | None:
         if self._durable_queue is not None:
@@ -188,12 +229,12 @@ class SessionRunManager:
             claimed = self._durable_queue.claim_user_message(conversation_id)
             remaining = self._durable_queue.pending_user_messages(conversation_id)
             command = next(
-                (candidate for candidate in local_commands if candidate == claimed),
+                (candidate for candidate in local_commands if claimed is not None and self._durable_queue.same_user_command(candidate, claimed)),
                 claimed,
             )
             remaining = [
                 next(
-                    (candidate for candidate in local_commands if candidate == persisted),
+                    (candidate for candidate in local_commands if self._durable_queue.same_user_command(candidate, persisted)),
                     persisted,
                 )
                 for persisted in remaining
@@ -209,7 +250,13 @@ class SessionRunManager:
         queue = self._user_message_queues.get(conversation_id)
         if not queue:
             return None
-        command = queue.popleft()
+        index = 0
+        if pause_token := self.user_queue_pause_token(conversation_id):
+            index = next((i for i, item in enumerate(queue) if item.data.get("_queue_explicit_send") == pause_token), -1)
+            if index < 0:
+                return None
+        command = queue[index]
+        del queue[index]
         self._inflight_user_messages[conversation_id] = command
         if not queue:
             self._user_message_queues.pop(conversation_id, None)
@@ -234,7 +281,7 @@ class SessionRunManager:
             remaining = self._durable_queue.pending_user_messages(conversation_id)
             remaining = [
                 next(
-                    (candidate for candidate in local_commands if candidate == persisted),
+                    (candidate for candidate in local_commands if self._durable_queue.same_user_command(candidate, persisted)),
                     persisted,
                 )
                 for persisted in remaining
@@ -250,7 +297,7 @@ class SessionRunManager:
         self._persist_user_queues()
 
     def remove_queued_user_message(self, conversation_id: str, message_id: str) -> bool:
-        queue = self._user_message_queues.get(conversation_id)
+        queue = self.queued_user_messages(conversation_id)
         if not queue:
             return False
         kept = deque(
@@ -269,7 +316,7 @@ class SessionRunManager:
 
     def pop_queued_user_message(self, conversation_id: str, message_id: str) -> Any | None:
         """Remove and return one queued prompt without disturbing FIFO order."""
-        queue = self._user_message_queues.get(conversation_id)
+        queue = self.queued_user_messages(conversation_id)
         if not queue:
             return None
         commands = list(queue)
@@ -297,13 +344,29 @@ class SessionRunManager:
         return command
 
     def queued_user_messages(self, conversation_id: str) -> list[Any]:
+        if self._durable_queue is not None:
+            self._migrate_legacy_user_queues()
+            local = list(self._user_message_queues.get(conversation_id) or ())
+            pending = self._durable_queue.pending_user_messages(conversation_id)
+            commands = [
+                next((command for command in local if self._durable_queue.same_user_command(command, persisted)), persisted)
+                for persisted in pending
+            ]
+            if commands:
+                self._user_message_queues[conversation_id] = deque(commands)
+            else:
+                self._user_message_queues.pop(conversation_id, None)
         return list(self._user_message_queues.get(conversation_id) or ())
 
     def queued_user_message_snapshot(self, conversation_id: str = "") -> list[dict[str, Any]]:
         """Return replay-safe metadata for queued follow-ups without internals."""
         target = str(conversation_id or "").strip()
         result: list[dict[str, Any]] = []
-        for cid, commands in self._user_message_queues.items():
+        if self._durable_queue is not None:
+            self._migrate_legacy_user_queues()
+        queues = self._durable_queue.pending_user_message_snapshot() if self._durable_queue is not None else self._user_message_queues
+        paused = self._durable_queue.paused_user_queues() if self._durable_queue is not None else self._paused_user_queues
+        for cid, commands in queues.items():
             if target and cid != target:
                 continue
             for position, command in enumerate(commands, 1):
@@ -313,7 +376,10 @@ class SessionRunManager:
                     "message_id": str(data.get("assistant_message_id") or ""),
                     "user_message_id": str(data.get("user_message_id") or ""),
                     "content": str(data.get("content") or ""),
+                    "attachments": [dict(item) for item in data.get("attachments", [])],
+                    **{key: data[key] for key in USER_INPUT_METADATA_KEYS if key in data},
                     "position": position,
+                    "paused": cid in paused and data.get("_queue_explicit_send") != paused[cid],
                 })
         return result
 
@@ -450,6 +516,8 @@ class SessionRunManager:
                     "target_message_id": item.target_message_id,
                     "content": item.content,
                     "attachments": [dict(attachment) for attachment in item.attachments],
+                    **{key: item.original_command.data[key] for key in USER_INPUT_METADATA_KEYS
+                       if key in item.original_command.data},
                     "position": position,
                     "queued_at_ms": item.queued_at_ms,
                 })
@@ -477,7 +545,7 @@ class SessionRunManager:
             if not any(command is pending for pending in durable_pending)
         )
         if restored:
-            existing = list(self._user_message_queues.get(conversation_id) or ())
+            existing = self.queued_user_messages(conversation_id)
             turn_inputs = dict(self._durable_turn_inputs)
             turn_inputs.pop(conversation_id, None)
             self._persist_user_queues(
@@ -490,7 +558,7 @@ class SessionRunManager:
 
     def promote_queued_user_message(self, conversation_id: str, message_id: str) -> list[Any] | None:
         """Move one queued prompt to the front and return the new queue order."""
-        queue = self._user_message_queues.get(conversation_id)
+        queue = self.queued_user_messages(conversation_id)
         if not queue:
             return None
         commands = list(queue)
@@ -510,6 +578,7 @@ class SessionRunManager:
         return commands
 
     def clear_user_message_queue(self, conversation_id: str) -> None:
+        self.queued_user_messages(conversation_id)
         queues = dict(self._user_message_queues)
         queues.pop(conversation_id, None)
         inflight = dict(self._inflight_user_messages)
@@ -517,6 +586,7 @@ class SessionRunManager:
         turn_inputs = dict(self._durable_turn_inputs)
         turn_inputs.pop(conversation_id, None)
         self._persist_user_queues(queues=queues, inflight=inflight, turn_inputs=turn_inputs)
+        self.set_user_queue_paused(conversation_id, "")
         self._queue_dispatching.discard(conversation_id)
         self._queue_steering.discard(conversation_id)
         queue = self._turn_input_queues.pop(conversation_id, None)
@@ -665,7 +735,7 @@ class SessionRunManager:
         )
 
     def running_task_for(self, conversation_id: str) -> asyncio.Task[Any] | None:
-        if self.is_delivery_complete(conversation_id) and not self._user_message_queues.get(
+        if self.is_delivery_complete(conversation_id) and not self.queued_user_messages(
             conversation_id
         ):
             return None
@@ -982,7 +1052,7 @@ class SessionRunManager:
                 conversation_id in self.run_tasks
                 or conversation_id in self._queue_dispatching
                 or conversation_id in self._queue_steering
-                or bool(self._user_message_queues.get(conversation_id))
+                or bool(self.queued_user_messages(conversation_id))
                 or conversation_id in self._inflight_user_messages
             ):
                 return

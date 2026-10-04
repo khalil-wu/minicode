@@ -6,6 +6,7 @@
 
 interface ResolveOptions {
   candidates: (string | undefined)[];
+  wsBaseUrl?: string;
 }
 
 interface ResolvedOrigins {
@@ -22,7 +23,7 @@ export async function resolveMiniCodeDevBackendOrigins(
   opts: ResolveOptions,
 ): Promise<ResolvedOrigins> {
   const first = opts.candidates.find(isTruthy) ?? "http://127.0.0.1:8000";
-  const apiBaseUrl = first.replace(/\/+$/, "");
-  const wsBaseUrl = toWs(apiBaseUrl);
+  const apiBaseUrl = first.replace(/^ws/i, "http").replace(/\/+$/, "");
+  const wsBaseUrl = toWs((opts.wsBaseUrl || apiBaseUrl).replace(/\/+$/, ""));
   return { apiBaseUrl, wsBaseUrl };
 }

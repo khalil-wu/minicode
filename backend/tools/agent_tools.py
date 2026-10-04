@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+from copy import copy
 import logging
 import os
 import re
@@ -19,6 +20,7 @@ from typing import Any
 from uuid import uuid4
 
 from backend.agent.context import ContextBuilder
+from backend.agent.mailbox_delivery import _run_is_conversation_leader
 from backend.async_cleanup import to_thread_cancel_safe
 from backend.agent.loop import AgentLoopSessionContext
 from backend.agent.message import AgentEvent
@@ -232,7 +234,7 @@ def _task_tool_parameters(
             "mode": {
                 "type": "string",
                 "enum": ["confirm", "auto", "bypass", "plan"],
-                "description": "Permission mode for the spawned teammate; plan requires leader approval.",
+                "description": "Permission mode for the spawned teammate; plan requires user review, except in a bypass session where the host approves automatically.",
             },
         }
 
@@ -316,7 +318,8 @@ class TaskTool(BaseTool):
             "Give implementation agents specific ownership: name the files or modules they own and the exact change. "
             "Do not delegate synthesis with vague instructions such as 'based on your findings, fix it'; "
             "understand the findings first, then delegate a concrete change. "
-            "The call waits for its result by default. Set run_in_background=true only when the parent can "
+            "The call waits for its result unless the custom agent declares a background default. "
+            "run_in_background explicitly overrides that default. Set it true only when the parent can "
             "continue without the result; background completion is delivered later. "
             "While a background agent is running, do not read its transcript/output file or predict its result. "
             "If asked before completion, report that it is still running; give status, not a guess. "
@@ -355,10 +358,11 @@ class TaskTool(BaseTool):
         )
 
     def model_schema(self) -> ToolSchema:
-        agent_types = _available_agent_types()
+        definitions = discover_agents(self._schema_workspace_root)
+        agent_types = available_agent_types(lambda: definitions)
         agent_type_help = agent_type_description(
             agent_types,
-            get_custom_agent=get_custom_agent,
+            get_custom_agent=definitions.get,
         )
         return ToolSchema(
             name=self.name,
@@ -375,6 +379,7 @@ class TaskTool(BaseTool):
         permission_checker_provider: Any | None = None,
         agent_settings_provider: Any | None = None,
         token_budget_provider: Any | None = None,
+        workspace_root: Path | None = None,
     ) -> None:
         self._llm_provider = llm_provider
         self._tool_registry_provider = tool_registry_provider
@@ -382,17 +387,16 @@ class TaskTool(BaseTool):
         self._permission_checker_provider = permission_checker_provider
         self._agent_settings_provider = agent_settings_provider
         self._token_budget_provider = token_budget_provider
+        # Schema discovery belongs to this registry's captured workspace.
+        # Actual child execution continues to use ToolExecutionContext.
+        self._schema_workspace_root = workspace_root
 
     def get_schema(self) -> ToolSchema:
-        agent_types = _available_agent_types()
-        agent_type_help = agent_type_description(
-            agent_types,
-            get_custom_agent=get_custom_agent,
-        )
+        schema = self.model_schema()
         return ToolSchema(
             name=self.name,
             description=self.description,
-            parameters=_task_tool_parameters(agent_types, agent_type_help),
+            parameters=schema.parameters,
         )
 
     async def execute(
@@ -400,6 +404,27 @@ class TaskTool(BaseTool):
         args: dict[str, Any],
         context: ToolExecutionContext | None = None,
     ) -> ToolResult:
+        workspace_root = context.workspace_root if context is not None else None
+        try:
+            parallel = args.get("parallel_tasks")
+            if isinstance(parallel, list) and len(parallel) >= 2:
+                tasks_with_defaults = [
+                    self._apply_definition_execution_defaults(item, workspace_root)
+                    if isinstance(item, dict) else item
+                    for item in parallel
+                ]
+                args = {**args, "parallel_tasks": tasks_with_defaults}
+                if "run_in_background" not in args:
+                    backgrounds = {bool(item.get("run_in_background")) for item in tasks_with_defaults if isinstance(item, dict)}
+                    if len(backgrounds) > 1:
+                        return self._error_result(
+                            "parallel_tasks has mixed agent background defaults. Set run_in_background for the batch or spawn those agents separately."
+                        )
+                    args["run_in_background"] = next(iter(backgrounds), False)
+            else:
+                args = self._apply_definition_execution_defaults(args, workspace_root)
+        except ValueError as exc:
+            return self._error_result(str(exc))
         description = str(args.get("description") or "").strip()
         parallel_tasks = args.get("parallel_tasks")
         parent_metadata = self._metadata_from_context(context)
@@ -410,7 +435,7 @@ class TaskTool(BaseTool):
             or (context.llm if context is not None else None)
             or self._resolve_llm()
         )
-        tool_registry = self._resolve_tool_registry()
+        tool_registry = self._resolve_tool_registry(context)
         permission_checker = (
             context.permission_checker
             if context is not None and context.permission_checker is not None
@@ -604,21 +629,16 @@ class TaskTool(BaseTool):
         runtime = require_runtime_from_context(context)
         conversation_id = str(getattr(context, "conversation_id", "") or "").strip()
         if teammate_name and not team_name:
-            leader_id = str(parent_metadata.get("run_id") or "").strip()
             led_teams = runtime.list_swarm_teams(
                 conversation_id=conversation_id,
                 limit=100,
             )
-            current_team = next(
-                (
-                    team for team in led_teams
-                    if str(team.created_by or "") == leader_id
-                ),
-                None,
-            )
-            if current_team is not None:
-                team_name = current_team.team_name
-                args = {**args, "team_name": team_name}
+            if not led_teams:
+                return self._error_result("No team exists in this conversation. Call team_create first.")
+            if len(led_teams) > 1:
+                return self._error_result("Multiple teams exist in this conversation. Provide team_name explicitly.")
+            team_name = led_teams[0].team_name
+            args = {**args, "team_name": team_name}
         if team_name and not teammate_name:
             return self._error_result(
                 "team_name only selects a team; provide name to spawn a teammate."
@@ -714,6 +734,23 @@ class TaskTool(BaseTool):
             context=context,
             subagent_metadata=child_metadata,
         )
+
+    @staticmethod
+    def _apply_definition_execution_defaults(args: dict[str, Any], workspace_root: Path | None) -> dict[str, Any]:
+        definition = get_custom_agent(str(args.get("agent_type") or "general-purpose").strip(), workspace_root)
+        if definition is None:
+            return args
+        if definition.has_output_schema:
+            raise ValueError(
+                f"Agent '{definition.name}' declares has_output_schema, but MiniCode has no supported schema body for this marker. "
+                "Remove has_output_schema from the agent definition before running it."
+            )
+        resolved = dict(args)
+        if "run_in_background" not in resolved and definition.background is not None:
+            resolved["run_in_background"] = definition.background
+        if not str(resolved.get("mode") or "").strip() and definition.permission_mode:
+            resolved["_agent_permission_mode"] = normalize_permission_mode_token(definition.permission_mode)
+        return resolved
 
     # ------------------------------------------------------------------
     # Single subtask execution
@@ -1086,8 +1123,11 @@ class TaskTool(BaseTool):
         subagent_id = subagent_id or f"subagent-{uuid4().hex[:8]}"
         runtime = require_runtime_from_context(context)
         subagent_cancel_event = asyncio.Event()
+        background_started = False
 
         async def _run_background() -> ToolResult:
+            nonlocal background_started
+            background_started = True
             resolution_handed_off = False
             try:
                 if wait_for_slot:
@@ -1225,15 +1265,33 @@ class TaskTool(BaseTool):
                         or "Background subagent ended before claiming its runtime identity."
                     )
                 )
+            if not background_started and prepared_llm_resolution is not None and prepared_llm_resolution.owns_llm:
+                async def close_unstarted_adapter() -> None:
+                    try:
+                        await _close_subagent_llm_resolution(prepared_llm_resolution)
+                    finally:
+                        if runtime.release_subagent_task(subagent_id, expected_task=cleanup_task):
+                            runtime.release_subagent_slot(subagent_id)
+
+                cleanup_task = asyncio.create_task(
+                    close_unstarted_adapter(), name=f"subagent-prepared-cleanup:{subagent_id}"
+                )
+                runtime.transfer_subagent_task_owner(subagent_id, expected_task=done_task, owner_task=cleanup_task)
+                context.run_context.retain_lifecycle_task(
+                    cleanup_task, label=f"unstarted child adapter {subagent_id}", llm=prepared_llm_resolution.llm
+                )
+                return
+            released = False
             try:
-                runtime.release_subagent_task(subagent_id, expected_task=done_task)
+                released = runtime.release_subagent_task(subagent_id, expected_task=done_task)
             except Exception:
                 logger.exception(
                     "Failed to release completed background subtask %s",
                     subagent_id,
                 )
             try:
-                runtime.release_subagent_slot(subagent_id)
+                if released:
+                    runtime.release_subagent_slot(subagent_id)
             except Exception:
                 logger.exception(
                     "Failed to release capacity slot for completed background subtask %s",
@@ -1271,6 +1329,7 @@ class TaskTool(BaseTool):
             raise RuntimeError(
                 f"Subagent {subagent_id} has no durable runtime record to resume."
             )
+        runtime.validate_subagent_task_registration(subagent_id, parent_run_id=record.parent_run_id)
 
         from backend.agent.checkpoint import load_latest_run_checkpoint
 
@@ -1279,6 +1338,7 @@ class TaskTool(BaseTool):
         ).strip()
         checkpoint = load_latest_run_checkpoint(
             subagent_id,
+            base_dir=runtime.state_root,
             conversation_id=conversation_id or None,
         )
         if checkpoint is None or not isinstance(checkpoint.context_snapshot, dict):
@@ -1485,6 +1545,10 @@ class TaskTool(BaseTool):
     ) -> _SubagentLLMResolution:
         """Build the canonical child config before the child is published."""
 
+        self._apply_definition_execution_defaults(
+            {"agent_type": agent_type, **(subagent_metadata or {})},
+            context.workspace_root if context is not None else None,
+        )
         parent_metadata = self._metadata_from_context(context)
         run_context = context.run_context if context is not None else None
         inherited_llm = (
@@ -1651,7 +1715,7 @@ class TaskTool(BaseTool):
         duration, iteration count, and tool-call statistics.
         """
         llm = llm_resolution.llm
-        tool_registry = self._resolve_tool_registry()
+        tool_registry = self._resolve_tool_registry(context)
         permission_checker = (
             context.permission_checker
             if context is not None and context.permission_checker is not None
@@ -1664,7 +1728,15 @@ class TaskTool(BaseTool):
         runtime = require_runtime_from_context(context)
         parent_metadata = self._metadata_from_context(context)
         parent_run_context = context.run_context
-        subagent_config = _subagent_metadata(subagent_metadata)
+
+        def _live_parent_context() -> ToolExecutionContext:
+            provider = parent_run_context.permission_context_provider
+            return replace(context, permission=provider()) if provider is not None else context
+
+        subagent_config = _subagent_metadata(self._apply_definition_execution_defaults(
+            {"agent_type": agent_type, "run_in_background": background, **(subagent_metadata or {})},
+            context.workspace_root,
+        ))
         restored_session_policy = (
             (subagent_metadata or {}).get(SESSION_TOOLSET_POLICY_METADATA_KEY)
             if isinstance(subagent_metadata, dict)
@@ -1781,6 +1853,14 @@ class TaskTool(BaseTool):
             user_message=prompt,
             max_iterations=sub_settings.max_iterations,
         )
+        custom_deny_rules = _custom_agent_deny_rules(agent_type, tool_registry, context.workspace_root)
+        sub_context = self._build_permission_context(
+            agent_type, _live_parent_context(), read_only=subagent_config["read_only"],
+            extra_deny_rules=custom_deny_rules, team_mode=team_mode, background=background,
+            plan_mode_required=bool(subagent_config.get("plan_mode_required")),
+            requested_mode=str(subagent_config.get("mode") or ""),
+            agent_triggers_enabled=feature_enabled("agent_triggers"), execution_profile=execution_profile,
+        )
 
         try:
             # Explicit background work is detached by default. Explicit flags
@@ -1834,7 +1914,7 @@ class TaskTool(BaseTool):
                 },
                 teammate_name=str(subagent_config.get("teammate_name") or ""),
                 team_name=str(subagent_config.get("team_name") or ""),
-                permission_mode=str(subagent_config.get("mode") or "confirm"),
+                permission_mode=sub_context.mode,
                 plan_mode_required=bool(subagent_config.get("plan_mode_required")),
                 agent_path_segment=child_task_name,
             ) if runtime is not None else None
@@ -1948,7 +2028,7 @@ class TaskTool(BaseTool):
             info, agent_worktree = agent_worktree, None
             try:
                 had_changes = await asyncio.to_thread(has_worktree_changes, info)
-                kept, kept_path = await asyncio.to_thread(cleanup_agent_worktree, info)
+                kept, kept_path = await to_thread_cancel_safe(cleanup_agent_worktree, info)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Worktree cleanup failed for %s: %s", subagent_id, exc)
                 return f"Worktree left at {info.worktree_path} (branch {info.branch}); cleanup failed."
@@ -2127,7 +2207,7 @@ class TaskTool(BaseTool):
 
                 # First delegation per git root sweeps orphaned worktrees left by a
                 # killed process (clean ones removed, changed ones kept). Best-effort.
-                await asyncio.to_thread(cleanup_stale_worktrees, parent_workspace_root)
+                await to_thread_cancel_safe(cleanup_stale_worktrees, parent_workspace_root)
                 worktree_creation = asyncio.create_task(asyncio.to_thread(
                     create_agent_worktree, subagent_id, parent_workspace_root
                 ))
@@ -2278,27 +2358,6 @@ class TaskTool(BaseTool):
                         "the child was not started."
                     ) from journal_exc
 
-            # Apply a custom agent's tool restrictions (Agent editor). A custom
-            # definition can declare a tools whitelist and/or disallowed_tools; those
-            # must actually be enforced at runtime (deny rules block the call), not
-            # just stored on the definition.
-            custom_deny_rules = _custom_agent_deny_rules(
-                agent_type,
-                tool_registry,
-                context.workspace_root if context is not None else None,
-            )
-            sub_context = self._build_permission_context(
-                agent_type,
-                context,
-                read_only=subagent_config["read_only"],
-                extra_deny_rules=custom_deny_rules,
-                team_mode=team_mode,
-                background=background,
-                plan_mode_required=bool(subagent_config.get("plan_mode_required")),
-                requested_mode=str(subagent_config.get("mode") or ""),
-                agent_triggers_enabled=feature_enabled("agent_triggers"),
-                execution_profile=execution_profile,
-            )
             lifecycle_owner = _SubagentLifecycleOwner(
                 subagent_id=subagent_id,
                 agent_type=agent_type,
@@ -2329,7 +2388,16 @@ class TaskTool(BaseTool):
                 resume_workspace_root
                 or (agent_worktree.worktree_path if agent_worktree is not None else None)
                 or explicit_child_workspace
+                or context.workspace_root
             )
+            tool_registry = tool_registry.fork()
+            child_task_tool = tool_registry.get_tool("task")
+            if isinstance(child_task_tool, TaskTool):
+                child_task_tool = copy(child_task_tool)
+                child_task_tool._schema_workspace_root = effective_child_workspace
+                tool_registry.register(
+                    child_task_tool, replace=True, owner=tool_registry.get_tool_owner("task"),
+                )
             inherited_subagent_metadata = sanitize_subagent_runtime_metadata(parent_metadata)
             # Child tools may execute in an isolated worktree, but their transcript
             # is projected through the parent conversation. Keep the parent
@@ -2431,7 +2499,7 @@ class TaskTool(BaseTool):
                     target_mode = normalize_permission_mode_token(mode)
                     rebuilt = transition_subagent_permission_mode(
                         agent_type,
-                        context,
+                        _live_parent_context(),
                         sub_context,
                         target_mode,
                         read_only=bool(subagent_config.get("read_only")),
@@ -2451,13 +2519,32 @@ class TaskTool(BaseTool):
                     sub_context = rebuilt
                     runtime.update_subagent_lifecycle(
                         subagent_id,
-                        permission_mode=target_mode,
+                        permission_mode=rebuilt.mode,
                         agent_path=str(subagent_fence.get("agent_path") or ""),
                         mailbox_epoch=int(subagent_fence.get("mailbox_epoch") or 0),
                     )
 
                 def _teammate_permission_context_provider() -> PermissionContext:
-                    return sub_context
+                    parent = _live_parent_context()
+                    # A teammate keeps its own mode across leader turns, while
+                    # inherited denials, filesystem constraints and grants must
+                    # follow the live owner. Only explicit transitions use the
+                    # leader's mode as a ceiling.
+                    parent = replace(parent, permission=replace(parent.permission, mode=sub_context.mode))
+                    refreshed = transition_subagent_permission_mode(
+                        agent_type, parent, sub_context, sub_context.mode,
+                        read_only=bool(subagent_config.get("read_only")),
+                        extra_deny_rules=custom_deny_rules,
+                        plan_mode_required=bool(subagent_config.get("plan_mode_required")),
+                        agent_triggers_enabled=feature_enabled("agent_triggers"),
+                        execution_profile=execution_profile,
+                    )
+                    return replace(
+                        refreshed, pre_plan_mode=sub_context.pre_plan_mode,
+                        filesystem_constraints=merge_plan_constraints(
+                            refreshed.filesystem_constraints, teammate_plan_path,
+                        ),
+                    )
 
                 async def _request_teammate_plan_approval(
                     *,
@@ -2888,9 +2975,21 @@ class TaskTool(BaseTool):
                     child_run_context.teammate_plan_approval_requester = (
                         _request_teammate_plan_approval
                     )
+                else:
+                    def _live_child_permission_context() -> PermissionContext:
+                        return build_subagent_permission_context(
+                            agent_type, _live_parent_context(), read_only=bool(subagent_config.get("read_only")),
+                            extra_deny_rules=custom_deny_rules, background=background,
+                            requested_mode=str(subagent_config.get("mode") or ""),
+                            agent_triggers_enabled=feature_enabled("agent_triggers"),
+                            execution_profile=execution_profile,
+                        )
+
+                    child_run_context.permission_context_provider = _live_child_permission_context
                 current_turn_metadata = {
                     **subagent_metadata_payload,
                     "run_id": turn_run_id,
+                    "turn_id": turn_run_id,
                     "parent_run_id": subagent_id if team_mode else parent_run_id,
                 }
                 query_stream = QueryEngine().submit(QuerySubmission(
@@ -3363,7 +3462,7 @@ class TaskTool(BaseTool):
                                     tool_name="",
                                     detail="",
                                     current_activity=(
-                                        "Awaiting team leader plan approval"
+                                        "Awaiting plan review"
                                         if bool(
                                             subagent_metadata_payload.get(
                                                 "awaiting_plan_approval"
@@ -3392,23 +3491,8 @@ class TaskTool(BaseTool):
                         selected_message = None
 
                         def _is_leader_sender(sender_id: Any) -> bool:
-                            # The leader's run id is query-run scoped, so it
-                            # changes every leader turn; the teammate was spawned
-                            # under one of them. Recognize any later turn by the
-                            # invariant that holds across all of them: it is a
-                            # root run of this same conversation. A sibling
-                            # teammate resolves to a subagent, never a root run,
-                            # so it cannot impersonate the leader.
-                            sender = str(sender_id or "").strip()
-                            if not sender:
-                                return False
-                            if sender == parent_run_id:
-                                return True
-                            record = runtime.get_run(sender)
-                            return (
-                                record is not None
-                                and str(getattr(record, "conversation_id", "") or "")
-                                == conversation_id
+                            return _run_is_conversation_leader(
+                                runtime, sender_id, conversation_id,
                             )
 
                         while not subagent_cancel_event.is_set():
@@ -4049,7 +4133,9 @@ class TaskTool(BaseTool):
             return self._llm_provider()
         return self._llm_provider
 
-    def _resolve_tool_registry(self) -> ToolRegistry | None:
+    def _resolve_tool_registry(self, context: ToolExecutionContext | None = None) -> ToolRegistry | None:
+        if context is not None and context.tool_registry is not None:
+            return context.tool_registry
         if callable(self._tool_registry_provider):
             return self._tool_registry_provider()
         return self._tool_registry_provider

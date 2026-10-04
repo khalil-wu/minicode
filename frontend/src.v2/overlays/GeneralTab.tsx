@@ -185,7 +185,10 @@ const DesktopUpdates = () => {
   const [installBlockMessage, setInstallBlockMessage] = useState("");
   const statusSequenceRef = useRef(-1);
   useEffect(() => {
+    let cancelled = false;
+    const requestedSequence = statusSequenceRef.current;
     const applyStatus = (payload: UpdateStatus) => {
+      if (cancelled) return;
       const sequence = Number(payload.sequence ?? 0);
       if (sequence < statusSequenceRef.current) return;
       statusSequenceRef.current = sequence;
@@ -200,11 +203,12 @@ const DesktopUpdates = () => {
     const updates = desktop()?.updates;
     const unsubscribe = updates?.onStatus(applyStatus);
     void updates?.getStatus().then(applyStatus).catch((error) => {
+      if (cancelled || statusSequenceRef.current !== requestedSequence) return;
       const detail = error instanceof Error ? error.message : String(error || "未知错误");
       setStatus("error");
       setMessage(detail);
     });
-    return unsubscribe;
+    return () => { cancelled = true; unsubscribe?.(); };
   }, []);
 
   const runUpdateAction = async (action: "check" | "download" | "install") => {

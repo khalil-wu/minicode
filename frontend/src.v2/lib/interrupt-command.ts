@@ -13,7 +13,7 @@ const streamingAssistantForConversation = (
   conversationId: string,
 ): ChatMessage | undefined => {
   const messages = state.sideChats[conversationId]?.messages
-    ?? (conversationId === state.conversationId
+    ?? (!conversationId || conversationId === state.conversationId
       ? state.messages
       : state.conversationMessages[conversationId] ?? []);
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -29,9 +29,7 @@ export const buildInterruptCommand = (
   requestedConversationId?: string | null,
 ): InterruptCommand => {
   const conversationId = (requestedConversationId ?? state.conversationId ?? "").trim();
-  const message = conversationId
-    ? streamingAssistantForConversation(state, conversationId)
-    : undefined;
+  const message = streamingAssistantForConversation(state, conversationId);
   return {
     type: "interrupt",
     ...(conversationId ? { conversation_id: conversationId } : {}),

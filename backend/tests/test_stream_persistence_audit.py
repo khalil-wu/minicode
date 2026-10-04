@@ -186,6 +186,7 @@ async def test_pending_terminal_projection_replays_after_a_non_input_write(tmp_p
         "context_delta": {"set": {"history": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "done"}]}, "removed": []},
         "summary": None,
         "expected_revision": staged_revision,
+        "source_user_message_ids": ["u1"],
     })
     repository.patch_context_snapshot(record.id, {"ui_agent_state": {"progress": []}}, revision=1, revision_key="_ui_rev")
 
@@ -351,7 +352,12 @@ async def test_priority_control_can_release_saturated_normal_command_slots():
     dispatcher = SessionCommandDispatcher.__new__(SessionCommandDispatcher)
     dispatcher._command_semaphore = asyncio.Semaphore(20)
     dispatcher._command_tasks = set()
-    dispatcher._session = SimpleNamespace(event_outbox=SimpleNamespace(bind_client_command=lambda *args: nullcontext()))
+    dispatcher._user_message_admissions = {}
+    dispatcher._session = SimpleNamespace(
+        active_conversation_id="owner",
+        session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda: None),
+        event_outbox=SimpleNamespace(bind_client_command=lambda *args, **kwargs: nullcontext()),
+    )
     lifecycle, approved = asyncio.Lock(), asyncio.Event()
     async def handle(command, **kwargs):
         if command.type == "control_response":
@@ -382,6 +388,7 @@ async def test_start_boundary_assigns_identity_for_non_transport_prompts():
     def create(name, coroutine):
         return SimpleNamespace(id="task1", task=asyncio.create_task(coroutine))
     host = SimpleNamespace(run_manager=SimpleNamespace(turn_input_queue=lambda owner: TurnInputQueue(), is_delivery_complete=lambda *args: True),
+        _conversation_streams={},
         event_outbox=SimpleNamespace(bind_connection_generation=lambda value: nullcontext()), task_manager=SimpleNamespace(create=create),
         _run_agent=run, _register_agent_run=lambda **kwargs: None, _cleanup_agent_run=lambda **kwargs: None,
         command_dispatcher=SimpleNamespace(track_command_task=cleanup.append))

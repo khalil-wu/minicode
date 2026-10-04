@@ -411,7 +411,7 @@ def test_extension_tool_agent_wiring_does_not_double_run_hooks() -> None:
     runner.bind_tool_registry(registry)
     tool_context = ToolExecutionContext(
         permission=PermissionContext(),
-        metadata={"_lifecycle_runtime": runner},
+        run_context=RunContext(lifecycle_runtime=runner),
     )
 
     output = run(

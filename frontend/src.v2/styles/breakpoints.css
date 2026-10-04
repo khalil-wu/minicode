@@ -4,52 +4,6 @@
  * Standard breakpoints for responsive design
  */
 
-:root {
-  --breakpoint-sm: 640px;
-  --breakpoint-md: 768px;
-  --breakpoint-lg: 1024px;
-  --breakpoint-xl: 1280px;
-  --breakpoint-2xl: 1536px;
-}
-
-/* Utility classes for responsive visibility */
-@media (max-width: 639px) {
-  .hide-sm {
-    display: none !important;
-  }
-}
-
-@media (max-width: 767px) {
-  .hide-md {
-    display: none !important;
-  }
-}
-
-@media (max-width: 1023px) {
-  .hide-lg {
-    display: none !important;
-  }
-}
-
-@media (max-width: 1279px) {
-  .hide-xl {
-    display: none !important;
-  }
-}
-
-/* Show only on specific sizes */
-@media (min-width: 640px) {
-  .show-sm-only {
-    display: none !important;
-  }
-}
-
-@media (min-width: 768px) {
-  .show-md-only {
-    display: none !important;
-  }
-}
-
 /* Responsive text sizing */
 @media (max-width: 639px) {
   :root {
@@ -57,14 +11,6 @@
     --text-sm: 13px;
     --text-md: 15px;
     --text-lg: 17px;
-  }
-}
-
-/* Responsive spacing */
-@media (max-width: 639px) {
-  .container {
-    padding-left: 12px;
-    padding-right: 12px;
   }
 }
 
@@ -92,12 +38,4 @@
     transition-duration: 0.01ms !important;
   }
 
-  /* But keep essential UI animations */
-  .keep-animation,
-  .modal,
-  .drawer,
-  .toast {
-    animation-duration: revert !important;
-    transition-duration: revert !important;
-  }
 }

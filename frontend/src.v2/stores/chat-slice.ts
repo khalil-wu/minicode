@@ -13,7 +13,7 @@ import type {
 } from "./types";
 import { canonicalWorkspacePath } from "../lib/workspace-display";
 import { workspaceRootsEqual } from "../lib/workspace-path";
-import { promptCacheEffectivePromptTokens } from "../chat/cacheUsage";
+import { promptCacheEffectivePromptTokens, promptCacheOrdinaryInputTokens } from "../chat/cacheUsage";
 import { desktop } from "../desktop/runtime";
 import { toBackendPermissionMode } from "../protocol/permissions";
 import {
@@ -58,16 +58,6 @@ import {
 } from "../lib/tool-call-reducer";
 import { providerProgressLifecycleRegressed } from "../lib/provider-progress";
 import { isTransientProviderReasoning } from "../lib/provider-reasoning";
-
-function stripDisplayContextSuffix(content: string, refs: MessageContextRef[]): string {
-  const suffixItems = refs
-    .filter((ref) => ref.kind !== "skill")
-    .map((ref) => `@${ref.name}`)
-    .filter((name) => name.length > 1);
-  if (suffixItems.length === 0) return content;
-  const suffix = ` ${suffixItems.join(" ")}`;
-  return content.endsWith(suffix) ? content.slice(0, -suffix.length).trimEnd() : content;
-}
 
 function findAgentMessageBlockIndex(blocks: ContentBlock[], itemId: string): number {
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
@@ -303,6 +293,7 @@ function findStreamingIndexForMessage(messages: AppStore["messages"], messageId?
 export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, get) => ({
   conversationId: null,
   pendingConversationSwitchId: null,
+  messageRevealTarget: null,
   conversations: [],
   conversationInventoryInstanceId: null,
   conversationInventoryRevision: 0,
@@ -421,6 +412,10 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           return currentIndex;
         })();
     const currentRecalled = current.messages[currentTurnStart] ?? currentTarget;
+    const composerAtRequest = JSON.stringify([
+      current.draft, current.attachments.map((attachment) => attachment.id),
+      current.selectedMentions, current.selectedSkills, current.quotedMessage,
+    ]);
     const conversationId = current.conversationId || "";
     if (conversationId && currentRecalled.id) {
       try {
@@ -434,35 +429,29 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           pushToast(result.message || "Unable to recall this turn.", "error", 4000);
           return false;
         }
-      } catch {
+      } catch (error) {
+        pushToast(error instanceof Error ? error.message : "撤回请求未完成，请重试。", "error", 4000);
         return false;
       }
     }
     let restored = false;
+    let keptNewInput = false;
     set((s) => {
       // The truncate response may arrive after the user switches chats. Never
       // restore a durable attachment handle into a different conversation.
       if (String(s.conversationId || "") !== conversationId) return s;
-      const index = s.messages.findIndex((message) => message.id === id);
-      if (index < 0) return s;
-      const target = s.messages[index];
-      const turnStart =
-        target.role === "user"
-          ? index
-          : (() => {
-              for (let i = index; i >= 0; i -= 1) {
-                if (s.messages[i]?.role === "user") return i;
-              }
-              return index;
-            })();
-      const recalled = s.messages[turnStart] ?? target;
-      const nextMessages = s.messages.slice(0, turnStart);
-      const contextRefs = recalled.contextRefs ?? target.contextRefs ?? [];
+      const turnStart = s.messages.findIndex((message) => message.id === currentRecalled.id);
+      const recalled = currentRecalled;
+      // The server publishes the truncated transcript before its command
+      // result. Restore the requested input from the captured source, while
+      // retaining that authoritative transcript (and any later user work).
+      const nextMessages = turnStart >= 0 ? s.messages.slice(0, turnStart) : s.messages;
+      const contextRefs = recalled.contextRefs ?? currentTarget.contextRefs ?? [];
       const mentionRefs = contextRefs.filter(
         (ref): ref is Exclude<MessageContextRef, SkillContextRef> => ref.kind !== "skill",
       );
       const skillRefs: SkillContextRef[] = contextRefs.filter((ref): ref is SkillContextRef => ref.kind === "skill");
-      const attachmentRefs = recalled.attachmentRefs ?? target.attachmentRefs ?? [];
+      const attachmentRefs = recalled.attachmentRefs ?? currentTarget.attachmentRefs ?? [];
       const restoredAt = Date.now().toString(36);
       const restoredAttachments = attachmentRefs.map((attachment, attachmentIndex) => {
         const artifactId = String(attachment.artifactId || "").trim();
@@ -495,25 +484,33 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
               }),
         };
       });
-      const removedMessages = s.messages.slice(turnStart);
-      const nextStreaming = removedMessages.some((message) => message.isStreaming) ? false : s.isStreaming;
+      const removedMessages = current.messages.slice(currentTurnStart);
+      const nextStreaming = turnStart >= 0 && s.messages.slice(turnStart).some((message) => message.isStreaming)
+        ? false : s.isStreaming;
       const restoredDraft = recalled.role === "user"
-        ? stripDisplayContextSuffix(recalled.content, contextRefs)
+        ? recalled.content
         : s.draft;
       const activeConversationId = conversationId;
       const removedIds = removedMessages.map((message) => message.id).filter(Boolean);
       const existingTruncation = activeConversationId ? s.conversationRecallTruncations[activeConversationId] : undefined;
+      keptNewInput = composerAtRequest !== JSON.stringify([
+        s.draft, s.attachments.map((attachment) => attachment.id),
+        s.selectedMentions, s.selectedSkills, s.quotedMessage,
+      ]);
       restored = true;
       return {
         messages: nextMessages,
-        draft: restoredDraft,
-        selectedMentions: mentionRefs,
-        selectedSkills: skillRefs,
-        attachments: restoredAttachments,
-        actionChip: null,
-        mentionResults: [],
-        slashPanelOpen: false,
-        mentionPanelOpen: false,
+        ...(!keptNewInput ? {
+          draft: restoredDraft,
+          selectedMentions: mentionRefs,
+          selectedSkills: skillRefs,
+          quotedMessage: recalled.quotedMessage ?? null,
+          attachments: restoredAttachments,
+          actionChip: null,
+          mentionResults: [],
+          slashPanelOpen: false,
+          mentionPanelOpen: false,
+        } : {}),
         isStreaming: nextStreaming,
         toolCallCount: s.toolCallCount - computeToolCallCount(s.messages) + computeToolCallCount(nextMessages),
         conversationRecallTruncations: activeConversationId && removedIds.length > 0
@@ -529,6 +526,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         ...cacheMessagesForConversation(s, s.conversationId, nextMessages, nextStreaming),
       };
     });
+    if (restored && keptNewInput) pushToast("消息已撤回；编辑框中的新内容已保留。", "info", 4000);
     if (restored && conversationId) {
       sendClientCommand({
         type: "session.usage.inspect",
@@ -607,7 +605,9 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     // every later command then carried a conversation_id its scope check
     // rejects. Keep the authority unchanged while presenting the requested
     // conversation as an empty view until its public page arrives.
-    set({ pendingConversationSwitchId: targetId });
+    set((state) => ({ pendingConversationSwitchId: targetId,
+      messageRevealTarget: state.messageRevealTarget?.conversationId === targetId ? state.messageRevealTarget : null,
+    }));
     if (!sendClientCommand({ type: "conversation.switch", conversation_id: targetId })) {
       set({ pendingConversationSwitchId: null });
     }
@@ -659,6 +659,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
             }
           : {}),
         conversationId: id,
+        messageRevealTarget: s.messageRevealTarget?.conversationId === id ? s.messageRevealTarget : null,
         activeGoal: targetConversation?.goal ?? null,
         messages: cachedCurrent.conversationMessages[id] ?? [],
         isStreaming: cachedCurrent.conversationStreaming[id] ?? false,
@@ -807,6 +808,23 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     for (const message of hydrated) {
       if (message.role === "assistant") {
         get().flushPendingProviderProgress(id, message.id);
+        if (message.failureMessage || message.terminalStatus === "failed") {
+          get().addInspectorEntry({
+            targetKind: "message",
+            targetId: `error:${id}:${message.id}:transcript`,
+            payload: {
+              event: "error",
+              conversation_id: id,
+              message_id: message.id,
+              turn_id: message.turnId,
+              message: message.failureMessage || message.content,
+              recoverable: message.failureRecoverable,
+              terminal_status: message.terminalStatus,
+              restored_from: "transcript",
+            },
+            timestamp: message.completedAt ?? message.timestamp,
+          });
+        }
       }
     }
   },
@@ -1536,7 +1554,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       usageTotals: u
         ? {
             input: s.usageTotals.input + Math.max(0, u.input || 0),
-            ordinaryInput: Math.max(0, s.usageTotals.ordinaryInput || 0) + Math.max(0, u.ordinaryInput || 0),
+            ordinaryInput: promptCacheOrdinaryInputTokens(s.usageTotals) + promptCacheOrdinaryInputTokens(u),
             output: s.usageTotals.output + Math.max(0, u.output || 0),
             cacheRead: s.usageTotals.cacheRead + Math.max(0, u.cacheRead || 0),
             cacheWrite: s.usageTotals.cacheWrite + Math.max(0, u.cacheWrite || 0),
@@ -1546,11 +1564,14 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           }
         : s.usageTotals,
     })),
-  ensureSideChat: (id) =>
+  ensureSideChat: (id, owner) =>
     set((s) => {
       if (s.sideChats[id]) return s;
-      const selectedContext = s.sideChatPendingContext ?? undefined;
-      const recentMessages = s.messages
+      const workspaceRoot = owner?.workspaceRoot ?? s.workingDirectory;
+      const selectedContext = s.sideChatPendingContext
+        && workspaceRootsEqual(s.sideChatPendingContext.workspaceRoot ?? s.workingDirectory, workspaceRoot)
+        ? s.sideChatPendingContext : undefined;
+      const recentMessages = (workspaceRootsEqual(workspaceRoot, s.workingDirectory) ? s.messages : [])
         .filter((message) => message.role === "user" || message.role === "assistant")
         .slice(-6)
         .map((message) => {
@@ -1563,10 +1584,11 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         ? `Main conversation context:\n${recentMessages.join("\n")}`
         : "";
       return {
-        sideChatPendingContext: null,
+        sideChatPendingContext: selectedContext ? null : s.sideChatPendingContext,
         sideChats: {
           ...s.sideChats,
-          [id]: { id, messages: [], isStreaming: false, draft: "", inheritedContext, selectedContext },
+          [id]: { id, messages: [], isStreaming: false, draft: "", inheritedContext, selectedContext,
+            attachments: [], contextRefs: [], workspaceRoot, permissionMode: owner?.permissionMode ?? s.permissionMode },
         },
       };
     }),

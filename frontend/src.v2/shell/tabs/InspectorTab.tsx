@@ -509,7 +509,9 @@ const RuntimeMetricsSection = () => {
   const messages = useAppStore((s) => s.messages)
   const agentProgress = useAppStore((s) => s.agentProgress)
   const inspectorEntries = useAppStore((s) => s.inspectorEntries)
-  const cacheEntries = useMemo(() => inspectorEntries.filter(isCacheMetricEntry), [inspectorEntries])
+  const conversationId = useAppStore((s) => s.conversationId)
+  const cacheEntries = useMemo(() => inspectorEntries.filter((entry) =>
+    entry.conversationId === conversationId && isCacheMetricEntry(entry)), [inspectorEntries, conversationId])
   const summary = useMemo(
     () => buildRuntimeMetricSummary(messages, agentProgress, cacheEntries),
     [messages, agentProgress, cacheEntries],
@@ -536,17 +538,39 @@ const RuntimeMetricsSection = () => {
 }
 
 const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => {
-  const inspectorEntries = useAppStore((s) => s.inspectorEntries)
+  const allLiveEntries = useAppStore((s) => s.inspectorEntries)
+  const messages = useAppStore((s) => s.messages)
+  const conversationId = useAppStore((s) => s.conversationId)
+  const liveEntries = useMemo(() => allLiveEntries.filter((entry) => !entry.conversationId || entry.conversationId === conversationId), [allLiveEntries, conversationId])
+  // Hydration restores canonical records, not transient Inspector events.
+  // Make their complete protocol data inspectable here after a reload too;
+  // ordinary transcript disclosure is reserved for task evidence.
+  const inspectorEntries = useMemo(() => {
+    const liveToolIds = new Set(liveEntries.filter((entry) => entry.targetKind === 'tool_call').map((entry) => entry.targetId))
+    const restored: InspectorEntry[] = messages.flatMap((message) => getToolCallsFromMessage(message)
+      .filter((record) => !liveToolIds.has(record.id))
+      .map((record) => ({
+        targetKind: 'tool_call' as const,
+        targetId: record.id,
+        conversationId: conversationId || undefined,
+        timestamp: record.finishedAt ?? record.startedAt,
+        payload: { event: 'transcript.tool', conversation_id: conversationId, message_id: message.id, record },
+      })))
+    return [...restored, ...liveEntries]
+  }, [messages, liveEntries, conversationId])
   const inspectorFocus = useAppStore((s) => s.inspectorFocus)
   const addInspectorEntry = useAppStore((s) => s.addInspectorEntry)
   const [filter, setFilter] = useState<'all' | 'provider' | 'tool' | 'cache' | 'usage'>('all')
   const importRef = useRef<HTMLInputElement>(null)
   const focusedEntry = useMemo(
-    () => inspectorFocus ? inspectorEntries.find((e) => e.targetId === inspectorFocus.id) : null,
-    [inspectorEntries, inspectorFocus],
+    () => inspectorFocus
+      ? inspectorEntries.find((e) => e.targetKind === inspectorFocus.kind && e.targetId === inspectorFocus.id
+        && (e.conversationId ?? '') === (inspectorFocus.conversationId ?? conversationId ?? ''))
+      : null,
+    [inspectorEntries, inspectorFocus, conversationId],
   )
-  const providerEntries = useMemo(() => inspectorEntries.filter(isProviderTraceEntry), [inspectorEntries])
-  const cacheEntries = useMemo(() => inspectorEntries.filter(isCacheMetricEntry), [inspectorEntries])
+  const providerEntries = useMemo(() => inspectorEntries.filter((entry) => entry.conversationId === conversationId && isProviderTraceEntry(entry)), [inspectorEntries, conversationId])
+  const cacheEntries = useMemo(() => inspectorEntries.filter((entry) => entry.conversationId === conversationId && isCacheMetricEntry(entry)), [inspectorEntries, conversationId])
   const providerRaws = useMemo(() => providerEntries.map((entry) => providerRawFromPayload(entry.payload)), [providerEntries])
   const visibleEntries = useMemo(() => inspectorEntries.filter((entry) => {
     if (filter === 'provider') return isProviderTraceEntry(entry)
@@ -574,6 +598,7 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
 
   const importProviderTraceJsonl = async (file: File | undefined) => {
     if (!file) return
+    const ownerConversationId = conversationId
     const text = await file.text()
     let imported = 0
     for (const [index, line] of text.split(/\r?\n/).entries()) {
@@ -585,6 +610,7 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
         addInspectorEntry({
           targetKind: 'provider',
           targetId: `imported-provider-${Date.now()}-${index}`,
+          conversationId: ownerConversationId || undefined,
           payload,
           timestamp: Date.now(),
         })
@@ -593,7 +619,7 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
         // Ignore malformed lines so partial JSONL exports can still be inspected.
       }
     }
-    if (imported > 0) setFilter('provider')
+    if (imported > 0 && useAppStore.getState().conversationId === ownerConversationId) setFilter('provider')
   }
 
   return (
@@ -672,7 +698,8 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
             <button
               key={`${entry.targetId}-${i}`}
               onClick={() => focusInspectorEntry(entry)}
-              style={eventButtonStyle(entry.targetId === inspectorFocus?.id)}
+              style={eventButtonStyle(entry.targetKind === inspectorFocus?.kind && entry.targetId === inspectorFocus.id
+                && (inspectorFocus.conversationId ?? conversationId ?? '') === (entry.conversationId ?? ''))}
             >
               <span style={{ color: 'var(--text-muted)' }}>{entry.targetKind}</span>
               <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-primary)' }}>{entry.targetId.slice(0, 12)}</span>
@@ -900,6 +927,7 @@ const cacheMetricRowLabel = (entry: InspectorEntry): string => {
 
 const providerRawFromPayload = (payload: Record<string, unknown>): ProviderRawMetadata => ({
   provider: typeof payload.provider === 'string' ? payload.provider : undefined,
+  request_id: typeof payload.request_id === 'string' ? payload.request_id : undefined,
   model: typeof payload.model === 'string' ? payload.model : undefined,
   finish_reason: typeof payload.finish_reason === 'string' ? payload.finish_reason : undefined,
   event_type: typeof payload.event_type === 'string' ? payload.event_type : undefined,
@@ -918,7 +946,7 @@ const providerRawFromPayload = (payload: Record<string, unknown>): ProviderRawMe
 })
 
 const previousProviderEntry = (entries: InspectorEntry[], focused: InspectorEntry): InspectorEntry | undefined => {
-  const index = entries.findIndex((entry) => entry.targetId === focused.targetId)
+  const index = entries.indexOf(focused)
   return index > 0 ? entries[index - 1] : undefined
 }
 

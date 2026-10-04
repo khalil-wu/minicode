@@ -114,7 +114,8 @@ def test_packaged_resource_runtime_uses_minicode_state_home(tmp_path, monkeypatc
     assert runtime.executable == executable.resolve()
 
 
-def test_native_command_projects_environment_and_policy(tmp_path, monkeypatch):
+@pytest.mark.parametrize("structured", [False, True])
+def test_native_command_projects_environment_and_policy(tmp_path, monkeypatch, structured):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     runtime_home = tmp_path / "runtime-home"
@@ -123,10 +124,10 @@ def test_native_command_projects_environment_and_policy(tmp_path, monkeypatch):
     owner = _identity(runtime_home)
     runtime = windows_native.WindowsNativeRuntime(executable, runtime_home,
         owner["offline_username"], owner["online_username"], owner["owner_id"], _SID, owner["group"])
-    desktop = SimpleNamespace(name="MiniCodeSandboxDesktop-" + "a" * 32)
+    desktop = SimpleNamespace(name="MiniCodeSandboxDesktop-" + "a" * 32, close=lambda: None)
     monkeypatch.setattr(windows_native, "discover_runtime", lambda: (runtime, ""))
     monkeypatch.setattr(windows_native.PrivateDesktop, "create", lambda _account: desktop)
-    monkeypatch.setattr(windows_native, "DATA_ROOT", tmp_path / "state")
+    monkeypatch.setattr(windows_native, "STATE_ROOT", tmp_path / "state")
     profile = PermissionProfile.managed(FileSystemSandboxPolicy.restricted([
         FileSystemSandboxEntry(
             FileSystemPath.special(FileSystemSpecialPath.ROOT),
@@ -150,6 +151,7 @@ def test_native_command_projects_environment_and_policy(tmp_path, monkeypatch):
         workspace_roots=(workspace,),
         deny_read_paths=(),
         deny_write_paths=(workspace / ".git",),
+        argv=["python", "-c", 'print("literal")', "one two", 'a"b'] if structured else None,
     )
 
     assert returned_desktop is desktop
@@ -167,10 +169,12 @@ def test_native_command_projects_environment_and_policy(tmp_path, monkeypatch):
     assert "HTTP_PROXY" not in child_env
     assert "CODEX_WINDOWS_SANDBOX_PROXY_PORTS" not in child_env
     assert child_env["TEMP"] == str(private_temp)
-    encoded = args[args.index("-EncodedCommand") + 1]
-    script = base64.b64decode(encoded).decode("utf-16-le")
-    assert "Get-ChildItem -LiteralPath $minicodePrivateTemp" in script
-    assert "Remove-Item -Recurse -Force" in script
+    if structured:
+        assert args[args.index("--") + 1:] == ["python", "-c", 'print("literal")', "one two", 'a"b']
+    else:
+        script = args[args.index("-Command") + 1]
+        assert "Get-ChildItem -LiteralPath $minicodePrivateTemp" in script
+        assert "Remove-Item -Recurse -Force" in script
     assert json.loads(args[args.index("--deny-write-paths-json") + 1]) == [
         str((workspace / ".git").resolve())
     ]

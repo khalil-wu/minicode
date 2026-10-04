@@ -17,6 +17,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import asdict, dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable, Literal
 from uuid import uuid4
@@ -24,7 +25,6 @@ from uuid import uuid4
 from backend.async_cleanup import (
     CANCELLATION_DRAIN_TIMEOUT_SECONDS,
     cancel_and_drain,
-    cancel_and_drain_to_completion,
 )
 from backend.config import DATA_ROOT, TokenBudget
 from backend.agent.runtime_records import (
@@ -95,6 +95,34 @@ logger = logging.getLogger(__name__)
 # observation stream. A lost metric never changes run authority and is reported
 # through ``metric_persistence`` when it is observable.
 _METRIC_APPEND_LOCK = threading.RLock()
+
+
+def _purge_conversation_files(
+    agent_ids: set[str], *, conversation_id: str, journal_root: Path, outbox_root: Path,
+) -> list[dict[str, str]]:
+    """Remove known agent files while their durable ownership index still exists."""
+    errors: list[dict[str, str]] = []
+    for agent_id in sorted(agent_ids):
+        try:
+            delete_agent_journal(agent_id, base_dir=journal_root)
+        except Exception as exc:
+            errors.append({
+                "resource": "agent_journal", "resource_id": agent_id,
+                "error_type": type(exc).__name__, "error": str(exc)[:500],
+            })
+    outboxes = [
+        ("parent_run_id", "parent_outbox", agent_id) for agent_id in sorted(agent_ids)
+    ]
+    outboxes.append(("conversation_id", "conversation_outbox", conversation_id))
+    for field_name, resource, resource_id in outboxes:
+        try:
+            ParentNotificationOutbox(**{field_name: resource_id}, base_dir=outbox_root).delete()
+        except Exception as exc:
+            errors.append({
+                "resource": resource, "resource_id": resource_id,
+                "error_type": type(exc).__name__, "error": str(exc)[:500],
+            })
+    return errors
 
 
 
@@ -600,6 +628,7 @@ class AgentRuntime:
             agent_path=agent_path,
             mailbox_epoch=max(0, int(mailbox_epoch or 0)),
         )
+        registration = self._registry.prepare_registration(record, kind="run")
         persisted = self._swarm_store.upsert_agent_run(
             record.to_dict(),
             expected_owner_token=self._runtime_owner_token,
@@ -608,7 +637,7 @@ class AgentRuntime:
         if persisted is None:
             raise RuntimeError(f"Agent run {record.run_id} is owned by another runtime.")
         self._runs[record.run_id] = record
-        self._registry.register(record, kind="run")
+        self._registry.publish_registration(registration)
         self.write_metric("run_started", record.to_dict())
         return record
 
@@ -786,6 +815,8 @@ class AgentRuntime:
                 existing = _subagent_from_dict(persisted_existing)
         if existing is not None and existing.status == "running":
             raise RuntimeError(f"Subagent {subagent_id} is already running.")
+        if existing is not None and existing.cleanup_pending:
+            raise RuntimeError(f"Subagent {subagent_id} still has pending cleanup from its previous execution.")
         if subagent_id in self._subagent_slot_reservations:
             self._subagent_slot_reservations.discard(subagent_id)
         elif existing is None or existing.status != "running":
@@ -875,6 +906,7 @@ class AgentRuntime:
             active_plan_request_id="",
             is_idle=False,
         )
+        registration = self._registry.prepare_registration(record, kind="subagent")
         persisted = self._swarm_store.upsert_subagent(
             record.to_dict(),
             expected_owner_token=self._runtime_owner_token,
@@ -892,7 +924,7 @@ class AgentRuntime:
             )
             self._subagent_completion_events[subagent_id] = asyncio.Event()
         self._subagents[subagent_id] = record
-        self._registry.register(record, kind="subagent")
+        self._registry.publish_registration(registration)
         self._register_subagent_names(
             subagent_id,
             teammate_name=record.teammate_name,
@@ -954,10 +986,10 @@ class AgentRuntime:
         if not clean_id:
             return False
         while True:
-            if self.try_reserve_subagent_slots([clean_id]):
-                return True
             if cancel_event is not None and cancel_event.is_set():
                 return False
+            if self.try_reserve_subagent_slots([clean_id]):
+                return True
 
             loop = asyncio.get_running_loop()
             event = asyncio.Event()
@@ -970,7 +1002,20 @@ class AgentRuntime:
                     return True
                 if cancel_event is not None and cancel_event.is_set():
                     return False
-                await event.wait()
+                if cancel_event is None:
+                    await event.wait()
+                else:
+                    capacity_wait = asyncio.create_task(event.wait())
+                    cancellation_wait = asyncio.create_task(cancel_event.wait())
+                    try:
+                        await asyncio.wait(
+                            {capacity_wait, cancellation_wait},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                    finally:
+                        capacity_wait.cancel()
+                        cancellation_wait.cancel()
+                        await asyncio.gather(capacity_wait, cancellation_wait, return_exceptions=True)
             finally:
                 self._subagent_capacity_waiters.discard(waiter)
 
@@ -1148,7 +1193,12 @@ class AgentRuntime:
             raise ValueError("subagent_id is required")
         clean_parent_run_id = str(parent_run_id or "").strip()
         clean_task_name = str(canonical_task_name or "").strip()
+        current_task = self._subagent_tasks.get(clean_subagent_id)
+        if current_task is not None and not current_task.done():
+            raise RuntimeError(f"Subagent {clean_subagent_id} still owns a running task.")
         existing = self._subagents.get(clean_subagent_id)
+        if existing is not None and existing.cleanup_pending:
+            raise RuntimeError(f"Subagent {clean_subagent_id} still has pending cleanup from its previous execution.")
         candidate_agent_path = (
             str(existing.agent_path or "")
             if existing is not None and existing.agent_path
@@ -1196,6 +1246,7 @@ class AgentRuntime:
         self._subagent_parent_run_ids.pop(subagent_id, None)
         self._subagent_owner_task_ids.pop(subagent_id, None)
         self._subagent_session_ids.pop(subagent_id, None)
+        self.release_subagent_slot(subagent_id)
         if subagent_id not in self._subagents:
             self._subagent_name_registry = {
                 name: registered_id
@@ -1207,6 +1258,20 @@ class AgentRuntime:
     def get_subagent_task_metadata(self, subagent_id: str) -> dict[str, Any] | None:
         metadata = self._subagent_task_metadata.get(str(subagent_id or "").strip())
         return dict(metadata) if isinstance(metadata, dict) else None
+
+    def transfer_subagent_task_owner(
+        self,
+        subagent_id: str,
+        *,
+        expected_task: asyncio.Task[Any],
+        owner_task: asyncio.Task[Any],
+    ) -> bool:
+        """Retain one exact worker's cleanup without replacing a newer owner."""
+        if self._subagent_tasks.get(subagent_id) is not expected_task:
+            return False
+        self._subagent_tasks[subagent_id] = owner_task
+        self._subagent_task_metadata[subagent_id]["cleanup_owner"] = True
+        return True
 
     def _conversation_id_for_agent(self, agent_id: str) -> str:
         """Resolve conversation ownership through run/subagent parent edges."""
@@ -1451,7 +1516,7 @@ class AgentRuntime:
         if task.done():
             self.release_subagent_task(subagent_id, expected_task=task)
             return "done"
-        if not task.cancelling():
+        if not task.cancelling() and not (metadata or {}).get("cleanup_owner"):
             task.cancel()
         self.write_metric("subagent_task_cancel_requested", {"subagent_id": subagent_id})
         self._record_agent_activity(
@@ -1743,8 +1808,11 @@ class AgentRuntime:
 
         clean_id = str(subagent_id or "").strip()
         record = self._subagents.get(clean_id)
-        if record is None or not record.cleanup_pending:
-            return record is not None
+        if record is None:
+            task = self._subagent_tasks.get(clean_id)
+            return task is None or task.done()
+        if not record.cleanup_pending:
+            return True
         worktrees_completed = self._reconcile_subagent_worktrees(record)
         record = self._subagents.get(clean_id) or record
         task_report = (
@@ -1919,6 +1987,23 @@ class AgentRuntime:
                 cancelled.append(subagent_id)
         return cancelled
 
+    async def _drain_subagent_owners(
+        self,
+        owned: list[tuple[str, asyncio.Task[Any]]],
+    ) -> set[asyncio.Task[Any]]:
+        """Wait for cancellation already requested, including cleanup handoff."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CANCELLATION_DRAIN_TIMEOUT_SECONDS
+        while True:
+            owned[:] = [(agent_id, self._subagent_tasks.get(agent_id) or task) for agent_id, task in owned]
+            pending = {task for _agent_id, task in owned if not task.done()}
+            if not pending or loop.time() >= deadline:
+                return pending
+            try:
+                await asyncio.wait(pending, timeout=max(0.0, deadline - loop.time()))
+            except asyncio.CancelledError:
+                continue
+
     async def stop_subagent_tasks_for_task(
         self,
         task_id: str,
@@ -1939,11 +2024,7 @@ class AgentRuntime:
             if (task := self._subagent_tasks.get(subagent_id)) is not None
             and not task.done()
         ]
-        initially_timed_out = await cancel_and_drain_to_completion(
-            (task for _subagent_id, task in owned),
-            timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
-            label=f"task {task_id} subagents",
-        )
+        initially_timed_out = await self._drain_subagent_owners(owned)
         if initially_timed_out:
             self.write_metric(
                 "subagent_task_cancel_timeout",
@@ -1989,11 +2070,7 @@ class AgentRuntime:
         for subagent_id, _task in owned:
             self.cancel_subagent_task(subagent_id, reason=reason)
             self._mark_subagent_cleanup(subagent_id, reason=reason)
-        initially_timed_out = await cancel_and_drain_to_completion(
-            (task for _subagent_id, task in owned),
-            timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
-            label=f"session {session} subagents",
-        )
+        initially_timed_out = await self._drain_subagent_owners(owned)
         if initially_timed_out:
             self.write_metric(
                 "subagent_session_cancel_timeout",
@@ -2078,11 +2155,7 @@ class AgentRuntime:
                 owned_tasks.append((subagent_id, task))
             self.cancel_subagent_task(subagent_id, reason=reason)
             self._mark_subagent_cleanup(subagent_id, reason=reason)
-        initially_timed_out = await cancel_and_drain_to_completion(
-            (task for _subagent_id, task in owned_tasks),
-            timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
-            label=f"conversation {owner} subagents",
-        )
+        initially_timed_out = await self._drain_subagent_owners(owned_tasks)
         if initially_timed_out:
             self.write_metric(
                 "subagent_conversation_cancel_timeout",
@@ -2188,6 +2261,18 @@ class AgentRuntime:
 
     def get_run(self, run_id: str) -> AgentRunRecord | None:
         return self._runs.get(str(run_id or "").strip())
+
+    @property
+    def state_root(self) -> Path:
+        return self._runtime_state_root
+
+    @property
+    def swarm_store_path(self) -> Path:
+        return self._swarm_store.path
+
+    def latest_main_run(self, conversation_id: str) -> AgentRunRecord | None:
+        payload = self._swarm_store.latest_main_run(conversation_id)
+        return _agent_run_from_dict(payload) if payload is not None else None
 
     def _register_subagent_names(
         self,
@@ -2919,6 +3004,66 @@ class AgentRuntime:
             expected_active_plan_request_id=expected_active_plan_request_id,
         )
 
+    def respond_to_teammate_plan(
+        self,
+        *,
+        leader_run_id: str,
+        subagent_id: str,
+        conversation_id: str,
+        request_id: str,
+        mailbox_epoch: int,
+        approved: bool,
+    ) -> SwarmMessageRecord | None:
+        """Deliver a host review decision even after the leader turn ended.
+
+        The user and the host's bypass policy own this operation. Model
+        coordination messages still require a live sender and cannot produce
+        approval protocol payloads.
+        """
+        leader = self.get_run(leader_run_id)
+        child = self.get_subagent(subagent_id)
+        if (
+            leader is None or leader.parent_run_id or leader.role != "main"
+            or leader.conversation_id != conversation_id
+            or child is None or not child.plan_mode_required
+            or self._conversation_id_for_agent(subagent_id) != conversation_id
+        ):
+            raise ValueError("Plan review does not belong to this conversation leader")
+        token = self.reserve_lifecycle_response(
+            response_kind="plan_approval_response", participant_id=subagent_id,
+            mailbox_epoch=mailbox_epoch, request_id=request_id, target_id=leader_run_id,
+            expected_active_plan_request_id=request_id,
+        )
+        if not token:
+            return None
+        reservation = {
+            "response_kind": "plan_approval_response", "participant_id": subagent_id,
+            "mailbox_epoch": mailbox_epoch, "request_id": request_id, "reservation_token": token,
+        }
+        response = {
+            "type": "plan_approval_response", "request_id": request_id, "approved": approved,
+            "timestamp": datetime.now(UTC).isoformat(),
+            **({"permission_mode": "confirm"} if approved else {}),
+        }
+        try:
+            record = _swarm_message_from_dict(self._swarm_store.append_message({
+                "sender_id": leader_run_id, "recipient_id": subagent_id,
+                "content": json.dumps(response, ensure_ascii=False),
+                "conversation_id": conversation_id, "team_name": child.team_name,
+                "recipient_mailbox_epoch": mailbox_epoch,
+            }))
+        except Exception:
+            self.release_lifecycle_response(**reservation)
+            raise
+        if not self.commit_lifecycle_response(**reservation):
+            logger.error("Plan review delivered but lifecycle fence commit failed: %s", request_id)
+        self._swarm_messages[record.message_id] = record
+        self.write_metric("swarm_message_sent", record.to_dict())
+        self._record_agent_activity(
+            "message", agent_ids=(leader_run_id, subagent_id), conversation_id=conversation_id,
+        )
+        return record
+
     def commit_lifecycle_response(self, **kwargs: Any) -> bool:
         return self._swarm_store.commit_lifecycle_response(**kwargs)
 
@@ -3095,13 +3240,8 @@ class AgentRuntime:
             conversation_id=conversation_id,
         )
         if payload is None:
-            cached = self._swarm_tasks.get(task_id)
-            if cached is None:
-                return None
-            owner = str(conversation_id or "").strip()
-            if owner and str(cached.conversation_id or "").strip() != owner:
-                return None
-            return cached
+            self._swarm_tasks.pop(task_id, None)
+            return None
         task = _swarm_task_from_dict(payload)
         self._swarm_tasks[task.task_id] = task
         return task
@@ -3226,10 +3366,8 @@ class AgentRuntime:
                 continue
             if str(record.status or "") != "running":
                 continue
-            if conversation_id:
-                parent = self._runs.get(str(record.parent_run_id or "").strip())
-                if str(getattr(parent, "conversation_id", "") or "") != str(conversation_id):
-                    continue
+            if conversation_id and self._conversation_id_for_agent(record.subagent_id) != str(conversation_id):
+                continue
             members.append(record)
         return members
 
@@ -3322,7 +3460,17 @@ class AgentRuntime:
         removed = self._swarm_store.purge_conversation(
             owner,
             allowed_active_owner_tokens={self._runtime_owner_token},
+            before_delete=lambda durable: _purge_conversation_files(
+                memory_run_ids | memory_subagent_ids | set(durable["run_ids"]) | set(durable["subagent_ids"]),
+                conversation_id=owner, journal_root=self._journal_root, outbox_root=self._outbox_root,
+            ),
         )
+        if removed.get("cleanup_pending"):
+            self.write_metric(
+                "conversation_runtime_purge_cleanup_failed",
+                {"conversation_id": owner, "cleanup_errors": removed["cleanup_errors"]},
+            )
+            return removed
         run_ids = memory_run_ids | {str(value) for value in removed.get("run_ids", [])}
         subagent_ids = memory_subagent_ids | {str(value) for value in removed.get("subagent_ids", [])}
         task_ids = memory_task_ids | {str(value) for value in removed.get("task_ids", [])}
@@ -3335,8 +3483,6 @@ class AgentRuntime:
             "message_ids": sorted(message_ids),
             "team_ids": sorted(team_ids),
         })
-        cleanup_errors: list[dict[str, str]] = []
-
         for run_id in run_ids:
             self._runs.pop(run_id, None)
             self._registry.discard(run_id, kind="run")
@@ -3370,52 +3516,6 @@ class AgentRuntime:
         for agent_id in sorted(run_ids | subagent_ids):
             with self._execution_journal_lock:
                 self._execution_journals.pop(agent_id, None)
-            try:
-                delete_agent_journal(agent_id, base_dir=self._journal_root)
-            except Exception as exc:
-                cleanup_errors.append(
-                    {
-                        "resource": "agent_journal",
-                        "resource_id": agent_id,
-                        "error_type": type(exc).__name__,
-                        "error": str(exc)[:500],
-                    }
-                )
-            try:
-                ParentNotificationOutbox(
-                    parent_run_id=agent_id,
-                    base_dir=self._outbox_root,
-                ).delete()
-            except Exception as exc:
-                cleanup_errors.append(
-                    {
-                        "resource": "parent_outbox",
-                        "resource_id": agent_id,
-                        "error_type": type(exc).__name__,
-                        "error": str(exc)[:500],
-                    }
-                )
-        try:
-            ParentNotificationOutbox(
-                conversation_id=owner,
-                base_dir=self._outbox_root,
-            ).delete()
-        except Exception as exc:
-            cleanup_errors.append(
-                {
-                    "resource": "conversation_outbox",
-                    "resource_id": owner,
-                    "error_type": type(exc).__name__,
-                    "error": str(exc)[:500],
-                }
-            )
-        if cleanup_errors:
-            removed["cleanup_errors"] = cleanup_errors
-            removed["cleanup_pending"] = True
-            self.write_metric(
-                "conversation_runtime_purge_cleanup_failed",
-                {"conversation_id": owner, "cleanup_errors": cleanup_errors},
-            )
         self.write_metric(
             "conversation_runtime_purged",
             {
@@ -3667,25 +3767,12 @@ def purge_persisted_conversation_runtime(conversation_id: str) -> dict[str, Any]
     removed = store.purge_conversation(
         owner,
         allowed_active_owner_tokens=set(),
+        before_delete=lambda durable: _purge_conversation_files(
+            set(durable["run_ids"]) | set(durable["subagent_ids"]),
+            conversation_id=owner, journal_root=SWARM_DIR.parent / "sidechains",
+            outbox_root=SWARM_DIR.parent / "parent_notifications",
+        ),
     )
-    journal_root = SWARM_DIR.parent / "sidechains"
-    outbox_root = SWARM_DIR.parent / "parent_notifications"
-    agent_ids = {
-        str(value or "").strip()
-        for key in ("run_ids", "subagent_ids")
-        for value in removed.get(key, [])
-        if str(value or "").strip()
-    }
-    for agent_id in sorted(agent_ids):
-        delete_agent_journal(agent_id, base_dir=journal_root)
-        ParentNotificationOutbox(
-            parent_run_id=agent_id,
-            base_dir=outbox_root,
-        ).delete()
-    ParentNotificationOutbox(
-        conversation_id=owner,
-        base_dir=outbox_root,
-    ).delete()
     return removed
 
 

@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { ShieldAlert } from "lucide-react";
 import type { ToolCallRecord } from "../../../lib/tool-call-reducer";
 import { safeJsonParse } from "../../../lib/safe-parse";
+import { getRecordOutputText } from "../../cells/activityCellHelpers";
 
 // The backend appends a "[sandbox] ..." paragraph to a failed sandboxed command
 // so the model knows it can retry with escalated permissions. That text is
@@ -26,9 +27,8 @@ function parseCommandSummary(summary: string): {
 } {
   const trimmed = summary.trim();
   if (!trimmed) return { output: "", stderr: "", exitCode: null, timedOut: false, sandboxBlocked: false };
-  try {
-    const parsed = safeJsonParse<Record<string, unknown> | null>(trimmed, null);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+  const parsed = safeJsonParse<Record<string, unknown> | null>(trimmed, null);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
     const stdout = parsed.stdout ?? parsed.output ?? parsed.result ?? parsed.summary;
     const stderr = parsed.stderr ?? parsed.error;
     const exit = parsed.exit_code ?? parsed.exitCode ?? parsed.code;
@@ -41,13 +41,13 @@ function parseCommandSummary(summary: string): {
       timedOut: parsed.timed_out === true || parsed.timeout === true,
       sandboxBlocked: sandbox.sandboxBlocked,
     };
-  } catch {
+  } else {
     const sandbox = extractSandboxHint(trimmed);
     return { output: sandbox.text, stderr: "", exitCode: null, timedOut: false, sandboxBlocked: sandbox.sandboxBlocked };
   }
 }
 
-export const CommandResultView = ({
+const CommandResultView = ({
   command,
   summary,
   fallback,
@@ -101,7 +101,7 @@ export const CommandToolRenderer = ({ record, resultSummary = "" }: {
 }) => (
   <CommandResultView
     command={typeof (record.args.command ?? record.args.cmd) === "string" ? String(record.args.command ?? record.args.cmd) : null}
-    summary={record.summary ?? ""}
+    summary={resultSummary || getRecordOutputText(record)}
     fallback={resultSummary}
   />
 );

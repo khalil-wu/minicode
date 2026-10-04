@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -40,6 +42,26 @@ class WorkspaceFileResponse(BaseModel):
     size_bytes: int
     modified_at: str
     language_hint: str
+
+
+ProjectIndexFileKind = Literal["source", "config", "package", "declaration"]
+
+
+class WorkspaceProjectIndexFile(WorkspaceFileResponse):
+    kind: ProjectIndexFileKind
+
+
+class WorkspaceProjectIndexIssue(BaseModel):
+    path: str
+    status_code: int
+    message: str
+
+
+class WorkspaceProjectIndexResponse(BaseModel):
+    workspace_root: str
+    files: list[WorkspaceProjectIndexFile]
+    complete: bool
+    issues: list[WorkspaceProjectIndexIssue]
 
 
 class WorkspaceFileUpdateRequest(BaseModel):
@@ -90,6 +112,7 @@ class WorkspaceGitWorktreeEntryResponse(BaseModel):
 
 
 class WorkspaceGitWorktreeResponse(BaseModel):
+    is_git_repo: bool | None = None
     is_worktree: bool = False
     current_path: str = ""
     main_repo_path: str | None = None

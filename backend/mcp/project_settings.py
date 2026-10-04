@@ -59,10 +59,10 @@ def project_mcp_server_status(server_name: str, workspace_root: Path) -> str:
     """Resolve rejected, approved/all, then pending project MCP status."""
 
     settings = read_project_local_settings(workspace_root)
-    disabled = _server_name_set(settings.get("disabled_servers"))
+    disabled = set(settings.get("disabled_servers", []))
     if server_name in disabled:
         return PROJECT_MCP_REJECTED
-    enabled = _server_name_set(settings.get("enabled_servers"))
+    enabled = set(settings.get("enabled_servers", []))
     if server_name in enabled or settings.get("approve_all") is True:
         return PROJECT_MCP_APPROVED
     return PROJECT_MCP_PENDING
@@ -77,23 +77,13 @@ def approve_project_mcp_server(
     path = project_local_settings_path(workspace_root)
     with _PROJECT_SETTINGS_LOCK, file_mutation_locks([path]):
         settings = _trusted_project_settings(workspace_root)
-        enabled = normalize_string_array(
-            settings.get("enabled_servers"),
-            field_name="enabled_servers",
-            source=path,
-            reject_empty=True,
-        )
+        enabled = settings.get("enabled_servers", [])
         if server_name not in enabled:
             enabled.append(server_name)
         settings["enabled_servers"] = enabled
         disabled = [
             item
-            for item in normalize_string_array(
-                settings.get("disabled_servers"),
-                field_name="disabled_servers",
-                source=path,
-                reject_empty=True,
-            )
+            for item in settings.get("disabled_servers", [])
             if item != server_name
         ]
         if disabled:
@@ -109,23 +99,13 @@ def reject_project_mcp_server(server_name: str, workspace_root: Path) -> Path:
     path = project_local_settings_path(workspace_root)
     with _PROJECT_SETTINGS_LOCK, file_mutation_locks([path]):
         settings = _trusted_project_settings(workspace_root)
-        disabled = normalize_string_array(
-            settings.get("disabled_servers"),
-            field_name="disabled_servers",
-            source=path,
-            reject_empty=True,
-        )
+        disabled = settings.get("disabled_servers", [])
         if server_name not in disabled:
             disabled.append(server_name)
         settings["disabled_servers"] = disabled
         enabled = [
             item
-            for item in normalize_string_array(
-                settings.get("enabled_servers"),
-                field_name="enabled_servers",
-                source=path,
-                reject_empty=True,
-            )
+            for item in settings.get("enabled_servers", [])
             if item != server_name
         ]
         if enabled:
@@ -145,15 +125,3 @@ def _write_project_local_settings(workspace_root: Path, settings: dict[str, Any]
     path = project_local_settings_path(workspace_root)
     atomic_write_text(path, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
     return path
-
-
-def _server_name_set(value: Any) -> set[str]:
-    if value is None:
-        return set()
-    values = normalize_string_array(
-        value,
-        field_name="mcp server names",
-        source="project local settings",
-        reject_empty=True,
-    )
-    return set(values)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Literal
@@ -87,6 +87,7 @@ class PermissionContext:
     # infer cross-conversation capabilities from process-global paths.
     conversation_id: str = ""
     workspace_root: Path | None = None
+    protected_state_roots: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
         # frozen=True prevents field replacement but does not protect nested
@@ -165,6 +166,15 @@ class ToolExecutionContext:
         return self.conversation_id or self.session_id
 
     def __post_init__(self) -> None:
+        from backend.security.sensitive_files import application_state_roots
+
+        self.permission = replace(
+            self.permission,
+            protected_state_roots=tuple(dict.fromkeys((
+                *self.permission.protected_state_roots,
+                *application_state_roots(self.run_context),
+            ))),
+        )
         # Promote the pre-R1 registry slot once at the context boundary. This
         # keeps older SDK/test callers working while all runtime writes use the
         # typed field and the metadata copy no longer carries the live object.

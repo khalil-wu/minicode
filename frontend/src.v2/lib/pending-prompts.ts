@@ -10,7 +10,6 @@ const normalizeId = (value: string | null | undefined): string | undefined => {
 export const pendingPromptTargetsConversation = (
   prompt: PendingPrompt,
   targetConversationId: string | null | undefined,
-  activeConversationId: string | null | undefined,
 ): boolean => {
   if (!prompt) return false;
   const promptConversationId = normalizeId(prompt.conversationId);
@@ -18,13 +17,11 @@ export const pendingPromptTargetsConversation = (
   // A prompt without an owner is unscoped. Never project it into whichever
   // conversation happens to be active; the backend must attach the owner (or
   // the caller must render it in a generic/unowned surface).
-  void activeConversationId;
   return Boolean(promptConversationId && targetId && promptConversationId === targetId);
 };
 
 export const hasLocalPendingPromptForConversation = (
   prompts: PendingPrompt[],
   targetConversationId: string | null | undefined,
-  activeConversationId: string | null | undefined,
 ): boolean =>
-  prompts.some((prompt) => pendingPromptTargetsConversation(prompt, targetConversationId, activeConversationId));
+  prompts.some((prompt) => pendingPromptTargetsConversation(prompt, targetConversationId));

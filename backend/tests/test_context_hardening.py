@@ -164,7 +164,7 @@ def test_cleared_user_directory_does_not_leak_into_next_turn(monkeypatch) -> Non
 def test_git_snapshot_is_session_owned_and_round_trips(monkeypatch, tmp_path) -> None:
     calls: list[str] = []
 
-    async def fake_git_status(root) -> str:
+    async def fake_git_status(root, *, context=None) -> str:
         calls.append(str(root))
         return "session-start git status"
 
@@ -186,7 +186,7 @@ def test_git_snapshot_is_session_owned_and_round_trips(monkeypatch, tmp_path) ->
     restored = ContextBuilder()
     restored.load_snapshot(builder.export_snapshot())
     asyncio.run(restored.start_turn("third", state))
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_post_compaction_restore_bounds_oversized_single_line(tmp_path) -> None:

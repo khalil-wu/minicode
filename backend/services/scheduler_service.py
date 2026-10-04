@@ -43,7 +43,7 @@ def list_scheduled_tasks(scheduler: Any, *, workspace_root: str | None = None) -
     )
 
 
-def add_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None) -> SchedulerOperationResult:
+def _task_configuration(data: dict[str, Any]) -> dict[str, Any]:
     from backend.tasks.scheduler import is_valid_timezone, next_run_after
 
     name = _required_field(data.get("name"), "Task name is required")
@@ -58,22 +58,42 @@ def add_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_root: 
         raise SchedulerServiceError("Task schedule must be a valid 5-field cron expression")
     if isolation not in {"worktree", "workspace"}:
         raise SchedulerServiceError("Task isolation must be 'worktree' or 'workspace'")
+    return dict(name=name, prompt=prompt, schedule=schedule, permission_mode=permission_mode,
+                conversation_id=str(data.get("conversation_id") or "").strip(), timezone=timezone, isolation=isolation)
+
+
+def add_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None) -> SchedulerOperationResult:
+    configuration = _task_configuration(data)
     # ``None`` is reserved for embedded/legacy API callers that do not expose
     # a workspace accessor. A real WebSocket session passes an empty string
     # when no folder is open and is rejected below.
     if workspace_root == "":
         raise SchedulerServiceError("Open a workspace before creating a scheduled task")
     scheduler.add_task(
-        name=name,
-        prompt=prompt,
-        schedule=schedule,
-        permission_mode=permission_mode,
+        **configuration,
         workspace_root=workspace_root or "",
-        conversation_id=str(data.get("conversation_id") or "").strip(),
-        timezone=timezone,
-        isolation=isolation,
     )
     return list_scheduled_tasks(scheduler, workspace_root=workspace_root)
+
+
+def update_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None) -> SchedulerOperationResult:
+    configuration = _task_configuration(data)
+    task_id = _task_id_from_payload(data)
+    if not scheduler.update_task(task_id, workspace_root=workspace_root, **configuration):
+        raise SchedulerServiceError(f"Task '{task_id}' not found")
+    return list_scheduled_tasks(scheduler, workspace_root=workspace_root)
+
+
+def scheduled_run_history(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None) -> dict[str, Any]:
+    offset = data.get("offset", 0)
+    limit = data.get("limit", 50)
+    if (isinstance(offset, bool) or not isinstance(offset, int)
+            or isinstance(limit, bool) or not isinstance(limit, int)
+            or offset < 0 or not 1 <= limit <= 100):
+        raise SchedulerServiceError("History offset must be non-negative and page size must be between 1 and 100")
+    rows = scheduler.list_runs(task_id=str(data.get("task_id") or "") or None,
+                               workspace_root=workspace_root, offset=offset, limit=limit + 1)
+    return {"runs": rows[:limit], "has_more": len(rows) > limit, "next_offset": offset + min(len(rows), limit)}
 
 
 def remove_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None = None) -> SchedulerOperationResult:
@@ -85,7 +105,10 @@ def remove_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_roo
 
 def toggle_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None = None) -> SchedulerOperationResult:
     task_id = _task_id_from_payload(data)
-    if not scheduler.toggle_task(task_id, bool(data.get("enabled", True)), workspace_root=workspace_root):
+    enabled = data.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise SchedulerServiceError("Task enabled must be a boolean")
+    if not scheduler.toggle_task(task_id, enabled, workspace_root=workspace_root):
         raise SchedulerServiceError(f"Task '{task_id}' not found")
     return list_scheduled_tasks(scheduler, workspace_root=workspace_root)
 

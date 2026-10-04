@@ -61,6 +61,8 @@ class ToolCallRecord:
     command_id: str = ""
     output_cursor: int | None = None
     call_source: dict[str, str] = field(default_factory=dict)
+    tool_call_id: str = ""
+    result_payload: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
 # Terminal-reason vocabulary for run termination.
@@ -120,13 +122,9 @@ class AgentState:
 
     # ── 执行状态 ──
     iterations: int = 0
-    # Provider requests spent on recovery rather than on new work: stop-hook
-    # feedback and steering. They
-    # are already bounded by ``total_retries``
-    # (agent.turn_error_budget), so charging them to the work budget as well
-    # would end a turn early precisely when it is repairing itself.
-    # ``iterations`` stays the raw provider-request counter: event ids
-    # (``iter:N``), checkpoints and resume all key off it.
+    # Loop recovery metric. Every admitted model iteration still counts toward
+    # max_iterations; inner provider transport retries use their own budget.
+    # Event ids, checkpoints and resume use the admitted ``iterations`` count.
     recovery_iterations: int = 0
     reply: str = ""
     stopped_reason: TerminalReason | None = None
@@ -286,7 +284,8 @@ class AgentState:
         command_id: str = "",
         output_cursor: int | None = None,
         call_source: dict[str, str] | None = None,
-    ) -> None:
+        tool_call_id: str = "",
+    ) -> ToolCallRecord:
         """记录一次工具调用。"""
         resolved_status: ToolCallStatus
         if status is not None:
@@ -294,8 +293,7 @@ class AgentState:
         else:
             resolved_status = "error" if is_error else "success"
 
-        self.tool_calls.append(
-            ToolCallRecord(
+        record = ToolCallRecord(
                 tool_name=name,
                 tool_input=deepcopy(args),
                 tool_output=output,
@@ -323,8 +321,9 @@ class AgentState:
                 command_id=command_id,
                 output_cursor=output_cursor,
                 call_source=dict(call_source or {}),
+                tool_call_id=tool_call_id,
             )
-        )
+        self.tool_calls.append(record)
         if artifact_id:
             self.artifact_refs.append(artifact_id)
 
@@ -333,6 +332,12 @@ class AgentState:
 
         if mutates and resolved_status == "success":
             self._last_mutation_index = self._tool_sequence
+        return record
+
+    def committed_tool_results(self, turn_id: str) -> list[ToolCallRecord]:
+        """Exact current-turn receipts written by the canonical result producer."""
+        return [record for record in self.tool_calls
+                if record.tool_call_id and record.result_payload and record.turn_id == turn_id]
 
     def rebuild_tool_call_accounting(self) -> None:
         """Restore checkpoint-compatible tool sequence accounting."""

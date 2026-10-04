@@ -1,7 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Check, ChevronDown, ChevronRight, Circle, Copy, Pencil, Wifi, WifiOff } from "lucide-react";
 import type { ActivityCellState } from "./cellTypes";
-import { ToolSourceBadge } from "./ToolSourceBadge";
 import { useAppStore } from "../../stores";
 import {
   type ActivityDetail,
@@ -12,7 +11,6 @@ import {
   hasOutputPreview,
   getOutputPreview,
   getRecordOutputPreview,
-  isLongRunning,
   isHttpUrl,
   fileLabel,
   recordInputTarget,
@@ -21,8 +19,10 @@ import {
   type PlanUpdateStep,
   isWebFetchActivity,
   isWebFetchRecord,
+  isBrowserRecord,
+  browserFailureGuidance,
 } from "./activityCellHelpers";
-import { getToolDiffStats } from "../../lib/tool-call-reducer";
+import { getToolDiffStats, toolCleanupNotice } from "../../lib/tool-call-reducer";
 import {
   activityCellStatus,
   formatCellDuration,
@@ -30,17 +30,15 @@ import {
 } from "./cellStatus";
 import { readableToolLabel } from "../toolDisplayName";
 import { ToolGlyph } from "../toolUtils";
-import { subscribeSecondTick } from "../../lib/shared-tick";
 import { openWebTarget } from "../openWebTarget";
-import { normalizeAgentErrorMessage, purifyToolErrorText } from "../errorMessages";
+import { normalizeAgentErrorMessage, normalizeToolErrorMessage, purifyToolErrorText } from "../errorMessages";
 import { RollingNumber } from "../../components/RollingNumber";
 import { InlineDiff } from "../diff/InlineDiff";
-import { workspaceRelativeDiffPath } from "../diffPaths";
 import { getWebSocket } from "../../hooks/useWebSocket";
 import { openArtifactPreview, openWorkspaceFilePreview } from "../openAttachmentPreview";
 import { workspaceRootsEqual } from "../../lib/workspace-path";
 import {
-  artifactImageResourceUrl,
+  artifactResourceUrl,
   withPreviewCacheBust,
 } from "../../lib/artifact-resource";
 import {
@@ -55,30 +53,13 @@ import {
   type ProviderProgressSnapshot,
 } from "../../lib/provider-progress";
 import "./cells.css";
-
-/** Real-time elapsed timer — ticks every second while tool is running.
- * Subscribes to the shared 1s tick so N running cells share one interval. */
-function useElapsedTime(startedAt: number | undefined, isRunning: boolean): string {
-  const [elapsed, setElapsed] = useState("");
-
-  useEffect(() => {
-    if (!startedAt || !isRunning) return;
-    const update = (now: number) => setElapsed(formatCellDuration(now - startedAt));
-    update(Date.now());
-    return subscribeSecondTick(update);
-  }, [startedAt, isRunning]);
-
-  return elapsed;
-}
+import { useTranscriptSearch } from "../TranscriptSearchContext";
 
 /**
- * ActivityCell — Claude Code style compact tool-call display.
+ * ActivityCell — compact action + original target, with evidence on disclosure.
  *
- * ● tool_name (details) 1.2s          ← running: blinking dot + bold name + elapsed
- * ● tool_name (details)              ← done: static dot + dim name
- * ● tool_name (details)              ← failed: red dot + red name
- *
- * Expandable on click to show detailed records.
+ * Success needs no second status label. Failures, partial completion,
+ * interruptions and approvals remain visible without opening the details.
  */
 export const ActivityCell = memo(function ActivityCell({
   cell,
@@ -97,6 +78,8 @@ export const ActivityCell = memo(function ActivityCell({
   const ownerConversationId = String(conversationId || "").trim();
   const records = useMemo(() => cell.toolCallRecords ?? [], [cell.toolCallRecords]);
   const hasRecords = records.length > 0;
+  const browserRecords = records.filter(isBrowserRecord);
+  const isBrowserAction = browserRecords.length > 0;
   const isFileChange = cell.activityKind === "fileChange";
   const isRead = cell.activityKind === "fileRead";
   const isWorkspaceSearch = cell.activityKind === "workspaceSearch";
@@ -114,11 +97,12 @@ export const ActivityCell = memo(function ActivityCell({
       return { plus: stats.plus + diff.plus, minus: stats.minus + diff.minus };
     }, { plus: 0, minus: 0 });
   }, [isFileChange, records]);
-  const fileChangeTarget = isFileChange
-    ? workspaceRelativeDiffPath(recordInputTarget(records[0]), workingDirectory)
+  const fileChangeTarget = isFileChange && records.length === 1
+    ? recordInputTarget(records[0])
     : "";
   const shouldAutoExpand = !cell.collapsed;
-  const [isExpanded, setIsExpanded] = useState(shouldAutoExpand);
+  const [expansionPreference, setIsExpanded] = useState(shouldAutoExpand);
+  const isExpanded = useTranscriptSearch() || expansionPreference;
   const [copiedPatch, setCopiedPatch] = useState<string | null>(null);
   const userToggled = useRef(false);
   const previousId = useRef(cell.id);
@@ -131,9 +115,21 @@ export const ActivityCell = memo(function ActivityCell({
 
   const isFailed = cell.status === "failed" || cell.status === "interrupted";
   const isPartial = cell.status === "partial";
+  const needsApproval = records.some((record) => record.transition === "waiting_approval" || record.waitingOn === "approval");
+  const attentionLabel = needsApproval ? "Awaiting approval"
+    : cell.status === "interrupted" ? "Interrupted"
+    : isPartial ? "Partial"
+    : [
+    records.some((record) => record.status === "cancelled") ? "Interrupted" : "",
+    records.some((record) => record.status === "failed")
+      || (cell.status === "failed" && !records.some((record) => ["blocked", "timeout"].includes(record.status))) ? "Failed" : "",
+    records.some((record) => record.status === "blocked") ? "Blocked" : "",
+    records.some((record) => record.status === "timeout") ? "Timed out" : "",
+    isPartial || records.some((record) => record.status === "partial") ? "Partial" : "",
+  ].filter(Boolean).join(" · ");
   const recordDetails = useMemo(
     () => isExpanded && hasRecords
-      ? describeRecordDetails(records, developerMode)
+      ? describeRecordDetails(records.filter(record => record.name !== "update_plan" && (!isBrowserRecord(record) || records.length > 1)), developerMode)
       : [],
     [records, developerMode, hasRecords, isExpanded],
   );
@@ -142,7 +138,7 @@ export const ActivityCell = memo(function ActivityCell({
     [records],
   );
   const nonPlanRecords = useMemo(
-    () => records.filter((record) => record.name !== "update_plan"),
+    () => records.filter((record) => record.name !== "update_plan" && !isBrowserRecord(record)),
     [records],
   );
   const imageArtifactRecords = useMemo(
@@ -156,12 +152,13 @@ export const ActivityCell = memo(function ActivityCell({
   const showOutputPreview = !isInlineAction
     && !isFileChange
     && !isFailed
+    && !isPartial
     && !isRunning
     && hasOutputPreview(nonPlanRecords);
   const inlineDisclosureRecords = useMemo(() => {
     if (!isInlineAction) return [];
     const showTargets = records.length > 1;
-    return records.flatMap((record) => {
+    return records.filter((record) => !isBrowserRecord(record)).flatMap((record) => {
       const target = recordInputTarget(record);
       const output = getRecordOutputPreview(record);
       const visibleOutput = output.trim() === target.trim() ? "" : output;
@@ -169,31 +166,18 @@ export const ActivityCell = memo(function ActivityCell({
       return [{ record, target: showTargets ? target : "", output: visibleOutput }];
     });
   }, [isInlineAction, records]);
-  const hasInlineFailureEvidence = isInlineAction
-    && inlineDisclosureRecords.some(({ output }) => Boolean(output.trim()));
-  const showGenericErrorDetail = !isInlineAction || !hasInlineFailureEvidence;
-  const canToggle = hasRecords && (
-    !isInlineAction
-    || isFailed
-    || inlineDisclosureRecords.length > 0
-  );
+  const canToggle = hasRecords && (!isInlineAction || isFailed || inlineDisclosureRecords.length > 0);
 
-  const name = isInlineAction && records.length === 1
-    ? cell.activityKind === "webSearch"
-      ? readableTimelineTitle(cell)
-      : inlineActionLabel(records[0], cell.activityKind)
-    : readableTimelineTitle(cell);
-  const inlineTarget = isInlineAction && records.length === 1
+  const name = readableTimelineTitle(cell);
+  const concreteToolTarget = records.length === 1
     ? recordInputTarget(records[0])
-    : "";
-  const concreteToolTarget = !isFailed && records.length === 1
-    ? recordInputTarget(records[0])
-    : "";
-  const detail = inlineTarget || cell.subtitle?.trim() || concreteToolTarget;
+    : isBrowserAction ? [...new Set(browserRecords.map(recordInputTarget).filter(Boolean))].join(", ") : "";
+  const detailValue = hasRecords ? concreteToolTarget : cell.subtitle?.trim();
+  const detail = detailValue === name ? undefined : detailValue;
   const singleInlineDetail = isInlineAction && records.length === 1 ? describeRecordDetail(records[0], developerMode) : null;
   const changeDetails = useMemo(
-    () => isFileChange ? buildChangeDetails(records, workingDirectory) : [],
-    [isFileChange, records, workingDirectory],
+    () => isFileChange ? buildChangeDetails(records) : [],
+    [isFileChange, records],
   );
   const hasChangeEvidence = isExpanded && isFileChange && changeDetails.length > 0;
   const hasInlineEvidence = isExpanded && isInlineAction && inlineDisclosureRecords.length > 0;
@@ -202,12 +186,8 @@ export const ActivityCell = memo(function ActivityCell({
     && !isFileChange
     && !isInlineAction
     && (showDetailRows || showOutputPreview);
-  const hasErrorEvidence = isExpanded && isFailed && hasRecords && showGenericErrorDetail;
-  const showUnifiedEvidence = hasChangeEvidence
-    || hasInlineEvidence
-    || hasArtifactEvidence
-    || hasGenericEvidence
-    || hasErrorEvidence;
+  const hasErrorEvidence = isExpanded && !hasInlineEvidence && records.some((record) => !isBrowserRecord(record) && ["failed", "blocked", "timeout", "cancelled", "partial"].includes(record.status));
+  const showUnifiedEvidence = isExpanded && hasRecords;
   const glyphKind = activityGlyphKind(cell.activityKind, records[0]);
   const useToolIcon = !isFileChange && cell.activityKind !== "genericTool";
   const providerProgress: ProviderProgressSnapshot | undefined = cell.progress && {
@@ -229,17 +209,7 @@ export const ActivityCell = memo(function ActivityCell({
   const providerIsDisconnected = isFailed
     || providerProgress?.providerState === "failed"
     || providerProgress?.providerState === "interrupted";
-  const liveLabel = providerLabel || (isRunning
-    ? isWebFetchAction
-      ? "正在获取网页"
-      : cell.activityKind === "webSearch"
-        ? "正在搜索网页"
-        : `正在${activityVerb(cell.activityKind)}`
-    : "");
-  // Every cell reports duration the same way: live elapsed while running, the
-  // settled tool duration afterwards. A tool must not silently drop its timing
-  // just because it settled between ticks.
-  const liveElapsed = useElapsedTime(cell.startedAt, isRunning);
+  const progressLabel = readableToolLabel(cell.progress?.text, isRunning);
   const settledDuration = formatCellDuration(
     cell.completedAt != null && cell.startedAt != null
       ? cell.completedAt - cell.startedAt
@@ -248,7 +218,6 @@ export const ActivityCell = memo(function ActivityCell({
           0,
         ) || undefined,
   );
-  const elapsed = isRunning ? liveElapsed : settledDuration;
 
   const cellStateClass = isRunning
     ? "activity-cell-running"
@@ -320,8 +289,8 @@ export const ActivityCell = memo(function ActivityCell({
 
           {isFileChange ? (
             <>
-              <span className="activity-cell-name" data-failed={isFailed}>{isRunning ? "正在编辑" : cell.status === "interrupted" ? "已取消编辑" : isFailed ? "编辑失败" : isPartial ? "编辑未完成" : "已编辑"}</span>
-              {fileChangeTarget && <span className="activity-cell-file-change-target">{fileChangeTarget}</span>}
+              <span className="activity-cell-name" data-failed={isFailed}>{name}</span>
+              {fileChangeTarget && <span className="activity-cell-file-change-target" title={fileChangeTarget}>{fileChangeTarget}</span>}
               {fileChangeStats && (
                 <span className="activity-cell-file-change-stats">
                   <RollingNumber value={fileChangeStats?.plus ?? 0} prefix="+" className="activity-cell-added" />
@@ -335,40 +304,45 @@ export const ActivityCell = memo(function ActivityCell({
               data-failed={isFailed}
               aria-live={isProviderRetry ? "polite" : undefined}
             >
-              {liveLabel || name}
+              {providerLabel || name}
             </span>
           )}
 
           {!isFileChange && detail && (
-            <span className={`activity-cell-detail${isRead ? " activity-cell-read-target" : ""}`}>
+            <span className={`activity-cell-detail${isRead ? " activity-cell-read-target" : ""}`} title={detail}>
               {detail}
             </span>
           )}
-          <ToolSourceBadge source={records[0]?.callSource} />
           {singleInlineDetail?.lineInfo && <span className="activity-cell-detail-meta">{singleInlineDetail.lineInfo}</span>}
 
-          {isRunning && cell.progress?.text && !providerLabel && (
-            <span className="activity-cell-progress">{readableToolLabel(cell.progress.text)}</span>
+          {attentionLabel && (
+            <span className="activity-cell-detail-meta" role="status">{attentionLabel}</span>
           )}
 
-          {elapsed && !isProviderRetry && (isRunning || (!isFileChange && isExpanded)) && <span className="activity-cell-elapsed">{elapsed}</span>}
+          {isRunning && progressLabel && !providerLabel && progressLabel !== name && (
+            <span className="activity-cell-progress">{progressLabel}</span>
+          )}
 
           {canToggle && (
             <span className="activity-cell-toggle">
               {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
             </span>
           )}
-
-          {isRunning && !isProviderRetry && isLongRunning(cell.startedAt) && (
-            <span className="activity-cell-long-running">仍在运行</span>
-          )}
         </button>
 
       </div>
 
-      {/* One frame per cell: identity and duration live in the header row, so
-          all records, screenshots, output, and errors share one evidence
-          surface instead of stacking several nested cards. */}
+      {records.map((record) => {
+        const notice = toolCleanupNotice(record.cleanupReceipt);
+        return notice ? <div key={`cleanup-${record.id}`} className="activity-cell-detail-meta" role="status">{notice}</div> : null;
+      })}
+      {browserRecords.filter((record) => ["failed", "blocked", "timeout", "cancelled", "partial"].includes(record.status)
+        || record.transition === "waiting_approval" || record.waitingOn === "approval").map((record) => (
+        <BrowserRecordNotice key={`browser-notice-${record.id}`} record={record} conversationId={ownerConversationId} showAction={browserRecords.length > 1} />
+      ))}
+
+      {/* Disclosure is task evidence, not runtime provenance. Canonical call
+          ids, source, script and raw envelopes remain in Inspector/replay. */}
       {showUnifiedEvidence && (
         <div className={[
           "activity-cell-expanded",
@@ -376,9 +350,6 @@ export const ActivityCell = memo(function ActivityCell({
           hasInlineEvidence ? "activity-cell-tool-expanded" : "",
           hasArtifactEvidence ? "activity-cell-artifact-gallery" : "",
         ].filter(Boolean).join(" ")}>
-          {records.filter((record) => record.name === "tool_exec" && typeof record.args.code === "string").map((record) => (
-            <pre key={`code-${record.id}`} className="activity-cell-inline-output" aria-label="组合脚本">{record.args.code as string}</pre>
-          ))}
           {hasChangeEvidence && changeDetails.map((change, index) => (
             <div key={`${change.path}-${index}`} className="activity-cell-change-card">
               <div className="activity-cell-change-card-header">
@@ -431,7 +402,7 @@ export const ActivityCell = memo(function ActivityCell({
                   steps={planUpdateSteps(record)}
                 />
               ))}
-              {showDetailRows && recordDetails.map(({ label, target, targetKind, lineInfo, count }, i) => (
+              {showDetailRows && recordDetails.filter((row) => row.label !== name || row.target !== (detail || "") || row.lineInfo || row.count > 1).map(({ label, target, targetKind, lineInfo, count }, i) => (
                 <div key={`${label}-${target}-${i}`} className="activity-cell-detail-row">
                   <span className="activity-cell-detail-name">{label}</span>
                   {/* The header row already shows this cell's target. Repeating it
@@ -448,36 +419,82 @@ export const ActivityCell = memo(function ActivityCell({
             </>
           )}
 
+          {browserRecords.map((record) => (
+            <BrowserRecordEvidence key={`browser-details-${record.id}`} record={record} />
+          ))}
+
           {/* Failed records use the same evidence frame as every other tool. */}
           {hasErrorEvidence && (
             <div className="activity-cell-error-detail">
-              {cell.toolCallRecords!.map((record, i) => {
-                const rawError = purifyToolErrorText(
-                  developerMode
-                    ? record.developerDetail || record.outputPreview || record.userSummary || record.errorInfo?.user_summary || ""
-                    : record.outputPreview || record.userSummary || record.errorInfo?.user_summary || "",
-                );
-                const error = developerMode
-                  ? rawError
-                  : normalizeAgentErrorMessage(rawError, { includeProviderDetails: false });
+              {records.filter((record) => !isBrowserRecord(record) && ["failed", "blocked", "timeout", "cancelled", "partial"].includes(record.status)).map((record, i) => {
+                const rawError = purifyToolErrorText(record.userSummary || record.errorInfo?.user_summary || getRecordOutputPreview(record) || record.stderrPreview || "");
+                if (isInlineAction && rawError.trim() === getRecordOutputPreview(record).trim()) return null;
+                const error = record.providerErrorType
+                  ? normalizeAgentErrorMessage(rawError, { includeProviderDetails: false })
+                  : normalizeToolErrorMessage(rawError);
                 if (!error) return null;
-                const label = developerMode
-                  ? readableToolLabel(record.displayHint || record.name)
-                  : readableRecordLabel(record);
+                const label = readableRecordLabel(record);
                 return (
                   <div key={`error-${i}`} className="activity-cell-error-item">
-                    {label && <div className="activity-cell-error-label">{label}</div>}
+                    {records.length > 1 && label && <div className="activity-cell-error-label">{label}</div>}
                     <pre className="activity-cell-error-pre">{error}</pre>
                   </div>
                 );
               })}
             </div>
           )}
+          {settledDuration && <div className="activity-cell-detail-row">
+            <span className="activity-cell-detail-duration">{settledDuration}</span>
+          </div>}
         </div>
       )}
     </div>
   );
 });
+
+function BrowserRecordNotice({ record, conversationId, showAction }: {
+  record: ActivityToolRecord;
+  conversationId: string;
+  showAction: boolean;
+}) {
+  // Historical and child cells must not borrow the active task's preview.
+  const workbench = useAppStore((state) => conversationId ? state.conversationWorkbenchStates[conversationId] : undefined);
+  const activeProcesses = useAppStore((state) => conversationId && conversationId === state.conversationId ? state.previewLaunchProcesses : undefined);
+  const activeVerification = useAppStore((state) => conversationId && conversationId === state.conversationId ? state.previewVerification : undefined);
+  const guidance = browserFailureGuidance(record, workbench || (activeProcesses && {
+    previewLaunchProcesses: activeProcesses,
+    previewVerification: activeVerification ?? null,
+  }));
+  return (
+    <div className="activity-cell-error-detail browser-record-notice" role="status" data-browser-call-id={record.id}>
+      <div className="activity-cell-error-item">
+        {showAction && <div className="activity-cell-error-label">{readableRecordLabel(record)}</div>}
+        <div className="error-cell-message">{guidance.reason}</div>
+        {guidance.previewState && <div className="error-cell-message">{guidance.previewState}</div>}
+        {guidance.previewUrls?.map((url) => <div key={url} className="activity-cell-detail-row">
+          <span className="activity-cell-detail-meta">本会话预览 URL</span>
+          <span className="activity-cell-detail-path" title={url}>{url}</span>
+        </div>)}
+        <div className="error-cell-suggestion"><span>下一步：{guidance.nextStep}</span></div>
+      </div>
+    </div>
+  );
+}
+
+function BrowserRecordEvidence({ record }: {
+  record: ActivityToolRecord;
+}) {
+  const output = getRecordOutputPreview(record);
+  const error = purifyToolErrorText(record.stderrPreview || (!output ? record.userSummary || record.errorInfo?.user_summary || record.errorInfo?.user_message : "") || "");
+  const action = String(record.args.action || "");
+  return (
+    <div className="activity-cell-tool-detail-card">
+      {action === "evaluate" && typeof record.args.expression === "string" && <pre className="activity-cell-inline-output" aria-label="JavaScript">{record.args.expression}</pre>}
+      {output && <pre className="activity-cell-output-pre" aria-label="操作结果">{output}</pre>}
+      {error && !output.includes(error) && <pre className="activity-cell-error-pre" aria-label="错误详情">{error}</pre>}
+    </div>
+  );
+}
 
 /**
  * A few durable transcripts predate artifact_kind and only retain the MIME
@@ -518,7 +535,7 @@ function ToolArtifactImage({
   }, [artifactId, ownerConversationId, mediaType, sessionId, isConnected]);
 
   const imageUrl = useMemo(() => withPreviewCacheBust(
-    artifactImageResourceUrl({
+    artifactResourceUrl({
       artifactId,
       conversationId: ownerConversationId,
       sessionId,
@@ -617,33 +634,6 @@ function activityGlyphKind(
   return activityKind || record?.resultKind || "genericTool";
 }
 
-function activityVerb(activityKind: ActivityCellState["activityKind"]): string {
-  if (activityKind === "fileRead") return "读取";
-  if (activityKind === "workspaceList") return "列出文件";
-  if (activityKind === "workspaceSearch") return "搜索";
-  if (activityKind === "webSearch") return "获取网页";
-  if (activityKind === "browser") return "操作浏览器";
-  if (activityKind === "skill") return "使用技能";
-  return "执行工具";
-}
-
-function inlineActionLabel(
-  record: ActivityToolRecord,
-  activityKind: ActivityCellState["activityKind"],
-): string {
-  // The turn projection already owns tool classification. Render from that
-  // canonical activity kind instead of reclassifying broad result metadata
-  // such as resultKind="file", which also appears on list_files results.
-  if (activityKind === "workspaceList") return "列出文件";
-  if (activityKind === "workspaceSearch") return "搜索文件";
-  if (activityKind === "fileRead") return "读取文件";
-  if (activityKind === "webSearch") {
-    if (isWebFetchRecord(record)) return "获取网页";
-    return "搜索网页";
-  }
-  return readableToolLabel(record.displayHint || record.name);
-}
-
 type ChangeDetail = {
   path: string;
   patch?: string;
@@ -651,7 +641,7 @@ type ChangeDetail = {
   deletions: number;
 };
 
-function buildChangeDetails(records: ActivityToolRecord[], workingDirectory: string): ChangeDetail[] {
+function buildChangeDetails(records: ActivityToolRecord[]): ChangeDetail[] {
   const details: ChangeDetail[] = [];
 
   for (const record of records) {
@@ -664,7 +654,7 @@ function buildChangeDetails(records: ActivityToolRecord[], workingDirectory: str
           patch: file.patch,
         });
         details.push({
-          path: workspaceRelativeDiffPath(file.path, workingDirectory) || file.path,
+          path: file.path,
           patch: file.patch,
           additions: stats.plus,
           deletions: stats.minus,
@@ -676,7 +666,7 @@ function buildChangeDetails(records: ActivityToolRecord[], workingDirectory: str
     if (path || record.diff) {
       const stats = record.diff ? getToolDiffStats(record.diff) : { plus: 0, minus: 0 };
       details.push({
-        path: workspaceRelativeDiffPath(path, workingDirectory) || path || "已编辑文件",
+        path: path || "Edited file",
         patch: record.diff?.patch,
         additions: stats.plus,
         deletions: stats.minus,
@@ -699,8 +689,8 @@ function DetailTarget({
   workspaceRoot: string;
   conversationId?: string;
 }) {
-  const text = target.trim();
-  if (!text) return null;
+  const text = target;
+  if (!text.trim()) return null;
 
   if (targetKind === "url" && isHttpUrl(text)) {
     return (

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pathspec.gitignore import GitIgnoreSpec
+from backend.security.sensitive_files import is_protected_write_path
+from backend.workspace.fuzzy_search import iter_search_paths
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ _STRUCTURAL_IGNORED_DIRS = {
     ".venv",
     "__pycache__",
     "node_modules",
-    ".conda", "data", "datasets", "dataset", "models", "checkpoints",
+    ".conda",
     "runs", "wandb", "mlruns", "logs", "tmp", "temp", ".ipynb_checkpoints",
     "venv", "env", "dist", "build", "target", "out", "coverage", "htmlcov",
 }
@@ -39,12 +39,6 @@ _IGNORED_FILE_SUFFIXES = {
     ".parquet", ".feather", ".sqlite", ".sqlite3", ".db", ".zip", ".tar",
     ".gz", ".7z", ".rar", ".png", ".jpg", ".jpeg", ".gif", ".webp",
     ".mp4", ".mov", ".avi",
-}
-_TEXT_FILE_SUFFIXES = {
-    ".bash", ".c", ".cfg", ".conf", ".cpp", ".css", ".fish", ".go",
-    ".h", ".hpp", ".html", ".ini", ".java", ".js", ".json", ".jsx",
-    ".md", ".py", ".rs", ".sass", ".scss", ".sh", ".toml", ".ts",
-    ".tsx", ".txt", ".yaml", ".yml", ".zsh",
 }
 
 
@@ -56,32 +50,20 @@ class ProjectMetadata:
     description: str = ""
     has_project_instructions: bool = False
     gitignore_patterns: list[str] = field(default_factory=list)
-    # Kept in the public protocol for compatibility. Workspace activation no
-    # longer performs a full-tree count merely to populate these decorations.
+    # Bounded metadata statistics; fuzzy search owns the reusable file index.
     file_count: int = 0
     total_size: int = 0
-
-
-@dataclass
-class FileIndexEntry:
-    path: Path
-    relative_path: str
-    size: int
-    mtime: float
-    is_text: bool
 
 
 class WorkspaceContext:
     """Own project metadata without maintaining a second filesystem index."""
 
-    def __init__(self, root_path: str | Path, *, max_index_files: int = 50_000, **_: Any) -> None:
+    def __init__(self, root_path: str | Path, *, max_index_files: int = 50_000) -> None:
         self.root_path = Path(root_path).resolve()
         self.metadata: ProjectMetadata | None = None
-        self.file_index: dict[str, FileIndexEntry] = {}
         self.max_index_files = max(1, int(max_index_files or 50_000))
         self.index_truncated = False
         self._gitignore_patterns: list[str] = []
-        self._gitignore_spec = GitIgnoreSpec.from_lines([])
 
     async def initialize(self) -> ProjectMetadata:
         if not self.root_path.exists():
@@ -89,7 +71,6 @@ class WorkspaceContext:
         if not self.root_path.is_dir():
             raise ValueError(f"不是目录: {self.root_path}")
         self._gitignore_patterns = self._load_gitignore()
-        self._gitignore_spec = GitIgnoreSpec.from_lines(self._gitignore_patterns)
         self.metadata = ProjectMetadata(
             root_path=self.root_path,
             project_type=self._detect_project_type(),
@@ -97,9 +78,7 @@ class WorkspaceContext:
             has_project_instructions=self._has_project_instructions(),
             gitignore_patterns=list(self._gitignore_patterns),
         )
-        await self._build_file_index()
-        self.metadata.file_count = len(self.file_index)
-        self.metadata.total_size = sum(entry.size for entry in self.file_index.values())
+        await self._collect_file_stats()
         logger.info(
             "工作区初始化完成: %s (%s)",
             self.metadata.name,
@@ -107,50 +86,33 @@ class WorkspaceContext:
         )
         return self.metadata
 
-    async def _build_file_index(self) -> None:
-        def scan() -> tuple[dict[str, FileIndexEntry], bool]:
-            result: dict[str, FileIndexEntry] = {}
+    async def _collect_file_stats(self) -> None:
+        def scan() -> tuple[int, int, bool]:
+            count = 0
+            total_size = 0
             truncated = False
-            for relative, path in self._iter_visible_files():
-                if len(result) >= self.max_index_files:
+            for _relative, path in self._iter_visible_files():
+                if count >= self.max_index_files:
                     truncated = True
                     break
-                stat = path.stat()
-                result[relative] = FileIndexEntry(
-                    path=path,
-                    relative_path=relative,
-                    size=stat.st_size,
-                    mtime=stat.st_mtime,
-                    is_text=path.suffix.lower() in _TEXT_FILE_SUFFIXES,
-                )
-            return result, truncated
-        self.file_index, self.index_truncated = await asyncio.to_thread(scan)
+                try:
+                    stat = path.stat()
+                except FileNotFoundError:
+                    continue
+                count += 1
+                total_size += stat.st_size
+            return count, total_size, truncated
+        count, size, self.index_truncated = await asyncio.to_thread(scan)
+        self.metadata.file_count = count
+        self.metadata.total_size = size
 
     def _iter_visible_files(self) -> Iterator[tuple[str, Path]]:
-        for dirpath, dirnames, filenames in os.walk(self.root_path):
-            relative_dir = Path(dirpath).relative_to(self.root_path)
-            dirnames[:] = [
-                dirname
-                for dirname in dirnames
-                if not self._directory_is_ignored(relative_dir, dirname)
-            ]
-            for filename in filenames:
-                relative = (relative_dir / filename).as_posix()
-                if self._file_is_ignored(relative, filename):
-                    continue
-                yield relative, Path(dirpath) / filename
-
-    def _directory_is_ignored(self, relative_dir: Path, dirname: str) -> bool:
-        if dirname in _STRUCTURAL_IGNORED_DIRS:
-            return True
-        relative = (relative_dir / dirname).as_posix() + "/"
-        return self._gitignore_spec.match_file(relative)
-
-    def _file_is_ignored(self, relative: str, filename: str) -> bool:
-        return (
-            Path(filename).suffix.lower() in _IGNORED_FILE_SUFFIXES
-            or self._gitignore_spec.match_file(relative)
-        )
+        for path, is_dir in iter_search_paths(
+            self.root_path, include_hidden=True, ignore_dirs=_STRUCTURAL_IGNORED_DIRS,
+        ):
+            if is_dir or path.suffix.lower() in _IGNORED_FILE_SUFFIXES or is_protected_write_path(path):
+                continue
+            yield path.relative_to(self.root_path).as_posix(), path
 
     def _detect_project_type(self) -> str:
         if (self.root_path / "pyproject.toml").exists() or (
@@ -170,6 +132,8 @@ class WorkspaceContext:
         return "unknown"
 
     def _has_project_instructions(self) -> bool:
+        if any((self.root_path / name).is_file() for name in ("AGENTS.md", "AGENTS.override.md")):
+            return True
         config_dir = self.root_path / ".minicode"
         if any(
             (config_dir / name).is_file()

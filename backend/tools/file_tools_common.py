@@ -7,16 +7,14 @@ from __future__ import annotations
 
 import logging
 import hashlib
-from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
-from threading import Lock
 from typing import Any
 
 from backend.agent.turn_diff_tracker import TurnDiffTracker
 from backend.diff.unified import count_unified_diff_changes as _count_unified_diff_changes, iter_unified_diff
 from backend.permissions.context import ToolExecutionContext
-from backend.atomic_io import atomic_write_text, canonical_file_path_key, canonical_path_mapping_key, normalize_text_newlines
+from backend.atomic_io import atomic_write_text as _atomic_write_text, canonical_path_mapping_key, normalize_text_newlines
 from backend.tools.base import (
     MAX_TOOL_RESULT_BYTES,
     MAX_TOOL_RESULT_CHARS,
@@ -72,92 +70,6 @@ def _validate_path_arg_type(args: dict[str, Any]) -> str:
     return ""
 
 
-@dataclass(frozen=True)
-class _ListFilesCacheEntry:
-    dependencies: tuple[Path, ...]
-    signature: tuple[tuple[str, int, int, int], ...]
-    result: str
-
-
-# The visibility policy is part of the identity of a listing: two sessions
-# with different effective denylists must not share one cached result.
-_LIST_FILES_CACHE: dict[tuple[str, bool, int | None, str], _ListFilesCacheEntry] = {}
-_LIST_FILES_CACHE_LOCK = Lock()
-
-
-def _list_files_signature(paths: tuple[Path, ...]) -> tuple[tuple[str, int, int, int], ...] | None:
-    signature: list[tuple[str, int, int, int]] = []
-    try:
-        for dependency in paths:
-            stat = dependency.stat()
-            signature.append((str(dependency), stat.st_mtime_ns, stat.st_size, stat.st_mode))
-    except OSError:
-        return None
-    return tuple(signature)
-
-
-def _get_cached_list_files_result(
-    path: Path,
-    recursive: bool,
-    *,
-    limit: int | None = None,
-) -> str | None:
-    result, found = _lookup_list_files_cache_result(path, recursive, limit=limit)
-    return result if found else None
-
-
-def _lookup_list_files_cache_result(
-    path: Path,
-    recursive: bool,
-    *,
-    limit: int | None = None,
-    policy_key: str = "",
-) -> tuple[str | None, bool]:
-    key = (canonical_file_path_key(path), bool(recursive), limit, policy_key)
-    with _LIST_FILES_CACHE_LOCK:
-        entry = _LIST_FILES_CACHE.get(key)
-    if entry is None:
-        return None, False
-    current_signature = _list_files_signature(entry.dependencies)
-    if current_signature is None or current_signature != entry.signature:
-        with _LIST_FILES_CACHE_LOCK:
-            _LIST_FILES_CACHE.pop(key, None)
-        return None, False
-    return entry.result, True
-
-
-def _put_list_files_cache(
-    path: Path,
-    recursive: bool,
-    result: str,
-    *,
-    limit: int | None = None,
-    dependencies: tuple[Path, ...] | None = None,
-    policy_key: str = "",
-) -> None:
-    resolved = path.resolve()
-    dependency_paths = dependencies or (resolved,)
-    normalized_dependencies = tuple(
-        sorted({dependency.resolve() for dependency in dependency_paths}, key=lambda item: str(item).casefold())
-    )
-    signature = _list_files_signature(normalized_dependencies)
-    if signature is None:
-        return
-    key = (canonical_file_path_key(resolved), bool(recursive), limit, policy_key)
-    with _LIST_FILES_CACHE_LOCK:
-        _LIST_FILES_CACHE[key] = _ListFilesCacheEntry(
-            dependencies=normalized_dependencies,
-            signature=signature,
-            result=result,
-        )
-
-
-def clear_list_files_cache() -> None:
-    """Invalidate cached directory listings after workspace mutations."""
-    with _LIST_FILES_CACHE_LOCK:
-        _LIST_FILES_CACHE.clear()
-
-
 def invalidate_workspace_file_caches(
     *,
     file_tree_changed: bool = False,
@@ -168,33 +80,21 @@ def invalidate_workspace_file_caches(
     Dedicated file tools know the paths they changed and can invalidate one
     file-state entry directly. Shell commands do not: a command may create,
     delete, rename, or rewrite arbitrary files. Keeping this policy in one
-    place prevents a mutation path from clearing ``list_files`` while leaving
-    MiniCode-style fuzzy discovery or the read cache stale.
+    place keeps fuzzy discovery and the read cache consistent with mutations.
 
     ``clear_file_state`` is intentionally opt-in because direct file tools can
     invalidate their known paths more cheaply. It is used for shell commands,
     where the affected path set is unknowable without parsing the shell.
     """
-    try:
-        clear_list_files_cache()
-    except Exception:
-        logger.debug("failed to invalidate list-files cache", exc_info=True)
-
     if file_tree_changed:
-        try:
-            from backend.workspace.fuzzy_search import invalidate_global_fuzzy_search
+        from backend.workspace.fuzzy_search import invalidate_global_fuzzy_search
 
-            invalidate_global_fuzzy_search()
-        except Exception:
-            logger.debug("failed to invalidate fuzzy-search cache", exc_info=True)
+        invalidate_global_fuzzy_search()
 
     if clear_file_state:
-        try:
-            from backend.workspace.file_state_cache import clear_global_file_cache
+        from backend.workspace.file_state_cache import clear_global_file_cache
 
-            clear_global_file_cache()
-        except Exception:
-            logger.debug("failed to clear file-state cache", exc_info=True)
+        clear_global_file_cache()
 
 
 def _add_line_numbers(content: str, start_line: int = 1) -> str:
@@ -357,11 +257,6 @@ def record_file_hash(context: ToolExecutionContext | None, path: Path, value: st
         hashes[key] = value
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Compatibility wrapper for the shared durable writer."""
-    atomic_write_text(path, content)
-
-
 def _validate_expected_hash(path: Path, expected_hash: Any, *, require_hash: bool = True) -> tuple[bool, str]:
     if not path.exists():
         if str(expected_hash or "").strip():
@@ -400,18 +295,6 @@ def _validate_expected_hash(path: Path, expected_hash: Any, *, require_hash: boo
 MAX_FILE_READ_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
-def _coerce_line_number(value: Any, *, default: int | None = None) -> int | None:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return default
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
-
-
 def _read_text_range(
     path: Path,
     *,
@@ -448,12 +331,10 @@ __all__ = [
     "MAX_FILE_READ_BYTES",
     "_path_arg", "_first_present_arg",
     "_validate_text_arg", "_validate_path_arg_type",
-    "_get_cached_list_files_result",
-    "_lookup_list_files_cache_result", "_put_list_files_cache", "clear_list_files_cache",
     "invalidate_workspace_file_caches",
     "_add_line_numbers", "_generate_unified_diff",
     "_generate_limited_unified_diff", "_count_unified_diff_changes",
     "_workspace_display_path", "_emit_write_diff",
     "content_hash", "_atomic_write_text", "_validate_expected_hash",
-    "_coerce_line_number", "_read_text_range", "_format_size",
+    "_read_text_range", "_format_size",
 ]

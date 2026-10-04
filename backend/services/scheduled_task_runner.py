@@ -17,8 +17,12 @@ from backend.agent.conversation_query_guard import (
     conversation_query_guards,
 )
 from backend.agent.run_context import RunContext
+from backend.agent.execution_journal import execution_journal_owner
+from backend.agent.runtime import default_runtime
+from backend.async_cleanup import to_thread_cancel_safe
 from backend.conversations.repository import ConversationRepository
 from backend.services.chat_api_service import run_owned_rest_chat
+from backend.services.conversation_projection_service import replay_pending_conversation_projections
 from backend.services.workspace_service import git_branch_for, main_worktree_root
 
 
@@ -95,8 +99,19 @@ async def run_scheduled_task(
             "error": "The heartbeat conversation already has an active turn.",
         }
     run_context = RunContext()
-    cleanup_waiters: set[asyncio.Task] = set()
+    interrupted = False
     try:
+        runtime = default_runtime()
+        run_context.agent_runtime = runtime
+        run_context.execution_journal = runtime.execution_journal(execution_journal_owner(
+            "conversation", repository.store_instance_id(), conversation.id,
+        ))
+        await replay_pending_conversation_projections(
+            repository, run_context.execution_journal, conversation_id=conversation.id,
+        )
+        conversation = repository.get_conversation(conversation.id)
+        if conversation is None:
+            raise RuntimeError("The scheduled conversation disappeared before admission.")
         return await _run_scheduled_task_owned(
             task,
             run,
@@ -108,10 +123,28 @@ async def run_scheduled_task(
             query_claim=query_claim,
             run_context=run_context,
         )
+    except asyncio.CancelledError:
+        interrupted = True
+        raise
     finally:
-        query_guards.end_after_cleanup(
-            query_claim, tasks=run_context.lifecycle_cleanup_tasks, waiters=cleanup_waiters,
-        )
+        # The scheduler's worker remains the resource owner after model/tool
+        # cancellation. Its existing bounded stop operation can report pending
+        # cleanup until these borrowers actually finish.
+        cancelled_during_cleanup = False
+        while pending := {task for task in run_context.lifecycle_cleanup_tasks if not task.done()}:
+            try:
+                await asyncio.wait(pending)
+            except asyncio.CancelledError:
+                cancelled_during_cleanup = True
+        try:
+            if interrupted and query_guards.owns(query_claim):
+                await replay_pending_conversation_projections(
+                    repository, run_context.execution_journal, conversation_id=conversation.id,
+                )
+        finally:
+            query_guards.end(query_claim)
+        if cancelled_during_cleanup:
+            raise asyncio.CancelledError
 
 
 async def _run_scheduled_task_owned(
@@ -142,12 +175,23 @@ async def _run_scheduled_task_owned(
         else:
             from backend.services.conversation_payload_service import create_isolated_worktree_binding
 
-            creation = await asyncio.to_thread(
-                create_isolated_worktree_binding,
-                conversation,
-                current_workspace_root=workspace_root,
-                main_worktree_root=main_worktree_root,
-            )
+            def create_and_bind_worktree():
+                creation = create_isolated_worktree_binding(
+                    conversation,
+                    current_workspace_root=workspace_root,
+                    main_worktree_root=main_worktree_root,
+                )
+                updated = repository.update_workspace_binding(
+                    conversation.id,
+                    workspace_root=creation.workspace_root,
+                    git_branch=creation.git_branch,
+                    worktree_path=creation.worktree_path,
+                    git_isolated=True,
+                ) if creation.created else None
+                return creation, updated
+
+            # Creation and its durable binding share one cancellation boundary.
+            creation, updated = await to_thread_cancel_safe(create_and_bind_worktree)
             if not creation.created:
                 error = getattr(creation.error_event, "data", {}).get("message") if creation.error_event else ""
                 return {
@@ -156,13 +200,6 @@ async def _run_scheduled_task_owned(
                     "conversation_id": conversation.id,
                     "error": str(error or "Unable to create an isolated worktree for the scheduled task."),
                 }
-            updated = repository.update_workspace_binding(
-                conversation.id,
-                workspace_root=creation.workspace_root,
-                git_branch=creation.git_branch,
-                worktree_path=creation.worktree_path,
-                git_isolated=True,
-            )
             if updated is None:
                 return {
                     "status": "failed",
@@ -172,6 +209,37 @@ async def _run_scheduled_task_owned(
                 }
             conversation = updated
             execution_root = Path(creation.workspace_root).resolve()
+
+    from backend.agent.plans import merge_plan_constraints, plan_path_for_snapshot
+    from backend.permissions.checker import clamp_permission_mode
+    from backend.permissions.context import PermissionContext
+    from backend.permissions.profiles import workspace_scope_for
+    from backend.tools.base import PermissionLevel
+
+    def live_permission_context() -> PermissionContext:
+        owner = repository.get_conversation(conversation.id)
+        if owner is None:
+            raise RuntimeError("The scheduled conversation no longer exists.")
+        mode = clamp_permission_mode(permission_mode, owner.permission_mode)
+        plan_path = (
+            plan_path_for_snapshot(owner.context_snapshot, execution_root)
+            if mode == "plan" else None
+        )
+        return PermissionContext(
+            mode=mode,
+            tool_deny_rules=owner.permission_deny_rules,
+            session_overrides={name: PermissionLevel(level) for name, level in owner.permission_overrides.items()},
+            filesystem_constraints=merge_plan_constraints({}, plan_path),
+            workspace_scope=workspace_scope_for(workspace_root=owner.workspace_root, worktree_path=owner.worktree_path),
+            conversation_id=owner.id, workspace_root=execution_root, source="scheduled_task",
+            pre_plan_mode=(
+                clamp_permission_mode(owner.permission_previous_mode, permission_mode)
+                if mode == "plan" and owner.permission_previous_mode else None
+            ),
+        )
+
+    run_context.conversation_repository = repository
+    run_context.permission_context_provider = live_permission_context
     now = datetime.now(UTC).isoformat()
     snapshot = dict(conversation.context_snapshot or {})
     if not snapshot.get("history") and conversation.transcript:
@@ -262,6 +330,18 @@ async def _run_scheduled_task_owned(
             **run_context.lifecycle_cleanup_evidence(),
         }
     }
+    journal = run_context.execution_journal
+    from backend.conversations.context_delta import context_snapshot_delta
+    pending_projection = journal.append_lifecycle(
+        "conversation_projection_pending",
+        {
+            "conversation_id": conversation.id, "assistant_message": assistant_message,
+            "context_snapshot": next_snapshot, "expected_revision": admitted.revision,
+            "context_delta": context_snapshot_delta(snapshot, next_snapshot),
+            "run_id": str(getattr(run, "id", "")),
+            "source_user_message_ids": [f"schedule_{getattr(run, 'id', '')}"],
+        },
+    ) if journal is not None else None
     committed = repository.commit_turn_projection(
         conversation.id,
         assistant_message=assistant_message,
@@ -270,6 +350,15 @@ async def _run_scheduled_task_owned(
     )
     if committed is None:
         raise RuntimeError("The scheduled conversation disappeared before its result was saved.")
+    if pending_projection is not None:
+        journal.append_lifecycle(
+            "conversation_projection_committed",
+            {
+                "conversation_id": conversation.id, "message_id": assistant_message["id"],
+                "pending_event_id": pending_projection.event_id, "conversation_revision": committed.revision,
+                "run_id": str(getattr(run, "id", "")),
+            },
+        )
     return {
         "status": status,
         "conversation_id": conversation.id,

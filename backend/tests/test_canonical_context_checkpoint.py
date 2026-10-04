@@ -402,6 +402,7 @@ def test_turn_kernel_records_checkpoint_save_and_clear_failures(
         assert len(saved_evidence["context_revision"]) == 64
         checkpoint = load_latest_checkpoint(
             "checkpoint-session",
+            base_dir=runtime.state_root,
             conversation_id="checkpoint-conversation",
         )
         assert checkpoint is not None

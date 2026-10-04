@@ -173,10 +173,7 @@ def test_effort_dispatches_reasoning_effort_config_command(tmp_path, monkeypatch
     assert handled is True
     assert next_content == ""
     assert calls == [{"reasoning_effort": "max", "source": "slash:/effort"}]
-    assert session.command_results[-1]["data"] == {
-        "reasoning_effort": "max",
-        "applied": False,
-    }
+    assert session.command_results == []  # The registered owner emits the outcome.
 
 
 def test_effort_warns_without_success_for_chat_provider(tmp_path, monkeypatch) -> None:
@@ -204,9 +201,7 @@ def test_effort_warns_without_success_for_chat_provider(tmp_path, monkeypatch) -
     assert handled is True
     assert next_content == ""
     assert calls == [{"reasoning_effort": "max", "source": "slash:/effort"}]
-    assert session.command_results[-1]["level"] == "warning"
-    assert session.command_results[-1]["data"] == {"reasoning_effort": "max", "applied": False}
-    assert "not applied" in session.command_results[-1]["message"]
+    assert session.command_results == []  # No outcome is invented by slash routing.
 
 
 def test_goal_dispatches_authoritative_conversation_goal_command() -> None:

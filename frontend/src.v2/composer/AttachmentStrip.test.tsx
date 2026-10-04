@@ -46,6 +46,18 @@ describe("AttachmentStrip", () => {
 
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("releases a main composer's blob exactly once through its store removal owner", () => {
+    const revoke = vi.fn();
+    vi.stubGlobal("URL", class extends URL { static revokeObjectURL = revoke; });
+    useAppStore.setState({ attachments: [{ id: "blob-main", name: "photo.png", type: "image/png", size: 1, status: "ready", dataUrl: "blob:main" }] });
+    render(<AttachmentStrip />);
+    fireEvent.click(screen.getByRole("button", { name: "移除 photo.png" }));
+    expect(revoke).toHaveBeenCalledTimes(1);
+    expect(revoke).toHaveBeenCalledWith("blob:main");
   });
 
   it("shows failed image uploads directly on the chip", () => {
@@ -63,8 +75,7 @@ describe("AttachmentStrip", () => {
 
     render(<AttachmentStrip />);
     const thumbnail = screen.getByRole("img", { name: "screen.png" });
-    expect(thumbnail.style.objectFit).toBe("contain");
-    expect(screen.getByRole("button", { name: "预览 screen.png" }).parentElement!.style.width).toBe("88px");
+    expect(thumbnail.getAttribute("src")).toBe("data:image/png;base64,AA==");
 
     fireEvent.click(screen.getByRole("button", { name: "预览 screen.png" }));
     expect(uploadMocks.openLocalFilePreview).toHaveBeenCalledWith(expect.objectContaining({

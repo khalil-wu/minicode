@@ -9,7 +9,7 @@ from typing import Any, cast, get_args
 
 from backend.agent.state import AgentState, TerminalReason
 from backend.llm.errors import classify_llm_error, sanitize_llm_error_message
-from backend.agent.runtime_records import epoch_ms
+from backend.agent.runtime_records import epoch_ms as epoch_ms
 
 
 logger = logging.getLogger(__name__)

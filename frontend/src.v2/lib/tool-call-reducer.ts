@@ -128,6 +128,8 @@ export const mergeToolCallResultRecord = (
       stdoutPreview: existing.stdoutPreview ?? incoming.stdoutPreview,
       stderrPreview: existing.stderrPreview ?? incoming.stderrPreview,
       diff: existing.diff ?? incoming.diff,
+      cleanupReceipt: existing.cleanupReceipt ?? incoming.cleanupReceipt,
+      outputFiles: existing.outputFiles ?? incoming.outputFiles,
       finishedAt: existing.finishedAt ?? incoming.finishedAt,
     };
   }
@@ -135,7 +137,7 @@ export const mergeToolCallResultRecord = (
     && TOOL_STATUS_RANK[incoming.status] < TOOL_STATUS_RANK[existing.status]) {
     return existing;
   }
-  return incoming;
+  return { ...incoming, seq: incomingSeq ?? existingSeq };
 };
 
 const normalizedProjectionValue = (value: string | undefined): string => String(value || "").trim().toLowerCase();
@@ -147,6 +149,13 @@ export const isCommandToolRecord = (record: ToolCallRecord): boolean =>
   // command_output_chunk can still arrive without an id. The executable tool
   // name is the only safe compatibility discriminator in that shape.
   || normalizedProjectionValue(record.name) === "run_command";
+
+export const toolCleanupNotice = (receipt: ToolCallRecord["cleanupReceipt"]): string => {
+  if (!receipt || !receipt.pending) return "";
+  const resource = (receipt.resource_cleanup as Record<string, unknown> | undefined) ?? receipt;
+  const processId = resource?.resource_kind === "process" ? String(resource.resource_id || "") : "";
+  return `资源清理尚未确认${processId ? `（PID ${processId}）` : ""}。请检查后再重试。`;
+};
 
 export const isFileChangeToolRecord = (record: ToolCallRecord): boolean =>
   !record.temporaryRemoved && (
@@ -350,7 +359,7 @@ export const reduceToolCallResult = (
     stepId: e.step_id ?? existing.stepId,
     taskId: e.task_id ?? existing.taskId,
     turnId: e.turn_id ?? existing.turnId,
-    seq: e.seq ?? existing.seq,
+    seq: e.seq,
     limitation: e.limitation,
     provider: e.provider,
     providerErrorType: e.provider_error_type,
@@ -373,7 +382,10 @@ export const reduceToolCallResult = (
       mimeType: file.mime_type,
       isImage: file.is_image,
     })) ?? existing.outputFiles,
-    finishedAt: now,
+    cleanupReceipt: e.cleanup_receipt ?? existing.cleanupReceipt,
+    supersededToolCallIds: e.superseded_tool_call_ids ?? existing.supersededToolCallIds,
+    removedFilePaths: e.removed_file_paths ?? existing.removedFilePaths,
+    finishedAt: e.completed_at_ms ?? existing.finishedAt ?? now,
   };
   next.set(e.id, mergeToolCallResultRecord(existing, incoming));
   return next;

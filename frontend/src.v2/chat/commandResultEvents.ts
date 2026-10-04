@@ -6,6 +6,7 @@ import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { openAutomations } from "../lib/automations-navigation";
 import { openSettings } from "../lib/settings-navigation";
 import type { PanelKind, RightStackTab, WorkspaceSlice } from "../stores/types";
+import { workspaceRootsEqual } from "../lib/workspace-path";
 
 export const downloadConversationExport = (
   filename: string,
@@ -75,11 +76,6 @@ const isUserInvokedCommandResult = (command: string): boolean => {
   // settings panel, menu, or other caller and must never be written into the
   // conversation process area.
   return Boolean(normalized) && !normalized.includes(".");
-};
-
-const commandResultTargetsActiveConversation = (conversationId?: string): boolean => {
-  if (!conversationId) return true;
-  return useAppStore.getState().conversationId === conversationId;
 };
 
 const RIGHT_STACK_TABS = new Set<RightStackTab>([
@@ -268,15 +264,30 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
   // settings page waiting on this result owns its inline state/toast; surfacing
   // the same MCP/plugin/scheduler result as agent progress mixes control-plane
   // UI into the conversation and produces duplicate feedback.
-  const consumedByCaller = "resolveClientCommandResult" in wsOutbox
-    ? wsOutbox.resolveClientCommandResult(ev)
-    : false;
+  const consumedByCaller = wsOutbox.resolveClientCommandResult(ev);
+  const envelope = ev as CommandResultEvent & { conversation_id?: string; workspace_root?: string };
+  const owner = typeof ev.data?.conversation_id === "string" ? ev.data.conversation_id : envelope.conversation_id;
+  const workspaceRoot = typeof ev.data?.workspace_root === "string" ? ev.data.workspace_root : envelope.workspace_root;
+  const targetsActiveScope = () => owner !== undefined && typeof workspaceRoot === "string"
+    && owner === (useAppStore.getState().conversationId || "")
+    && workspaceRootsEqual(workspaceRoot, useAppStore.getState().workingDirectory);
+
+  if (commandResultStatus(ev.level) === "failed") {
+    const state = useAppStore.getState();
+    const requestId = ev.command === "diff.git_working_tree"
+      ? state.gitChanges.workingTreeRequestId
+      : ev.command === "diff.git_staged" ? state.gitChanges.stagedRequestId : undefined;
+    if (requestId && e.client_command_id === requestId) {
+      state.setGitChanges({ loading: false, error: ev.message || "无法加载 Git 更改" });
+      if (!consumedByCaller) pushToast(ev.message || "无法加载 Git 更改", "error", 5000);
+    }
+  }
 
   if (
     ev.command === "usage" &&
     ev.data?.budget?.used != null &&
     ev.data.budget.total != null &&
-    commandResultTargetsActiveConversation(ev.data.conversation_id)
+    targetsActiveScope()
   ) {
     const used = ev.data.budget.used;
     const total = ev.data.budget.total;
@@ -295,14 +306,16 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     });
   }
 
-  handleUiAction(ev.data);
+  if (targetsActiveScope()) handleUiAction(ev.data);
 
   if (ev.command === "send_message" && typeof ev.data?.message_id === "string") {
     const messageId = ev.data.message_id;
     const recipient = typeof ev.data.recipient === "string" ? ev.data.recipient : "";
     const deliveryStatus = commandResultStatus(ev.level) === "failed" ? "failed" : "sent";
     const state = useAppStore.getState();
-    const target = state.subagents.find((subagent) =>
+    const ownedAgents = owner === state.conversationId
+      ? state.subagents : owner ? state.conversationAgentStates[owner]?.subagents ?? [] : [];
+    const target = ownedAgents.find((subagent) =>
       (recipient && subagent.id === recipient)
       || subagent.messages?.some((message) => message.messageId === messageId)
     );
@@ -311,7 +324,7 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
         messages: (target.messages ?? []).map((message) =>
           message.messageId === messageId ? { ...message, deliveryStatus } : message,
         ),
-      }, state.conversationId ?? undefined);
+      }, owner || undefined);
     }
   }
 
@@ -325,12 +338,12 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     }
   }
 
-  if (!consumedByCaller && isUserInvokedCommandResult(ev.command)) {
+  if (!consumedByCaller && targetsActiveScope() && isUserInvokedCommandResult(ev.command)) {
     surfaceCommandResult(ev);
   }
 
   if (ev.command === "conversation.worktree.cleanup") {
-    if (ev.data?.needs_force && ev.data.conversation_id) {
+    if (targetsActiveScope() && ev.data?.needs_force && ev.data.conversation_id) {
       const convId = ev.data.conversation_id;
     const msg = ev.message || ev.data.error || "Worktree 中存在本地更改。";
       import("../overlays/DialogService").then(({ showConfirm }) =>
@@ -340,7 +353,7 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
       confirmLabel: "强制清理",
           danger: true,
         }).then((ok) => {
-          if (ok) {
+          if (ok && targetsActiveScope()) {
             wsOutbox.sendClientCommand({
               type: "conversation.worktree.cleanup",
               conversation_id: convId,
@@ -364,10 +377,9 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
               }
             : conversation,
         ),
-        ...(state.conversationId === ev.data?.conversation_id && workspaceRoot
-          ? { workingDirectory: workspaceRoot }
-          : {}),
       }));
+      const state = useAppStore.getState();
+      if (state.conversationId === ev.data.conversation_id && workspaceRoot) state.setWorkingDirectory(workspaceRoot);
     }
   }
 
@@ -377,14 +389,14 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     const fingerprint = typeof ev.data?.fingerprint === "string" ? ev.data.fingerprint : "";
     const checks = Array.isArray(ev.data?.checks) ? ev.data.checks as Array<{ severity?: string; message?: string }> : [];
     const dirty = checks.some((check) => check.severity === "blocking" && /local changes|source\.dirty/i.test(String(check.message || "")));
-    if (!ev.data?.allowed && dirty && conversationId) {
+    if (targetsActiveScope() && !ev.data?.allowed && dirty && conversationId) {
       import("../overlays/DialogService").then(({ showConfirm }) => showConfirm({
         title: "检测到未提交改动",
         message: "可将已跟踪和未跟踪文件暂存，并在目标工作区恢复。发生冲突时暂存内容会保留，可手动恢复。",
         confirmLabel: "暂存后继续",
         danger: true,
       }).then((ok) => {
-        if (ok) wsOutbox.sendClientCommand({
+        if (ok && targetsActiveScope()) wsOutbox.sendClientCommand({
           type: "conversation.worktree.handoff.preflight",
           conversation_id: conversationId,
           target,
@@ -392,7 +404,7 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
         });
       }));
     }
-    if (ev.data?.allowed && conversationId && fingerprint) {
+    if (targetsActiveScope() && ev.data?.allowed && conversationId && fingerprint) {
       const warnings = checks.filter((check) => check.severity === "warning").map((check) => check.message).filter(Boolean);
       import("../overlays/DialogService").then(({ showConfirm }) => showConfirm({
       title: target === "local" ? "将任务移到本地检出？" : "将任务移到受保护工作区？",
@@ -404,7 +416,7 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
         ].join("\n\n"),
       confirmLabel: "移动任务",
       }).then((ok) => {
-        if (ok) wsOutbox.sendClientCommand({
+        if (ok && targetsActiveScope()) wsOutbox.sendClientCommand({
           type: "conversation.worktree.handoff.execute",
           conversation_id: conversationId,
           target,
@@ -425,10 +437,11 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
         gitBranch: String(ev.data?.git_branch || "") || undefined,
         gitIsolated: Boolean(ev.data?.git_isolated),
       } : conversation),
-      ...(state.conversationId === conversationId && ev.data?.workspace_root
-        ? { workingDirectory: String(ev.data.workspace_root) }
-        : {}),
     }));
+    const state = useAppStore.getState();
+    if (state.conversationId === conversationId && ev.data.workspace_root) {
+      state.setWorkingDirectory(String(ev.data.workspace_root));
+    }
   }
 
   return true;

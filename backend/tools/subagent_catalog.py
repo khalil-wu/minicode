@@ -31,10 +31,7 @@ def agent_type_description(
     for name in agent_types:
         guidance = _BUILTIN_AGENT_GUIDANCE.get(name, "")
         if not guidance and get_custom_agent is not None:
-            try:
-                definition = get_custom_agent(name)
-            except Exception:
-                definition = None
+            definition = get_custom_agent(name)
             guidance = str(getattr(definition, "description", "") or "").strip()
         lines.append(f"- {name}: {guidance}" if guidance else f"- {name}")
     return "Subagent type to delegate to. Available types:\n" + "\n".join(lines)
@@ -50,14 +47,11 @@ def available_agent_types(
     """
     custom: list[str] = []
     if discover_custom_agents is not None:
-        try:
-            custom = sorted(
-                name
-                for name in discover_custom_agents().keys()
-                if name and name not in BUILTIN_AGENT_TYPES
-            )
-        except Exception:
-            custom = []
+        custom = sorted(
+            name
+            for name in discover_custom_agents().keys()
+            if name and name not in BUILTIN_AGENT_TYPES
+        )
     return [*BUILTIN_AGENT_TYPE_ORDER, *custom]
 
 

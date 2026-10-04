@@ -9,14 +9,42 @@ These functions handle:
 """
 from __future__ import annotations
 
+from html import escape
+
 from typing import Any
 
 from backend.tools.base import PermissionLevel
-from backend.permissions.patterns import normalize_tool_patterns
+from backend.permissions.patterns import normalize_tool_patterns as normalize_tool_patterns
 
 # ── Constants ──────────────────────────────────────────────
 
 CONVERSATION_SUMMARY_MAX_CHARS = 320
+USER_INPUT_METADATA_KEYS = ("display_content", "context_refs", "quoted_message")
+
+
+def normalize_user_input_metadata(data: dict[str, Any]) -> dict[str, Any]:
+    """Parse the renderer's user-input presentation at command admission."""
+    result = {key: data[key] for key in USER_INPUT_METADATA_KEYS if key in data}
+    if "display_content" in result and not isinstance(result["display_content"], str):
+        raise ValueError("display_content must be a string")
+    if "context_refs" in result:
+        refs = result["context_refs"]
+        if not isinstance(refs, list):
+            raise ValueError("context_refs must be a list")
+        for ref in refs:
+            if not isinstance(ref, dict) or not isinstance(ref.get("kind"), str) or ref["kind"] not in {
+                "file", "folder", "url", "skill", "plugin", "browser_annotation",
+            }:
+                raise ValueError("Each context reference must have a supported kind")
+            if not isinstance(ref.get("name"), str) or ("path" in ref and not isinstance(ref["path"], str)):
+                raise ValueError("Context reference name and path must be strings")
+        result["context_refs"] = [dict(ref) for ref in refs]
+    if "quoted_message" in result and result["quoted_message"] is not None:
+        quote = result["quoted_message"]
+        if not isinstance(quote, dict) or any(not isinstance(quote.get(key), str) for key in ("id", "role", "content")):
+            raise ValueError("quoted_message requires string id, role and content")
+        result["quoted_message"] = {key: quote[key] for key in ("id", "role", "content")}
+    return result
 
 
 # ── Permission helpers ────────────────────────────────────
@@ -119,21 +147,29 @@ def build_attachment_summary(attachments: list[dict[str, Any]]) -> str:
 
 def normalize_attachment_payloads(raw_attachments: Any) -> list[dict[str, Any]]:
     if not isinstance(raw_attachments, list):
-        return []
+        raise ValueError("attachments must be a list of uploaded attachment references")
 
     normalized: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for item in raw_attachments:
         if not isinstance(item, dict):
-            continue
-        artifact_id = str(item.get("artifact_id", "")).strip()
-        file_name = str(item.get("file_name", "")).strip()
+            raise ValueError("Each attachment must be an object")
+        artifact_id = item.get("artifact_id", "")
+        file_name = item.get("file_name", "")
+        if not isinstance(artifact_id, str) or not isinstance(file_name, str):
+            raise ValueError("Attachment artifact_id and file_name must be strings")
+        artifact_id = artifact_id.strip()
+        file_name = file_name.strip()
         doc_id = str(item.get("doc_id", "")).strip()
         if not artifact_id or not file_name:
-            continue
+            raise ValueError("Each attachment requires artifact_id and file_name")
         if artifact_id in seen_ids:
             continue
         seen_ids.add(artifact_id)
+        for field_name in ("size_bytes", "source_char_count"):
+            value = item.get(field_name, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"Attachment {field_name} must be a nonnegative integer")
         entry = {
             "id": str(item.get("id", "")).strip() or f"att_{artifact_id}",
             "kind": str(item.get("kind", "")).strip() or "document",
@@ -141,11 +177,11 @@ def normalize_attachment_payloads(raw_attachments: Any) -> list[dict[str, Any]]:
             "media_type": str(item.get("media_type", "")).strip() or "text/plain",
             "artifact_id": artifact_id,
             "doc_id": doc_id,
-            "size_bytes": int(item.get("size_bytes", 0) or 0),
+            "size_bytes": item.get("size_bytes", 0),
             "title": str(item.get("title", "")).strip(),
             "summary": str(item.get("summary", "")).strip(),
             "input_source": str(item.get("input_source", "")).strip(),
-            "source_char_count": int(item.get("source_char_count", 0) or 0),
+            "source_char_count": item.get("source_char_count", 0),
         }
         # Uploaded media is resolved from AttachmentStore by artifact_id. Raw
         # base64 is deliberately not accepted on the WebSocket boundary.
@@ -169,11 +205,14 @@ def build_effective_user_message(
         parse_error = str(attachment.get("parse_error") or "").strip()
         kind = str(attachment.get("kind") or "document").strip() or "document"
         status = ", text_extraction=failed" if parse_error else ""
-        lines.append(
-            f'<attachment file_name="{attachment["file_name"]}" kind="{kind}" '
-            f'doc_id="{attachment["doc_id"]}" artifact_id="{attachment["artifact_id"]}" '
-            f'status="{status.lstrip(", ")}" />'
-        )
+        attributes = {
+            "file_name": attachment["file_name"], "kind": kind,
+            "doc_id": attachment["doc_id"], "artifact_id": attachment["artifact_id"],
+            "status": status.lstrip(", "),
+        }
+        lines.append("<attachment " + " ".join(
+            f'{name}="{escape(value, quote=True)}"' for name, value in attributes.items()
+        ) + " />")
     attachment_block = (
         "<attachments>\n" + "\n".join(lines) + "\n</attachments>"
     )

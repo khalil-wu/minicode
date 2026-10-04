@@ -22,13 +22,18 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
   const ref = useRef<HTMLDivElement>(null);
   const [adjusted, setAdjusted] = useState(position);
   const triggerRef = useRef<HTMLElement | null>(null);
+  const focusListenerRef = useRef<(event: FocusEvent) => void>();
+  const closeMenu = () => {
+    window.removeEventListener("focusin", focusListenerRef.current!);
+    onClose();
+  };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape" || event.key === "Tab") {
       event.stopPropagation();
       if (event.key === "Escape") event.preventDefault();
-      triggerRef.current?.focus();
-      onClose();
+      closeMenu();
+      triggerRef.current?.focus({ preventScroll: true });
       return;
     }
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
@@ -46,31 +51,47 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
   // Dismiss on outside mousedown or Escape; arrow/Home/End roving focus
   useEffect(() => {
     const handleMouseDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        onClose();
+      if (!e.composedPath().includes(ref.current!)) closeMenu();
+    };
+    const handleFocus = (event: FocusEvent) => {
+      if (!event.composedPath().includes(ref.current!)) closeMenu();
+    };
+    focusListenerRef.current = handleFocus;
+    const handleScroll = (event: Event) => {
+      if (!event.composedPath().includes(ref.current!)) {
+        closeMenu();
+        triggerRef.current?.focus({ preventScroll: true });
       }
     };
     // Use setTimeout so the current click event doesn't immediately fire
     const timer = window.setTimeout(() => {
       window.addEventListener("mousedown", handleMouseDown);
+      window.addEventListener("focusin", handleFocus);
+      window.addEventListener("scroll", handleScroll, true);
     }, 0);
     return () => {
       window.clearTimeout(timer);
       window.removeEventListener("mousedown", handleMouseDown);
+      window.removeEventListener("focusin", handleFocus);
+      window.removeEventListener("scroll", handleScroll, true);
     };
   }, [onClose]);
 
   // Adjust position to stay within viewport
   useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    let { x, y } = position;
-    if (x + rect.width > vw - 8) x = Math.max(8, vw - rect.width - 8);
-    if (y + rect.height > vh - 8) y = Math.max(8, vh - rect.height - 8);
-    setAdjusted({ x, y });
+    const el = ref.current!;
+    const place = () => {
+      const rect = el.getBoundingClientRect();
+      setAdjusted({
+        x: Math.max(8, Math.min(position.x, window.innerWidth - rect.width - 8)),
+        y: Math.max(8, Math.min(position.y, window.innerHeight - rect.height - 8)),
+      });
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    observer.observe(el);
+    window.addEventListener("resize", place);
+    return () => { observer.disconnect(); window.removeEventListener("resize", place); };
   }, [position]);
 
   // Focus the menu so keyboard events work
@@ -91,13 +112,15 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
         left: adjusted.x,
         top: adjusted.y,
         zIndex: "var(--z-context-menu)",
-        minWidth: 180,
-        maxWidth: 260,
+        minWidth: "min(180px, calc(100vw - 16px))",
+        maxWidth: "min(260px, calc(100vw - 16px))",
+        maxHeight: "calc(100dvh - 16px)",
+        overflowY: "auto",
         background: "var(--surface-raised)",
         border: "1px solid var(--border-subtle)",
         borderRadius: "var(--radius-md)",
         boxShadow: "var(--shadow-strong-overlay)",
-        padding: "4px 0",
+        padding: "5px",
         outline: "none",
       }}
     >
@@ -109,7 +132,7 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
             style={{
               height: 1,
               background: "var(--border-subtle)",
-              margin: "4px 8px",
+              margin: "5px 8px",
             }}
           />
         ) : (
@@ -122,41 +145,43 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
             className="mc-menu-item"
             disabled={item.disabled}
             onClick={() => {
+              closeMenu();
+              triggerRef.current?.focus({ preventScroll: true });
               item.onClick?.();
-              onClose();
             }}
             style={{
               display: "flex",
               alignItems: "center",
               gap: 8,
               width: "100%",
+              minHeight: 32,
               textAlign: "left",
               background: "transparent",
               border: 0,
               color: item.disabled
                 ? "var(--text-muted)"
-                : item.danger ? "var(--state-danger)" : "var(--text-secondary)",
+                : item.danger ? "var(--state-danger)" : "var(--text-primary)",
               cursor: item.disabled ? "default" : "pointer",
-              padding: "6px 12px",
-              fontSize: "var(--text-sm, 13px)",
-              lineHeight: 1.4,
+              padding: "5px 8px",
+              fontSize: "var(--mc-font-body)",
+              lineHeight: "var(--leading-snug)",
               opacity: item.disabled ? 0.45 : 1,
             }}
           >
-            {item.icon && (
-              <span className="shrink-0" style={{ display: "inline-flex", width: 16, justifyContent: "center" }}>
-                {item.icon}
-              </span>
-            )}
+            <span aria-hidden="true" className="shrink-0" style={{ display: "inline-flex", width: 16, alignItems: "center", justifyContent: "center", color: item.danger ? "inherit" : "var(--text-secondary)" }}>
+              {item.icon}
+            </span>
             <span className="flex-fill truncate">
               {item.label}
             </span>
             {item.shortcut && (
               <span
-                className="shrink-0 mc-kbd"
+                className="shrink-0"
                 style={{
                   color: "var(--text-muted)",
                   marginLeft: 12,
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "var(--mc-font-caption)",
                 }}
               >
                 {item.shortcut}

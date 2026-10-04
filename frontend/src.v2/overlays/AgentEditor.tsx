@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Bot, LoaderCircle, Plus, Save, Trash2, X } from "lucide-react";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useAppStore } from "../stores";
@@ -30,7 +30,6 @@ interface AgentRecord {
   location: "project" | "user" | "policy" | "unknown";
   editable: boolean;
   deletable: boolean;
-  can_override: boolean;
   active: boolean;
 }
 
@@ -94,7 +93,6 @@ const EMPTY_DRAFT: AgentRecord = {
   location: "project",
   editable: true,
   deletable: true,
-  can_override: false,
   active: true,
 };
 
@@ -103,32 +101,6 @@ const parseList = (value: string): string[] =>
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-
-const normalizeSource = (value: unknown): AgentRecord["source"] => {
-  const source = String(value || "");
-  if (source === "project") return "project";
-  if (source === "user") return "user";
-  if (source === "policy") return "policy";
-  return "unknown";
-};
-
-const normalizeAgentRecord = (value: Partial<AgentRecord>): AgentRecord => {
-  const source = normalizeSource(value.source || value.location);
-  return {
-    ...EMPTY_DRAFT,
-    ...value,
-    source,
-    location: source,
-    effort: String(value.effort || ""),
-    filename: String(value.filename || value.name || ""),
-    tools: Array.isArray(value.tools) ? value.tools : [],
-    disallowed_tools: Array.isArray(value.disallowed_tools) ? value.disallowed_tools : [],
-    editable: value.editable !== false,
-    deletable: value.deletable !== false,
-    can_override: value.can_override === true,
-    active: value.active !== false,
-  };
-};
 
 const agentSourceLabel = (source: AgentRecord["source"]): string => {
   if (source === "user") return "用户";
@@ -151,29 +123,62 @@ export const AgentEditor = () => {
   const conversations = useAppStore((s) => s.conversations);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
+  const ownerWorkspaceRoot = useMemo(() => {
+    const active = conversations.find((conversation) => conversation.id === conversationId);
+    return String(active ? active.worktreePath || active.workspaceRoot || "" : workingDirectory).trim();
+  }, [conversationId, conversations, workingDirectory]);
+  const newAgentDraft = useMemo<AgentRecord>(() => ({ ...EMPTY_DRAFT,
+    source: ownerWorkspaceRoot ? "project" : "user", location: ownerWorkspaceRoot ? "project" : "user",
+  }), [ownerWorkspaceRoot]);
   const [agents, setAgents] = useState<AgentRecord[]>([]);
   const [runtimeModelCatalog, setRuntimeModelCatalog] = useState<AgentModelCatalogEntry[]>([]);
   const [llmSettings, setLlmSettings] = useState<LlmSettingsPayload>({});
-  const [draft, setDraft] = useState<AgentRecord>(EMPTY_DRAFT);
+  const [draft, setDraft] = useState<AgentRecord>(newAgentDraft);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [saving, setSaving] = useState(false);
   const [deletingName, setDeletingName] = useState("");
   const dialogRef = useFocusTrap(open);
-  const ownerWorkspaceRoot = useMemo(() => {
-    const active = conversations.find((conversation) => conversation.id === conversationId);
-    return String(active?.worktreePath || active?.workspaceRoot || workingDirectory || "").trim();
-  }, [conversationId, conversations, workingDirectory]);
   const ownerQuery = useMemo(() => {
     const query = new URLSearchParams();
     if (ownerWorkspaceRoot) query.set("workspace_root", ownerWorkspaceRoot);
-    if (conversationId) query.set("conversation_id", conversationId);
     return query.toString();
-  }, [conversationId, ownerWorkspaceRoot]);
+  }, [ownerWorkspaceRoot]);
+  const [draftKey, setDraftKey] = useState("new");
+  const currentDraftKey = useRef(draftKey);
+  currentDraftKey.current = draftKey;
+  const currentQuery = useRef(ownerQuery);
+  currentQuery.current = ownerQuery;
+  const currentOpen = useRef(open);
+  currentOpen.current = open;
+  const loadRequest = useRef(0);
+  const currentOwner = useRef(ownerWorkspaceRoot);
+  currentOwner.current = ownerWorkspaceRoot;
+  const currentDraft = useRef(draft);
+  currentDraft.current = draft;
+  const draftOwner = useRef(ownerWorkspaceRoot);
+  const draftsByWorkspace = useRef(new Map<string, { selected: string; drafts: Map<string, AgentRecord> }>());
+  if (draftOwner.current === ownerWorkspaceRoot) {
+    const scope = draftsByWorkspace.current.get(ownerWorkspaceRoot) || { selected: "new", drafts: new Map<string, AgentRecord>() };
+    scope.selected = draftKey;
+    scope.drafts.set(draftKey, draft);
+    draftsByWorkspace.current.set(ownerWorkspaceRoot, scope);
+  }
+  useLayoutEffect(() => {
+    draftOwner.current = ownerWorkspaceRoot;
+    const scope = draftsByWorkspace.current.get(ownerWorkspaceRoot);
+    setDraftKey(scope?.selected || "new");
+    setDraft(scope?.drafts.get(scope.selected) || newAgentDraft);
+  }, [ownerWorkspaceRoot, newAgentDraft]);
 
   const load = useCallback(async () => {
+    if (!currentOpen.current || currentQuery.current !== ownerQuery) return;
+    const request = ++loadRequest.current;
+    const isCurrent = () => currentOpen.current && currentQuery.current === ownerQuery && loadRequest.current === request;
     setLoading(true);
     setLoadError("");
+    setAgents([]);
+    setRuntimeModelCatalog([]);
     try {
       const [res, settingsRes] = await Promise.all([
         fetchWithTimeout(`${apiBase()}/api/agents${ownerQuery ? `?${ownerQuery}` : ""}`, {
@@ -189,19 +194,21 @@ export const AgentEditor = () => {
         const text = await res.text().catch(() => "");
         throw new Error(errorMessageFromResponseText(text, res.statusText || `HTTP ${res.status}`));
       }
-      const data = await res.json();
-      setAgents(Array.isArray(data.agents) ? data.agents.map(normalizeAgentRecord) : []);
-      setRuntimeModelCatalog(Array.isArray(data.model_catalog) ? data.model_catalog : []);
-      if (settingsRes?.ok) {
-        const settings = await settingsRes.json().catch(() => ({}));
-        setLlmSettings(settings && typeof settings === "object" ? settings : {});
+      const data = await res.json() as { agents: AgentRecord[]; model_catalog: AgentModelCatalogEntry[] };
+      const settings = settingsRes?.ok ? await settingsRes.json() as LlmSettingsPayload : null;
+      if (!isCurrent()) return;
+      setAgents(data.agents);
+      setRuntimeModelCatalog(data.model_catalog);
+      if (settings !== null) {
+        setLlmSettings(settings);
       }
     } catch (err) {
+      if (!isCurrent()) return;
       const detail = err instanceof Error ? err.message : String(err || "未知错误");
       setLoadError(detail);
       pushToast(`加载 Agent 失败：${detail}`, "error");
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, [ownerQuery]);
 
@@ -289,18 +296,29 @@ export const AgentEditor = () => {
   useEffect(() => {
     if (open) {
       void load();
-      setDraft(EMPTY_DRAFT);
     }
+    return () => { loadRequest.current += 1; };
   }, [open, load]);
 
   if (!open) return null;
 
-  const editExisting = (a: AgentRecord) => setDraft({ ...a, location: a.source });
-  const newDraft = () => setDraft(EMPTY_DRAFT);
+  const editExisting = (a: AgentRecord) => {
+    const key = agentSelectionKey(a);
+    setDraftKey(key);
+    setDraft(draftsByWorkspace.current.get(ownerWorkspaceRoot)?.drafts.get(key) || { ...a, location: a.source });
+  };
+  const newDraft = () => {
+    setDraftKey("new");
+    setDraft(draftsByWorkspace.current.get(ownerWorkspaceRoot)?.drafts.get("new") || newAgentDraft);
+  };
   const readOnlyDraft = Boolean(draft.source_path && !draft.editable);
-  const selectedDraftKey = agentSelectionKey(draft);
+  const selectedDraftKey = draftKey;
+  const originalDraft = agents.find((agent) => agentSelectionKey(agent) === draftKey) || newAgentDraft;
+  const dirty = JSON.stringify(draft) !== JSON.stringify(originalDraft);
 
   const save = async () => {
+    const submittedDraft = draft;
+    const submittedKey = draftKey;
     const name = draft.name.trim();
     if (!name) {
       pushToast("请输入 Agent 名称", "warning");
@@ -333,10 +351,21 @@ export const AgentEditor = () => {
         const text = await res.text().catch(() => "");
         throw new Error(errorMessageFromResponseText(text, res.statusText || `HTTP ${res.status}`));
       }
-      const data = await res.json().catch(() => ({}));
+      const data = await res.json() as { agent: AgentRecord };
       pushToast(`已保存 Agent“${name}”`, "success");
       await load();
-      if (data?.agent) setDraft(normalizeAgentRecord(data.agent));
+      {
+        const saved = data.agent;
+        const scope = draftsByWorkspace.current.get(ownerWorkspaceRoot)!;
+        if (scope.drafts.get(submittedKey) === submittedDraft) {
+          scope.drafts.delete(submittedKey);
+          scope.drafts.set(agentSelectionKey(saved), saved);
+          if (scope.selected === submittedKey) scope.selected = agentSelectionKey(saved);
+        }
+        if (currentOwner.current === ownerWorkspaceRoot && currentDraft.current === submittedDraft) {
+          setDraftKey(agentSelectionKey(saved)); setDraft(saved);
+        }
+      }
     } catch (err) {
       pushToast(`保存 Agent 失败：${err instanceof Error ? err.message : err}`, "error");
     } finally {
@@ -366,7 +395,6 @@ export const AgentEditor = () => {
         source_path: agent.source_path || "",
       });
       if (ownerWorkspaceRoot) query.set("workspace_root", ownerWorkspaceRoot);
-      if (conversationId) query.set("conversation_id", conversationId);
       const res = await fetchWithTimeout(`${apiBase()}/api/agents/${encodeURIComponent(name)}?${query.toString()}`, {
         method: "DELETE",
         headers: authHeaders(),
@@ -376,7 +404,13 @@ export const AgentEditor = () => {
         throw new Error(errorMessageFromResponseText(text, res.statusText || `HTTP ${res.status}`));
       }
       pushToast(`已删除 Agent“${name}”`, "success");
-      if (selectedDraftKey === agentSelectionKey(agent)) setDraft(EMPTY_DRAFT);
+      const deletedKey = agentSelectionKey(agent);
+      const scope = draftsByWorkspace.current.get(ownerWorkspaceRoot);
+      scope?.drafts.delete(deletedKey);
+      if (scope?.selected === deletedKey) scope.selected = "new";
+      if (currentOwner.current === ownerWorkspaceRoot && currentDraftKey.current === deletedKey) {
+        setDraftKey("new"); setDraft(scope?.drafts.get("new") || newAgentDraft);
+      }
       await load();
     } catch (err) {
       pushToast(`删除 Agent 失败：${err instanceof Error ? err.message : err}`, "error");
@@ -456,7 +490,7 @@ export const AgentEditor = () => {
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Bot size={16} />
-            <h2 style={{ margin: 0, fontSize: "var(--mc-font-heading)", color: "var(--text-primary)" }}>Agent 编辑器</h2>
+            <h2 style={{ margin: 0, fontSize: "var(--mc-font-heading)", color: "var(--text-primary)" }}>Agent 编辑器{dirty && <span className="settings-unsaved">未保存</span>}</h2>
           </div>
           <button
             type="button"
@@ -604,12 +638,11 @@ export const AgentEditor = () => {
                 value={draft.source_path ? draft.source : draft.location}
                 disabled={Boolean(draft.source_path)}
                 onValueChange={(value) => {
-                  const location = normalizeSource(value);
-                  if (location !== "project" && location !== "user") return;
+                  const location = value as "project" | "user";
                   setDraft((current) => ({ ...current, source: location, location }));
                 }}
               >
-                <option value="project">项目（.minicode/agents）</option>
+                <option value="project" disabled={!ownerWorkspaceRoot}>项目（.minicode/agents）</option>
                 <option value="user">用户（~/.minicode/agents）</option>
                 {draft.source === "policy" && <option value="policy">托管（只读）</option>}
                 {draft.source === "unknown" && <option value="unknown">未知来源（只读）</option>}

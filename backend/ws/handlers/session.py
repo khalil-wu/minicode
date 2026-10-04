@@ -27,10 +27,10 @@ async def handle_session_tasks_inspect(session: "WebSocketSession", data: dict[s
 
 
 async def handle_session_status_inspect(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.api.routes_health import get_mcp_status
+    from backend.services.mcp_service import get_mcp_status
     from backend.services.session_inspect_service import build_status_inspect_outcome
 
-    mcp_status = get_mcp_status()
+    mcp_status = get_mcp_status(session.mcp_manager)
     # Skill selections are turn-scoped contextual input, not session state.
     active_skills: list[str] = []
     snapshot = session.runtime_snapshot()

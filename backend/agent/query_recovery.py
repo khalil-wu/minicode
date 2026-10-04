@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import logging
 from typing import Any, TYPE_CHECKING
 
@@ -29,6 +30,8 @@ _RESERVED_RESUME_KEYS = {
     "session_id",
     "minicode_session_id",
     "task_id",
+    "role",
+    "agent_role",
 }
 
 
@@ -53,6 +56,8 @@ def prepare_query_recovery(
     current_run_id: str,
     skill_manager: Any | None = None,
     execution_journal: ExecutionJournal | None = None,
+    connected_mcp_servers: tuple[str, ...] = (),
+    checkpoint_base_dir: Path | None = None,
 ) -> QueryRecoveryResult:
     """Restore one incomplete checkpoint without taking over run identity.
 
@@ -66,7 +71,14 @@ def prepare_query_recovery(
     if not metadata.get("resume_from_checkpoint") or not session_id or not conversation_id:
         return QueryRecoveryResult()
 
-    checkpoint = load_latest_checkpoint(session_id, conversation_id=conversation_id)
+    checkpoint = load_latest_checkpoint(
+        str(metadata.get("resume_checkpoint_session_id") or session_id),
+        base_dir=checkpoint_base_dir,
+        conversation_id=conversation_id,
+    )
+    selected_run_id = str(metadata.get("resume_checkpoint_run_id") or "").strip()
+    if selected_run_id and (checkpoint is None or checkpoint.run_id != selected_run_id):
+        raise ValueError("The selected checkpoint is no longer current. Refresh the run checkpoints before resuming.")
     if checkpoint is None:
         return QueryRecoveryResult()
 
@@ -140,6 +152,14 @@ def prepare_query_recovery(
         if key in _RESERVED_RESUME_KEYS or key.startswith("_query_engine_"):
             continue
         metadata[key] = value
+    if selected_plugins := resume_payload.get("selected_plugins"):
+        from backend.services.plugin_settings_service import resolve_enabled_plugin_mentions
+
+        state.prompt_context["plugin_injections"] = resolve_enabled_plugin_mentions(
+            selected_plugins,
+            connected_mcp_servers=connected_mcp_servers,
+            workspace_root=state.workspace_root,
+        )
     metadata["checkpoint_origin"] = {
         "run_id": checkpoint.run_id,
         "conversation_id": checkpoint.conversation_id,

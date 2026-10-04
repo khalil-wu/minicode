@@ -48,6 +48,8 @@ describe("handleCommandCatalogEvent", () => {
   it("normalizes skill metadata from skills.list", () => {
     expect(handleCommandCatalogEvent({
       type: "skills.list",
+      conversation_id: "conv-active",
+      workspace_root: useAppStore.getState().workingDirectory,
       skills: [{
         name: "openai-docs",
         description: "Use official docs",

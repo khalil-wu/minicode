@@ -579,8 +579,6 @@ class CapabilityRegistry:
         toolset_policy: 'ToolsetPolicy | None' = None,
         mcp_registry_version: int = 0,
     ) -> list[dict[str, Any]]:
-        from backend.tools.toolsets import ToolsetPolicy
-
         active_policy = self._resolve_toolset_policy(toolset_policy)
         # mcp_registry_version is intentionally ignored for the default direct
         # schema payload: deferred/MCP catalog churn must not perturb the model's
@@ -656,7 +654,8 @@ class CapabilityRegistry:
                 parameters = function.get("parameters") or {}
                 args = code_mode_parameters(parameters)
                 description = str(function.get("description") or "")
-                catalog.append(f"- {name}({args}): {description}")
+                accessor = f"tools.{name}" if name.isidentifier() else f"tools[{json.dumps(name)}]"
+                catalog.append(f"- {accessor}({args}): {description}")
             directory = "\n\nNested tools available through tools.name(args):\n" + "\n".join(catalog)
             directory += "\nUse ALL_TOOLS to inspect complete schemas before calling unfamiliar tools."
             for schema in schemas:
@@ -703,9 +702,29 @@ class CapabilityRegistry:
         if cancel_event is not None and cancel_event.is_set():
             raise asyncio.CancelledError
 
-        execution_task = asyncio.ensure_future(
-            tool.execute(args, context=context)
-        )
+        async def invoke() -> ToolResult:
+            try:
+                return await tool.execute(args, context=context)
+            except (asyncio.CancelledError, Exception) as exc:
+                resource_receipt = getattr(exc, "cleanup_receipt", None)
+                if context is not None and resource_receipt and resource_receipt.get("pending"):
+                    resource_evidence = dict(resource_receipt)
+                    resource_evidence.update(
+                        conversation_id=context.command_scope_id,
+                        workspace_root=str(context.workspace_root or ""),
+                    )
+                    call_id = context.tool_call_id or name
+                    context.cleanup_receipts.setdefault(call_id, {}).update(
+                        resource_kind="tool", resource_id=call_id,
+                        reason=resource_evidence["reason"],
+                        requested=True, acknowledged=True, completed=False,
+                        pending=resource_evidence["pending"],
+                        manual_recovery_required=True, retry_safe=False,
+                        resource_cleanup=resource_evidence,
+                    )
+                raise
+
+        execution_task = asyncio.ensure_future(invoke())
         cancel_wait_task = (
             asyncio.create_task(cancel_event.wait())
             if cancel_event is not None
@@ -743,7 +762,12 @@ class CapabilityRegistry:
             _publish_registry_cleanup_receipt(context, name, receipt, reason=cancel_reason)
             raise
         except Exception as exc:
-            return execution_exception_result(exc, label=f"Tool '{name}' execution")
+            result = execution_exception_result(exc, label=f"Tool '{name}' execution")
+            if context is not None:
+                call_receipt = context.cleanup_receipts.get(context.tool_call_id or name)
+                if call_receipt and call_receipt.get("resource_cleanup"):
+                    result.cleanup_receipt = call_receipt
+            return result
         finally:
             if cancel_wait_task is not None and not cancel_wait_task.done():
                 cancel_wait_task.cancel()
@@ -859,10 +883,17 @@ def _publish_registry_cleanup_receipt(
         resource_id=str(getattr(context, "tool_call_id", "") or tool_name),
         reason=reason,
     )
+    call_id = str(getattr(context, "tool_call_id", "") or tool_name).strip()
+    resource_cleanup = context.cleanup_receipts.get(call_id, {}).get("resource_cleanup")
+    if resource_cleanup and resource_cleanup.get("pending"):
+        evidence.update(
+            completed=False, pending=resource_cleanup["pending"],
+            manual_recovery_required=True, retry_safe=False,
+            resource_cleanup=resource_cleanup,
+        )
     metadata = getattr(context, "metadata", None)
     if isinstance(metadata, dict):
         metadata["_registry_cleanup_receipt"] = evidence
-    call_id = str(getattr(context, "tool_call_id", "") or "").strip()
     receipts = getattr(context, "cleanup_receipts", None)
     if call_id and isinstance(receipts, dict):
         # Keep the call's receipt object and watchdog provenance alive: a

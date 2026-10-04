@@ -18,16 +18,6 @@ def _strip_openai_unsupported_fields(value: Any) -> Any:
     return value
 
 
-def _normalize_schema_for_openai(schema: Any) -> Any:
-    """Preserve non-strict schemas, including implicitly open object nodes."""
-    if isinstance(schema, list):
-        return [_normalize_schema_for_openai(item) for item in schema]
-    if not isinstance(schema, dict):
-        return schema
-    normalized = {key: _normalize_schema_for_openai(value) for key, value in schema.items()}
-    return normalized
-
-
 # pi constrained-sampling.ts: keys OpenAI structured outputs cannot express.
 _UNSUPPORTED_STRICT_SCHEMA_KEYS = frozenset(
     {

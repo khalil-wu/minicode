@@ -150,6 +150,7 @@ def execution_exception_result(
         recoverable=True,
         projection="error",
         model_observation="The tool execution failed. Check the arguments or try another approach.",
+        cleanup_receipt=dict(getattr(exc, "cleanup_receipt", {}) or {}),
     )
 
 
@@ -585,15 +586,12 @@ class BaseTool(ABC):
         values: list[str] = []
         payload = args or {}
         fields = set(self.workspace_path_fields)
-        try:
-            schema = self.get_schema().parameters
-            properties = schema.get("properties") if isinstance(schema, dict) else None
-        except Exception:
-            properties = None
+        schema = self.get_schema().parameters
+        properties = schema.get("properties")
         if isinstance(properties, dict):
             fields.update(WORKSPACE_PATH_SCHEMA_FIELDS.intersection(properties))
-        for field in fields:
-            value = payload.get(field)
+        for path_field in fields:
+            value = payload.get(path_field)
             if isinstance(value, str) and value.strip() not in {"", "."}:
                 values.append(value)
             elif isinstance(value, (list, tuple)):
@@ -762,13 +760,7 @@ class BaseTool(ABC):
         # safely classify a concrete read-only invocation as side-effect free.
         if self.get_side_effect_kind(args) != TOOL_SIDE_EFFECT_NONE:
             return False
-        try:
-            if self.is_read_only(args):
-                return True
-        except Exception:
-            if self.read_only:
-                return True
-        return False
+        return self.is_read_only(args)
 
     def get_side_effect_kind(self, args: dict[str, Any] | None = None) -> str:
         """Return the coarse side-effect class for this invocation.
@@ -793,16 +785,7 @@ class BaseTool(ABC):
             return bool(self.idempotent)
         if self.get_side_effect_kind(args) != TOOL_SIDE_EFFECT_NONE:
             return False
-        try:
-            if self.is_read_only(args):
-                return True
-        except Exception:
-            if self.read_only:
-                return True
-        try:
-            return bool(self.is_concurrency_safe(args))
-        except Exception:
-            return bool(getattr(self, "read_only", False))
+        return self.is_read_only(args) or self.is_concurrency_safe(args)
 
     def idempotency_key(self, args: dict[str, Any] | None = None) -> str | None:
         """Stable key for deduping/retry diagnostics of idempotent calls."""

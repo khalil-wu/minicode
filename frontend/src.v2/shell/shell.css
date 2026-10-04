@@ -113,9 +113,9 @@ html[data-theme="dark"] ::selection {
   justify-content: flex-end;
   flex: 0 0 auto;
   min-width: 0;
-  min-height: 44px;
-  gap: 10px;
-  padding: 6px 16px;
+  min-height: 40px;
+  gap: 8px;
+  padding: 4px 12px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--surface-base);
 }
@@ -779,45 +779,16 @@ html[data-theme="light"] .workbench-home {
 
 .side-chat-empty h2 { margin: 0; color: var(--text-primary); font-size: var(--text-lg); font-weight: var(--fw-medium); }
 .side-chat-empty p { margin: 0; line-height: 1.6; }
-.side-chat-compose {
-  margin: 12px;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  background: var(--surface-base);
-  box-shadow: var(--shadow-soft);
-}
-.side-chat-input {
-  width: 100%;
-  min-height: 64px;
-  padding: 0;
-  border: 0;
-  outline: none;
-  resize: none;
-  background: transparent;
-  color: var(--text-primary);
-  font: inherit;
-  font-size: var(--text-sm);
-}
-.side-chat-compose:focus-within { border-color: var(--border-focus); }
-.side-chat-compose-actions { display: flex; justify-content: flex-end; }
-.side-chat-submit {
-  width: 32px;
-  height: 32px;
+.mc-workbench-layout-actions {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: 50%;
-  background: var(--text-primary);
-  color: var(--surface-base);
-  cursor: pointer;
+  flex-shrink: 0;
+  gap: 2px;
 }
-.side-chat-submit:disabled { opacity: 0.4; cursor: default; }
-.side-chat-submit:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 3px; }
+.mc-workbench-layout-actions button[aria-pressed="true"] {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
 
 /* ════════════════════════════════════════════════════════
    Right sidebar — theme custom-properties + shell-only bits.

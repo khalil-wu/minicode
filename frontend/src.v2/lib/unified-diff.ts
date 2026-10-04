@@ -3,6 +3,26 @@ export interface UnifiedDiffLine {
   text: string;
 }
 
+/** Display/navigation identity belongs to the destination, or the removed
+ * source for a deletion. Rename-only patches carry that identity in metadata. */
+export function unifiedDiffFilePaths(lines: { kind: string; text: string }[]): { oldPath: string; newPath: string } {
+  let oldPath = "";
+  let newPath = "";
+  for (const line of lines) {
+    if (line.kind !== "meta") continue;
+    if (line.text.startsWith("--- ")) oldPath = line.text.slice(4).split("\t", 1)[0].replace(/^a\//, "");
+    else if (line.text.startsWith("+++ ")) newPath = line.text.slice(4).split("\t", 1)[0].replace(/^b\//, "");
+    else if (line.text.startsWith("rename from ")) oldPath = line.text.slice(12);
+    else if (line.text.startsWith("rename to ")) newPath = line.text.slice(10);
+  }
+  return { oldPath, newPath };
+}
+
+export function extractFilePathFromDiff(lines: { kind: string; text: string }[]): string {
+  const { oldPath, newPath } = unifiedDiffFilePaths(lines);
+  return newPath && newPath !== "/dev/null" ? newPath : oldPath === "/dev/null" ? "" : oldPath;
+}
+
 export function parseUnifiedDiffLines(patch: string): UnifiedDiffLine[] {
   if (!patch) return [];
   const lines = patch.split(/\r?\n/);

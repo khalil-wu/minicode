@@ -36,8 +36,17 @@ async def _emit_git_error(
     await emit_command_error(session, command, error, data=details)
 
 
+async def _send_git_action_result(
+    session: "WebSocketSession", scope: CommandScope, event: Any,
+) -> None:
+    await _send_scoped_event(session, scope, event)
+    await session.emit_command_result(
+        event.type, "", level="success", data=scope.apply({"ok": True}),
+    )
+
+
 async def handle_diff_git_working_tree(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.diff.git_integration import get_working_tree_diff, get_untracked_files
+    from backend.diff.git_integration import StructuredDiff, get_working_tree_diff, get_untracked_files, is_git_worktree
     from backend.services.diff_service import working_tree_diff_event
 
     try:
@@ -46,17 +55,18 @@ async def handle_diff_git_working_tree(session: "WebSocketSession", data: dict[s
         await emit_command_error(session, "diff.git_working_tree", exc)
         return True
     try:
-        result = await get_working_tree_diff(scope.workspace_root)
-        untracked = await get_untracked_files(scope.workspace_root)
+        is_git_repo = await is_git_worktree(scope.workspace_root)
+        result = await get_working_tree_diff(scope.workspace_root) if is_git_repo else StructuredDiff()
+        untracked = await get_untracked_files(scope.workspace_root) if is_git_repo else []
     except Exception as exc:
         await _emit_git_error(session, "diff.git_working_tree", exc)
         return True
-    await _send_scoped_event(session, scope, working_tree_diff_event(result, untracked=untracked))
+    await _send_scoped_event(session, scope, working_tree_diff_event(result, untracked=untracked, is_git_repo=is_git_repo))
     return True
 
 
 async def handle_diff_git_staged(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.diff.git_integration import get_staged_diff
+    from backend.diff.git_integration import StructuredDiff, get_staged_diff, is_git_worktree
     from backend.services.diff_service import staged_diff_event
 
     try:
@@ -65,11 +75,12 @@ async def handle_diff_git_staged(session: "WebSocketSession", data: dict[str, An
         await emit_command_error(session, "diff.git_staged", exc)
         return True
     try:
-        result = await get_staged_diff(scope.workspace_root)
+        is_git_repo = await is_git_worktree(scope.workspace_root)
+        result = await get_staged_diff(scope.workspace_root) if is_git_repo else StructuredDiff()
     except Exception as exc:
         await _emit_git_error(session, "diff.git_staged", exc)
         return True
-    await _send_scoped_event(session, scope, staged_diff_event(result))
+    await _send_scoped_event(session, scope, staged_diff_event(result, is_git_repo=is_git_repo))
     return True
 
 
@@ -88,7 +99,7 @@ async def handle_diff_git_stage_file(session: "WebSocketSession", data: dict[str
     except Exception as exc:
         await _emit_git_error(session, "diff.git_stage_file", exc)
         return True
-    await _send_scoped_event(session, scope, git_file_action_event("diff.git_stage_file", path=path, ok=ok))
+    await _send_git_action_result(session, scope, git_file_action_event("diff.git_stage_file", path=path, ok=ok))
     return True
 
 
@@ -107,7 +118,7 @@ async def handle_diff_git_unstage_file(session: "WebSocketSession", data: dict[s
     except Exception as exc:
         await _emit_git_error(session, "diff.git_unstage_file", exc)
         return True
-    await _send_scoped_event(session, scope, git_file_action_event("diff.git_unstage_file", path=path, ok=ok))
+    await _send_git_action_result(session, scope, git_file_action_event("diff.git_unstage_file", path=path, ok=ok))
     return True
 
 
@@ -125,7 +136,7 @@ async def handle_diff_git_stage_all(session: "WebSocketSession", data: dict[str,
     except Exception as exc:
         await _emit_git_error(session, "diff.git_stage_all", exc)
         return True
-    await _send_scoped_event(session, scope, git_all_action_event("diff.git_stage_all", ok=ok))
+    await _send_git_action_result(session, scope, git_all_action_event("diff.git_stage_all", ok=ok))
     return True
 
 
@@ -143,7 +154,7 @@ async def handle_diff_git_unstage_all(session: "WebSocketSession", data: dict[st
     except Exception as exc:
         await _emit_git_error(session, "diff.git_unstage_all", exc)
         return True
-    await _send_scoped_event(session, scope, git_all_action_event("diff.git_unstage_all", ok=ok))
+    await _send_git_action_result(session, scope, git_all_action_event("diff.git_unstage_all", ok=ok))
     return True
 
 
@@ -160,8 +171,7 @@ async def handle_diff_git_revert_file(session: "WebSocketSession", data: dict[st
     # git restore --worktree discards uncommitted changes with no undo; the
     # destructive action requires an explicit confirmation round-trip (cc's
     # ExitWorktree refuses destructive deletion without a change count).
-    confirmed = bool(data.get("confirmed", False))
-    if not confirmed:
+    if data.get("confirmed") is not True:
         await emit_command_error(
             session,
             "diff.git_revert_file",
@@ -173,7 +183,7 @@ async def handle_diff_git_revert_file(session: "WebSocketSession", data: dict[st
     except Exception as exc:
         await _emit_git_error(session, "diff.git_revert_file", exc)
         return True
-    await _send_scoped_event(session, scope, git_file_action_event("diff.git_revert_file", path=path, ok=ok))
+    await _send_git_action_result(session, scope, git_file_action_event("diff.git_revert_file", path=path, ok=ok))
     return True
 
 

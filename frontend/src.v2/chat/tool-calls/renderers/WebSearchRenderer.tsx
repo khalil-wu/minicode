@@ -1,56 +1,32 @@
 import { useMemo } from "react";
 import { openWebTarget } from "../../openWebTarget";
 import { BrandIcon } from "../../../components/BrandIcon";
-import type { ToolCallRecord } from "../../../lib/tool-call-reducer";
-import { safeJsonParse } from "../../../lib/safe-parse";
 import "./web-search-renderer.css";
 
-export const WebSearchResultsView = ({ text, structured }: { text: string; structured?: string }) => {
+export const WebSearchResultsView = ({ text }: { text: string }) => {
   const items = useMemo(() => {
-    if (structured) {
-      try {
-        const parsed = safeJsonParse<unknown>(structured, null);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed.map((raw, i) => {
-            const r = raw && typeof raw === "object" ? raw as { title?: unknown; url?: unknown; snippet?: unknown } : {};
-            return {
-              index: i + 1,
-              title: typeof r.title === "string" ? r.title : "",
-              url: typeof r.url === "string" ? r.url : "",
-              snippet: typeof r.snippet === "string" ? r.snippet : "",
-            };
-          }).filter((r) => r.title && r.url);
-        }
-      } catch {
-        /* fall through */
-      }
-    }
-    try {
-      const parsedItems: { index: number; title: string; url: string; snippet: string }[] = [];
-      const blocks = text.split(/\[\d+\]\s+/);
-      for (let i = 1; i < blocks.length; i++) {
-        const block = blocks[i];
-        const lines = block.split("\n");
-        const title = lines[0].trim();
-        let url = "";
-        let snippet = "";
-        for (const line of lines.slice(1)) {
-          const trimmed = line.trim();
-          if (trimmed.startsWith("URL: ")) {
-            url = trimmed.slice(5).trim();
-          } else if (trimmed.startsWith("片段: ") || trimmed.startsWith("摘要: ") || trimmed.startsWith("snippet: ") || trimmed.startsWith("Snippet: ")) {
-            snippet = trimmed.replace(/^(?:片段|摘要|snippet):\s*/i, "").trim();
-          }
-        }
-        if (title && url) {
-          parsedItems.push({ index: i, title, url, snippet });
+    const parsedItems: { index: number; title: string; url: string; snippet: string }[] = [];
+    const blocks = text.split(/(?:^|\r?\n)(?:\[\d+\]|\d+\.)[ \t]+/);
+    for (let i = 1; i < blocks.length; i++) {
+      const block = blocks[i];
+      const lines = block.split("\n");
+      const title = lines[0].trim();
+      let url = "";
+      let snippet = "";
+      for (const line of lines.slice(1)) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("URL: ")) {
+          url = trimmed.slice(5).trim();
+        } else if (trimmed.startsWith("片段: ") || trimmed.startsWith("摘要: ") || trimmed.startsWith("snippet: ") || trimmed.startsWith("Snippet: ")) {
+          snippet = trimmed.replace(/^(?:片段|摘要|snippet):\s*/i, "").trim();
         }
       }
-      return parsedItems;
-    } catch {
-      return [];
+      if (title && url) {
+        parsedItems.push({ index: i, title, url, snippet });
+      }
     }
-  }, [text, structured]);
+    return parsedItems;
+  }, [text]);
 
   const openUrl = (url: string) => {
     openWebTarget(url);
@@ -101,11 +77,3 @@ export const WebSearchResultsView = ({ text, structured }: { text: string; struc
     </div>
   );
 };
-
-export const WebSearchToolRenderer = ({ record, resultSummary = "", rawResultSummary = "" }: {
-  record: ToolCallRecord;
-  resultSummary?: string;
-  rawResultSummary?: string;
-}) => (
-  <WebSearchResultsView text={rawResultSummary || resultSummary} structured={record.contentPreview} />
-);

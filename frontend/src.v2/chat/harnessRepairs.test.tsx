@@ -64,7 +64,7 @@ beforeEach(() => {
   mocks.confirm.mockResolvedValue(true);
   registerWebSocketSender((command) => {
     sent.push(command);
-    if (command.type === "diff.git_revert_patch") queueMicrotask(() => resolveClientCommandResult({
+    if (command.type === "diff.git_revert_patch" || command.type === "control_response") queueMicrotask(() => resolveClientCommandResult({
       type: "command.result", command: command.type, level: "success", message: "reverted",
       data: { client_command_id: command.client_command_id },
     }));

@@ -111,7 +111,7 @@ const exitCodeFor = (record: ToolCallRecord): number | undefined => {
   const raw = (record as ToolCallRecord & { exitCode?: unknown }).exitCode
     ?? (record.errorInfo as { exit_code?: unknown } | undefined)?.exit_code;
   const value = Number(raw);
-  if (Number.isFinite(value)) return value;
+  if (raw != null && Number.isFinite(value)) return value;
   const summary = `${record.summary || ""}\n${record.outputPreview || ""}`;
   const parsed = summary.match(/\bExit code:\s*(-?\d+)/i)?.[1];
   if (parsed == null) return undefined;
@@ -154,6 +154,7 @@ const execCell = (record: ToolCallRecord, item?: TurnActivityItem): ExecCellStat
     stdoutFull: stdout,
     stderrFull: stderr,
     durationMs: record.durationMs,
+    cleanupReceipt: record.cleanupReceipt,
     // Completed commands stay as one-line process evidence. Their stdout is
     // available on demand, so test-run summaries do not flood the timeline.
     collapsed: true,
@@ -418,8 +419,7 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
     const name = String(record.name || "").trim();
     if (name === "send_message") {
       const recipient = stringArg(record.args?.recipient) || "子智能体";
-      const content = stringArg(record.args?.message);
-      if (!content) continue;
+      const content = (record.args.message as string | undefined) ?? "";
       cells.push(collaborationCell(record, "sent_message", [{
         agentId: recipient,
         agentLabel: collaborationAgentLabel(recipient),
@@ -428,11 +428,11 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
       continue;
     }
     if (name === "task_stop") {
-      const target = stringArg(record.args?.subagent_id);
-      if (!target) continue;
+      const target = stringArg(record.args?.subagent_id) || "子智能体";
       cells.push(collaborationCell(record, "closed", [{
         agentId: target,
         agentLabel: collaborationAgentLabel(target),
+        ...(record.args.reason ? { content: record.args.reason as string } : {}),
       }]));
       continue;
     }
@@ -447,12 +447,12 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
     const entries = rawEntries.flatMap((raw, index) => {
       if (!raw || typeof raw !== "object") return [];
       const args = raw as Record<string, unknown>;
-      const content = stringArg(args.prompt);
-      if (!content) return [];
+      const content = (args.prompt as string | undefined) ?? "";
       const explicitId = taskResultAgentIds(record)[index];
       const fallback = stringArg(args.description) || stringArg(args.agent_type) || `任务 ${index + 1}`;
       const agentId = explicitId || fallback;
-      return [{ agentId, agentLabel: stringArg(args.description) || collaborationAgentLabel(agentId), content }];
+      const labels = [...new Set([stringArg(args.name), stringArg(args.description)].filter(Boolean))];
+      return [{ agentId, agentLabel: labels.join(" · ") || stringArg(args.agent_type) || collaborationAgentLabel(agentId), content }];
     });
     if (entries.length > 0) cells.push(collaborationCell(record, "delegated", entries));
   }
@@ -476,6 +476,9 @@ const collaborationCell = (
         ? record.status
       : "failed",
   entries,
+  error: ["failed", "blocked", "timeout"].includes(record.status)
+    ? record.errorInfo?.user_message || record.errorInfo?.user_summary || record.userSummary
+    : undefined,
   collapsed: false,
   createdAt: record.startedAt ?? record.finishedAt,
 });
@@ -489,8 +492,10 @@ const taskResultAgentIds = (record: ToolCallRecord): string[] => {
 
 const collaborationAgentLabel = (value: string): string => {
   const label = value.trim();
-  if (!/^subagent-[a-z0-9]+$/i.test(label)) return label;
-  return label.slice("subagent-".length) || label;
+  if (label === "parent") return "主智能体";
+  if (label === "*" || label === "all") return "所有智能体";
+  if (/^(?:(?:subagent|agent|thread|call|session|run)[-_:][\w-]+|[a-f0-9]{8,}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/i.test(label)) return "Agent";
+  return label.split("@")[0];
 };
 
 const userCell = (message: ChatMessage | null): UserMessageCellState | null => message
@@ -498,6 +503,8 @@ const userCell = (message: ChatMessage | null): UserMessageCellState | null => m
       kind: "user_message",
       id: message.id,
       content: message.content,
+      contextRefs: message.contextRefs,
+      quotedMessage: message.quotedMessage,
       messageSource: message.messageSource,
       attachments: message.attachmentRefs?.map((attachment) => ({
         id: attachment.id,
@@ -573,7 +580,6 @@ function buildTurn(
   );
   const citations = resolveCitations(
     assistantMessage.citations,
-    blocks,
     projection.finalAnswer,
     finalBlock?.providerRaw?.citations,
   );

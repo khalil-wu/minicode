@@ -11,9 +11,10 @@ import time
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, TypeVar
+from typing import Any, Iterable, Iterator, TypeVar
 
 from filelock import FileLock
+from backend.async_cleanup import to_thread_cancel_safe as run_blocking_io
 
 _IOResult = TypeVar("_IOResult")
 
@@ -27,17 +28,6 @@ async def await_task_despite_cancellation(task: asyncio.Task[_IOResult]) -> _IOR
             if task.cancelled():
                 raise
     return task.result()
-
-
-async def run_blocking_io(operation: Callable[..., _IOResult], /, *args: Any, **kwargs: Any) -> _IOResult:
-    """Run one complete synchronous file transaction outside the event loop."""
-    task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        with suppress(Exception):
-            await await_task_despite_cancellation(task)
-        raise
 
 
 @dataclass
@@ -162,18 +152,14 @@ def _replace_with_retry(source: Path, target: Path) -> None:
     Windows as well as on POSIX.
     """
 
-    last_error: PermissionError | None = None
     for attempt in range(_ATOMIC_REPLACE_ATTEMPTS):
         try:
             source.replace(target)
             return
-        except PermissionError as exc:
-            last_error = exc
+        except PermissionError:
             if attempt + 1 >= _ATOMIC_REPLACE_ATTEMPTS:
                 raise
             time.sleep(0.05 * (attempt + 1))
-    if last_error is not None:  # pragma: no cover - loop always returns/raises
-        raise last_error
 
 
 def atomic_write_bytes(path: Path, content: bytes, *, overwrite: bool = True) -> None:
@@ -231,12 +217,8 @@ def _atomic_write_bytes_unlocked(path: Path, content: bytes, *, overwrite: bool 
         if overwrite:
             _replace_with_retry(Path(temp_name), path)
         else:
-            try:
-                os.link(temp_name, path)
-            except FileExistsError:
-                raise
-            else:
-                os.unlink(temp_name)
+            os.link(temp_name, path)
+            os.unlink(temp_name)
         temp_name = ""
         _fsync_parent(path)
     finally:

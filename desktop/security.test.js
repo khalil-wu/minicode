@@ -117,6 +117,50 @@ test("workspace trust checks fail closed when an existing path cannot be canonic
   }
 });
 
+test("first absolute editor read restores only its approved root before any tree request", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-editor-restore-"));
+  const workspace = path.join(tempRoot, "approved");
+  const unused = path.join(tempRoot, "unused-approved");
+  const outside = path.join(tempRoot, "approved-sibling");
+  for (const root of [workspace, unused, outside]) fs.mkdirSync(root);
+  const target = path.join(workspace, "index.html");
+  const rejected = path.join(outside, "index.html");
+  fs.writeFileSync(target, "<h1>Approved</h1>");
+  fs.writeFileSync(rejected, "<h1>Unapproved</h1>");
+  const trustedRootsFile = path.join(tempRoot, "trusted_workspaces.json");
+  fs.writeFileSync(trustedRootsFile, JSON.stringify({ version: 1, roots: [workspace, unused] }));
+  security.init({ initialRoots: [], trustedRootsFile });
+
+  assert.equal(security.isWithinTrustedWorkspace(target), false);
+  assert.throws(() => security.assertReadablePath(rejected), /outside the trusted workspace/);
+  assert.throws(() => security.assertReadablePath("index.html"), /outside the trusted workspace/);
+  assert.equal(security.assertReadablePath(target), fs.realpathSync.native(target));
+  assert.equal(security.isWithinTrustedWorkspace(target), true);
+  assert.equal(security.isWithinTrustedWorkspace(unused), false);
+  assert.equal(security.isWithinTrustedWorkspace(outside), false);
+});
+
+test("restoring an approved root for a file read does not follow junctions outside it", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("junction behavior is Windows-specific");
+    return;
+  }
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-editor-junction-"));
+  const workspace = path.join(tempRoot, "approved");
+  const outside = path.join(tempRoot, "outside");
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, "index.html"), "outside");
+  fs.symlinkSync(outside, path.join(workspace, "escape"), "junction");
+  const trustedRootsFile = path.join(tempRoot, "trusted_workspaces.json");
+  fs.writeFileSync(trustedRootsFile, JSON.stringify({ version: 1, roots: [workspace] }));
+  security.init({ initialRoots: [], trustedRootsFile });
+
+  assert.throws(() => security.assertReadablePath(path.join(workspace, "escape", "index.html")), /outside the trusted workspace/);
+  assert.equal(security.isWithinTrustedWorkspace(outside), false);
+  assert.equal(security.isWithinTrustedWorkspace(workspace), false);
+});
+
 test("native workspace approval is persisted for a later desktop launch", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-ledger-"));
   const workspace = path.join(tempRoot, "workspace");
@@ -208,8 +252,8 @@ test("MiniCode tool-result storage is readable but never writable workspace stat
 
   assert.equal(security.assertReadablePath(resultFile), fs.realpathSync.native(resultFile));
   assert.equal(security.isWithinAppReadOnlyData(resultFile), true);
-  assert.throws(() => security.assertTrustedPath(resultFile), /outside the trusted workspace/);
   assert.throws(() => security.assertMutableTrustedPath(resultFile), /outside the trusted workspace/);
+  assert.throws(() => security.assertTrustedPath(resultFile), /outside the trusted workspace/);
   assert.throws(() => security.assertReadablePath(siblingFile), /outside the trusted workspace/);
 });
 

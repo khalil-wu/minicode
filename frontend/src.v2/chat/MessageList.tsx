@@ -14,6 +14,7 @@ import { loadEarlierConversationMessages } from "./historyPagination";
 import { hasVisibleActiveConversation } from "./activeConversation";
 import { summarizeTurnDiff } from "../lib/turn-diff";
 import type { ChatTurnState, DiffCellState } from "./cells/cellTypes";
+import { loadRevealMessage } from "./revealConversationMessage";
 
 const RECENT_TURN_WINDOW = 40;
 const MAX_TURNS_WITHOUT_VIRTUALIZATION = 8;
@@ -27,17 +28,31 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   const isStreaming = useAppStore((s) => s.isStreaming);
   const conversationId = useAppStore((s) => s.conversationId);
   const historyPage = useAppStore((s) => conversationId ? s.conversationHistoryPages[conversationId] : undefined);
+  const revealTarget = useAppStore((s) => s.messageRevealTarget);
+  const hydrating = useAppStore((s) => Boolean(conversationId && s.conversationHydration[conversationId]?.isHydrating));
+  const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const conversations = useAppStore((s) => s.conversations);
   const turnDiff = useAppStore((s) => conversationId ? s.turnDiffs[conversationId] : undefined);
+  const [sourceMessage, setSourceMessage] = useState<{ id: string; requestId: string } | null>(null);
+  const [revealStatus, setRevealStatus] = useState("");
+  const startedReveal = useRef<string | null>(null);
+  const historyScrollRef = useRef<{
+    conversationId: string | null;
+    scrollTop: number;
+    scrollHeight: number;
+  } | null>(null);
 
-  // Deferred messages: during streaming, use the live messages so the
-  // streaming tail updates in real-time. When NOT streaming, defer the
-  // messages to keep the composer input responsive — the deferred value
-  // lags behind by one frame but the user isn't watching for updates
-  // at that point. Mirrors cc's usesSyncMessages approach (REPL.tsx:4560).
-  const deferredMessages = useDeferredValue(messages);
-  const displayMessages = isStreaming ? messages : deferredMessages;
+  // Defer settled transcript updates to keep composer input responsive.
+  // Owner changes and history commits use the current transcript immediately.
+  const deferredTranscript = useDeferredValue(useMemo(
+    () => ({ conversationId, workspaceRoot: workingDirectory, messages }),
+    [conversationId, messages, workingDirectory],
+  ));
+  const displayMessages = isStreaming || sourceMessage || revealTarget || historyScrollRef.current
+    || deferredTranscript.conversationId !== conversationId
+    || deferredTranscript.workspaceRoot !== workingDirectory
+    ? messages : deferredTranscript.messages;
   // Queue filtering is performed by the turn projector while it scans only
   // the visible recent window.  Filtering the full transcript here made every
   // streaming token copy an otherwise unchanged multi-thousand-message array.
@@ -92,7 +107,48 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   const historicalTurns = tailTurn ? turns.slice(0, -1) : turns;
   // DOM Range search needs all loaded turns, not just the current viewport.
   // Use the existing full-history renderer only while the user searches.
-  const shouldVirtualize = !searchActive && historicalTurns.length > MAX_TURNS_WITHOUT_VIRTUALIZATION;
+  const shouldVirtualize = !searchActive && !sourceMessage && historicalTurns.length > MAX_TURNS_WITHOUT_VIRTUALIZATION;
+  useEffect(() => {
+    setSourceMessage(null);
+    setRevealStatus("");
+  }, [conversationId]);
+  useEffect(() => {
+    if (!revealTarget || revealTarget.conversationId !== conversationId || pendingConversationSwitchId || hydrating || historyPage?.loading || startedReveal.current === revealTarget.requestId) return;
+    startedReveal.current = revealTarget.requestId;
+    const ownerState = useAppStore.getState();
+    const chat = ownerState.panelSlots.find((slot) => slot.kind === "chat");
+    if (chat) ownerState.focusPanel(chat.id);
+    setRevealStatus("正在定位来源消息…");
+    isNearBottom.current = false;
+    setIsFollowing(false);
+    setShowScrollBtn(true);
+    void loadRevealMessage(revealTarget).then((result) => {
+      if (useAppStore.getState().messageRevealTarget?.requestId !== revealTarget.requestId) return;
+      if (result === "found") {
+        setShowAllHistory(true);
+        setSourceMessage({ id: revealTarget.messageId, requestId: revealTarget.requestId });
+      } else {
+        setRevealStatus(result === "missing" ? "找不到来源消息，它可能已被删除。" : "来源历史加载失败，请再次点击“回到对话”重试。");
+        useAppStore.setState({ messageRevealTarget: null });
+      }
+    });
+  }, [revealTarget, conversationId, pendingConversationSwitchId, hydrating, historyPage?.loading]);
+  useLayoutEffect(() => {
+    if (!sourceMessage) return;
+    const target = [...(contentRef.current?.querySelectorAll<HTMLElement>("[data-message-id]") ?? [])].find((element) => element.dataset.messageId === sourceMessage.id);
+    if (!target) {
+      const queued = useAppStore.getState().messages.find((message) => message.id === sourceMessage.id)?.queueState === "queued";
+      setRevealStatus(queued ? "来源消息仍在队列中，执行后会出现在对话中。" : "来源消息已载入，但当前视图无法显示这条记录。");
+      if (useAppStore.getState().messageRevealTarget?.requestId === sourceMessage.requestId) useAppStore.setState({ messageRevealTarget: null });
+      return;
+    }
+    target.scrollIntoView({ block: "center", behavior: "smooth" });
+    target.classList.add("chat-message-reveal-target");
+    ref.current?.focus({ preventScroll: true });
+    setRevealStatus("");
+    if (useAppStore.getState().messageRevealTarget?.requestId === sourceMessage.requestId) useAppStore.setState({ messageRevealTarget: null });
+    return () => target.classList.remove("chat-message-reveal-target");
+  }, [sourceMessage, showAllHistory]);
   const firstHistoricalTurnId = historicalTurns[0]?.id;
   const lastHistoricalTurnId = historicalTurns.at(-1)?.id;
   // TanStack includes getItemKey identity in its measurement cache key. Keep
@@ -232,6 +288,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
       setShowScrollBtn(false);
       lastRenderedMessageIdRef.current = messages.at(-1)?.id ?? null;
       lastRenderedMessageCountRef.current = messages.length;
+      historyScrollRef.current = null;
       const frame = requestAnimationFrame(() => {
         const el = ref.current;
         if (el) setScrollTop(el, el.scrollHeight);
@@ -239,6 +296,28 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
       return () => cancelAnimationFrame(frame);
     }
   }, [conversationId, messages, setScrollTop]);
+
+  const captureHistoryScroll = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    historyScrollRef.current = { conversationId, scrollTop: el.scrollTop, scrollHeight: el.scrollHeight };
+    isNearBottom.current = false;
+    setIsFollowing(false);
+    if (scrollRafRef.current !== null) {
+      cancelAnimationFrame(scrollRafRef.current);
+      scrollRafRef.current = null;
+    }
+  }, [conversationId]);
+
+  useLayoutEffect(() => {
+    const previous = historyScrollRef.current;
+    const el = ref.current;
+    if (!previous || !el) return;
+    historyScrollRef.current = null;
+    if (previous.conversationId !== conversationId) return;
+    setScrollTop(el, previous.scrollTop + Math.max(0, el.scrollHeight - previous.scrollHeight));
+    setShowScrollBtn(el.scrollHeight - el.scrollTop - el.clientHeight > 200);
+  }, [conversationId, showAllHistory, timelineMessages, setScrollTop]);
 
   const scrollToBottom = useCallback(() => {
     const el = ref.current;
@@ -311,9 +390,15 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
       return;
     }
     const previousCount = lastRenderedMessageCountRef.current;
-    const appendedMessages = messages.length > previousCount
-      ? messages.slice(previousCount)
-      : [];
+    const previousTailId = lastRenderedMessageIdRef.current;
+    let appendedMessages = previousCount === 0 ? messages : [];
+    if (messages.length > previousCount && previousTailId) {
+      // A history prepend increases length without adding a new turn at the
+      // tail. Walk only the new suffix instead of mistaking old users for sends.
+      let previousTailIndex = messages.length - 1;
+      while (previousTailIndex >= 0 && messages[previousTailIndex].id !== previousTailId) previousTailIndex -= 1;
+      if (previousTailIndex >= 0) appendedMessages = messages.slice(previousTailIndex + 1);
+    }
     lastRenderedMessageCountRef.current = messages.length;
     const latest = messages.at(-1);
     const latestId = latest?.id ?? null;
@@ -346,6 +431,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
       className="relative flex-1 min-h-0 h-full flex flex-col"
       style={{ position: "relative", flex: 1, minHeight: 0, height: "100%", display: "flex", flexDirection: "column" }}
     >
+      {revealStatus && <div role="status" className="chat-reveal-status">{revealStatus}</div>}
       <div
         ref={ref}
         data-testid="message-list-scroll"
@@ -385,8 +471,16 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
                 className="self-center"
                 disabled={historyPage?.loading}
                 onClick={async () => {
-                  if (historyPage?.hasMore && conversationId) await loadEarlierConversationMessages(conversationId);
-                  setShowAllHistory(true);
+                  if (historyPage?.hasMore && conversationId) {
+                    await loadEarlierConversationMessages(conversationId, () => {
+                      if (useAppStore.getState().conversationId !== conversationId) return;
+                      captureHistoryScroll();
+                      setShowAllHistory(true);
+                    });
+                  } else {
+                    captureHistoryScroll();
+                    setShowAllHistory(true);
+                  }
                 }}
               >
                 {historyPage?.loading ? "正在加载…" : historyPage?.hasMore ? "加载更早的消息" : `显示更早的消息（${hiddenTurnCount}）`}
@@ -499,7 +593,7 @@ const EmptyState = () => (
   </div>
 );
 
-const applyAuthoritativeTurnDiff = (
+export const applyAuthoritativeTurnDiff = (
   turns: ChatTurnState[],
   turnDiff: ReturnType<typeof useAppStore.getState>["turnDiffs"][string] | undefined,
 ): ChatTurnState[] => {

@@ -26,17 +26,6 @@ def build_context_budget_snapshot(session: Any, builder: ContextBuilder) -> dict
     )
     return builder.get_budget_snapshot(state=state, tool_schemas=tool_schemas)
 
-def _hook_manager_has_hooks(hook_mgr: Any, event: HookEvent) -> bool:
-    has_hooks = getattr(hook_mgr, "has_hooks", None)
-    if not callable(has_hooks):
-        return False
-    try:
-        return bool(has_hooks(event))
-    except Exception as exc:
-        logger.debug("hook has_hooks(%s) failed: %s", event, exc)
-        return False
-
-
 async def manage_context_budget(
     ctx: ContextBuilder,
     state: AgentState,
@@ -140,7 +129,7 @@ async def _run_normal_compaction(
     before_ledger = context_ledger_snapshot(ctx)
     hook_mgr = ctx.hook_manager
     pre_compact_result = None
-    if hook_mgr and _hook_manager_has_hooks(hook_mgr, HookEvent.PRE_COMPACT):
+    if hook_mgr and hook_mgr.has_hooks(HookEvent.PRE_COMPACT):
         try:
             pre_compact_result = await hook_mgr.run_pre_compact(trigger="auto")
         except Exception as exc:
@@ -200,16 +189,12 @@ async def _run_normal_compaction(
             getattr(post_compact_result, "additional_context", "") or ""
         ).strip()
         if additional_context:
-            append_user_context = getattr(ctx, "append_user_context", None)
-            if callable(append_user_context):
-                append_user_context(additional_context)
+            ctx.append_user_context(additional_context)
         system_message = str(
             getattr(post_compact_result, "system_message", "") or ""
         ).strip()
         if system_message:
-            append_system_note = getattr(ctx, "append_system_note", None)
-            if callable(append_system_note):
-                append_system_note(system_message)
+            ctx.append_system_note(system_message)
     if ctx.needs_compaction(state, tool_schemas=tool_schemas):
         # The local estimate can still sit above the trigger after a successful
         # compaction (tool schemas are over-counted by roughly a tenth), while
@@ -229,7 +214,7 @@ async def _run_post_compact_hook(
     hook_manager: Any | None,
 ) -> Any | None:
     hook_mgr = hook_manager
-    if not hook_mgr or not _hook_manager_has_hooks(hook_mgr, HookEvent.POST_COMPACT):
+    if not hook_mgr or not hook_mgr.has_hooks(HookEvent.POST_COMPACT):
         return None
     try:
         return await hook_mgr.run_post_compact(summary=summary, trigger="auto")

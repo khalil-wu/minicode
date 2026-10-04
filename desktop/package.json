@@ -75,6 +75,10 @@
     ],
     "extraResources": [
       {
+        "from": "scripts/setup-desktop-user-sandbox.ps1",
+        "to": "windows-sandbox/setup-desktop-user-sandbox.ps1"
+      },
+      {
         "from": "../frontend/dist",
         "to": "frontend/dist"
       },
@@ -92,7 +96,8 @@
           "!**/.env",
           "!**/.env.*",
           "!**/nul",
-          "!tests/**"
+          "!tests/**",
+          "!evals/**"
         ]
       },
       {

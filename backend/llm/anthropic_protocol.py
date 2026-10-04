@@ -10,20 +10,6 @@ from __future__ import annotations
 import logging
 from copy import deepcopy
 
-logger = logging.getLogger(__name__)
-
-# Model families that use Anthropic's adaptive-thinking request shape.
-_ADAPTIVE_THINKING_MODEL_MARKERS = (
-    "opus-4-7",
-    "opus-4-8",
-    "opus-5",
-    "fable",
-    "mythos",
-    "sonnet-5",
-)
-
-
-
 from backend.agent.prompting import _json_fingerprint, _short_sha256, split_sys_prompt_prefix
 from backend.agent.turn_markers import contains_turn_aborted_marker
 from backend.llm.base import (
@@ -56,6 +42,18 @@ import hashlib
 import json
 import os
 import re
+
+logger = logging.getLogger(__name__)
+
+# Model families that use Anthropic's adaptive-thinking request shape.
+_ADAPTIVE_THINKING_MODEL_MARKERS = (
+    "opus-4-7",
+    "opus-4-8",
+    "opus-5",
+    "fable",
+    "mythos",
+    "sonnet-5",
+)
 
 
 def anthropic_tool_input_schema(parameters: dict[str, Any]) -> dict[str, Any]:
@@ -360,7 +358,7 @@ def _anthropic_stream_protocol_error(
         "unknown_content_block": "the provider returned an unknown content block type",
         "missing_tool_call_id": "a tool-use block had no stable identifier",
         "missing_tool_name": "a tool-use block had no tool name",
-        "invalid_tool_input": "a tool-use block had a non-object initial input",
+        "invalid_tool_input": "a tool-use block had a non-object input",
         "duplicate_tool_call_id": "a tool-use identifier was reused in the response",
         "content_delta_without_start": "a content delta arrived without an open content block",
         "unknown_content_delta": "the provider returned an unknown content delta type",
@@ -1187,7 +1185,11 @@ def _anthropic_input_size_summary(messages: list[dict[str, Any]]) -> dict[str, A
 def _strip_excess_anthropic_media(
     messages: list[dict[str, Any]],
     limit: int = 100,
+    *,
+    protected_media_ids: set[int],
 ) -> list[dict[str, Any]]:
+    if len(protected_media_ids) > limit:
+        raise ValueError(f"The current user message exceeds Anthropic's {limit}-media limit.")
     media_types = {"image", "document"}
     media_count = 0
     for message in messages:
@@ -1212,11 +1214,14 @@ def _strip_excess_anthropic_media(
     if to_remove <= 0:
         return messages
 
-    # Dropping attachments changes what the model sees. Say so: an answer that
-    # ignores an image the user attached is otherwise inexplicable.
+    omission = {
+        "type": "text",
+        "text": f"[Media omitted from this request to fit Anthropic's {limit}-media limit. "
+        "Do not infer the omitted image/document contents; use the attachment or file reference to inspect them again.]",
+    }
     logger.warning(
         "Anthropic request carries %d media blocks over the %d-block limit; "
-        "dropping the %d oldest image/document blocks from this request",
+        "omitting %d older image/document blocks while preserving the current user input",
         to_remove,
         max(0, int(limit)),
         to_remove,
@@ -1242,13 +1247,16 @@ def _strip_excess_anthropic_media(
                         to_remove > 0
                         and isinstance(nested, dict)
                         and nested.get("type") in media_types
+                        and id(nested) not in protected_media_ids
                     ):
                         to_remove -= 1
+                        nested_content.append(dict(omission))
                         continue
                     nested_content.append(nested)
                 block["content"] = nested_content
-            if to_remove > 0 and block.get("type") in media_types:
+            if to_remove > 0 and block.get("type") in media_types and id(raw_block) not in protected_media_ids:
                 to_remove -= 1
+                next_content.append(dict(omission))
                 continue
             next_content.append(block)
         next_message = dict(message)

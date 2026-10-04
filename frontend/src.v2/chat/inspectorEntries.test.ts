@@ -42,13 +42,13 @@ describe("inspector entries", () => {
     const entry = {
       targetKind: "provider" as const,
       targetId: "trace-1",
-      payload: { diagnostics_deferred: true },
+      payload: { diagnostics_deferred: true, conversation_id: "conversation-1" },
       timestamp: 1,
     };
 
     focusInspectorEntry(entry);
 
-    expect(useAppStore.getState().inspectorFocus).toEqual({ kind: "provider", id: "trace-1" });
+    expect(useAppStore.getState().inspectorFocus).toEqual({ kind: "provider", id: "trace-1", conversationId: "conversation-1" });
     expect(commands).toEqual([{
       type: "inspector.focus",
       target_kind: "provider",

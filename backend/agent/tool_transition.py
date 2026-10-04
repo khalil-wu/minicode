@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -169,37 +168,12 @@ def append_tool_transition_history(
     provider_items: list[dict[str, Any]],
 ) -> None:
     if transition.history_tool_calls:
-        append_tool_calls = ctx.append_assistant_tool_calls
-        try:
-            parameters = inspect.signature(append_tool_calls).parameters
-        except (TypeError, ValueError):
-            parameters = {}
-        accepts_kwargs = any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters.values()
+        ctx.append_assistant_tool_calls(
+            transition.history_tool_calls,
+            content=content,
+            phase=phase,
+            provider_items=provider_items,
         )
-        kwargs: dict[str, Any] = {}
-        if accepts_kwargs or "content" in parameters:
-            kwargs["content"] = content
-        if accepts_kwargs or "phase" in parameters:
-            kwargs["phase"] = phase
-        if accepts_kwargs or "provider_items" in parameters:
-            kwargs["provider_items"] = provider_items
-        append_tool_calls(transition.history_tool_calls, **kwargs)
         return
     if content.strip():
-        append_assistant = ctx.append_assistant
-        try:
-            parameters = inspect.signature(append_assistant).parameters
-        except (TypeError, ValueError):
-            parameters = {}
-        accepts_kwargs = any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters.values()
-        )
-        kwargs = {}
-        if accepts_kwargs or "phase" in parameters:
-            kwargs["phase"] = phase
-        if accepts_kwargs or "provider_items" in parameters:
-            kwargs["provider_items"] = provider_items
-        append_assistant(content, **kwargs)
+        ctx.append_assistant(content, phase=phase, provider_items=provider_items)

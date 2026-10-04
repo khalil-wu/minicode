@@ -20,8 +20,6 @@ export type RuntimeCommandState = {
   workingDirectory?: string;
   slashCommands?: SlashCommand[];
   skillsMarketplaceOpen?: boolean;
-  automationsOpen?: boolean;
-  toggleAutomations?: () => void;
   addSelectedSkill?: (skill: Omit<SkillContextRef, "kind">) => void;
   hydrateConversationMessages?: (
     conversationId: string,

@@ -9,26 +9,7 @@ def test_plugin_mentions_use_enabled_local_inventory_and_connected_mcp(monkeypat
     monkeypatch.setattr(
         plugin_settings_service,
         "get_plugin_settings",
-        lambda: {
-            "plugins": [
-                {
-                    "name": "docs",
-                    "id": "docs@local",
-                    "displayName": "Official Docs",
-                    "description": "Trusted local metadata",
-                    "shortDescription": "Trusted local summary",
-                    "enabled": True,
-                    "skill_count": 2,
-                    "mcp_server_names": ["docs-search", "offline-server"],
-                },
-                {
-                    "name": "disabled",
-                    "enabled": False,
-                    "skill_count": 1,
-                    "mcp_server_names": ["disabled-server"],
-                },
-            ],
-        },
+        lambda *args, **kwargs: {'plugins': [{'name': 'docs', 'id': 'docs@local', 'displayName': 'Official Docs', 'description': 'Trusted local metadata', 'shortDescription': 'Trusted local summary', 'enabled': True, 'skill_count': 2, 'mcp_server_names': ['docs-search', 'offline-server']}, {'name': 'disabled', 'enabled': False, 'skill_count': 1, 'mcp_server_names': ['disabled-server']}]},
     )
 
     resolved = plugin_settings_service.resolve_enabled_plugin_mentions(
@@ -46,7 +27,7 @@ def test_plugin_mentions_use_enabled_local_inventory_and_connected_mcp(monkeypat
     )
 
     assert resolved == [{
-        "config_name": "docs",
+        "config_name": "docs@local",
         "display_name": "Official Docs",
         "description": "Trusted local summary",
         "has_skills": True,
@@ -58,7 +39,7 @@ def test_plugin_mentions_use_enabled_local_inventory_and_connected_mcp(monkeypat
 def test_plugin_capabilities_are_turn_scoped_developer_instructions() -> None:
     state = AgentState(user_message="Use the selected plugin")
     state.prompt_context["plugin_injections"] = [{
-        "config_name": "docs",
+        "config_name": "docs@local",
         "display_name": "Official Docs",
         "has_skills": True,
         "mcp_server_names": ["docs-search"],

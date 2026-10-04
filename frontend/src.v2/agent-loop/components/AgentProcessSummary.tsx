@@ -24,17 +24,17 @@ export function AgentProcessSummary({
 }: AgentProcessSummaryProps) {
   const running = status === "running";
   const statusLabel = running
-    ? "正在处理"
+    ? "Working"
     : status === "failed"
-      ? "出错"
+      ? "Failed"
       : status === "partial"
-        ? "部分完成"
+        ? "Partial"
         : status === "stopped"
-          ? "已停止"
-          : "已处理";
+          ? "Stopped"
+          : "Worked";
   const durationLabel = running ? "" : formatElapsedSeconds(durationMs);
   const displayLabel = durationLabel
-    ? `${status === "completed" ? "用时" : statusLabel} ${durationLabel}`
+    ? `${status === "completed" ? "Worked for" : statusLabel} ${durationLabel}`
     : statusLabel;
   const normalizedFailure = status === "failed" ? failureMessage?.trim() : "";
   const summaryFailure = normalizedFailure && !processExpanded ? normalizedFailure : "";
@@ -45,7 +45,7 @@ export function AgentProcessSummary({
     <>
       {!running && status !== "completed" && (
         <span className="agent-loop-process-summary-icon" aria-hidden="true">
-          <CircleAlert size={14} className="agent-loop-failed-icon" />
+          <CircleAlert size={14} className={status === "failed" ? "agent-loop-failed-icon" : undefined} />
         </span>
       )}
       <span className="agent-loop-process-summary-body">
@@ -106,16 +106,16 @@ export function AgentProcessSummary({
 
 function formatElapsedSeconds(durationMs: number | null): string {
   if (durationMs == null || !Number.isFinite(durationMs) || durationMs < 0) return "";
-  if (durationMs < 1_000) return "<1 秒";
+  if (durationMs < 1_000) return "<1s";
   const seconds = durationMs / 1_000;
   if (seconds >= 60) {
     const roundedSeconds = Math.round(seconds);
     const minutes = Math.floor(roundedSeconds / 60);
     const remainder = roundedSeconds % 60;
-    return remainder > 0 ? `${minutes} 分钟 ${remainder} 秒` : `${minutes} 分钟`;
+    return remainder > 0 ? `${minutes}m ${remainder}s` : `${minutes}m`;
   }
   const value = seconds < 10
     ? seconds.toFixed(1).replace(/\.0$/, "")
     : String(Math.round(seconds));
-  return `${value} 秒`;
+  return `${value}s`;
 }

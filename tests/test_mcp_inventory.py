@@ -303,7 +303,8 @@ def test_inventory_propagates_external_task_cancellation() -> None:
 
 
 class _Session:
-    def __init__(self) -> None:
+    def __init__(self, manager=None) -> None:
+        self.mcp_manager = manager or object()
         self.events = []
 
     async def send_event(self, event) -> None:
@@ -323,9 +324,8 @@ def test_inventory_handler_returns_inventory_in_the_correlated_command_result(mo
         return inventory
 
     manager_token = object()
-    monkeypatch.setattr("backend.api.routes_health.get_mcp_manager", lambda: manager_token)
     monkeypatch.setattr(mcp_handlers, "list_mcp_inventory", list_inventory)
-    session = _Session()
+    session = _Session(manager_token)
 
     assert asyncio.run(mcp_handlers.handle_mcp_inventory_list(
         session,
@@ -383,7 +383,6 @@ def test_inventory_handler_preserves_typed_service_error_details(monkeypatch) ->
             details={"mcp_code": -32602},
         )
 
-    monkeypatch.setattr("backend.api.routes_health.get_mcp_manager", lambda: object())
     monkeypatch.setattr(mcp_handlers, "list_mcp_inventory", fail)
     session = _Session()
 
@@ -412,7 +411,6 @@ def test_inventory_cancel_stops_the_live_request_and_cleans_session_state(monkey
             started.set()
             await asyncio.Event().wait()
 
-        monkeypatch.setattr("backend.api.routes_health.get_mcp_manager", lambda: object())
         monkeypatch.setattr(mcp_handlers, "list_mcp_inventory", wait_for_cancel)
         session = _Session()
         list_task = asyncio.create_task(mcp_handlers.handle_mcp_inventory_list(
@@ -463,7 +461,6 @@ def test_inventory_handler_does_not_convert_connection_shutdown_into_user_cancel
             started.set()
             await asyncio.Event().wait()
 
-        monkeypatch.setattr("backend.api.routes_health.get_mcp_manager", lambda: object())
         monkeypatch.setattr(mcp_handlers, "list_mcp_inventory", block)
         session = _Session()
         handler_task = asyncio.create_task(mcp_handlers.handle_mcp_inventory_list(

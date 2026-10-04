@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Sequence
@@ -155,7 +156,17 @@ class SchemaMigrationRunner:
                     f"expected {existing['value']}, got {checksum}"
                 )
             if migration.version > current_version:
-                connection.executescript(migration.sql)
+                # executescript commits the caller's transaction before DDL.
+                # Execute complete SQL statements within the store's existing
+                # transaction so schema and version/checksum advance together.
+                statement = ""
+                for fragment in migration.sql.split(";"):
+                    statement += fragment + ";"
+                    if sqlite3.complete_statement(statement):
+                        connection.execute(statement)
+                        statement = ""
+                if statement.strip():
+                    connection.execute(statement)
                 has_metadata = True
                 current_version = migration.version
             if existing is None:

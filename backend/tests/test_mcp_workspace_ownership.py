@@ -274,6 +274,8 @@ def test_mcp_status_broadcast_targets_only_sessions_bound_to_manager(
     monkeypatch,
 ) -> None:
     class _Manager:
+        workspace_root = None
+
         def get_all_status(self) -> list[dict[str, str]]:
             return [{"name": "demo", "status": "connected"}]
 
@@ -286,11 +288,12 @@ def test_mcp_status_broadcast_targets_only_sessions_bound_to_manager(
     class _Session:
         def __init__(self, manager: Any) -> None:
             self.mcp_manager = manager
+            self.active_conversation_id = "owner"
             self.is_connected = True
             self.events: list[Any] = []
 
-        async def send_event(self, event: Any) -> None:
-            self.events.append(event)
+        async def send_payload(self, payload: dict[str, Any], **_kwargs: Any) -> None:
+            self.events.append(payload)
 
     class _WSManager:
         def __init__(self, sessions: list[_Session]) -> None:
@@ -310,7 +313,7 @@ def test_mcp_status_broadcast_targets_only_sessions_bound_to_manager(
 
     asyncio.run(main._broadcast_mcp_status_change("demo", object(), manager_a))
 
-    assert [event.type for event in session_a.events] == ["mcp_status", "mcp.lifecycle"]
+    assert [event["type"] for event in session_a.events] == ["mcp_status", "mcp.lifecycle"]
     assert session_b.events == []
 
 

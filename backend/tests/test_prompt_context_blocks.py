@@ -153,27 +153,29 @@ def test_context_builder_exposes_host_resolved_user_directories(monkeypatch) -> 
     assert r"<downloads>C:\Users\ago\Downloads</downloads>" in runtime_system
 
 
-def test_context_builder_freezes_implicit_session_date_across_midnight(monkeypatch) -> None:
+def test_context_builder_refreshes_implicit_session_date_across_midnight(monkeypatch) -> None:
     import backend.agent.context as context_module
 
     class _Clock:
-        calls = 0
+        day = 1
 
         @classmethod
         def now(cls):
-            cls.calls += 1
-            day = 1 if cls.calls == 1 else 2
-            return RealDateTime(2026, 7, day, 10, 0, tzinfo=timezone.utc)
+            return RealDateTime(2026, 7, cls.day, 10, 0, tzinfo=timezone.utc)
 
     monkeypatch.setattr(context_module, "datetime", _Clock)
     ctx = ContextBuilder()
     state = AgentState(user_message="hello")
     asyncio.run(ctx.start_turn("hello", state))
     first = asyncio.run(ctx.build(state))
+    _Clock.day = 2
     second = asyncio.run(ctx.build(state))
 
     assert "<current_date>2026-07-01</current_date>" in first[-1].content
-    assert second[-1].content == first[-1].content
+    assert "<current_date>2026-07-02</current_date>" in second[-1].content
+    for messages in (first, second):
+        users = [message for message in messages if message.is_user_input]
+        assert len(users) == 1 and users[0].content.endswith("hello")
 
 
 def test_context_builder_omits_turn_aborted_block_without_abort_signal() -> None:
@@ -646,12 +648,13 @@ def test_stream_sanitizer_preserves_non_control_prose_and_memory_citation_chunks
     from backend.agent.stream_sanitizer import ThinkingStreamSanitizer
 
     prose = "<internal-api> and <think-tank> and <reasoning-engine>"
-    citation = "<minicode-memory-citation>source-1</minicode-memory-citation>"
+    body = "<rollout_ids>source-1</rollout_ids>"
+    citation = f"<minicode-memory-citation>{body}</minicode-memory-citation>"
     for split in range(len(citation) + 1):
         sanitizer = ThinkingStreamSanitizer()
         result = sanitizer.feed(prose + citation[:split]) + sanitizer.feed(citation[split:]) + sanitizer.finish()
         assert result == prose
-        assert sanitizer.citations == ["source-1"]
+        assert sanitizer.citations == [body]
 
 
 @pytest.mark.parametrize("api", ["chat", "responses"])

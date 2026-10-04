@@ -274,6 +274,8 @@ export type {
   SkillsInstallCommand,
   SchedulerListCommand,
   SchedulerAddCommand,
+  SchedulerUpdateCommand,
+  SchedulerHistoryCommand,
   SchedulerRemoveCommand,
   SchedulerToggleCommand,
   SchedulerRunNowCommand,
@@ -486,6 +488,8 @@ export interface UntypedClientCommand {
     | "skills.install"
     | "scheduler.list"
     | "scheduler.add"
+    | "scheduler.update"
+    | "scheduler.history"
     | "scheduler.remove"
   | "scheduler.toggle"
   | "scheduler.run_now"
@@ -880,6 +884,8 @@ import type {
   SkillsInstallCommand,
   SchedulerListCommand,
   SchedulerAddCommand,
+  SchedulerUpdateCommand,
+  SchedulerHistoryCommand,
   SchedulerRemoveCommand,
   SchedulerToggleCommand,
   SchedulerRunNowCommand,
@@ -943,6 +949,8 @@ type ClientCommandPayload =
   | SkillsInstallCommand
   | SchedulerListCommand
   | SchedulerAddCommand
+  | SchedulerUpdateCommand
+  | SchedulerHistoryCommand
   | SchedulerRemoveCommand
   | SchedulerToggleCommand
   | SchedulerRunNowCommand
@@ -1258,6 +1266,8 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   // Scheduler
   "scheduler.list",
   "scheduler.add",
+  "scheduler.update",
+  "scheduler.history",
   "scheduler.remove",
   "scheduler.toggle",
   "scheduler.run_now",

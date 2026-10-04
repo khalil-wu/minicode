@@ -170,6 +170,7 @@ class CheckpointStore:
         conversation_id: str,
         *,
         limit: int | None = 50,
+        strict: bool = False,
     ) -> list[CheckpointRecord]:
         if limit is not None and int(limit) <= 0:
             return []
@@ -182,6 +183,8 @@ class CheckpointStore:
                 try:
                     paths.append((path.stat().st_mtime_ns, path))
                 except OSError as exc:
+                    if strict:
+                        raise CheckpointCorruptError(f"Cannot inspect checkpoint file {path.name}: {exc}") from exc
                     corrupt_files.append(self._path_label(path))
                     logger.warning("Cannot inspect checkpoint file %s: %s", path, exc)
                     continue
@@ -189,6 +192,8 @@ class CheckpointStore:
                 try:
                     record = self._read_record(path)
                 except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+                    if strict:
+                        raise CheckpointCorruptError(f"Cannot read checkpoint file {path.name}: {exc}") from exc
                     corrupt_files.append(self._path_label(path))
                     logger.warning("Skipping corrupt checkpoint file %s: %s", path, exc)
                     continue

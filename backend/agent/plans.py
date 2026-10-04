@@ -146,18 +146,10 @@ def bind_plan_owner(
     owner = str(conversation_id or "").strip()
     if not owner:
         raise PlanFileError("Conversation owner is required")
-    record = repository.get_conversation(owner)
+    record = repository.ensure_plan_owner(owner, workspace_root=workspace_root)
     if record is None:
         raise PlanFileError("Conversation owner was not found")
-    snapshot = dict(getattr(record, "context_snapshot", {}) or {})
-    slug = ensure_plan_slug(snapshot, workspace_root or getattr(record, "workspace_root", ""))
-    if snapshot != getattr(record, "context_snapshot", {}):
-        updated = repository.patch_context_snapshot(
-            owner,
-            {PLAN_SLUG_KEY: slug},
-        )
-        if updated is None:
-            raise PlanFileError("Conversation owner disappeared while binding its plan")
+    slug = str(record.context_snapshot[PLAN_SLUG_KEY])
     return slug, get_plan_file_path(
         slug,
         workspace_root or getattr(record, "workspace_root", "") or None,
@@ -232,6 +224,11 @@ def ensure_plan_file_for_resume(
         snapshot[PLAN_RECOVERY_STATUS_KEY] = "available"
         return path, "available"
     recovered = recover_plan_from_transcript(transcript)
+    reference = snapshot.get(PLAN_FILE_REFERENCE_KEY)
+    if not recovered and isinstance(reference, Mapping) and reference.get("path") == str(path):
+        content = reference.get("plan_content")
+        if isinstance(content, str):
+            recovered = content
     if recovered:
         write_plan(path, recovered)
         snapshot[PLAN_FILE_REFERENCE_KEY] = plan_file_reference(path, recovered)
@@ -308,13 +305,18 @@ def recover_plan_from_transcript(messages: Sequence[Mapping[str, Any]]) -> str |
         if not isinstance(message, Mapping):
             continue
         # Normalized ExitPlanMode input persisted in assistant tool blocks.
-        blocks = message.get("content") or message.get("blocks")
+        blocks = message.get("blocks")
+        if not isinstance(blocks, list):
+            blocks = message.get("content")
         if isinstance(blocks, list):
-            for block in blocks:
+            for block in reversed(blocks):
                 if not isinstance(block, Mapping):
                     continue
-                name = str(block.get("name") or block.get("tool_name") or "")
-                payload = block.get("input") or block.get("arguments")
+                call = block.get("record") if block.get("type") == "tool_call" else block
+                if not isinstance(call, Mapping):
+                    continue
+                name = str(call.get("name") or call.get("tool_name") or "")
+                payload = call.get("args") or call.get("input") or call.get("arguments")
                 if name in {"ExitPlanMode", "exit_plan_mode"} and isinstance(payload, Mapping):
                     plan = payload.get("plan")
                     if isinstance(plan, str) and plan:

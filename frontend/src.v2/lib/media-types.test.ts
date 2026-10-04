@@ -7,6 +7,10 @@ import {
 } from "./media-types";
 
 describe("workspace media classification", () => {
+  it.each(["png", "pdf", "json", "yaml"])("keeps an extensionless filename %s outside media preview", (filename) => {
+    expect(mediaTypeForPath(`C:\\workspace\\${filename}`)).toBe("application/octet-stream");
+    expect(isPreviewableMediaPath(filename)).toBe(false);
+  });
   it("classifies Windows, query-string, and encoded image paths consistently", () => {
     expect(isImagePath("C:\\workspace\\assets\\PHOTO.PNG")).toBe(true);
     expect(isImagePath("assets%2Fphoto.png?download=1")).toBe(true);

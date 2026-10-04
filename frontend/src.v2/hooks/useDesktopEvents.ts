@@ -4,8 +4,10 @@ import { isDesktop } from "../desktop/runtime";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import { openSettings } from "../lib/settings-navigation";
 import { LEFT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
+import { useDesktopTerminalMirror } from "./useDesktopTerminalMirror";
 
 export const useDesktopEvents = () => {
+  useDesktopTerminalMirror();
   useEffect(() => {
     if (!isDesktop()) return;
 

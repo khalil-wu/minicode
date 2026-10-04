@@ -6,6 +6,9 @@ import { ChatSearch } from "./ChatSearch";
 import { MessageList } from "./MessageList";
 import { useAppStore } from "../stores";
 import type { ChatMessage } from "../stores/types";
+import { ExecCell } from "./cells/ExecCell";
+import { TranscriptSearchContext } from "./TranscriptSearchContext";
+import * as historyPagination from "./historyPagination";
 
 // Keep windowing/projection/search real; isolate the presentational renderer.
 vi.mock("./components/ChatTurn", () => ({ ChatTurn: ({ turn }: { turn: {
@@ -37,6 +40,28 @@ function surface(searchActive: boolean) {
 }
 
 describe("loaded transcript search", () => {
+  it("finds a folded command output during search and restores its disclosure preference afterward", async () => {
+    const containerRef = createRef<HTMLDivElement>();
+    const cell = { kind: "exec" as const, id: "folded-command", command: "build", status: "success" as const, stdoutPreview: ["hidden-error-needle"], stderrPreview: [], collapsed: true, createdAt: 1 };
+    const content = (active: boolean) => <><ChatSearch containerRef={containerRef} onClose={() => {}} /><main ref={containerRef}><TranscriptSearchContext.Provider value={active}><ExecCell cell={cell} /></TranscriptSearchContext.Provider></main></>;
+    const view = render(content(false));
+    expect(view.queryByText("hidden-error-needle")).toBeNull();
+    view.rerender(content(true));
+    fireEvent.change(view.getByLabelText("搜索对话内容"), { target: { value: "hidden-error-needle" } });
+    await waitFor(() => expect(view.getByText("1/1")).toBeTruthy());
+    expect(window.getSelection()?.toString()).toBe("hidden-error-needle");
+    view.rerender(content(false));
+    expect(view.queryByText("hidden-error-needle")).toBeNull();
+  });
+
+  it("states the loaded-history boundary and offers the owner-scoped earlier page", () => {
+    const load = vi.spyOn(historyPagination, "loadEarlierConversationMessages").mockResolvedValue(undefined);
+    useAppStore.setState({ conversationHistoryPages: { A: { beforeMessageId: "old", hasMore: true, loading: false } } });
+    const view = render(surface(true));
+    expect(view.getByText(/还有更早历史未检索/)).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "载入更早历史继续搜索" }));
+    expect(load).toHaveBeenCalledWith("A");
+  });
   it("mounts all loaded turns during search and returns to windowing when closed", async () => {
     const view = render(surface(true));
     expect(document.querySelector('[data-turn="assistant-0"]')).not.toBeNull();
@@ -70,5 +95,45 @@ describe("loaded transcript search", () => {
       <aside>not-a-transcript-needle</aside><main ref={containerRef}><p>actual transcript</p></main></>);
     fireEvent.change(view.getByLabelText("搜索对话内容"), { target: { value: "not-a-transcript-needle" } });
     expect(view.getByText("无匹配项")).toBeTruthy();
+  });
+
+  it("uses original Unicode offsets and clears selection when the query is emptied", () => {
+    const containerRef = createRef<HTMLDivElement>();
+    const view = render(<><ChatSearch containerRef={containerRef} onClose={() => {}} />
+      <main ref={containerRef}><p>İx [literal]</p></main></>);
+    const input = view.getByLabelText("搜索对话内容");
+    fireEvent.change(input, { target: { value: "x [literal]" } });
+    expect(view.getByText("1/1")).toBeTruthy();
+    expect(window.getSelection()?.toString()).toBe("x [literal]");
+    fireEvent.change(input, { target: { value: "" } });
+    expect(window.getSelection()?.rangeCount).toBe(0);
+    expect((view.getByRole("button", { name: "下一个匹配项" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("matches inline text without joining unrelated paragraphs", () => {
+    const containerRef = createRef<HTMLDivElement>();
+    const view = render(<><ChatSearch containerRef={containerRef} onClose={() => {}} />
+      <main ref={containerRef}><p>join<strong>ed</strong></p><p>cat</p><p>alog</p></main></>);
+    const input = view.getByLabelText("搜索对话内容");
+    fireEvent.change(input, { target: { value: "joined" } });
+    expect(window.getSelection()?.toString()).toBe("joined");
+    fireEvent.change(input, { target: { value: "catalog" } });
+    expect(view.getByText("无匹配项")).toBeTruthy();
+  });
+
+  it("retains the selected match without scrolling again during a streamed DOM update", async () => {
+    const containerRef = createRef<HTMLDivElement>();
+    const view = render(<><ChatSearch containerRef={containerRef} onClose={() => {}} />
+      <main ref={containerRef}><p>needle first</p><p>needle second</p><p data-tail>stream tail</p></main></>);
+    fireEvent.change(view.getByLabelText("搜索对话内容"), { target: { value: "needle" } });
+    fireEvent.click(view.getByRole("button", { name: "下一个匹配项" }));
+    expect(view.getByText("2/2")).toBeTruthy();
+    const selectedNode = window.getSelection()?.getRangeAt(0).startContainer;
+    const scroll = vi.mocked(HTMLElement.prototype.scrollIntoView);
+    scroll.mockClear();
+    await act(async () => { view.container.querySelector("[data-tail]")!.textContent = "stream tail grew"; });
+    await waitFor(() => expect(view.getByText("2/2")).toBeTruthy());
+    expect(window.getSelection()?.getRangeAt(0).startContainer).toBe(selectedNode);
+    expect(scroll).not.toHaveBeenCalled();
   });
 });

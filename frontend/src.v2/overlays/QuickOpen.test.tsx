@@ -34,6 +34,7 @@ const deferred = <T,>() => {
 
 describe("QuickOpen", () => {
   beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
     vi.useFakeTimers();
     mocks.searchWorkspaceFiles.mockReset();
     mocks.fsSearchFiles.mockReset();
@@ -51,6 +52,35 @@ describe("QuickOpen", () => {
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+  });
+
+  it("leaves composition-confirm Escape in the input and keeps combobox options out of Tab order", () => {
+    useAppStore.setState({ editorTabs: [{ id: "recent", path: "current.ts", content: "", original: "", loading: false }] });
+    render(<QuickOpen />);
+    const input = screen.getByRole("combobox");
+    fireEvent.keyDown(input, { key: "Escape", isComposing: true });
+    fireEvent.keyDown(input, { key: "Escape", keyCode: 229 });
+    expect(useAppStore.getState().quickOpenVisible).toBe(true);
+    expect(screen.getByRole("option").tabIndex).toBe(-1);
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(useAppStore.getState().quickOpenVisible).toBe(false);
+  });
+
+  it("keeps keyboard results in view and does not open a file while composing Chinese text", () => {
+    useAppStore.setState({ editorTabs: Array.from({ length: 20 }, (_, index) => ({
+      id: `recent-${index}`, path: `src/file-${index}.ts`, content: "", original: "", loading: false,
+    })) });
+    render(<QuickOpen />);
+    const input = screen.getByRole("combobox", { name: "搜索文件" });
+    for (let index = 0; index < 19; index++) fireEvent.keyDown(input, { key: "ArrowDown" });
+    const last = screen.getAllByRole("option")[19];
+    expect(last.getAttribute("aria-selected")).toBe("true");
+    expect(vi.mocked(last.scrollIntoView).mock.instances.at(-1)).toBe(last);
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
+    expect(useAppStore.getState().editorOpenRequests).toHaveLength(0);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(useAppStore.getState().editorOpenRequests.at(-1)?.path).toBe("src/file-19.ts");
   });
 
   it("drops a late result from an older query", async () => {

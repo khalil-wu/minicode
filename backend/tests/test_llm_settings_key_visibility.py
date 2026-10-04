@@ -631,9 +631,10 @@ def test_save_llm_settings_keeps_key_for_empty_or_shortened_submissions(monkeypa
     )
     calls: list[tuple[str, str, str]] = []
     monkeypatch.setattr(config_helpers, "SETTINGS_FILE", settings_file)
-    monkeypatch.setattr(config_providers, "_set_runtime_api_key",
-        lambda provider, api_key, base_url="": calls.append((provider, api_key, base_url)),
-    )
+    def capture_changes(provider, api_key, base_url="", **kwargs):
+        calls.append((provider, api_key, base_url))
+        return {}, None
+    monkeypatch.setattr(config_providers, "_credential_changes", capture_changes)
 
     for value in ("", "••••", "tes…-key"):
         config.save_llm_settings({
@@ -655,9 +656,10 @@ def test_save_llm_settings_replaces_key_only_with_full_user_value(monkeypatch, t
     calls: list[tuple[str, str, str]] = []
     monkeypatch.setattr(config_helpers, "SETTINGS_FILE", settings_file)
     monkeypatch.setattr(config_helpers, "_vault_api_key", lambda name: "")
-    monkeypatch.setattr(config_providers, "_set_runtime_api_key",
-        lambda provider, api_key, base_url="": calls.append((provider, api_key, base_url)),
-    )
+    def capture_changes(provider, api_key, base_url="", **kwargs):
+        calls.append((provider, api_key, base_url))
+        return {}, None
+    monkeypatch.setattr(config_providers, "_credential_changes", capture_changes)
 
     config.save_llm_settings({
         "provider": "custom",
@@ -1122,8 +1124,8 @@ def test_delete_llm_provider_history_removes_entry_and_scoped_key(monkeypatch, t
     monkeypatch.setattr(config_helpers, "SETTINGS_FILE", settings_file)
     monkeypatch.setattr(
         config,
-        "_clear_scoped_runtime_api_key",
-        lambda provider, base_url="": cleared.append((provider, base_url)),
+        "_credential_deletions",
+        lambda provider, base_url="": (cleared.append((provider, base_url)) or {}, []),
     )
 
     payload = config.delete_llm_provider_history({

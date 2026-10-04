@@ -573,7 +573,7 @@ def sandbox_policy_for_permission_context(
     allowed_modes = requirements.value_for("allowed_sandbox_modes", ())
     if not isinstance(allowed_modes, list):
         allowed_modes = ()
-    return sandbox_policy_from_config_snapshot(
+    policy = sandbox_policy_from_config_snapshot(
         workspace,
         sandbox_mode=(
             getattr(effective_permission, "sandbox_mode", "")
@@ -596,6 +596,32 @@ def sandbox_policy_for_permission_context(
         allowed_sandbox_modes=allowed_modes,
         shell_environment_policy=effective_config.get("shell_environment_policy"),
     )
+    # Generic subprocesses may read host storage but must not publish control
+    # state through an ordinary workspace-write grant. Host repositories keep
+    # using their own persistence APIs. Explicit unsandboxed mode is unchanged.
+    profile = policy.permission_profile
+    if profile.enforcement is not SandboxEnforcement.MANAGED:
+        return policy
+    from backend.security.sensitive_files import application_state_roots
+
+    state_roots = tuple(dict.fromkeys((
+        *application_state_roots(), *effective_permission.protected_state_roots,
+    )))
+    entries = [
+        entry for entry in profile.file_system.entries
+        if not (
+            entry.access is FileSystemAccessMode.WRITE
+            and entry.path.kind == "path"
+            and any(_absolute_path(entry.path.value).is_relative_to(root) for root in state_roots)
+        )
+    ]
+    entries.extend(
+        FileSystemSandboxEntry(FileSystemPath.path(root), FileSystemAccessMode.READ)
+        for root in state_roots
+    )
+    return replace(policy, permission_profile=replace(
+        profile, file_system=replace(profile.file_system, entries=tuple(entries)),
+    ))
 
 
 def sandbox_policy_from_config_snapshot(

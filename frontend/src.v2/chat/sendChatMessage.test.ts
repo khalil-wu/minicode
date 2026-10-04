@@ -42,6 +42,17 @@ vi.mock("../protocol/ws-outbox", () => ({
 }));
 
 describe("sendChatMessage attachment feedback", () => {
+  it("queues an owner-scoped selection with durable range metadata while the main draft stays intact", () => {
+    const range = { startLineNumber: 40, startColumn: 3, endLineNumber: 56, endColumn: 1 };
+    const contextRefs = [{ kind: "file" as const, name: "app.ts", path: "src/app.ts", workspaceRoot: "/side", range, text: "selected" }];
+    useAppStore.setState({ draft: "main stays", sideChats: { side: { id: "side", draft: "follow up", workspaceRoot: "/side", isStreaming: true, messages: [
+      { id: "running-side", role: "assistant", content: "running", isStreaming: true, artifacts: [], timestamp: 1 },
+    ] } } });
+    expect(sendChatMessage({ conversationId: "side", displayContent: "follow up", contextRefs, allowWhileStreaming: true })).toBe(true);
+    expect(sent[0]).toMatchObject({ conversation_id: "side", workspace_root: "/side", queue_if_busy: true, context_refs: contextRefs });
+    expect(useAppStore.getState().sideChats.side.messages.find((message) => message.role === "user")).toMatchObject({ contextRefs, queueState: "queued" });
+    expect(useAppStore.getState().draft).toBe("main stays");
+  });
   beforeEach(() => {
     resetSendDeduplication();
     sent.length = 0;
@@ -664,7 +675,8 @@ describe("sendChatMessage attachment feedback", () => {
       messages: [{
         id: "user-context",
         role: "user",
-        content: "inspect this page @Docs @Login button",
+        content: "inspect this page",
+        backendContent: "Browser annotation: https://example.test/login\n\ninspect this page",
         contextRefs: [
           { kind: "plugin", name: "Docs", configName: "docs", path: "plugin://docs" },
           {

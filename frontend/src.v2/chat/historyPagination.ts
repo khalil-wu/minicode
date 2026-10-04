@@ -7,7 +7,10 @@ import { pushToast } from "../overlays/ToastContainer";
 import { hydrateMessages, normalizeContentBlocks } from "./transcriptHydration";
 import type { ToolHistoryPage } from "../stores/types";
 
-export async function loadEarlierConversationMessages(conversationId: string): Promise<void> {
+export async function loadEarlierConversationMessages(
+  conversationId: string,
+  beforePrepend?: () => void,
+): Promise<void> {
   const state = useAppStore.getState();
   const page = state.conversationHistoryPages[conversationId];
   if (!page?.hasMore || page.loading) return;
@@ -39,6 +42,9 @@ export async function loadEarlierConversationMessages(conversationId: string): P
   const messages = current.getVisibleMessages(conversationId);
   const loadedIds = new Set(messages.map((message) => message.id));
   const earlier = hydrateMessages(payload.transcript).filter((message) => !loadedIds.has(message.id));
+  // The list owns its reading position. Capture it at the commit boundary,
+  // after the request has finished and before new history changes its layout.
+  beforePrepend?.();
   current.hydrateConversationMessages(conversationId, [...earlier, ...messages], {
     activate: current.conversationId === conversationId,
     isStreaming: current.conversationStreaming[conversationId],

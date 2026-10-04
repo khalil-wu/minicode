@@ -64,6 +64,72 @@ def _owner_namespace_edits(source_dir: Path, texts: dict[Path, str]) -> None:
         path = source_dir / file
         texts[path] = texts[path].replace('OsStr::new(READ_ACL_MUTEX_NAME)', 'OsStr::new(read_acl_mutex_name())')
 
+    # Runner logon uses command_cwd before the background read helper can run.
+    # Finish only its already-authorized RX root here; other read roots retain
+    # their existing background path. Both paths share the same ACL operation.
+    read_acl_body = '''    if !payload.read_roots.is_empty() {
+        let users_sid = resolve_sid("Users")?;
+        let users_psid = sid_bytes_to_psid(&users_sid)?;
+        let auth_sid = resolve_sid("Authenticated Users")?;
+        let auth_psid = sid_bytes_to_psid(&auth_sid)?;
+        let everyone_sid = resolve_sid("Everyone")?;
+        let everyone_psid = sid_bytes_to_psid(&everyone_sid)?;
+        let rx_psids = vec![users_psid, auth_psid, everyone_psid];
+        let subjects = ReadAclSubjects {
+            sandbox_group_psid,
+            rx_psids: &rx_psids,
+        };
+        apply_read_acls(
+            &payload.read_roots,
+            &subjects,
+            log,
+            &mut refresh_errors,
+            FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+            "read",
+            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+        )?;
+        unsafe {
+            if !users_psid.is_null() {
+                LocalFree(users_psid as HLOCAL);
+            }
+            if !auth_psid.is_null() {
+                LocalFree(auth_psid as HLOCAL);
+            }
+            if !everyone_psid.is_null() {
+                LocalFree(everyone_psid as HLOCAL);
+            }
+        }
+    }
+'''
+    replace("setup_provisioning.rs", read_acl_body, '''    apply_read_acls_for_sandbox_group(
+        &payload.read_roots, sandbox_group_psid, log, &mut refresh_errors,
+    )?;
+''')
+    shared_read_acl_body = read_acl_body.replace('&payload.read_roots', 'read_roots').replace('payload.read_roots', 'read_roots').replace('&mut refresh_errors,', 'refresh_errors,')
+    replace("setup_provisioning.rs", 'fn run_read_acl_only(', '''fn apply_read_acls_for_sandbox_group(
+    read_roots: &[PathBuf],
+    sandbox_group_psid: *mut c_void,
+    log: &mut dyn Write,
+    refresh_errors: &mut Vec<String>,
+) -> Result<()> {
+''' + shared_read_acl_body + '''    Ok(())
+}
+
+fn run_read_acl_only(''')
+    replace("setup_provisioning.rs", '    if payload.read_roots.is_empty() {', '''    // This root has already passed the read-policy and deny-path filters.
+    // Keep RX inheritance identical to the background grant so a root-only ACE
+    // cannot make its existing children look prepared when they are not.
+    let cwd_key = crate::path_normalization::canonical_path_key(&payload.command_cwd);
+    let launch_read_roots: Vec<PathBuf> = payload.read_roots.iter()
+        .filter(|root| crate::path_normalization::canonical_path_key(root) == cwd_key)
+        .cloned()
+        .collect();
+    apply_read_acls_for_sandbox_group(
+        &launch_read_roots, sandbox_group_psid, log, &mut refresh_errors,
+    )?;
+
+    if payload.read_roots.is_empty() {''')
+
     # No new owner may reach a pre-v3 global service, including a package-family hint.
     replace("service_identity.rs", 'Ok("MiniCodeSandboxService".into())', 'Ok(crate::owner_identity::owner().service.clone())')
     replace("service_identity.rs", 'format!("MiniCodeSandboxService.{name}")', 'format!("{}.{name}", crate::owner_identity::owner().service)')

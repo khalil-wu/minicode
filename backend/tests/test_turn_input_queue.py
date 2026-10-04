@@ -221,7 +221,8 @@ def test_session_queue_uses_session_conversation_repository_root(tmp_path: Path)
     manager = SessionRunManager(session)
 
     assert manager.durable_queue is not None
-    assert manager.durable_queue.path.parent == (tmp_path / "user-message-queue").resolve()
+    assert manager.durable_queue.path.parent == (tmp_path / "user-message-queue/conversations").resolve()
+    assert manager.durable_client_commands.path.parent == (tmp_path / "user-message-queue").resolve()
 
 
 def test_durable_follow_up_queue_retries_transient_windows_replace_lock(tmp_path: Path, monkeypatch) -> None:
@@ -305,7 +306,7 @@ def test_legacy_v3_inflight_state_is_recovered_and_upgraded(tmp_path: Path) -> N
         for command in queue.pending_client_commands()
     ] == ["cmd-legacy"]
     upgraded = json.loads(queue.path.read_text(encoding="utf-8"))
-    assert upgraded["version"] == 4
+    assert upgraded["version"] == 5
     assert upgraded["inflight"] == {}
     assert upgraded["turn_inputs"] == {}
     assert upgraded["client_inflight"] == {}
@@ -541,7 +542,9 @@ def test_runtime_queue_snapshot_is_frontend_replayable() -> None:
         "message_id": "assistant-1",
         "user_message_id": "user-assistant-1",
         "content": "queued content",
+        "attachments": [{"file_name": "context.txt", "artifact_id": "artifact-1"}],
         "position": 1,
+        "paused": False,
     }]
 
 

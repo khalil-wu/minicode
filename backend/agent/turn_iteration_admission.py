@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from backend.agent.loop_runtime_helpers import iteration_id, sleep_or_cancel
+from backend.agent.loop_runtime_helpers import iteration_id
 from backend.agent.mailbox_delivery import (
     inject_parent_notifications,
     inject_subagent_mailbox_updates,

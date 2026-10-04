@@ -154,6 +154,7 @@ class MonitorTool(BaseTool):
                 return self._error_result(f"Background command '{command_id}' was not found.")
             snapshot = self._command_snapshot(manager, command_id, args, conversation_id=conversation_id)
             snapshot.content = written.content + "\n" + snapshot.content
+            snapshot.content_preview = (written.content_preview or written.content) + "\n" + (snapshot.content_preview or snapshot.content)
             return snapshot
         if action == "cancel":
             if not command_id:
@@ -191,7 +192,10 @@ class MonitorTool(BaseTool):
                 f"cwd={item.get('cwd') or ''} command={item.get('command') or ''} "
                 f"started_at={started_at}"
             )
-        return self._success_result("\n".join(lines))
+        presentation = ["Background commands:"]
+        for item in commands:
+            presentation.append(f"- {item.get('status')} · {item.get('command') or ''}\ncwd: {item.get('cwd') or ''}\nexit: {item.get('exit_code')}")
+        return ToolResult(content="\n".join(lines), content_preview="\n".join(presentation))
 
     async def _write_stdin(
         self,
@@ -216,8 +220,9 @@ class MonitorTool(BaseTool):
         except RuntimeError as exc:
             return self._error_result(str(exc))
         suffix = " and closed stdin" if close_stdin else ""
-        return self._success_result(
-            f"Wrote {written} UTF-8 bytes to background command {command_id}{suffix}."
+        return ToolResult(
+            content=f"Wrote {written} UTF-8 bytes to background command {command_id}{suffix}.",
+            content_preview=f"Wrote {written} UTF-8 bytes to the background command{suffix}.",
         )
 
     async def _cancel_command(
@@ -252,14 +257,18 @@ class MonitorTool(BaseTool):
                 f"Cancellation requested for owned background command {command_id}; "
                 "process cleanup is still pending."
             )
+            user_prefix = "Cancellation requested; process cleanup is still pending."
         elif cancelled:
             prefix = f"Cancelled owned background command {command_id}."
+            user_prefix = "Background command cancelled."
         else:
             prefix = (
                 f"Background command {command_id} was already {previous_status or command.status}; "
                 "no process was terminated."
             )
+            user_prefix = f"Command was already {previous_status or command.status}; no process was terminated."
         snapshot.content = f"{prefix}\n\n{snapshot.content}"
+        snapshot.content_preview = f"{user_prefix}\n\n{snapshot.content_preview or ''}"
         snapshot.status = (
             "pending"
             if cleanup_pending
@@ -348,6 +357,12 @@ class MonitorTool(BaseTool):
         )
         return ToolResult(
             content=f"{header}\n{body}",
+            content_preview=(
+                f"Process: {command.status}\ncommand: {command.command}\ncwd: {command.cwd}\nexit_code: {command.exit_code}\n"
+                + ("Process cleanup is still pending.\n" if cleanup_receipt else "")
+                + ("[Output is incomplete; more output is retained.]\n" if more or truncated else "")
+                + (output or "<no output captured yet>")
+            ),
             is_error=command.status == "failed",
             status=status,
             result_kind="terminal",

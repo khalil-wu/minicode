@@ -54,6 +54,7 @@
 }
 
 .message-quote-content {
+  overflow-wrap: anywhere;
   font-size: var(--text-sm);
   color: var(--text-secondary);
   line-height: 1.5;

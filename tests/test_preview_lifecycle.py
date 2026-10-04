@@ -162,11 +162,12 @@ def test_real_preview_exit_publishes_one_terminal_event_and_rejects_late_readine
         ("ready", 7, False),
     ],
 )
-def test_readiness_only_commits_for_a_live_preview(tmp_path: Path, status, returncode, accepted) -> None:
+def test_readiness_only_commits_for_a_live_preview(monkeypatch, tmp_path: Path, status, returncode, accepted) -> None:
     async def scenario():
         launched = _launch_fixture(tmp_path)
         launched.status = status
         launched.process.returncode = returncode
+        monkeypatch.setattr(launcher, "_RUNNING", {launched.id: launched})
         broadcast = AsyncMock()
 
         assert await launcher.mark_preview_ready(launched, broadcast) is accepted
@@ -271,6 +272,7 @@ def test_old_monitor_does_not_publish_a_terminal_event_for_a_replacement(
 def test_preview_start_handler_does_not_accept_late_http_success(monkeypatch, tmp_path: Path, completion) -> None:
     async def scenario():
         launched = _launch_fixture(tmp_path)
+        monkeypatch.setattr(launcher, "_RUNNING", {launched.id: launched})
         conversation = SimpleNamespace(id=launched.conversation_id, workspace_root=str(tmp_path), worktree_path="")
         session = SimpleNamespace(
             session_id=launched.session_id,
@@ -315,6 +317,8 @@ def test_preview_tool_start_reports_the_current_process_state(
 ) -> None:
     async def scenario():
         launched = _launch_fixture(tmp_path)
+
+        monkeypatch.setattr(launcher, "_RUNNING", {launched.id: launched})
 
         def complete():
             if completion != "live":

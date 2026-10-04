@@ -19,7 +19,7 @@ from backend.feature_flags import (
     feature_flags_payload,
     normalize_feature_name,
 )
-from backend.hooks.runtime import raise_if_config_change_blocked
+from backend.hooks.runtime import ConfigChangeHookBlocked, raise_if_config_change_blocked
 
 ConfigChangeHook = Callable[..., Awaitable[Any]]
 
@@ -108,9 +108,7 @@ async def update_feature_flag_settings(
             source="feature_flags",
             file_path=str(settings_file),
         )
-    except Exception as exc:
-        if isinstance(exc, FeatureFlagSettingsError):
-            raise
+    except ConfigChangeHookBlocked as exc:
         raise FeatureFlagSettingsError(str(exc), status_code=409) from exc
 
     def apply_updates(settings_data: dict[str, Any]) -> None:

@@ -2,21 +2,16 @@ import { useAppStore } from "../stores";
 import type { CommandsListEvent, ServerEvent } from "../protocol/events";
 import { normalizeSkillList, normalizeSlashCommands } from "../lib/catalog-normalizers";
 import { addInspectorPayload } from "./inspectorEntries";
+import { workspaceRootsEqual } from "../lib/workspace-path";
 
 export const handleCommandCatalogEvent = (e: ServerEvent): boolean => {
   const s = useAppStore.getState();
   switch (e.type) {
     case "skills.list": {
-      const owner = typeof e.conversation_id === "string"
-        ? e.conversation_id.trim() || null
-        : null;
-      const activeConversationId = String(s.conversationId || "").trim() || null;
-      // Skill discovery is workspace/session scoped. An explicit owner keeps a
-      // response from a previous conversation from replacing the active picker;
-      // legacy payloads without an owner remain accepted for compatibility.
-      if (owner && owner !== activeConversationId) return true;
+      if (e.conversation_id !== (s.conversationId || "") || typeof e.workspace_root !== "string"
+        || !workspaceRootsEqual(e.workspace_root, s.workingDirectory)) return true;
       if (e.skills) {
-        s.setAvailableSkills(normalizeSkillList(e.skills));
+        s.setAvailableSkills(normalizeSkillList(e.skills, e.workspace_root));
       }
       return true;
     }

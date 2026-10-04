@@ -60,6 +60,7 @@ from backend.config import AgentSettings, TokenBudget
 from backend.llm.base import LLMAdapter, LLMTurnContext
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
+from backend.sandbox.runner import SandboxUnavailableError
 from backend.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -241,9 +242,6 @@ async def run_agent_loop(
                 yield event
             return
 
-        turn_start_tool_call_count = 0
-        tool_batch_count = 0
-
         if cancel_event is not None and cancel_event.is_set():
             raise asyncio.CancelledError
 
@@ -289,7 +287,6 @@ async def run_agent_loop(
 
         # Phase 2: Main loop (the kernel)
         error_controller = ErrorWithholdingController()
-        degraded_reason = ""
         iteration_executor = TurnIterationExecutor(
             llm=llm,
             llm_request_metadata=llm_request_metadata,
@@ -395,10 +392,6 @@ async def run_agent_loop(
                     )
                 iteration_execution_state = iteration_execution_result.state
                 turn_usage = iteration_execution_state.turn_usage
-                tool_batch_count = iteration_execution_state.tool_batch_count
-                degraded_reason = (
-                    iteration_execution_state.degraded_reason
-                )
                 stream_text = iteration_execution_result.stream_text
                 if iteration_execution_result.action == "retry":
                     continue
@@ -441,7 +434,7 @@ async def run_agent_loop(
         if deferred_cancel is not None:
             raise deferred_cancel
     except GeneratorExit:
-        if state.terminal_status is None:
+        if not turn_kernel.completion_emitted:
             # Closing a query iterator is also an interruption. Resource
             # cleanup alone leaves unmatched tool calls in the next prompt.
             turn_kernel.interrupt(
@@ -465,19 +458,23 @@ async def run_agent_loop(
         # An unexpected admission, provider, tool, or final-answer exception must
         # therefore become one canonical failed terminal transition instead of
         # escaping with a permanently running record and no public done event.
-        if isinstance(exc, PermissionContextRefreshError):
-            logger.warning("Stopping turn after live permission refresh failure: %s", exc)
+        if isinstance(exc, (PermissionContextRefreshError, SandboxUnavailableError)):
+            logger.warning("Stopping turn after permission or sandbox failure: %s", exc)
         else:
             logger.exception("Unhandled MiniCode agent-loop failure")
         if not turn_kernel.completion_emitted:
-            _set_terminal_reason(state, "runtime_error", status="failed")
+            reason = "sandbox_unavailable" if isinstance(exc, SandboxUnavailableError) else "runtime_error"
+            _set_terminal_reason(state, reason, status="failed")
             yield AgentEvent.error(
-                str(exc) if isinstance(exc, PermissionContextRefreshError)
+                "当前任务要求的命令沙箱不可用。请配置满足当前策略的隔离后端后重试；权限未被降级，已有执行结果请查看记录。"
+                if isinstance(exc, SandboxUnavailableError)
+                else str(exc) if isinstance(exc, PermissionContextRefreshError)
                 else "MiniCode agent loop failed unexpectedly.",
-                recoverable=isinstance(exc, PermissionContextRefreshError),
-                error_type=("permission" if isinstance(exc, PermissionContextRefreshError) else "agent_loop"),
+                recoverable=isinstance(exc, (PermissionContextRefreshError, SandboxUnavailableError)),
+                error_type=("permission" if isinstance(exc, (PermissionContextRefreshError, SandboxUnavailableError)) else "agent_loop"),
                 error_code=(
-                    "permission_context_refresh_failed"
+                    "sandbox.unavailable" if isinstance(exc, SandboxUnavailableError)
+                    else "permission_context_refresh_failed"
                     if isinstance(exc, PermissionContextRefreshError)
                     else "agent_loop.runtime_error"
                 ),
@@ -491,7 +488,7 @@ async def run_agent_loop(
                 usage=turn_usage,
                 terminal_projection=terminal_projection,
                 status="failed",
-                reason="runtime_error",
+                reason=reason,
             ):
                 yield event
     finally:

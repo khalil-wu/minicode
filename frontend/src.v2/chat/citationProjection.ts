@@ -1,4 +1,4 @@
-import type { ChatMessage, Citation, ContentBlock, ProviderRawCitation } from "../stores/types";
+import type { ChatMessage, Citation, ProviderRawCitation } from "../stores/types";
 import { extractInlineCitationIndexes } from "../lib/markdown";
 
 export { extractInlineCitationIndexes } from "../lib/markdown";
@@ -39,12 +39,12 @@ export const providerCitationsToBase = (
 
 export const resolveCitations = (
   messageCitations: ChatMessage["citations"] | undefined,
-  _blocks: ContentBlock[],
   markdownSource: string,
   providerCitations?: ProviderRawCitation[],
 ): ChatMessage["citations"] => {
   const providerOwned = providerCitationsToBase(providerCitations);
   const citations = providerOwned ?? messageCitations ?? [];
+  if (!citations.length) return [];
   const citedIndexes = extractInlineCitationIndexes(markdownSource);
   // Provider-native citation metadata is authoritative even when a provider
   // renders citations without model-authored [n] markers (Anthropic does this

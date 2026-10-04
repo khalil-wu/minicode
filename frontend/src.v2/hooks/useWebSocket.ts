@@ -359,15 +359,20 @@ const reportedUnknownServerEventTypes = new Set<string>();
  * a loop no resync can break. Returns false when an earlier unprocessed hole
  * means the cursor must not advance yet. */
 export const skipUndeliverableInboundEvent = (rawEvent: unknown, seq: number): boolean => {
-  const type = rawEvent && typeof rawEvent === "object"
-    ? String((rawEvent as { type?: unknown }).type ?? "")
-    : "";
+  const candidate = (rawEvent && typeof rawEvent === "object" ? rawEvent : {}) as Record<string, unknown>;
+  const type = String(candidate.type ?? "");
   if (type && !reportedUnknownServerEventTypes.has(type)) {
     reportedUnknownServerEventTypes.add(type);
     console.error("[ws] Server sent an event this client cannot represent:", type);
     pushToast(`收到无法处理的服务端事件 “${type}”，已忽略。前后端协议版本可能不一致。`, "error", 8000);
   }
-  if (!Number.isSafeInteger(seq) || seq <= lastReceivedServerSeq) return true;
+  // Wire sequence also numbers live-only frames. Only a staged durable frame
+  // carries this link; advancing on an unknown transient creates a replay hole.
+  if (!Object.prototype.hasOwnProperty.call(candidate, "previous_replay_seq")) return true;
+  const previousReplaySeq = Number(candidate.previous_replay_seq);
+  if (!Number.isSafeInteger(seq) || !Number.isSafeInteger(previousReplaySeq)) return false;
+  if (seq <= lastReceivedServerSeq) return true;
+  if (previousReplaySeq !== lastReceivedServerSeq) return false;
   const firstHole = failedReplaySeqs.size > 0 ? Math.min(...failedReplaySeqs) : Infinity;
   if (seq >= firstHole) return false;
   lastReceivedServerSeq = seq;
@@ -510,6 +515,7 @@ export const eventsFromSessionReplay = (event: ServerEvent): ServerEvent[] => {
       replayed.push({
         type: String(candidate.type ?? ""),
         seq: replayedSeq,
+        previous_replay_seq: previousReplaySeq,
         replayed: true,
         __undeliverable: true,
       } as unknown as ServerEvent);
@@ -674,14 +680,14 @@ export const useWebSocketConnection = () => {
       // No further transport means no further terminal event. `session.restore`
       // is what normally repairs streaming flags after a reconnect, and it can
       // no longer arrive, so spinners would spin forever. Seal them here — the
-      // one place that knows reconnection is over. The turn genuinely failed
-      // from this client's point of view, so it is recorded as such instead of
-      // being left to render as a finished turn.
+      // one place that knows reconnection is over. Losing the transport does
+      // not establish the backend turn's outcome; a later restore can still
+      // supply its authoritative result.
       clearStreamingState({ textStreamBuffer, thinkingStreamBuffer }, {
         clearAllConversations: true,
-        terminalStatus: "failed",
+        terminalStatus: "partial",
         failureMessage: message,
-        failureRecoverable: false,
+        failureRecoverable: true,
       });
       connectionFailureToast = pushToast(message, "error", 0);
     };
@@ -981,6 +987,11 @@ export const useWebSocketConnection = () => {
       });
 
       const deliverInboundEvent = (parsed: ServerEvent): boolean => {
+        if (isUndeliverableReplayEvent(parsed)) {
+          const handled = skipUndeliverableInboundEvent(parsed, Number(parsed.seq));
+          if (!handled) closeWebSocketForResync(ws, "event replay required");
+          return handled;
+        }
         if (!shouldProcessInboundEvent(parsed)) return true;
         acknowledgeClientCommand(parsed);
         const handled = processInboundEvent(parsed);
@@ -1057,6 +1068,16 @@ export const useWebSocketConnection = () => {
             // desync. Resyncing replays it from the durable log forever, so
             // drop it, move the cursor, and make the gap visible instead.
             if (isUnknownServerEventType(rawEvent)) {
+              const candidate = rawEvent as Record<string, unknown>;
+              if (awaitingSessionRestore && Object.prototype.hasOwnProperty.call(candidate, "previous_replay_seq")) {
+                if (bufferedRecoveryEvents.length >= MAX_RECOVERY_BUFFERED_EVENTS) {
+                  closeWebSocketForResync(ws, "session recovery buffer exceeded");
+                  return;
+                }
+                bufferedRecoveryEvents.push({ type: String(candidate.type), seq: Number(rawSeq),
+                  previous_replay_seq: Number(candidate.previous_replay_seq), __undeliverable: true } as unknown as ServerEvent);
+                return;
+              }
               if (skipUndeliverableInboundEvent(rawEvent, Number(rawSeq))) return;
             }
             closeWebSocketForResync(ws, "protocol resync required");

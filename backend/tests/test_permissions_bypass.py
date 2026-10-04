@@ -1,7 +1,10 @@
 """Bypass mode is the explicit unattended permission profile."""
 
+import asyncio
 import tempfile
 from pathlib import Path
+
+import pytest
 
 from backend.artifact.store import ArtifactStore
 from backend.config import PermissionSettings
@@ -230,7 +233,9 @@ def test_bypass_still_waives_the_users_own_settings_denylist():
     )
 
 
-def test_git_diff_permission_failure_fails_closed() -> None:
+def test_git_diff_permission_failure_fails_closed(tmp_path) -> None:
+    from backend.tools.git_tools import GitDiffTool
+
     class _BrokenChecker:
         def is_path_allowed(self, *_args, **_kwargs):
             raise RuntimeError("policy unavailable")
@@ -238,6 +243,11 @@ def test_git_diff_permission_failure_fails_closed() -> None:
     context = type("Context", (), {
         "permission_checker": _BrokenChecker(),
         "permission": PermissionContext(mode="auto"),
+        "workspace_root": tmp_path,
     })()
 
-    assert _is_denied_path(context, ".env") is True
+    with pytest.raises(RuntimeError, match="policy unavailable"):
+        _is_denied_path(context, ".env")
+    result = asyncio.run(GitDiffTool().execute({"file_path": ".env"}, context=context))
+    assert result.is_error
+    assert "policy unavailable" in result.content

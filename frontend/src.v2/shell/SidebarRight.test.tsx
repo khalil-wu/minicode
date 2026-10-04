@@ -27,7 +27,10 @@ const {
   return {
     sendMock: vi.fn(),
     sendClientCommandMock: vi.fn(() => true),
-    sendClientCommandAwaitResultMock: vi.fn(() => Promise.resolve({ status: "ok" })),
+    sendClientCommandAwaitResultMock: vi.fn((command: { type: string; conversation_id?: string }) => Promise.resolve({
+      type: "command.result", command: command.type, level: "success", message: "",
+      data: { conversation_id: command.conversation_id },
+    })),
     fetchAttachmentPreviewMock: vi.fn(),
     deleteConversationMock: vi.fn(async () => true),
   };
@@ -35,6 +38,7 @@ const {
 
 const writeTextMock = vi.fn(() => Promise.resolve());
 const scrollIntoViewMock = vi.fn();
+let notifyTabResize = () => {};
 
 vi.mock("../desktop/runtime", () => ({
   isDesktop: () => false,
@@ -92,6 +96,11 @@ const chatMessage = (patch: Partial<ChatMessage> & Pick<ChatMessage, "id" | "rol
 });
 
 const resetSidebarState = () => {
+  vi.stubGlobal("ResizeObserver", class {
+    constructor(callback: () => void) { notifyTabResize = callback; }
+    observe() {}
+    disconnect() {}
+  });
   Object.defineProperty(Element.prototype, "scrollIntoView", {
     configurable: true,
     value: scrollIntoViewMock,
@@ -113,6 +122,7 @@ const resetSidebarState = () => {
     rightStackTab: "diagnostics",
     rightStackTabLocked: false,
     rightPanelOpen: true,
+    rightPanelExpanded: false,
     rightSidebarWidth: 380,
     plan: null,
     todos: [],
@@ -165,6 +175,36 @@ describe("SidebarRight activity", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("expands the existing preview and restores it without remounting the panel", async () => {
+    useAppStore.setState({ rightStackTab: "browser" });
+    const { container } = render(<SidebarRight />);
+    const panel = await screen.findByText("Browser Control panel");
+    const aside = container.querySelector("aside")!;
+    fireEvent.click(screen.getByRole("button", { name: "扩大到主工作区" }));
+    expect(useAppStore.getState().rightPanelExpanded).toBe(true);
+    expect(aside.getAttribute("data-expanded")).toBe("true");
+    expect(aside.style.maxWidth).toBe("none");
+    fireEvent.click(screen.getByRole("button", { name: "还原到侧栏" }));
+    expect(useAppStore.getState().rightPanelExpanded).toBe(false);
+    expect(screen.getByText("Browser Control panel")).toBe(panel);
+  });
+
+  it("reveals the current tab after its container shrinks and offers an overflow chooser", async () => {
+    useAppStore.setState({ rightStackTab: "browser" });
+    render(<SidebarRight />);
+    await screen.findByText("Browser Control panel");
+    act(() => useAppStore.getState().setRightStackTab("artifacts"));
+    const track = screen.getByRole("tablist", { name: "右侧栏面板" });
+    Object.defineProperty(track, "scrollWidth", { configurable: true, value: 680 });
+    Object.defineProperty(track, "clientWidth", { configurable: true, value: 260 });
+    scrollIntoViewMock.mockClear();
+    act(() => notifyTabResize());
+    expect(scrollIntoViewMock.mock.instances.at(-1)?.getAttribute("data-sidebar-tab-frame")).toBe("artifacts");
+    fireEvent.click(screen.getByRole("button", { name: "已打开的面板" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "浏览器" }));
+    expect(useAppStore.getState().rightStackTab).toBe("browser");
   });
 
   it("starts with one quiet primary tab and keeps other panels in the launcher", () => {
@@ -266,13 +306,18 @@ describe("SidebarRight activity", () => {
     expect(screen.queryByText(/Main workspace/)).toBeNull();
     expect(screen.getByText("preview.png")).toBeTruthy();
     expect(screen.getByText("Vite")).toBeTruthy();
-    expect(screen.getByText("Docs")).toBeTruthy();
     expect(screen.getByText("Guide")).toBeTruthy();
+    expect(screen.getByText("docs.example")).toBeTruthy();
+    const sourceButton = screen.getByText("Guide").closest("button")!;
+    expect(sourceButton.getAttribute("title")).toBe("https://docs.example/guide");
     expect(screen.getByText("Daily smoke")).toBeTruthy();
     expect(screen.getByText("Point 25%, 75%")).toBeTruthy();
     expect(document.querySelector('a[href="https://docs.example/guide"]')).toBeNull();
 
-    fireEvent.click(screen.getByText("Docs"));
+    fireEvent.click(screen.getByRole("button", { name: "在对话中定位" }));
+    expect(useAppStore.getState().messageRevealTarget).toMatchObject({ conversationId: "conv-activity", messageId: "assistant-activity" });
+    useAppStore.setState({ messageRevealTarget: null });
+    fireEvent.click(sourceButton);
     expect(useAppStore.getState().rightStackTab).toBe("browser");
     expect(useAppStore.getState().livePreviewUrl).not.toBe("https://docs.example/guide");
     expect(sendMock).not.toHaveBeenCalledWith({ type: "preview.navigate", url: "https://docs.example/guide" });
@@ -280,7 +325,6 @@ describe("SidebarRight activity", () => {
     useAppStore.getState().setSettingsTab("general");
     fireEvent.click(screen.getByText("Daily smoke"));
 
-    expect(useAppStore.getState().automationsOpen).toBe(false);
     expect(useAppStore.getState().settingsOpen).toBe(true);
     await waitFor(() => expect(useAppStore.getState().settingsTab).toBe("scheduler"));
   });
@@ -491,8 +535,8 @@ describe("SidebarRight activity", () => {
     fireEvent.click(screen.getByRole("button", { name: "查看最近事件" }));
 
     expect(screen.getByText("回放预览")).toBeTruthy();
-    expect(screen.getAllByText("Ran command").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Read file").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Run command").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Read").length).toBeGreaterThan(0);
     expect(screen.getByText("回放已完成")).toBeTruthy();
     expect(screen.getAllByText("tool.completed").length).toBeGreaterThan(0);
     expect(screen.getByText("400ms")).toBeTruthy();
@@ -502,12 +546,12 @@ describe("SidebarRight activity", () => {
     const exported = String(writeTextMock.mock.calls[0][0])
       .split("\n")
       .map((line) => JSON.parse(line))
-      .find((event) => event.label === "Ran command");
+      .find((event) => event.label === "Run command");
     expect(exported).toMatchObject({
       kind: "minicode_run_timeline_event",
       phase: "tool",
       status: "completed",
-      label: "Ran command",
+      label: "Run command",
       tool_name: "run_command",
     });
 
@@ -517,13 +561,13 @@ describe("SidebarRight activity", () => {
     const replayed = String(writeTextMock.mock.calls[0][0])
       .split("\n")
       .map((line) => JSON.parse(line))
-      .find((event) => event.label === "Ran command");
+      .find((event) => event.label === "Run command");
     expect(replayed).toMatchObject({
       kind: "minicode_run_replay_event",
       schema_version: 1,
       phase: "tool",
       status: "completed",
-      label: "Ran command",
+      label: "Run command",
       tool_name: "run_command",
     });
 
@@ -560,6 +604,7 @@ describe("SidebarRight activity", () => {
         {
           targetKind: "provider",
           targetId: "trace-0",
+          conversationId: "conv-provider-trace",
           timestamp: 0,
           payload: {
             kind: "provider_trace",
@@ -588,6 +633,7 @@ describe("SidebarRight activity", () => {
         {
           targetKind: "provider",
           targetId: "trace-1",
+          conversationId: "conv-provider-trace",
           timestamp: 1,
           payload: {
             kind: "provider_trace",
@@ -818,6 +864,7 @@ describe("SidebarRight activity", () => {
         {
           targetKind: "cache",
           targetId: "grep:sig",
+          conversationId: "conv-cache",
           timestamp: 0,
           payload: {
             kind: "cache_metric",

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.config import DATA_ROOT, AppConfig, load_config
+from backend.async_cleanup import to_thread_cancel_safe
 from backend.memory.file_memory import FileMemory
 from backend.memory.manager import MemoryManager
 from backend.permissions.checker import PermissionChecker
@@ -52,6 +53,13 @@ class AppBootstrap:
         self._create_session_llm = create_session_llm
         self.ws_manager = ws_manager
         self._on_mcp_status_change = on_mcp_status_change
+        callback_parameters = signature(on_mcp_status_change).parameters.values()
+        self._mcp_status_accepts_owner = any(
+            parameter.kind == Parameter.VAR_POSITIONAL for parameter in callback_parameters
+        ) or sum(
+            parameter.kind in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+            for parameter in callback_parameters
+        ) >= 3
         self._status_cache_ttl_seconds = status_cache_ttl_seconds
 
         self.config: AppConfig | None = None
@@ -75,7 +83,7 @@ class AppBootstrap:
         # Capability discovery may invoke a container CLI. Warm its cache in
         # parallel with normal startup so session snapshots remain nonblocking.
         self._sandbox_probe_task = asyncio.create_task(
-            asyncio.to_thread(refresh_native_os_sandbox)
+            to_thread_cancel_safe(refresh_native_os_sandbox)
         )
         self.config = load_config()
 
@@ -255,6 +263,8 @@ class AppBootstrap:
                     await self._pr_monitor_task
                 except asyncio.CancelledError:
                     pass
+                except Exception:
+                    logger.warning("PR automation monitor stopped with an error", exc_info=True)
                 self._pr_monitor_task = None
             try:
                 from backend.memory.generation import drain_memory_background_tasks
@@ -281,13 +291,23 @@ class AppBootstrap:
             self._mcp_start_tasks.clear()
             managers = list(dict.fromkeys(self._mcp_managers.values()))
             if managers:
-                await asyncio.gather(
+                results = await asyncio.gather(
                     *(manager.stop_all() for manager in managers),
                     return_exceptions=True,
                 )
-                self._mcp_managers.clear()
-                self.mcp_manager = None
-                logger.info("MCP manager stopped")
+                for manager, result in zip(managers, results):
+                    if isinstance(result, BaseException):
+                        logger.warning(
+                            "MCP manager shutdown is incomplete; retaining its owner",
+                            exc_info=(type(result), result, result.__traceback__),
+                        )
+                        continue
+                    for key, registered in list(self._mcp_managers.items()):
+                        if registered is manager:
+                            self._mcp_managers.pop(key)
+                    if self.mcp_manager is manager:
+                        self.mcp_manager = None
+                logger.info("MCP shutdown finished with %d owner(s) pending", len(self._mcp_managers))
             try:
                 from backend.lsp.client import get_lsp_manager
 
@@ -354,21 +374,7 @@ class AppBootstrap:
         status: Any,
     ) -> None:
         callback = self._on_mcp_status_change
-        try:
-            params = signature(callback).parameters
-        except (TypeError, ValueError):
-            params = {}
-        positional = [
-            parameter
-            for parameter in params.values()
-            if parameter.kind
-            in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
-        ]
-        accepts_varargs = any(
-            parameter.kind == Parameter.VAR_POSITIONAL
-            for parameter in params.values()
-        )
-        if accepts_varargs or len(positional) >= 3:
+        if self._mcp_status_accepts_owner:
             await callback(server_name, status, manager)
         elif manager is self.mcp_manager:
             await callback(server_name, status)
@@ -376,23 +382,14 @@ class AppBootstrap:
     def _new_mcp_manager(self, workspace_root: Path | None) -> Any:
         from backend.mcp.manager import MCPServerManager
 
-        owner: dict[str, Any] = {}
-
         async def on_status_change(server_name: str, status: Any) -> None:
-            manager = owner.get("manager")
-            if manager is not None:
-                await self._handle_scoped_mcp_status_change(
-                    manager,
-                    server_name,
-                    status,
-                )
+            await self._handle_scoped_mcp_status_change(manager, server_name, status)
 
         manager = MCPServerManager(
             on_status_change=on_status_change,
             elicitation_handler=self._handle_mcp_elicitation,
             workspace_root=workspace_root,
         )
-        owner["manager"] = manager
         return manager
 
     async def ensure_mcp_manager(

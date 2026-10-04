@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from backend.async_cleanup import to_thread_cancel_safe
+
 import asyncio
 import json
 import logging
@@ -11,10 +13,10 @@ from enum import Enum
 from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, Awaitable, Callable
-from urllib.parse import urlparse
 
 from backend.config import DATA_ROOT, PROJECT_ROOT
 from backend.mcp.client import MCPClient, MCPToolDef, MCPTransport
+from backend.mcp.oauth import MCPTokenStoreError
 from backend.mcp.project_settings import (
     PROJECT_MCP_APPROVED,
     PROJECT_MCP_PENDING,
@@ -26,8 +28,9 @@ from backend.mcp.policy import (
     load_enterprise_mcp_payload,
     load_mcp_policy,
 )
-from backend.mcp.transport import mcp_transport_from_mapping, normalize_mcp_transport
+from backend.mcp.transport import mcp_transport_from_mapping, normalize_mcp_remote_url, normalize_mcp_transport
 from backend.mcp.value_utils import has_nonempty_value as _has_nonempty_config_value
+from backend.mcp.value_utils import resolve_env_placeholders as _resolve_env_placeholders
 from backend.plugins.layout import plugin_manifest_path
 from backend.workspace.state import get_explicit_active_workspace_root
 
@@ -294,13 +297,7 @@ def validate_mcp_server_config(config: MCPServerConfig) -> None:
         raise ValueError("remote MCP headers cannot contain NUL")
     if config.oauth_callback_port is not None and not (1 <= config.oauth_callback_port <= 65535):
         raise ValueError("MCP OAuth callback_port must be between 1 and 65535")
-    url = str(config.url or "").strip()
-    if not url:
-        raise ValueError(f"MCP {transport} transport requires a URL")
-    scheme = urlparse(url).scheme.lower()
-    allowed_schemes = {"ws", "wss"} if transport == "ws" else {"http", "https"}
-    if scheme not in allowed_schemes:
-        raise ValueError(f"invalid {transport} URL scheme '{scheme or '(missing)'}'")
+    config.url = normalize_mcp_remote_url(config.url, transport)
 
 
 @dataclass
@@ -847,20 +844,6 @@ class MCPServerManager:
                 f"MCP server '{name}' from {source} has fields unsupported for "
                 f"{transport}: {', '.join(incompatible)}"
             )
-        # An HTTP-style MCP server cannot be connected without an endpoint.
-        # This also makes an unresolved environment placeholder fail closed,
-        # matching the config-file validator instead of registering a dead
-        # server that can never connect.
-        if transport in {"sse", "http", "ws"} and not url:
-            raise ValueError(f"MCP server '{name}' from {source} has no URL")
-        if url:
-            scheme = urlparse(url).scheme.lower()
-            allowed_schemes = {"ws", "wss"} if transport == "ws" else {"http", "https"}
-            if transport in {"sse", "http", "ws"} and scheme not in allowed_schemes:
-                raise ValueError(
-                    f"MCP server '{name}' from {source} has invalid {transport} "
-                    f"URL scheme {scheme or '(missing)'}"
-                )
         raw_command = conf.get("command")
         if transport == "stdio" and not isinstance(raw_command, str):
             raise ValueError(
@@ -1162,7 +1145,11 @@ class MCPServerManager:
             lock = asyncio.Lock()
             self._connection_locks[config.name] = lock
         async with lock:
-            state = await self._prepare_state(config)
+            try:
+                state = await self._prepare_state(config)
+            except MCPTokenStoreError as exc:
+                await self._report_credential_store_failure(config.name, exc)
+                return
             if state.status == ServerStatus.CONNECTED and not force:
                 return
             phase, _, _ = classify_mcp_phase(
@@ -1188,12 +1175,26 @@ class MCPServerManager:
             lock = asyncio.Lock()
             self._connection_locks[config.name] = lock
         async with lock:
-            state = await self._prepare_state(config)
+            try:
+                state = await self._prepare_state(config)
+            except MCPTokenStoreError as exc:
+                await self._report_credential_store_failure(config.name, exc)
+                return
             state.status = ServerStatus.OFFLINE
             state.tools = []
             state.last_error = ""
             state.last_exception = None
+            state.operation_failures.pop("credential_store", None)
             await self._notify_status(config.name, ServerStatus.OFFLINE)
+
+    async def _report_credential_store_failure(self, name: str, exc: MCPTokenStoreError) -> None:
+        state = self._servers[name]
+        state.status = ServerStatus.ERROR
+        state.tools = []
+        state.last_exception = exc
+        state.last_error = f"MCP credential storage failed: {exc}"
+        _record_operation_failure(state, "credential_store", exc, retryable=True)
+        await self._notify_status(name, ServerStatus.ERROR)
 
     async def stop_server(self, name: str) -> bool:
         state = self._servers.get(name)
@@ -1360,7 +1361,7 @@ class MCPServerManager:
                 f"MCP server '{name}' is still shutting down and cannot log out"
             )
         store = self._token_store.for_server(state.config.url or "", state.config.oauth_client_id)
-        await asyncio.to_thread(store.clear, name)
+        await to_thread_cancel_safe(store.clear, name)
         self._resource_subscriptions.pop(name, None)
         state.auth_status = (
             MCPAuthStatus.NOT_LOGGED_IN
@@ -1526,13 +1527,14 @@ class MCPServerManager:
         *,
         interactive_oauth: bool = False,
     ) -> None:
-        client = state.client or self._create_client(
-            state.config,
-            interactive_oauth=interactive_oauth,
-        )
-        state.client = client
-
+        client = state.client
         try:
+            if client is None:
+                client = self._create_client(
+                    state.config,
+                    interactive_oauth=interactive_oauth,
+                )
+                state.client = client
             connect_timeout = (
                 310.0
                 if interactive_oauth
@@ -1565,6 +1567,7 @@ class MCPServerManager:
             state.last_exception = None
             state.operation_failures.pop("connect", None)
             state.operation_failures.pop("reconnect", None)
+            state.operation_failures.pop("credential_store", None)
             if restore_failures:
                 failed_uris = [uri for uri, _ in restore_failures]
                 state.operation_failures["resource_restore"] = {
@@ -1601,10 +1604,11 @@ class MCPServerManager:
         except Exception as exc:
             cleanup_error: BaseException | None = None
             cleanup_pending = False
-            try:
-                cleanup_pending = not await client.close()
-            except Exception as close_exc:
-                cleanup_error = close_exc
+            if client is not None:
+                try:
+                    cleanup_pending = not await client.close()
+                except Exception as close_exc:
+                    cleanup_error = close_exc
             state.client = client if cleanup_pending or cleanup_error is not None else None
             state.status = ServerStatus.ERROR
             state.last_exception = exc
@@ -1633,8 +1637,12 @@ class MCPServerManager:
             phase, _, _ = classify_mcp_phase(state.status, state.last_error, exc)
             if phase in {"auth_required", "expired"}:
                 state.auth_status = MCPAuthStatus.NOT_LOGGED_IN
-            else:
-                state.auth_status = self._stored_auth_status(state.config)
+            elif not isinstance(exc, MCPTokenStoreError):
+                try:
+                    state.auth_status = self._stored_auth_status(state.config)
+                except MCPTokenStoreError as storage_exc:
+                    state.last_error += f"; MCP credential storage failed: {storage_exc}"
+                    _record_operation_failure(state, "credential_store", storage_exc, retryable=True)
             logger.error("Failed to start MCP server '%s': %s", name, state.last_error)
             await self._notify_status(name, ServerStatus.ERROR)
 
@@ -1946,28 +1954,6 @@ def _resolve_mapping_placeholders(value: Any) -> Any:
     if isinstance(value, list):
         return [_resolve_mapping_placeholders(item) for item in value]
     return _resolve_env_placeholders(value)
-
-
-def _resolve_env_placeholders(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-
-    # Supports ${VAR} and ${VAR:-default}; variable names follow the POSIX
-    # env-var shape (letters, digits, underscore; must start with a letter or
-    # underscore) so lowercase variables resolve too. Missing variables without
-    # an explicit default are configuration errors.
-    pattern = re.compile(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)(?::-([^}]*))?\}")
-
-    def replace(match: re.Match[str]) -> str:
-        name = match.group(1)
-        default = match.group(2)
-        if default is not None:
-            return os.getenv(name, default)
-        if name not in os.environ:
-            raise ValueError(f"MCP configuration references missing environment variable '{name}'")
-        return os.environ[name]
-
-    return pattern.sub(replace, value)
 
 
 def _optional_str(value: Any) -> str | None:

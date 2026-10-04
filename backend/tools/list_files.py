@@ -5,11 +5,7 @@ from typing import Any
 
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
-from backend.tools.file_tools_common import (
-    LIST_FILES_MAX_ENTRIES,
-    _lookup_list_files_cache_result,
-    _put_list_files_cache,
-)
+from backend.tools.file_tools_common import LIST_FILES_MAX_ENTRIES
 from backend.tools.path_resolution import (
     PathTraversalError,
     _is_bypass_mode,
@@ -142,19 +138,7 @@ class ListFilesTool(BaseTool):
             if checker is not None and denied_patterns
             else None
         )
-        policy_key = "\n".join(denied_patterns) if is_allowed is not None else ""
-
-        cached_result, cache_hit = _lookup_list_files_cache_result(
-            path,
-            bool(recursive),
-            limit=limit,
-            policy_key=policy_key,
-        )
-        if cache_hit:
-            return self._success_result(cached_result or "")
-
         entries: list[str] = []
-        dependencies: set[Any] = {path}
         entry_limit_reached = False
         try:
             if recursive:
@@ -162,12 +146,6 @@ class ListFilesTool(BaseTool):
                     path.rglob("*"),
                     key=lambda item: item.relative_to(path).as_posix().lower(),
                 )
-                for item in candidates:
-                    try:
-                        if item.is_dir():
-                            dependencies.add(item)
-                    except OSError:
-                        continue
                 for item in candidates:
                     rel = item.relative_to(path)
                     if is_windows_reserved_path(rel):
@@ -200,26 +178,9 @@ class ListFilesTool(BaseTool):
             return self._error_result(f"No permission to access directory: {directory}")
 
         if not entries:
-            result = "(empty directory)"
-            _put_list_files_cache(
-                path,
-                bool(recursive),
-                result,
-                limit=limit,
-                dependencies=tuple(dependencies),
-                policy_key=policy_key,
-            )
-            return self._success_result(result)
+            return self._success_result("(empty directory)")
 
         result = "\n".join(entries)
         if entry_limit_reached:
             result += "\n\n[The requested entry limit was reached.]"
-        _put_list_files_cache(
-            path,
-            bool(recursive),
-            result,
-            limit=limit,
-            dependencies=tuple(dependencies),
-            policy_key=policy_key,
-        )
         return self._success_result(result)

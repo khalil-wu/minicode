@@ -62,18 +62,6 @@ def model_thinking_levels(model: Any, adapter: Any | None = None) -> tuple[str, 
     adapter_levels = tuple(dict.fromkeys(supported())) if callable(supported) else ()
     if adapter_levels == ("off", "high"):
         return adapter_levels
-    mapping = getattr(model, "thinking_level_map", None)
-    if isinstance(mapping, Mapping):
-        levels: list[str] = []
-        for level in REASONING_LEVEL_ORDER:
-            has_mapping = level in mapping
-            mapped_value = mapping.get(level) if has_mapping else None
-            if has_mapping and mapped_value is None:
-                continue
-            if level in {"xhigh", "max", "ultra"} and not has_mapping:
-                continue
-            levels.append(level)
-        return tuple(levels)
     declared = tuple(
         str(value).strip().lower()
         for value in (
@@ -83,6 +71,19 @@ def model_thinking_levels(model: Any, adapter: Any | None = None) -> tuple[str, 
         )
         if str(value).strip()
     )
+    mapping = getattr(model, "thinking_level_map", None)
+    if isinstance(mapping, Mapping):
+        unmapped_levels = declared or ("off", "minimal", "low", "medium", "high")
+        levels: list[str] = []
+        for level in REASONING_LEVEL_ORDER:
+            has_mapping = level in mapping
+            mapped_value = mapping.get(level) if has_mapping else None
+            if has_mapping and mapped_value is None:
+                continue
+            if not has_mapping and level not in unmapped_levels:
+                continue
+            levels.append(level)
+        return tuple(levels)
     if declared:
         return tuple(dict.fromkeys(declared))
     return ("off", "minimal", "low", "medium", "high")

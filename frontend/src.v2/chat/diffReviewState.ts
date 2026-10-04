@@ -26,5 +26,5 @@ export function initialDiffReviewPatch(
   const selected = selectedPath
     ? files.find((file) => diffFilePathsEqual(file.path, selectedPath, workspaceRoot))
     : files[0];
-  return selected?.patch || files.find((file) => file.patch)?.patch || "";
+  return selected?.patch ?? "";
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, useCallback, useRef } from "react";
 import {
   FilePlus2,
   FolderOpen,
@@ -58,6 +58,7 @@ import {
 import { TreeNode } from "./FileTreeNode";
 import { FileContextMenu } from "./FileTreeContextMenu";
 import { WorkspaceContextMenu } from "../workspace/WorkspaceContextMenu";
+import { pushToast } from "../overlays/ToastContainer";
 import { SearchResultRow } from "./FileTreeSearchResult";
 import {
   normalizeWorkspaceRoot,
@@ -73,18 +74,6 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const scrollPersistValueRef = useRef(0);
   const scrollPersistKeyRef = useRef("");
 
-  useEffect(() => () => {
-    if (scrollFadeTimerRef.current !== null) window.clearTimeout(scrollFadeTimerRef.current);
-    // Flush a pending scroll-position write so a fast unmount cannot lose the
-    // last scroll offset for the workspace it belongs to.
-    if (scrollPersistTimerRef.current !== null) {
-      window.clearTimeout(scrollPersistTimerRef.current);
-      scrollPersistTimerRef.current = null;
-      try {
-        localStorage.setItem(scrollPersistKeyRef.current, String(scrollPersistValueRef.current));
-      } catch { /* noop */ }
-    }
-  }, []);
   const [loading, setLoading] = useState(false);
   const [slowLoading, setSlowLoading] = useState(false);
   const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
@@ -109,10 +98,23 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const consumeFileTreeRevealRequest = useAppStore((s) => s.consumeFileTreeRevealRequest);
   const activeEditorPath = useAppStore((s) => s.activeEditorPath);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const focusedTreePathRef = useRef<string | null>(null);
   const restoredScrollKeyRef = useRef<string | null>(null);
   const scrollWorkspaceKey = normalizeWorkspaceRoot(workingDirectory) || ".";
   const scrollKey = `minicode.file-tree.scroll:${scrollWorkspaceKey}`;
   const legacyScrollKey = `minicode.file-tree.scroll:${workingDirectory || "."}`;
+  useEffect(() => () => {
+    if (scrollFadeTimerRef.current !== null) window.clearTimeout(scrollFadeTimerRef.current);
+    // Flush the previous workspace before the same list receives scroll events
+    // for another root, or before the component unmounts.
+    if (scrollPersistTimerRef.current !== null) {
+      window.clearTimeout(scrollPersistTimerRef.current);
+      scrollPersistTimerRef.current = null;
+      try {
+        localStorage.setItem(scrollPersistKeyRef.current, String(scrollPersistValueRef.current));
+      } catch { /* noop */ }
+    }
+  }, [scrollKey]);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => {
     const stored = readExpandedPaths(workingDirectory || ".");
     return isDesktop() && workingDirectory ? normalizeDesktopExpandedPaths(workingDirectory, stored) : stored;
@@ -121,6 +123,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const gitChanges = useAppStore((s) => s.gitChanges);
   const requestGitChanges = useAppStore((s) => s.requestGitChanges);
   const lastChangeSequence = useRef(0);
+  const pendingChangesRef = useRef<{ path: string; event: string; timestamp: number }[]>([]);
   const refreshEpochRef = useRef(0);
   const searchEpochRef = useRef(0);
   const gitMap = useMemo(() => {
@@ -277,19 +280,17 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       workingDirectory,
     ))));
     if (!parents.length) return;
-    try {
-      await Promise.all(parents.map((parent) => (
-        parent === "." || parent === normalizeChangePath(workingDirectory || ".")
-          ? refresh()
-          : loadDirectory(parent)
-      )));
-    } catch {
-      await refresh();
-    }
+    await Promise.all(parents.map((parent) => (
+      parent === "." || parent === normalizeChangePath(workingDirectory || ".")
+        ? refresh()
+        : loadDirectory(parent)
+    )));
   }, [loadDirectory, refresh, workingDirectory]);
 
   useEffect(() => { refresh(); }, [refresh, workingDirectory, fileTreeVersion]);
   useEffect(() => {
+    pendingChangesRef.current = [];
+    restoredScrollKeyRef.current = null;
     setContextMenu(null);
     setWorkspaceMenu(null);
     setToolbarMenuOpen(false);
@@ -376,6 +377,9 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   }, [workingDirectory]);
 
   const revealFolderRequest = useCallback(async (request: FileTreeRevealRequest): Promise<boolean> => {
+    if (!workspaceRootsEqual(request.workspaceRoot, workingDirectory)) return true;
+    const isCurrent = () => workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)
+      && useAppStore.getState().fileTreeRevealRequests.includes(request);
     const target = normalizeRevealFolderPath(request.path);
     if (!target) return true;
     setQuery("");
@@ -385,9 +389,11 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     for (const folder of foldersToExpand) {
       if (!isSameTreePath(folder, workingDirectory, workingDirectory)) {
         if (!await loadDirectory(folder)) break;
+        if (!isCurrent()) return false;
         loadedFolders.push(folder);
       }
     }
+    if (!isCurrent()) return false;
     if (loadedFolders.length > 0) {
       setExpandedPaths((current) => {
         const next = new Set(current);
@@ -396,11 +402,12 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
         return next;
       });
     }
-    window.setTimeout(() => scrollToTreePath(target), 80);
+    window.setTimeout(() => {
+      if (workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)) scrollToTreePath(target);
+    }, 80);
     return true;
   }, [folderRevealChain, loadDirectory, normalizeRevealFolderPath, scrollToTreePath, workingDirectory]);
 
-  const pendingChangesRef = useRef<{ path: string; event: string; timestamp: number }[]>([]);
   const treeReady = Boolean(tree);
 
   useEffect(() => {
@@ -429,7 +436,8 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       return;
     }
     if (latestSequence > lastChangeSequence.current) {
-      const changes = fileChanges.filter((change) => change.sequence > lastChangeSequence.current);
+      const changes = fileChanges.filter((change) => change.sequence > lastChangeSequence.current
+        && workspaceRootsEqual(change.workspaceRoot, workingDirectory));
       lastChangeSequence.current = latestSequence;
       pendingChangesRef.current = [...pendingChangesRef.current, ...changes];
       const timer = window.setTimeout(() => {
@@ -513,6 +521,10 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     const { showPrompt, showAlert } = await import("../overlays/DialogService");
     const path = await showPrompt({ title: "新建文件", message: "输入相对工作区的文件路径", placeholder: "src/example.ts" });
     if (!path) return;
+    if (!workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)) {
+      pushToast("工作区已切换，新建文件已取消；请在当前工作区重新选择。", "warning");
+      return;
+    }
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
       await writeWorkspaceFile(targetPath, "", workingDirectory);
@@ -526,12 +538,52 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     const { showPrompt, showAlert } = await import("../overlays/DialogService");
     const path = await showPrompt({ title: "新建文件夹", message: "输入相对工作区的文件夹路径", placeholder: "src/components" });
     if (!path) return;
+    if (!workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)) {
+      pushToast("工作区已切换，新建文件夹已取消；请在当前工作区重新选择。", "warning");
+      return;
+    }
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
       await createWorkspaceDirectory(targetPath, workingDirectory);
       void refresh();
     } catch (error) {
       await showAlert({ title: "创建失败", message: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  const syncTreeTabStops = useCallback(() => {
+    const rows = Array.from(listRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? []);
+    const active = rows.find((row) => row === document.activeElement)
+      ?? rows.find((row) => row.dataset.treePath === focusedTreePathRef.current)
+      ?? rows.find((row) => row.getAttribute("aria-selected") === "true")
+      ?? rows[0];
+    for (const row of rows) row.tabIndex = row === active ? 0 : -1;
+    focusedTreePathRef.current = active?.dataset.treePath ?? null;
+  }, []);
+  useLayoutEffect(syncTreeTabStops, [syncTreeTabStops, tree, expandedPaths, searchResults, query, activeEditorPath, loading]);
+
+  const navigateTree = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.defaultPrevented || event.nativeEvent.isComposing) return;
+    const current = (event.target as HTMLElement).closest<HTMLElement>('[role="treeitem"]');
+    if (!current) return;
+    const rows = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[role="treeitem"]'));
+    const index = rows.indexOf(current);
+    const depth = Number(current.getAttribute("aria-level"));
+    let next: HTMLElement | undefined;
+    if (event.key === "ArrowDown") next = rows[index + 1];
+    else if (event.key === "ArrowUp") next = rows[index - 1];
+    else if (event.key === "Home") next = rows[0];
+    else if (event.key === "End") next = rows.at(-1);
+    else if (event.key === "ArrowRight" && current.getAttribute("aria-expanded") === "true") {
+      const child = rows[index + 1];
+      if (child && Number(child.getAttribute("aria-level")) > depth) next = child;
+    } else if (event.key === "ArrowLeft") {
+      next = rows.slice(0, index).reverse().find((row) => Number(row.getAttribute("aria-level")) < depth);
+    } else return;
+    event.preventDefault();
+    if (next) {
+      next.focus();
+      next.scrollIntoView({ block: "nearest" });
     }
   };
 
@@ -633,6 +685,11 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       <div
         ref={listRef}
         role="tree"
+        onKeyDown={navigateTree}
+        onFocusCapture={(event) => {
+          const row = (event.target as HTMLElement).closest<HTMLElement>('[role="treeitem"]');
+          if (row) { focusedTreePathRef.current = row.dataset.treePath!; syncTreeTabStops(); }
+        }}
         aria-label="文件资源管理器"
         className={`file-tree-scroll${isListScrolling ? " is-scrolling" : ""}`}
         style={fileTreeListStyle}
@@ -648,7 +705,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
             scrollPersistTimerRef.current = window.setTimeout(() => {
               scrollPersistTimerRef.current = null;
               try {
-                localStorage.setItem(scrollKey, String(scrollPersistValueRef.current));
+                localStorage.setItem(scrollPersistKeyRef.current, String(scrollPersistValueRef.current));
               } catch { /* noop */ }
             }, 200);
           }

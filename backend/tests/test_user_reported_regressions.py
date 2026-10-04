@@ -87,6 +87,8 @@ def test_recent_workspace_handlers_are_idempotent_and_publish_list_before_result
     events: list[tuple[str, object]] = []
 
     class _Session:
+        active_conversation_id = ""
+
         async def send_payload(self, payload, *, log_context):
             events.append(("payload", payload))
 
@@ -799,6 +801,7 @@ def test_paged_read_artifact_does_not_resend_the_artifact_head(tmp_path) -> None
     # explicit line window shipped both the requested window and the first
     # ~1600 chars of the artifact on every paged read.
     from backend.tools.agent_artifact_tools import ReadArtifactTool
+    from backend.tools.registry import ToolRegistry
 
     store = ArtifactStore(storage_dir=tmp_path / "artifacts")
     artifact_id = store.save(
@@ -819,11 +822,13 @@ def test_paged_read_artifact_does_not_resend_the_artifact_head(tmp_path) -> None
     assert unpaged.content_preview
     assert "LINE0001_head" in unpaged.content_preview
 
-    # A rejected/ignored paging argument must behave as an unpaged read rather
-    # than silently suppressing the preview.
-    for ignored in ({"offset": 0}, {"limit": -1}, {"offset": "abc"}, {"offset": True}):
-        result = asyncio.run(tool.execute({"artifact_id": artifact_id, **ignored}))
-        assert result.content_preview, ignored
+    # Invalid windows are rejected at the real schema boundary instead of
+    # silently expanding the request to an unpaged artifact read.
+    registry = ToolRegistry()
+    registry.register(tool)
+    for invalid in ({"offset": 0}, {"limit": -1}, {"offset": "abc"}, {"offset": True}):
+        result = asyncio.run(registry.execute(tool.name, {"artifact_id": artifact_id, **invalid}))
+        assert result.error_kind == "validation_error", invalid
 
 
 def test_tree_sitter_language_keys_all_have_definition_node_types() -> None:
@@ -899,7 +904,7 @@ def test_tree_sitter_loader_calls_the_declared_entrypoint(monkeypatch) -> None:
         monkeypatch.setitem(sys.modules, module_name, fake)
         monkeypatch.setattr(tsp, "_HAS_TREE_SITTER", True)
         monkeypatch.setattr(tsp, "_language_cache", {})
-        monkeypatch.setattr(tsp, "_parser_cache", {})
+        monkeypatch.setattr(tsp._ts, "Language", lambda capsule: capsule)
 
         tsp.get_language(language)
 

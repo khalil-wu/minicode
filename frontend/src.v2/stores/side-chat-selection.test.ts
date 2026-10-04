@@ -10,16 +10,19 @@ describe("side-chat selected context", () => {
       sideChatPendingContext: null,
       sideChats: {},
       messages: [],
+      workingDirectory: "/repo",
     });
   });
 
   it("opens the panel and consumes the selected text into the new thread", () => {
-    useAppStore.getState().openSideChatWithSelection("const answer = 42;", "src/app.ts");
+    const range = { startLineNumber: 2, startColumn: 1, endLineNumber: 2, endColumn: 19 };
+    useAppStore.getState().openSideChatWithSelection("const answer = 42;", "src/app.ts", { range, workspaceRoot: "/repo" });
 
     expect(useAppStore.getState().sideChatOpen).toBe(true);
     expect(useAppStore.getState().sideChatPendingContext).toEqual({
       text: "const answer = 42;",
       source: "src/app.ts",
+      workspaceRoot: "/repo", range,
     });
 
     useAppStore.getState().ensureSideChat("side-selection");
@@ -28,6 +31,7 @@ describe("side-chat selected context", () => {
     expect(state.sideChats["side-selection"]?.selectedContext).toEqual({
       text: "const answer = 42;",
       source: "src/app.ts",
+      workspaceRoot: "/repo", range,
     });
   });
 
@@ -39,6 +43,7 @@ describe("side-chat selected context", () => {
     expect(useAppStore.getState().sideChats["side-existing"]?.selectedContext).toEqual({
       text: "new selection",
       source: "README.md",
+      workspaceRoot: "/repo",
     });
   });
 

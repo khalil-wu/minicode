@@ -16,6 +16,11 @@ from backend.agent.provider_protocol import (
 )
 from backend.llm.base import LLMAdapter, LLMMessage, ToolCallEvent
 from backend.agent.lifecycle_observer import resolve_lifecycle_runtime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from backend.agent.context import ContextBuilder
+    from backend.agent.state import AgentState
 
 def _extension_message_content(value: Any) -> str:
     if isinstance(value, str):
@@ -118,6 +123,7 @@ def _coerce_extension_context_messages(
                     )
                     or ""
                 ),
+                is_user_input=bool(value.get("is_user_input", value.get("isUserInput", False))),
                 timestamp_ms=(
                     int(value.get("timestamp_ms", value.get("timestampMs")))
                     if value.get("timestamp_ms", value.get("timestampMs")) is not None
@@ -170,8 +176,8 @@ class PreparedTurnContext:
 
 async def prepare_turn_context(
     *,
-    context: Any,
-    state: Any,
+    context: ContextBuilder,
+    state: AgentState,
     llm: LLMAdapter,
     tool_schemas: list[dict[str, Any]],
     request_metadata: dict[str, Any],
@@ -183,13 +189,9 @@ async def prepare_turn_context(
 ) -> PreparedTurnContext:
     """Reconcile history, render messages, and project cache-fork metadata."""
     extension_system_prompt = metadata.get("_extension_system_prompt")
-    set_extension_prompt = getattr(context, "set_extension_system_prompt", None)
-    if callable(set_extension_prompt):
-        set_extension_prompt(
-            str(extension_system_prompt)
-            if extension_system_prompt is not None
-            else None
-        )
+    context.set_extension_system_prompt(
+        str(extension_system_prompt) if extension_system_prompt is not None else None
+    )
 
     extension_actions = tool_context.run_context.extension_actions
     extension_messages: list[str] = []
@@ -199,37 +201,25 @@ async def prepare_turn_context(
     if not metadata.get("_extension_before_agent_messages_applied"):
         raw_extension_messages = metadata.get("_extension_before_agent_messages")
         if isinstance(raw_extension_messages, (list, tuple)):
-            append_user_context = getattr(context, "append_user_context", None)
-            if callable(append_user_context):
-                for raw_message in raw_extension_messages:
-                    if not isinstance(raw_message, dict):
-                        continue
-                    content = _extension_message_content(
-                        raw_message.get("content", "")
-                    ).strip()
-                    if content:
-                        extension_messages.append(content)
+            for raw_message in raw_extension_messages:
+                if not isinstance(raw_message, dict):
+                    continue
+                content = _extension_message_content(raw_message.get("content", "")).strip()
+                if content:
+                    extension_messages.append(content)
         metadata["_extension_before_agent_messages_applied"] = True
 
     pending_extension_messages = metadata.pop("_extension_pending_messages", [])
     queued_extension_messages = context.extension_state.pop("pending_messages", [])
     extension_messages.extend(queued_extension_messages)
     if isinstance(pending_extension_messages, list):
-        append_user_context = getattr(context, "append_user_context", None)
-        if callable(append_user_context):
-            for pending in pending_extension_messages:
-                raw_message = (
-                    pending.get("message")
-                    if isinstance(pending, dict)
-                    else pending
-                )
-                content = _extension_message_content(
-                    raw_message.get("content", "")
-                    if isinstance(raw_message, dict)
-                    else raw_message
-                ).strip()
-                if content:
-                    extension_messages.append(content)
+        for pending in pending_extension_messages:
+            raw_message = pending.get("message") if isinstance(pending, dict) else pending
+            content = _extension_message_content(
+                raw_message.get("content", "") if isinstance(raw_message, dict) else raw_message
+            ).strip()
+            if content:
+                extension_messages.append(content)
 
     # Old host bindings may still hand over these lists at admission. They
     # migrate into extension storage, never into the provider message stream.
@@ -260,14 +250,12 @@ async def prepare_turn_context(
     # bound; deliver them the next context build instead of losing them.
     pending_extension_user_messages = metadata.pop("_extension_pending_user_messages", [])
     if isinstance(pending_extension_user_messages, list):
-        append_user_context = getattr(context, "append_user_context", None)
-        if callable(append_user_context):
-            for pending in pending_extension_user_messages:
-                content = _extension_message_content(
-                    pending.get("content", "") if isinstance(pending, dict) else pending
-                ).strip()
-                if content:
-                    extension_messages.append(content)
+        for pending in pending_extension_user_messages:
+            content = _extension_message_content(
+                pending.get("content", "") if isinstance(pending, dict) else pending
+            ).strip()
+            if content:
+                extension_messages.append(content)
 
     history_start = len(context._history)
     for content in extension_messages:
@@ -287,9 +275,7 @@ async def prepare_turn_context(
         if extension_messages or entries or labels:
             await extension_actions.flush()
 
-    reconcile = getattr(context, "reconcile_dangling_tool_calls", None)
-    if callable(reconcile):
-        reconcile()
+    context.reconcile_dangling_tool_calls()
 
     span_id = f"context:{run_id}:{state.iterations + 1}"
     started_at = epoch_ms()

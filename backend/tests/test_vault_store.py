@@ -10,8 +10,8 @@ from backend.vault.store import EnvVault
 
 def test_corrupt_index_refuses_mutations_instead_of_wiping(tmp_path: Path) -> None:
     vault_path = tmp_path / "vault.json"
-    vault_path.write_text("{ not json", encoding="utf-8")
     vault = EnvVault(vault_path)
+    vault_path.write_text("{ not json", encoding="utf-8")
 
     with pytest.raises(RuntimeError):
         vault.set("new-secret", "value")

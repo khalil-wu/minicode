@@ -84,6 +84,7 @@ class FuzzySearchTool(BaseTool):
                     },
                     "max_results": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "最大结果数（默认 20）",
                         "default": 20,
                     },

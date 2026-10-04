@@ -507,6 +507,21 @@ button.skills-logo {
   to { opacity: 1; transform: translateY(0); }
 }
 
+.skills-detail-page { outline: none; padding-block: 16px; display: grid; gap: 24px; }
+.skills-detail-back { display: inline-flex; align-items: center; gap: 8px; justify-self: start; border: 0; padding: 4px 0; background: transparent; color: var(--text-secondary); font: inherit; }
+.skills-detail-heading { display: flex; align-items: center; gap: 16px; }
+.skills-detail-heading h1 { margin: 0 0 5px; font-size: var(--mc-font-heading); font-weight: var(--fw-semibold); }
+.skills-detail-heading code { color: var(--text-muted); font-size: var(--mc-font-caption); }
+.skills-detail-description { color: var(--text-secondary); white-space: pre-wrap; line-height: var(--leading-relaxed); }
+.skills-detail-meta { margin: 0; display: grid; gap: 13px; }
+.skills-detail-meta > div { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 12px; }
+.skills-detail-meta dt { color: var(--text-muted); }
+.skills-detail-meta dd { margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
+.skills-detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.skills-detail-actions button { display: inline-flex; align-items: center; gap: 6px; }
+.skills-detail-note { padding-top: 16px; border-top: 1px solid var(--border-subtle); color: var(--text-secondary); }
+.skills-detail-note p { color: var(--text-muted); }
+
 @media (max-width: 760px) {
   .skills-workspace-content {
     width: min(100% - 28px, 620px);

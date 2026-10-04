@@ -529,9 +529,10 @@ describe("AssistantMarkdownCell generated files", () => {
 });
 
 describe("AssistantMarkdownCell run cancellation", () => {
-  it("forks from the stable assistant message id and includes the legacy index hint", () => {
+  it("forks from the stable assistant message id with explicit source ownership", () => {
     useAppStore.setState({
       conversationId: "conv-fork",
+      workingDirectory: "",
       messages: [
         { id: "user-1", role: "user", content: "prompt", artifacts: [], timestamp: 1 },
         { id: "assistant-other", role: "assistant", content: "earlier", artifacts: [], timestamp: 2 },
@@ -553,6 +554,8 @@ describe("AssistantMarkdownCell run cancellation", () => {
           messageId: "assistant-target",
           markdownSource: "target",
         })}
+        conversationId="conv-fork"
+        workspaceRoot=""
       />,
     );
 
@@ -560,15 +563,16 @@ describe("AssistantMarkdownCell run cancellation", () => {
 
     expect(sendMock).toHaveBeenCalledWith({
       type: "context.fork",
+      conversation_id: "conv-fork",
+      workspace_root: "",
       message_id: "assistant-target",
-      message_index: 2,
       create_branch: true,
       activate: true,
     });
   });
 
   it("stores quoted replies as composer context without inserting text into the draft", () => {
-    useAppStore.setState({ draft: "follow-up", quotedMessage: null });
+    useAppStore.setState({ conversationId: "conv-quote", workingDirectory: "", draft: "follow-up", quotedMessage: null });
 
     render(
       <AssistantMarkdownCell
@@ -577,6 +581,8 @@ describe("AssistantMarkdownCell run cancellation", () => {
           messageId: "assistant-quote",
           markdownSource: "这里是需要引用的回复。",
         })}
+        conversationId="conv-quote"
+        workspaceRoot=""
       />,
     );
 
@@ -624,6 +630,7 @@ describe("AssistantMarkdownCell run cancellation", () => {
     sendMock.mockReturnValue(true);
     useAppStore.setState({
       conversationId: "conv-assistant-regenerate",
+      workingDirectory: "",
       messages: [
         { id: "user-2", role: "user", content: "prompt", artifacts: [], timestamp: 1 },
         { id: "assistant-2", role: "assistant", content: "reply", artifacts: [], timestamp: 2, isStreaming: true },
@@ -645,6 +652,8 @@ describe("AssistantMarkdownCell run cancellation", () => {
           messageId: "assistant-2",
           markdownSource: "reply",
         })}
+        conversationId="conv-assistant-regenerate"
+        workspaceRoot=""
       />,
     );
 

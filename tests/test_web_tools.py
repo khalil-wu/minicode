@@ -150,11 +150,11 @@ def test_strips_canvas_noscript_template() -> None:
 
 def test_extraction_status_failed_for_empty() -> None:
     assert assess_extraction("", 5000) == "failed"
-    assert assess_extraction("short", 5000) == "failed"
+    assert assess_extraction("short", 5000) == "partial"
 
 
-def test_extraction_status_failed_for_very_short() -> None:
-    assert assess_extraction("x" * 19, 10000) == "failed"
+def test_extraction_status_partial_for_very_short_relative_to_raw_content() -> None:
+    assert assess_extraction("x" * 19, 10000) == "partial"
 
 
 def test_extraction_status_partial_for_low_ratio() -> None:

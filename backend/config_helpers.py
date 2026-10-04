@@ -13,7 +13,7 @@ from backend.atomic_io import (
 from backend.feature_flags import coerce_feature_bool
 from backend.llm.model_catalog import MODEL_CONTEXT_WINDOW_DEFAULT, responses_model_catalog_entry
 from backend.llm.proxy_policy import normalize_provider_proxy_mode
-from backend.llm.provider_contracts import normalize_tool_mode
+from backend.llm.provider_contracts import normalize_model_limit, normalize_tool_mode
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import wraps
@@ -362,16 +362,12 @@ def _vault_has_scoped_provider_keys(provider: str) -> bool:
         for name, value in os.environ.items()
     ):
         return True
-    try:
-        from backend.vault import EnvVault
+    from backend.vault import EnvVault
 
-        return any(
-            str(entry.get("name") or "").startswith(prefix)
-            for entry in EnvVault().list_names()
-            if isinstance(entry, dict)
-        )
-    except Exception:
-        return False
+    return any(
+        str(entry.get("name") or "").startswith(prefix)
+        for entry in EnvVault().list_names()
+    )
 
 
 def _global_provider_key_matches_base_url(provider: str, base_url: str) -> bool:
@@ -399,12 +395,9 @@ def _global_provider_key_matches_base_url(provider: str, base_url: str) -> bool:
 
 
 def _vault_api_key(name: str) -> str:
-    try:
-        from backend.vault import EnvVault
+    from backend.vault import EnvVault
 
-        value = EnvVault().get(name)
-    except Exception:
-        return ""
+    value = EnvVault().get(name)
     return str(value or "").strip()
 
 
@@ -517,7 +510,7 @@ def _coerce_model_metadata(value: Any) -> dict[str, dict[str, Any]]:
         if not model_id or not isinstance(raw_metadata, Mapping):
             continue
         metadata: dict[str, Any] = {}
-        context_window = _coerce_int(
+        context_window = normalize_model_limit(
             next(
                 (
                     raw_metadata.get(key)
@@ -533,11 +526,10 @@ def _coerce_model_metadata(value: Any) -> dict[str, dict[str, Any]]:
                 ),
                 0,
             ),
-            0,
         )
         if context_window > 0:
             metadata["context_window"] = context_window
-        max_context_window = _coerce_int(
+        max_context_window = normalize_model_limit(
             next(
                 (
                     raw_metadata.get(key)
@@ -546,11 +538,10 @@ def _coerce_model_metadata(value: Any) -> dict[str, dict[str, Any]]:
                 ),
                 0,
             ),
-            0,
         )
         if max_context_window > 0:
             metadata["max_context_window"] = max_context_window
-        max_output_tokens = _coerce_int(
+        max_output_tokens = normalize_model_limit(
             next(
                 (
                     raw_metadata.get(key)
@@ -564,7 +555,6 @@ def _coerce_model_metadata(value: Any) -> dict[str, dict[str, Any]]:
                 ),
                 0,
             ),
-            0,
         )
         if max_output_tokens > 0:
             metadata["max_output_tokens"] = max_output_tokens
@@ -1566,16 +1556,19 @@ def _load_settings_json() -> dict:
         return value
 
 
+_CONFIG_CWD_UNSET = object()
+
+
 def load_config_layer_stack(
     *,
     session_flags: Mapping[str, Any] | None = None,
-    cwd: Path | None = None,
+    cwd: Path | None | object = _CONFIG_CWD_UNSET,
     requirements_path: Path | None = None,
     managed_settings_dir: Path | None = None,
     managed_settings_result: Any | None = None,
     remote_managed_settings: Mapping[str, Any] | None = None,
 ) -> "ConfigLayerStack":
-    """Materialize MiniCode config precedence and managed constraints."""
+    """Load config; omitted cwd follows the active workspace, None is projectless."""
     from backend.config_layers import ConfigLayer, ConfigLayerSource, load_config_layers_state
     from backend.config_requirements import RequirementSource, RequirementsLayerEntry
     from backend.managed_settings import (
@@ -1584,7 +1577,10 @@ def load_config_layer_stack(
     )
     from backend.workspace.state import get_explicit_active_workspace_root
 
-    workspace_root = cwd if cwd is not None else get_explicit_active_workspace_root()
+    workspace_root = (
+        get_explicit_active_workspace_root()
+        if cwd is _CONFIG_CWD_UNSET else cwd
+    )
     requirements_override = str(os.environ.get("MINICODE_REQUIREMENTS_FILE") or "").strip()
     managed_dir_override = str(
         os.environ.get("MINICODE_MANAGED_SETTINGS_DIR") or ""
@@ -1647,7 +1643,7 @@ def load_config_layer_stack(
 def _load_effective_settings_json(
     *,
     session_flags: Mapping[str, Any] | None = None,
-    cwd: Path | None = None,
+    cwd: Path | None | object = _CONFIG_CWD_UNSET,
 ) -> dict[str, Any]:
     return load_config_layer_stack(session_flags=session_flags, cwd=cwd).effective_config()
 

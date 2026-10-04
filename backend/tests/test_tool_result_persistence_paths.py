@@ -24,7 +24,6 @@ import asyncio
 def test_persisted_tool_result_preview_contains_readable_path(tmp_path, monkeypatch) -> None:
     result_dir = tmp_path / "tool-results"
     monkeypatch.setattr(persistence, "TOOL_RESULT_DATA_DIR", result_dir)
-    monkeypatch.setattr(persistence, "_INITIALIZED", False)
     monkeypatch.setattr(persistence, "PERSIST_THRESHOLD_CHARS", 100)
 
     persisted = persistence.persist_tool_result("x" * 500, "call/web", "web_fetch")
@@ -40,7 +39,6 @@ def test_owned_persisted_tool_result_is_readable_but_not_writable_for_owner(tmp_
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setattr(persistence, "TOOL_RESULT_DATA_DIR", result_dir)
-    monkeypatch.setattr(persistence, "_INITIALIZED", False)
 
     persisted = persistence.persist_tool_result(
         "cached result",
@@ -92,7 +90,6 @@ def test_owned_persisted_tool_result_rejects_cross_owner_and_legacy_reads(tmp_pa
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setattr(persistence, "TOOL_RESULT_DATA_DIR", result_dir)
-    monkeypatch.setattr(persistence, "_INITIALIZED", False)
 
     persisted = persistence.persist_tool_result(
         "secret from conv-a",
@@ -191,7 +188,6 @@ def test_read_artifact_persisted_result_is_owner_scoped(tmp_path, monkeypatch) -
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setattr(persistence, "TOOL_RESULT_DATA_DIR", result_dir)
-    monkeypatch.setattr(persistence, "_INITIALIZED", False)
 
     persisted = persistence.persist_tool_result(
         "artifact cache for conv-a",
@@ -226,7 +222,6 @@ def test_read_artifact_persisted_result_is_owner_scoped(tmp_path, monkeypatch) -
 def test_oversized_tool_results_are_persisted_before_stable_preview(tmp_path, monkeypatch) -> None:
     result_dir = tmp_path / "tool-results"
     monkeypatch.setattr(persistence, "TOOL_RESULT_DATA_DIR", result_dir)
-    monkeypatch.setattr(persistence, "_INITIALIZED", False)
     monkeypatch.setattr(persistence, "PERSIST_THRESHOLD_CHARS", 100)
 
     builder = ContextBuilder(token_budget=TokenBudget(total=200_000, response_reserve=1_000))
@@ -244,7 +239,6 @@ def test_aggregate_tool_budget_never_replaces_an_already_seen_result(
     """Claude Code freezes prior inline/replaced decisions for cache stability."""
     result_dir = tmp_path / "tool-results"
     monkeypatch.setattr(persistence, "TOOL_RESULT_DATA_DIR", result_dir)
-    monkeypatch.setattr(persistence, "_INITIALIZED", False)
     monkeypatch.setattr(context_module, "PER_MESSAGE_TOOL_RESULT_BUDGET_CHARS", 10_000)
 
     builder = ContextBuilder(
@@ -283,7 +277,6 @@ def test_snapshot_restore_freezes_existing_inline_tool_results(
 ) -> None:
     result_dir = tmp_path / "tool-results"
     monkeypatch.setattr(persistence, "TOOL_RESULT_DATA_DIR", result_dir)
-    monkeypatch.setattr(persistence, "_INITIALIZED", False)
     monkeypatch.setattr(context_module, "PER_MESSAGE_TOOL_RESULT_BUDGET_CHARS", 10_000)
 
     original = ContextBuilder(
@@ -319,7 +312,6 @@ def test_snapshot_restore_freezes_existing_inline_tool_results(
 
 def test_aggregate_budget_does_not_expand_a_small_result(tmp_path, monkeypatch):
     monkeypatch.setattr(persistence, "TOOL_RESULT_DATA_DIR", tmp_path / "tool-results")
-    monkeypatch.setattr(persistence, "_INITIALIZED", False)
     monkeypatch.setattr(context_module, "PER_MESSAGE_TOOL_RESULT_BUDGET_CHARS", 1)
     builder = ContextBuilder()
     builder.append_user("inspect")

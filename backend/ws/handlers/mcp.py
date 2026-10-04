@@ -28,6 +28,7 @@ from backend.services.mcp_service import (
     update_mcp_server,
 )
 from backend.ws.command_results import emit_command_error
+from backend.ws.mcp_projection import send_mcp_projection
 
 if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
@@ -35,22 +36,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _session_mcp_manager(session: "WebSocketSession") -> Any | None:
-    manager = getattr(session, "mcp_manager", None)
-    if manager is not None:
-        return manager
-    from backend.api.routes_health import get_mcp_manager
-
-    return get_mcp_manager()
+def _session_mcp_manager(session: "WebSocketSession") -> Any:
+    manager = session.mcp_manager
+    if manager is None:
+        raise MCPServiceError("MCP manager is not available for this conversation yet")
+    return manager
 
 
-async def _reload_other_mcp_managers(session: "WebSocketSession") -> None:
+def _command_mcp_manager(session: "WebSocketSession", data: dict[str, Any]) -> Any | None:
+    if "conversation_id" in data or "workspace_root" in data:
+        from backend.ws.command_scope import resolve_command_scope
+
+        try:
+            resolve_command_scope(session, data, require_conversation=False)
+        except ValueError as exc:
+            raise MCPServiceError(str(exc)) from exc
+    return _session_mcp_manager(session)
+
+
+async def _reload_other_mcp_managers(manager: Any) -> None:
     from backend.api import _state
 
     bootstrap = getattr(_state, "bootstrap", None)
     reload_managers = getattr(bootstrap, "reload_mcp_managers", None)
     if callable(reload_managers):
-        await reload_managers(exclude=_session_mcp_manager(session))
+        await reload_managers(exclude=manager)
 
 
 class _ProviderOAuthCallbacks:
@@ -558,13 +568,13 @@ def _mcp_command_result_data(
 
 async def handle_mcp_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     try:
-        servers = get_mcp_status(_session_mcp_manager(session))
+        manager = _command_mcp_manager(session, data)
+        servers = get_mcp_status(manager)
     except MCPServiceError as exc:
         await emit_command_error(session, "mcp.list", exc)
         return True
-    await session.send_payload(
+    await send_mcp_projection(session, manager,
         {"type": "mcp_status", "servers": servers},
-        log_context="mcp_status",
     )
     await session.send_event(AgentEvent.command_result("mcp.list", ""))
     return True
@@ -607,8 +617,13 @@ async def handle_mcp_inventory_list(session: "WebSocketSession", data: dict[str,
         )
         return True
 
+    try:
+        manager = _command_mcp_manager(session, data)
+    except MCPServiceError as exc:
+        await emit_command_error(session, "mcp.inventory.list", exc)
+        return True
     task = asyncio.create_task(
-        list_mcp_inventory(_session_mcp_manager(session), server_name),
+        list_mcp_inventory(manager, server_name),
         name=f"mcp-inventory:{server_name}:{operation_id}",
     )
     tasks[operation_id] = task
@@ -722,9 +737,10 @@ async def _run_mcp_server_command(
     thirty-line response shape five times.
     """
     try:
-        servers = await invoke(_session_mcp_manager(session), data)
+        manager = _command_mcp_manager(session, data)
+        servers = await invoke(manager, data)
         if reload_other_managers:
-            await _reload_other_mcp_managers(session)
+            await _reload_other_mcp_managers(manager)
         refreshed = session.refresh_tool_registry_if_mcp_changed(allow_when_busy=False)
     except catch as exc:
         error: BaseException | str = exc
@@ -732,9 +748,8 @@ async def _run_mcp_server_command(
             error = error_template.format(exc=exc)
         await emit_command_error(session, command, error)
         return True
-    await session.send_payload(
+    await send_mcp_projection(session, manager,
         {"type": "mcp_status", "servers": servers},
-        log_context="mcp_status",
     )
     name = str(data.get("name", "")).strip()
     await session.send_event(
@@ -794,17 +809,18 @@ async def _handle_project_mcp_decision(
     from backend.ws.command_scope import resolve_command_scope
 
     try:
+        manager = _session_mcp_manager(session)
         scope = resolve_command_scope(session, data)
         if approved:
             servers = await approve_project_mcp(
-                _session_mcp_manager(session),
+                manager,
                 str(data.get("name") or ""),
                 workspace_root=scope.workspace_root,
                 approve_all=approve_all,
             )
         else:
             servers = await reject_project_mcp(
-                _session_mcp_manager(session),
+                manager,
                 str(data.get("name") or ""),
                 workspace_root=scope.workspace_root,
             )
@@ -812,9 +828,8 @@ async def _handle_project_mcp_decision(
     except Exception as exc:
         await emit_command_error(session, command, exc)
         return True
-    await session.send_payload(
+    await send_mcp_projection(session, manager,
         {"type": "mcp_status", "servers": servers},
-        log_context="mcp_status",
     )
     name = str(data.get("name") or "").strip()
     await session.send_event(
@@ -873,6 +888,7 @@ async def handle_env_list(session: "WebSocketSession", data: dict[str, Any]) -> 
         {"type": "env.list", "entries": list_env_entries().entries},
         log_context="env.list",
     )
+    await session.send_event(AgentEvent.command_result("env.list", "", level="success"))
     return True
 
 
@@ -952,6 +968,9 @@ async def handle_scheduler_list(session: "WebSocketSession", data: dict[str, Any
         await emit_command_error(session, "scheduler.list", exc)
         return True
     await _send_scheduler_snapshot(session, scheduler, scope=scope)
+    await session.send_event(
+        AgentEvent.command_result("scheduler.list", "", level="success", data=scope.apply({}))
+    )
     return True
 
 
@@ -972,6 +991,34 @@ async def handle_scheduler_add(session: "WebSocketSession", data: dict[str, Any]
     await session.send_event(
         AgentEvent.command_result("scheduler.add", "", data={"name": str(data.get("name", "")).strip()})
     )
+    return True
+
+
+async def handle_scheduler_update(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.services.scheduler_service import SchedulerServiceError, update_scheduled_task
+
+    scheduler = _get_scheduler(session)
+    try:
+        scope = _scheduler_command_scope(session, data)
+        result = update_scheduled_task(scheduler, data, workspace_root=scope.workspace_root)
+    except (SchedulerServiceError, ValueError) as exc:
+        await emit_command_error(session, "scheduler.update", exc)
+        return True
+    await session.send_payload(_scheduler_snapshot_payload(result, scope), log_context="scheduler.list")
+    await session.send_event(AgentEvent.command_result("scheduler.update", "", data=scope.apply({"task_id": data["task_id"]})))
+    return True
+
+
+async def handle_scheduler_history(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.services.scheduler_service import SchedulerServiceError, scheduled_run_history
+
+    try:
+        scope = _scheduler_command_scope(session, data)
+        result = scheduled_run_history(_get_scheduler(session), data, workspace_root=scope.workspace_root)
+    except (SchedulerServiceError, ValueError) as exc:
+        await emit_command_error(session, "scheduler.history", exc)
+        return True
+    await session.send_event(AgentEvent.command_result("scheduler.history", "", data=scope.apply(result)))
     return True
 
 
@@ -1053,7 +1100,7 @@ async def handle_scheduler_toggle(session: "WebSocketSession", data: dict[str, A
             "",
             data={
                 "task_id": str(data.get("task_id", "")).strip(),
-                "enabled": bool(data.get("enabled")),
+                "enabled": data.get("enabled", True),
             },
         )
     )
@@ -1062,14 +1109,14 @@ async def handle_scheduler_toggle(session: "WebSocketSession", data: dict[str, A
 
 async def handle_mcp_oauth_login(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     try:
-        servers = await login_mcp_server(_session_mcp_manager(session), data.get("name", ""))
+        manager = _command_mcp_manager(session, data)
+        servers = await login_mcp_server(manager, data.get("name", ""))
         refreshed = session.refresh_tool_registry_if_mcp_changed(allow_when_busy=False)
     except (MCPServiceError, KeyError) as exc:
         await emit_command_error(session, "mcp.oauth.login", exc)
         return True
-    await session.send_payload(
+    await send_mcp_projection(session, manager,
         {"type": "mcp_status", "servers": servers},
-        log_context="mcp_status",
     )
     name = str(data.get("name", "")).strip()
     await session.send_event(
@@ -1089,14 +1136,14 @@ async def handle_mcp_oauth_login(session: "WebSocketSession", data: dict[str, An
 
 async def handle_mcp_oauth_logout(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     try:
-        servers = await logout_mcp_server(_session_mcp_manager(session), data.get("name", ""))
+        manager = _command_mcp_manager(session, data)
+        servers = await logout_mcp_server(manager, data.get("name", ""))
         refreshed = session.refresh_tool_registry_if_mcp_changed(allow_when_busy=False)
     except (MCPServiceError, KeyError) as exc:
         await emit_command_error(session, "mcp.oauth.logout", exc)
         return True
-    await session.send_payload(
+    await send_mcp_projection(session, manager,
         {"type": "mcp_status", "servers": servers},
-        log_context="mcp_status",
     )
     name = str(data.get("name", "")).strip()
     await session.send_event(
@@ -1304,6 +1351,8 @@ HANDLERS: dict[str, Any] = {
     "env.delete": handle_env_delete,
     "scheduler.list": handle_scheduler_list,
     "scheduler.add": handle_scheduler_add,
+    "scheduler.update": handle_scheduler_update,
+    "scheduler.history": handle_scheduler_history,
     "scheduler.remove": handle_scheduler_remove,
     "scheduler.toggle": handle_scheduler_toggle,
     "scheduler.run_now": handle_scheduler_run_now,

@@ -2,11 +2,13 @@
 
 const crypto = require("node:crypto");
 const http = require("node:http");
+const { TextDecoder } = require("node:util");
 
 let manager = null;
 let token = "";
 let appendDesktopLog = () => {};
 let server = null;
+let starting = null;
 let endpoint = "";
 let accepting = false;
 const inFlight = new Set();
@@ -25,26 +27,31 @@ function tokenMatches(value) {
 
 function readJsonBody(request, maxBytes = 1_000_000) {
   return new Promise((resolve, reject) => {
-    let body = "";
-    request.setEncoding("utf8");
+    const chunks = [];
+    let bytes = 0;
     request.on("data", (chunk) => {
-      body += chunk;
-      if (Buffer.byteLength(body, "utf8") > maxBytes) {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
         reject(new Error("Request body is too large."));
         request.destroy();
+        return;
       }
+      chunks.push(chunk);
     });
     request.on("end", () => {
-      try { resolve(body ? JSON.parse(body) : {}); }
-      catch { reject(new Error("Request body must be valid JSON.")); }
+      try {
+        const body = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks, bytes));
+        resolve(body ? JSON.parse(body) : {});
+      } catch { reject(new Error("Request body must be valid UTF-8 JSON.")); }
     });
     request.on("error", reject);
   });
 }
 
 function sendJson(response, status, payload) {
+  const body = JSON.stringify(payload);
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-  response.end(JSON.stringify(payload));
+  response.end(body);
 }
 
 async function handleRequest(request, response) {
@@ -71,30 +78,50 @@ async function handleRequest(request, response) {
 }
 
 async function start() {
-  if (server) return endpoint;
-  accepting = true;
-  server = http.createServer((request, response) => {
-    const operation = handleRequest(request, response);
-    inFlight.add(operation);
-    void operation.finally(() => inFlight.delete(operation));
-  });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      server.off("error", reject);
-      resolve();
+  if (starting) return starting;
+  if (server) {
+    if (!accepting) throw new Error("Embedded browser bridge is stopping");
+    return endpoint;
+  }
+  starting = (async () => {
+    accepting = true;
+    const active = http.createServer((request, response) => {
+      const operation = handleRequest(request, response);
+      inFlight.add(operation);
+      void operation.finally(() => inFlight.delete(operation));
     });
-  });
-  endpoint = `http://127.0.0.1:${server.address().port}`;
-  appendDesktopLog(`[desktop] embedded browser bridge listening on ${endpoint}`);
-  return endpoint;
+    server = active;
+    try {
+      await new Promise((resolve, reject) => {
+        active.once("error", reject);
+        active.listen(0, "127.0.0.1", () => {
+          active.off("error", reject);
+          resolve();
+        });
+      });
+      if (!accepting) throw new Error("Embedded browser bridge is stopping");
+      endpoint = `http://127.0.0.1:${active.address().port}`;
+      appendDesktopLog(`[desktop] embedded browser bridge listening on ${endpoint}`);
+      return endpoint;
+    } catch (error) {
+      const closed = new Promise((resolve) => active.close(() => resolve()));
+      active.closeAllConnections();
+      await closed;
+      if (server === active) server = null;
+      endpoint = "";
+      accepting = false;
+      throw error;
+    } finally {
+      starting = null;
+    }
+  })();
+  return starting;
 }
 
 async function stop() {
   accepting = false;
+  if (starting) await starting.catch(() => {});
   const active = server;
-  server = null;
-  endpoint = "";
   if (!active) return;
   const closed = new Promise((resolve) => active.close(() => resolve()));
   // Stop owns the live HTTP connections, including requests which have not
@@ -103,6 +130,8 @@ async function stop() {
   active.closeAllConnections();
   await closed;
   if (inFlight.size) await Promise.allSettled(Array.from(inFlight));
+  if (server === active) server = null;
+  endpoint = "";
 }
 
 module.exports = { init, start, stop };

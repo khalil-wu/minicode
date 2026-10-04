@@ -47,11 +47,9 @@ _WORKSPACE_ROOT_UNSET = object()
 
 
 def _current_bootstrap() -> Any | None:
-    try:
-        from backend.api import _state
-    except Exception:
-        return None
-    return getattr(_state, "bootstrap", None)
+    from backend.api import _state
+
+    return _state.bootstrap
 
 
 def get_attachment_store() -> AttachmentStore:
@@ -127,6 +125,7 @@ def build_tool_registry(
         ),
         agent_settings_provider=config_snapshot.agent,
         token_budget_provider=config_snapshot.token_budget,
+        workspace_root=resolved_workspace_root,
     )
     registry.register(task_tool)
     registry.register(TaskStopTool())

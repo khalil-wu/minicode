@@ -23,14 +23,31 @@ class PreviewServerTool(BaseTool):
     activity_kind = "genericTool"
     display_label = "Preview server"
     description = (
-        "Manage a live preview dev server. Actions: "
-        "'start' launches the configured dev server and returns its process state; "
-        "'stop' terminates only a preview server owned by the current session and conversation; "
-        "'verify' checks if a URL is responding; "
-        "'detect' scans common ports for running servers; "
-        "'status' returns current preview process state. "
-        "For a standalone HTML file, use "
-        "preview_server(action='start', path='snake.html')."
+        "Manage previews scoped to the current session, conversation and workspace. "
+        "start launches a configured dev server or an existing workspace .html/.htm "
+        "file via path; starting a listener is subject to the current permission flow. "
+        "start is asynchronous: status='starting' is a valid accepted launch, including "
+        "for static HTML, not failure or readiness. Do not repeatedly start/restart "
+        "just because it is starting. Without timeout, start does not await HTTP "
+        "readiness; verify the current owned URL separately. A URL, PID or successful "
+        "tool result alone is not readiness: status='ready' may be set by a URL in "
+        "process output, not an HTTP check. status returns an owner-scoped process "
+        "snapshot, not a health probe; stopped/crashed entries may already be removed. "
+        "verify returns JSON with ok, the HTTP status and error; ok=true means the checked "
+        "HTTP response was below 500 (including 4xx), not that the intended page or "
+        "app works. verify does not change process status. Read any start verification "
+        "result even when status says ready, then inspect the actual browser page. "
+        "Startup errors, verification ok=false, and stopped/crashed/stopping or "
+        "processes awaiting cleanup must not be presented as a working preview; there "
+        "is no guaranteed literal 'failed' status in tool results. stop only targets "
+        "owned previews. detect scans common ports but neither establishes ownership "
+        "nor authorizes browser access. Use only fresh URLs returned by the owned "
+        "preview, preserving any port/token/path; never construct one or reuse it "
+        "after failure, stop or restart. Ownership and host metadata do not grant "
+        "permission beyond the user's main task or override network policy. For a "
+        "standalone file, browser_control(action='navigate', url='index.html') can "
+        "start the owned static preview directly; use preview_server for explicit "
+        "lifecycle control and HTTP verification."
     )
     permission = PermissionLevel.AUTO
     read_only = True
@@ -69,26 +86,60 @@ class PreviewServerTool(BaseTool):
                     "action": {
                         "type": "string",
                         "enum": ["start", "stop", "verify", "detect", "status"],
-                        "description": "The action to perform.",
+                        "description": (
+                            "start accepts an asynchronous launch and may return starting, including "
+                            "for static HTML; this is not failed or ready. status reads owned process "
+                            "metadata without probing "
+                            "HTTP; verify checks HTTP and reports success, HTTP status and errors; stop "
+                            "terminates owned previews. detect finds listeners only, not authorized "
+                            "previews. A successful tool envelope is not proof of a working page."
+                        ),
                     },
                     "name": {
                         "type": "string",
-                        "description": "Server name (for start/stop). Uses first config if omitted.",
+                        "description": (
+                            "For start, an exact launch-configuration name; omitted selects the first "
+                            "configuration unless path is supplied. For stop, an owned preview name "
+                            "from status; omitted stops all matching previews in the current owner "
+                            "scope, not just the first. Not an arbitrary command or external server id."
+                        ),
                     },
                     "url": {
                         "type": "string",
-                        "description": "URL to verify (for 'verify' action).",
+                        "description": (
+                            "For verify: a public HTTP(S) URL or the exact fresh URL of an active owned "
+                            "loopback preview. An owned starting process can be checked; do not require "
+                            "its status to become ready first. Omitted uses the first owned preview's "
+                            "current URL, "
+                            "or errors if none exists. Local/private/unresolved/credential-bearing "
+                            "targets remain subject to ownership and verification policy; browser "
+                            "preview-origin metadata alone does not register an owned process here. "
+                            "Only same-origin redirects are followed. Preserve returned port/token/path; "
+                            "do not guess a URL or reuse one after stop, failure or restart."
+                        ),
                     },
                     "path": {
                         "type": "string",
-                        "description": "Workspace-relative HTML file to serve for a standalone static preview.",
+                        "description": (
+                            "For start: an existing .html/.htm file inside the active workspace; prefer "
+                            "a workspace-relative path. Takes precedence over name and starts an owned "
+                            "static preview with an allocated port and tokenized URL. Static start may "
+                            "return starting; verify its actual URL rather than treating this as failure. "
+                            "Does not run an "
+                            "app backend. Alternatively pass the file directly to browser_control.navigate."
+                        ),
                     },
                     "timeout": {
                         "type": "number",
                         "exclusiveMinimum": 0,
                         "description": (
-                            "Optional HTTP request timeout in seconds for start/verify. "
-                            "When omitted, start returns immediately and verify uses no adapter timeout."
+                            "Optional positive seconds. start polls HTTP readiness up to this deadline "
+                            "when a URL is available and returns verification; a failed check can still "
+                            "leave a starting/ready process, so inspect verification.ok/error. Without "
+                            "timeout, start does not wait for HTTP and a starting result is normal. "
+                            "verify uses this as its HTTP request "
+                            "timeout; omitted defaults to 10 seconds per request. Neither proves rendering "
+                            "or app correctness, and verify does not promote process status to ready."
                         ),
                     },
                 },
@@ -149,7 +200,7 @@ class PreviewServerTool(BaseTool):
 
     async def _start(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         from backend.preview.launcher import mark_preview_ready, start_preview_launch, start_static_preview
-        from backend.preview.verifier import wait_until_ready
+        from backend.preview.verifier import PreviewProcessChangedError, wait_until_ready
 
         name = args.get("name")
         path = str(args.get("path") or "").strip()
@@ -189,7 +240,10 @@ class PreviewServerTool(BaseTool):
 
         verification = None
         if timeout is not None and proc.effective_url:
-            verification = await wait_until_ready(proc.effective_url, timeout=timeout)
+            try:
+                verification = await wait_until_ready(proc.effective_url, timeout=timeout, process=proc)
+            except PreviewProcessChangedError as exc:
+                return self._error_result(str(exc))
             if verification.ok:
                 await mark_preview_ready(proc)
         if proc.process.returncode is not None:
@@ -197,8 +251,8 @@ class PreviewServerTool(BaseTool):
                 f"Preview process exited with code {proc.process.returncode} before startup completed."
                 + ("\n" + "\n".join(proc.stderr_tail) if proc.stderr_tail else "")
             )
-        if proc.status == "stopping":
-            return self._error_result("Preview process was stopped before startup completed.")
+        if not proc.is_active:
+            return self._error_result("Preview process was stopped, restarted, or is awaiting cleanup before startup completed.")
         status = "ready" if proc.status == "ready" else "starting"
         payload = {
             "status": status,

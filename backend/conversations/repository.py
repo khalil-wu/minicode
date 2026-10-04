@@ -87,6 +87,10 @@ class ConversationRepository:
         self._manifest_cache: dict[str, tuple[tuple[int, int], dict[str, Any]]] = {}
         self._partial_projection_cache: OrderedDict[str, tuple[int, int, tuple[int, int], dict[str, Any]]] = OrderedDict()
 
+    @property
+    def storage_root(self) -> Path:
+        return self._base_dir.resolve()
+
     def create_conversation(
         self,
         *,
@@ -111,6 +115,7 @@ class ConversationRepository:
         fork_id: str = "",
         branch_kind: str = "",
         model_selection: dict[str, str] | None = None,
+        reuse_existing: bool = False,
     ) -> ConversationRecord:
         requested_id = str(conversation_id or "").strip()
         initial_transcript = project_public_transcript(transcript or [])
@@ -138,6 +143,17 @@ class ConversationRepository:
         )
         # Creation owns ID allocation, including replacement of an occupied ID.
         with self._store_lock():
+            if reuse_existing:
+                if not requested_id or candidate_id != requested_id:
+                    raise ValueError("Reusing a conversation requires its valid explicit id")
+                existing = self._load_record(requested_id)
+                if existing is not None:
+                    if (existing.archived or existing.conversation_type != normalized_conversation_type
+                            or existing.workspace_root != workspace_root or existing.git_isolated != git_isolated):
+                        raise ValueError("The existing conversation does not match the requested scope")
+                    return existing
+                if self._manifest_path_for(requested_id).exists():
+                    raise ValueError("The requested conversation id belongs to a deleted or unavailable conversation")
             # A delete tombstone permanently reserves the old lifecycle id.
             # Reusing it would let delayed events, uploads, or detached writers
             # from the deleted lifecycle attach to an unrelated new record.
@@ -221,7 +237,8 @@ class ConversationRepository:
                         snapshot = dict(metadata["public_context_snapshot"])
                         delta = projection.get("context_delta", {})
                         snapshot.update(delta.get("set", {}))
-                        for key in delta.get("removed", []): snapshot.pop(key, None)
+                        for key in delta.get("removed", []):
+                            snapshot.pop(key, None)
                         current = {**metadata, **manifest.get("metadata", {}), "context_snapshot": snapshot}
                         page = read_transcript_page(transcript_path, metadata["transcript_index"], limit=limit,
                                                     before_message_id=before_message_id, replacement=projection.get("assistant_message"))
@@ -706,6 +723,8 @@ class ConversationRepository:
         context_delta: dict[str, Any] | None = None,
         partial: bool = False,
         return_record: bool = True,
+        source_user_message_ids: list[str] | None = None,
+        source_run_id: str = "",
     ) -> ConversationRecord | ConversationSummary | None:
         """Atomically publish one terminal conversation projection.
 
@@ -728,6 +747,20 @@ class ConversationRepository:
                 else None
             )
             current_revision = max(0, int(getattr(record, "revision", 0) or 0))
+            if source_user_message_ids is not None:
+                user_ids = [str(item.get("id") or "") for item in record.transcript if item.get("role") == "user"]
+                admissions = record.context_snapshot.get("turn_admissions", {})
+                if (
+                    not source_user_message_ids
+                    or not set(source_user_message_ids).issubset(user_ids)
+                    or user_ids[-1] not in source_user_message_ids
+                    or any(
+                        source_run_id and message_id in admissions
+                        and str(admissions[message_id].get("run_id") or "") != source_run_id
+                        for message_id in source_user_message_ids
+                    )
+                ):
+                    raise ConversationWriteConflict(conversation_id, expected=expected_revision if expected_revision is not None else current_revision, current=current_revision)
             if expected_revision is not None and current_revision != expected_revision:
                 message_id = str((projected_message or {}).get("id") or "").strip()
                 existing_message = next(
@@ -753,7 +786,8 @@ class ConversationRepository:
                 # Renaming/archiving while a turn streams does not change its
                 # input history. Preserve that newer metadata and commit the
                 # projection only when its context checkpoint is still current.
-                if expected_revision < projection_revision or expected_revision > current_revision:
+                owned_delta = context_delta is not None and source_user_message_ids is not None
+                if expected_revision > current_revision or (expected_revision < projection_revision and not owned_delta):
                     raise ConversationWriteConflict(
                         conversation_id,
                         expected=expected_revision,
@@ -848,7 +882,7 @@ class ConversationRepository:
             record.context_snapshot = copy.deepcopy(dict(context_snapshot or {}))
             record.message_count = len(record.transcript)
             if record.title == "New chat":
-                record.title = _derive_title(str(next_message.get("content", "")))
+                record.title = _derive_title(str(next_message.get("display_content", next_message.get("content", ""))))
             record.updated_at = utc_now_iso()
             self._commit_record(record)
             self._cache_record(record)
@@ -1206,6 +1240,25 @@ class ConversationRepository:
             self._cache_record(record)
             return record
 
+    def ensure_plan_owner(
+        self, conversation_id: str, *, workspace_root: str | Path | None = None,
+    ) -> ConversationRecord | None:
+        """Allocate one conversation plan slug from the latest durable snapshot."""
+        from backend.agent.plans import ensure_plan_slug
+
+        with self._store_lock(conversation_id):
+            record = self._load_record_for_mutation(conversation_id)
+            if record is None:
+                return None
+            snapshot = dict(record.context_snapshot or {})
+            ensure_plan_slug(snapshot, workspace_root or record.workspace_root or None)
+            if snapshot != record.context_snapshot:
+                record.context_snapshot = snapshot
+                record.updated_at = utc_now_iso()
+                self._commit_record(record)
+                self._cache_record(record)
+            return record
+
     def save_context_snapshot(
         self, conversation_id: str, context_snapshot: dict[str, Any]
     ) -> ConversationRecord | None:
@@ -1402,7 +1455,8 @@ class ConversationRepository:
                 raise ValueError("manifest must be an object")
             if payload.get("schema") != _STORAGE_MANIFEST_SCHEMA:
                 raise ValueError("unsupported manifest schema")
-            if int(payload.get("version") or 0) not in {1, 2, 3, 4, 5, 6, 7, _STORAGE_MANIFEST_VERSION}:
+            version = payload.get("version")
+            if isinstance(version, bool) or not isinstance(version, int) or version not in {1, 2, 3, 4, 5, 6, 7, _STORAGE_MANIFEST_VERSION}:
                 raise ValueError("unsupported manifest version")
             if str(payload.get("conversation_id") or "") != self._safe_id(conversation_id):
                 raise ValueError("manifest conversation id mismatch")

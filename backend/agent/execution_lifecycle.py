@@ -45,7 +45,7 @@ class ExecutionLifecycle:
             self.result = dict(result)
         if error is not None:
             self.error = dict(error)
-        if self.status in {"completed", "failed", "cancelled", "interrupted", "partial"}:
+        if self.completed_at is None and self.status in {"completed", "failed", "cancelled", "interrupted", "partial"}:
             self.completed_at = self.updated_at
 
     def to_payload(self) -> dict[str, Any]:

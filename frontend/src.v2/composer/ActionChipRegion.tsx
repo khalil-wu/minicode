@@ -1,6 +1,7 @@
 import { Blocks, Folder, MessageSquareText, X } from "lucide-react";
 import { fileIcon } from "../lib/file-icons";
 import { useAppStore } from "../stores";
+import { contextReferenceLabel, openContextReference } from "../chat/contextReferenceActions";
 
 export const ContextChipRegion = () => {
   const actionChip = useAppStore((s) => s.actionChip);
@@ -29,17 +30,17 @@ export const ContextChipRegion = () => {
             <button
               type="button"
               aria-label={`打开 ${item.name}`}
-              onClick={() => openEditorFile(item.path, item.name, { exact: true })}
+              onClick={() => openContextReference(item)}
               style={mentionLabelButtonStyle}
             >
               {fileIcon(item.name || item.path || "file", { size: 12, className: "composer-context-icon-svg" })}
-              <span style={mentionNameStyle}>@{item.name}</span>
+              <span style={mentionNameStyle}>@{contextReferenceLabel(item)}</span>
             </button>
           ) : item.kind === "browser_annotation" ? (
-            <span style={mentionLabelStyle}>
+            <button type="button" onClick={() => openContextReference(item)} style={mentionLabelButtonStyle} title={`${item.url}\n${item.note}`}>
               <MessageSquareText size={14} />
               <span style={mentionNameStyle}>@{item.name}</span>
-            </span>
+            </button>
           ) : item.kind === "plugin" ? (
             <span style={mentionLabelStyle}>
               <Blocks size={14} />
