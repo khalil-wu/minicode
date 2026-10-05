@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from backend.async_cleanup import to_thread_cancel_safe
+from backend.glob_patterns import compile_glob_filter as _compile_glob_filter
 from backend.subprocesses import (
     SubprocessOutputLimitError,
     communicate_bounded,
@@ -26,7 +27,6 @@ from backend.tools.path_resolution import (
 )
 from backend.workspace.path_filters import is_windows_reserved_path
 from backend.workspace.fuzzy_search import iter_search_paths
-from pathspec.gitignore import GitIgnoreSpec
 from collections import deque
 from pathlib import Path
 from typing import (
@@ -309,30 +309,6 @@ def _normalize_file_extensions(file_extensions: Any, file_type: Any = None) -> l
         normalized.update(_GREP_TYPE_EXTENSIONS.get(type_key, ()))
 
     return sorted(normalized)
-
-
-def _compile_glob_filter(pattern: str) -> Callable[[str], bool]:
-    """Compile the path glob used by both Python search tools."""
-    def expand(value: str) -> list[str]:
-        group = re.search(r"(?<!\\)\{([^{}]*)\}", value)
-        if group is None:
-            return [value]
-        return [
-            expanded
-            for alternative in group[1].split(",")
-            for expanded in expand(value[:group.start()] + alternative + value[group.end():])
-        ]
-
-    # Gitignore treats a leading # and trailing spaces as syntax; rg globs
-    # treat those characters as part of the requested filename.
-    escaped = "\\" + pattern if pattern.startswith("#") else pattern
-    trailing = len(escaped) - len(escaped.rstrip(" "))
-    if trailing:
-        escaped = escaped[:-trailing] + "\\ " * trailing
-    spec = GitIgnoreSpec.from_lines(expand(escaped))
-    if pattern.startswith("!"):
-        return lambda relative: spec.check_file(relative).include is not False
-    return spec.match_file
 
 
 def _relative_display_path(file_path: Path, root_path: Path) -> str:

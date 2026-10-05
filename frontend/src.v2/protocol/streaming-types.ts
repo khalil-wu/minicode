@@ -996,6 +996,7 @@ export interface SubagentPlanReviewCommand {
 
 export interface SendMessageCommand {
   type: "send_message";
+  workspace_root?: string;
   recipient: string;
   message: string;
   sender?: string;

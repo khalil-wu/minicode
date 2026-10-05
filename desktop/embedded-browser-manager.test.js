@@ -184,6 +184,22 @@ test("embedded browser settings persist per origin", () => {
   );
 });
 
+test("browser settings publish only after the settings file is committed", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-browser-save-failure-"));
+  const settingsFile = path.join(root, "browser-settings.json");
+  init({ browserSettingsPath: settingsFile });
+  setBrowserSettings({ downloadPolicy: "ask" });
+  setBrowserSettings({ origin: "https://example.com", permission: "notifications", allowed: true });
+  const stored = fs.readFileSync(settingsFile, "utf8");
+  t.mock.method(fs, "renameSync", () => { throw new Error("settings disk failure"); });
+  assert.throws(() => setBrowserSettings({ downloadPolicy: "allow" }), /settings disk failure/);
+  assert.throws(() => setBrowserSettings({ origin: "https://example.com", permission: "media", allowed: true }), /settings disk failure/);
+  assert.deepEqual(getBrowserSettings("https://example.com"), {
+    downloadPolicy: "ask", origin: "https://example.com", permissions: ["notifications"],
+  });
+  assert.equal(fs.readFileSync(settingsFile, "utf8"), stored);
+});
+
 test("allowed downloads never overwrite an existing filename", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-browser-download-"));
   fs.writeFileSync(path.join(root, "report.pdf"), "one");

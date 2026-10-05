@@ -1,6 +1,9 @@
+[CmdletBinding(DefaultParameterSetName = "Installer")]
 param(
   [Parameter(Mandatory = $true)][int]$ShellProcessId,
-  [Parameter(Mandatory = $true)][string]$UserDataFolderName
+  [Parameter(Mandatory = $true, ParameterSetName = "Installer")][string]$UserDataFolderName,
+  [Parameter(Mandatory = $true, ParameterSetName = "Desktop")][string]$SandboxHome,
+  [string]$RuntimePath = (Join-Path $PSScriptRoot "codex.exe")
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,11 +23,12 @@ $resolvedSid = $accountIdentity.Translate([Security.Principal.SecurityIdentifier
 if ($resolvedSid -ne $ownerSid.Sid) {
   throw "The desktop shell account and SID disagree."
 }
-$folders = Get-ItemProperty -LiteralPath "Registry::HKEY_USERS\$resolvedSid\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders" -Name AppData -ErrorAction Stop
-$userDataRoot = Join-Path $folders.AppData $UserDataFolderName
-$sandboxHome = Join-Path $userDataRoot "data\windows-sandbox"
-$runtime = Join-Path $PSScriptRoot "codex.exe"
-& $runtime sandbox setup --elevated --user $account --codex-home $sandboxHome
+if ($PSCmdlet.ParameterSetName -eq "Installer") {
+  $folders = Get-ItemProperty -LiteralPath "Registry::HKEY_USERS\$resolvedSid\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders" -Name AppData -ErrorAction Stop
+  $UserDataRoot = Join-Path $folders.AppData $UserDataFolderName
+  $SandboxHome = Join-Path $UserDataRoot "data\windows-sandbox"
+}
+& $RuntimePath sandbox setup --elevated --user $account --codex-home $SandboxHome
 if ($LASTEXITCODE -ne 0) {
   throw "Desktop-user Windows sandbox setup failed (exit code $LASTEXITCODE)."
 }

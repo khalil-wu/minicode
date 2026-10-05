@@ -2,7 +2,8 @@
  * Context tab — captured files, sources, workspace state, and runtime details.
  */
 import { ChevronRight, FileCode2, FileText, FileType, Folder, GitBranch, Image, MessageSquare, MonitorPlay, Layers, Paperclip, SquareTerminal, CalendarClock, Activity } from 'lucide-react'
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
+import { BackgroundCommandDetails } from './BackgroundCommandDetails'
 import { EmptyState } from '../../components/EmptyState'
 import { useAppStore } from '../../stores'
 import { openWebTarget } from '../../chat/openWebTarget'
@@ -37,6 +38,7 @@ import {
 
 export const ActivityTab = () => {
   const conversationId = useAppStore((s) => s.conversationId)
+  const [backgroundDetail, setBackgroundDetail] = useState<{ conversationId: string; commandId: string } | null>(null)
   const hasActiveConversation = useAppStore((s) => hasVisibleActiveConversation(s.conversationId, s.conversations))
   const messages = useAppStore((s) => s.messages)
   const isStreaming = useAppStore((s) => s.isStreaming)
@@ -117,6 +119,10 @@ export const ActivityTab = () => {
     browserAnnotations,
   ])
 
+  if (backgroundDetail && backgroundDetail.conversationId === conversationId) {
+    return <BackgroundCommandDetails conversationId={backgroundDetail.conversationId} commandId={backgroundDetail.commandId} onBack={() => setBackgroundDetail(null)} />
+  }
+
   if (!state.hasConversation) {
     return (
       <div style={activityPanelStyle}>
@@ -149,7 +155,7 @@ export const ActivityTab = () => {
       <ActivityAttachmentsSection items={state.attachments} workingDirectory={workingDirectory} />
       <ActivitySourcesSection items={state.sources} conversationId={conversationId} />
       <ActivityOutputSection items={state.output} />
-      <ActivityRunsSection items={state.runs} />
+      <ActivityRunsSection items={state.runs} onOpenBackground={(commandId) => setBackgroundDetail({ conversationId: conversationId!, commandId })} />
       <ActivityBrowserAnnotationsSection items={state.browserAnnotations} />
       <ActivityBrowserSection items={state.browser} />
       <ActivitySummarySection items={state.summary} />
@@ -410,7 +416,7 @@ const ActivityAttachmentsSection = ({
   )
 }
 
-const ActivityRunsSection = ({ items }: { items: ActivityRunItem[] }) => {
+const ActivityRunsSection = ({ items, onOpenBackground }: { items: ActivityRunItem[]; onOpenBackground: (commandId: string) => void }) => {
   const kinds = new Set(items.map((item) => item.kind))
   const title = kinds.size !== 1
     ? '运行项'
@@ -445,7 +451,7 @@ const ActivityRunsSection = ({ items }: { items: ActivityRunItem[] }) => {
       store.setRightStackTab('subagents')
       return
     }
-    store.setRightStackTab('tasks')
+    if (item.backgroundCommandId) onOpenBackground(item.backgroundCommandId)
   }
 
   return (

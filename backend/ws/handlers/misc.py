@@ -11,9 +11,11 @@ from backend.ws.command_scope import CommandScope, resolve_command_scope
 from backend.config import get_available_models, get_models_source
 
 if TYPE_CHECKING:
+    from backend.agent.runtime import AgentRuntime
     from backend.ws.handler import WebSocketSession
 
 logger = logging.getLogger(__name__)
+_SUBAGENT_TERMINAL_STATUSES = {"completed", "partial", "failed", "cancelled", "interrupted"}
 
 
 async def handle_checkpoint_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
@@ -179,6 +181,7 @@ async def handle_subagent_status(session: "WebSocketSession", data: dict[str, An
             runtime,
             subagent_id,
             scope=scope,
+            read_only=True,
         )
     except ValueError as exc:
         await emit_command_error(session, "subagent.status", exc)
@@ -397,6 +400,7 @@ async def handle_subagent_transcript(session: "WebSocketSession", data: dict[str
             runtime,
             subagent_id,
             scope=scope,
+            read_only=True,
         )
     except ValueError as exc:
         await emit_command_error(session, "subagent.transcript", exc)
@@ -585,6 +589,7 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
             runtime,
             recipient,
             scope=scope,
+            allow_terminal_resume=True,
         )
     except ValueError as exc:
         await session.emit_command_result(
@@ -596,7 +601,7 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
         return True
     parent_run_id = str(getattr(subagent, "parent_run_id", "") or "").strip()
     subagent_status = str(getattr(subagent, "status", "") or "evicted")
-    if subagent_status not in {"running", "pending", "blocked"}:
+    if subagent_status in _SUBAGENT_TERMINAL_STATUSES:
         task_tool = session.tool_registry.get_tool("task")
         resume = getattr(task_tool, "resume_background_subtask", None)
         if not callable(resume):
@@ -986,56 +991,52 @@ async def handle_subagent_plan_review(session: "WebSocketSession", data: dict[st
 
 def _require_subagent_owner(
     session: "WebSocketSession",
-    runtime: Any,
+    runtime: "AgentRuntime",
     subagent_id: str,
     *,
     scope: CommandScope,
+    read_only: bool = False,
+    allow_terminal_resume: bool = False,
 ) -> str:
     record = _load_subagent_record(runtime, subagent_id)
-    metadata_loader = getattr(runtime, "get_subagent_task_metadata", None)
-    metadata = metadata_loader(subagent_id) if callable(metadata_loader) else None
-    metadata = metadata if isinstance(metadata, dict) else {}
-    snapshot_loader = getattr(runtime, "get_subagent_snapshot", None)
-    snapshot = (
-        snapshot_loader(subagent_id, include_result=False)
-        if callable(snapshot_loader)
-        else None
-    )
-    if record is None and not metadata and snapshot is None:
+    metadata = runtime.get_subagent_task_metadata(subagent_id) or {}
+    if record is None and not metadata:
         raise ValueError(f"No subagent found for {subagent_id}.")
-    parent_run_id = str(
-        getattr(record, "parent_run_id", "")
-        or metadata.get("parent_run_id")
-        or (snapshot or {}).get("parent_run_id")
-        or ""
-    ).strip()
-    parent = runtime.get_run(parent_run_id) if parent_run_id else None
-    conversation_id = str(
-        getattr(parent, "conversation_id", "")
-        or (snapshot or {}).get("conversation_id")
-        or ""
-    ).strip()
+    owner = runtime.get_agent_owner_run(subagent_id)
+    conversation_id = str(owner.conversation_id or "").strip() if owner is not None else ""
     if not conversation_id:
         raise ValueError("The subagent owner could not be verified.")
     if conversation_id != scope.conversation_id:
         raise ValueError("The subagent belongs to a different conversation.")
-    owner_session_id = str(
-        getattr(record, "session_id", "")
-        or metadata.get("session_id")
-        or (snapshot or {}).get("session_id")
-        or ""
-    ).strip()
-    if owner_session_id and owner_session_id != str(session.session_id or "").strip():
-        raise ValueError("The subagent belongs to a different session.")
+    # resolve_command_scope has already bound the active conversation and its
+    # workspace. History belongs to that durable scope, not its old websocket.
+    if not read_only:
+        if allow_terminal_resume and record is not None and record.status in _SUBAGENT_TERMINAL_STATUSES:
+            if record.cleanup_pending or runtime.has_live_subagent_task(subagent_id):
+                raise ValueError("The subagent is still finishing its previous execution; retry after cleanup completes.")
+            if not str(session.session_id or "").strip():
+                raise ValueError("The new subagent execution session could not be verified.")
+            # The user's explicit follow-up starts a new incarnation through
+            # TaskTool.resume_background_subtask, which claims the new session.
+            return conversation_id
+        owner_session_id = str(
+            metadata.get("session_id")
+            or (record.session_id if record is not None else "")
+            or owner.session_id
+            or ""
+        ).strip()
+        if not owner_session_id:
+            raise ValueError("The subagent execution session could not be verified.")
+        if owner_session_id != str(session.session_id or "").strip():
+            raise ValueError("The subagent belongs to a different session.")
     return conversation_id
 
 
-def _load_subagent_record(runtime: Any, subagent_id: str) -> Any | None:
+def _load_subagent_record(runtime: "AgentRuntime", subagent_id: str) -> Any | None:
     record = runtime.get_subagent(subagent_id)
     if record is not None:
         return record
-    load_persisted = getattr(runtime, "load_persisted_subagent", None)
-    return load_persisted(subagent_id) if callable(load_persisted) else None
+    return runtime.load_persisted_subagent(subagent_id)
 
 
 async def handle_skills_install(session: "WebSocketSession", data: dict[str, Any]) -> bool:

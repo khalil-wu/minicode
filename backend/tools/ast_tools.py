@@ -62,9 +62,11 @@ _DEFINITION_PATTERNS: dict[str, list[re.Pattern[str]]] = {
     "js":   [re.compile(r"\b(?:function|class|const|let|var)\s+({name})\b"),
              re.compile(r"\bexport\s+(?:default\s+)?(?:function|class|const|let)\s+({name})\b")],
     "go":   [re.compile(r"\bfunc\b.*?({name})\s*[\(\[]"),
-             re.compile(r"\btype\s+({name})\s+(?:struct|interface)")],
+             re.compile(r"\btype\s+({name})\s+(?:struct|interface)"),
+             re.compile(r"\b(?:var|const)\s+(?:[A-Za-z_]\w*\s*,\s*)*({name})\b")],
     "rs":   [re.compile(r"\bfn\s+({name})\s*[\(<]"),
-             re.compile(r"\b(?:struct|enum|trait|impl)\s+({name})\b")],
+             re.compile(r"\b(?:struct|enum|trait|impl)\s+({name})\b"),
+             re.compile(r"\b(?:const|static(?:\s+mut)?)\s+({name})\s*:")],
     "java": [re.compile(r"\b(?:class|interface|enum|record|void|public|private|protected|static)\s+({name})\s*[\(<{]")],
     "kt":   [re.compile(r"\b(?:fun|class|object|interface|val|var)\s+({name})\b")],
     "c":    [re.compile(r"\b\w[\w\s\*]+\s+({name})\s*\("),
@@ -123,9 +125,8 @@ def _python_ast_definitions(content: str, name: str) -> list[int]:
             if node.name == name:
                 lines.append(node.lineno)
         elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == name:
-                    lines.append(node.lineno)
+            if any(name in _python_binding_names(target) for target in node.targets):
+                lines.append(node.lineno)
         elif isinstance(node, (ast.AnnAssign,)):
             if isinstance(node.target, ast.Name) and node.target.id == name:
                 lines.append(node.lineno)
@@ -142,6 +143,16 @@ def _python_ast_definitions(content: str, name: str) -> list[int]:
     return lines
 
 
+def _python_binding_names(target: ast.expr) -> list[str]:
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [name for child in target.elts for name in _python_binding_names(child)]
+    if isinstance(target, ast.Starred):
+        return _python_binding_names(target.value)
+    return []
+
+
 def _regex_definitions(content: str, name: str, ext: str) -> list[int]:
     """对非 Python 文件用正则模式匹配定义，返回行号列表。"""
     patterns = _DEFINITION_PATTERNS.get(ext, [])
@@ -150,6 +161,12 @@ def _regex_definitions(content: str, name: str, ext: str) -> list[int]:
         compiled = re.compile(pat.pattern.replace("{name}", re.escape(name)), pat.flags | re.MULTILINE)
         for m in compiled.finditer(content):
             matched.add(_line_of_pos(content, m.start()))
+    if ext == "go":
+        # Grouped var/const specs omit the keyword on each declaration line.
+        declaration = re.compile(r"^[ \t]*(?:[A-Za-z_]\w*[ \t]*,[ \t]*)*" + re.escape(name) + r"\b", re.M)
+        for group in re.finditer(r"\b(?:var|const)\s*\((.*?)^\s*\)", content, re.S | re.M):
+            for match in declaration.finditer(group[1]):
+                matched.add(_line_of_pos(content, group.start(1) + match.start()))
     return sorted(matched)
 
 

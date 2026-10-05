@@ -53,6 +53,7 @@ class ProviderCapabilities:
     confidence: str = "unknown"
     limitations: tuple[str, ...] = ()
     adapters: tuple["ProviderCapabilities", ...] = ()
+    supports_hosted_web_search: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -154,6 +155,7 @@ def capabilities_from_openai_settings(
         base_url=base_url,
         streaming=False if dedicated_image_model else True,
         tool_calling=tool_calling,
+        supports_hosted_web_search=settings.supports_hosted_web_search,
         parallel_tool_calls=(
             False if dedicated_image_model
             else getattr(settings, "parallel_tool_calls", None)
@@ -236,6 +238,10 @@ def capabilities_from_anthropic_adapter(adapter: Any) -> ProviderCapabilities:
         base_url=base_url,
         streaming=True,
         tool_calling=True,
+        supports_hosted_web_search=(
+            spec.supports_hosted_web_search if spec is not None
+            else getattr(adapter, "_declared_hosted_web_search_support", None)
+        ),
         parallel_tool_calls=True,
         json_mode=False,
         reasoning_effort=bool(getattr(adapter, "_thinking_budget", None) or effective_effort),
@@ -295,6 +301,7 @@ def capabilities_for_adapter(adapter: Any) -> ProviderCapabilities:
             wire_api=api,
             streaming=True,
             tool_calling=True,
+            supports_hosted_web_search=getattr(model_definition, "supports_hosted_web_search", None),
             reasoning_effort=bool(getattr(model_definition, "reasoning", False)),
             reasoning_effort_levels=tuple(
                 getattr(model_definition, "reasoning_effort_levels", ()) or ()

@@ -9,6 +9,7 @@ import {
   GitBranch,
   Globe2,
   Keyboard,
+  Mic,
   Palette,
   Puzzle,
   Search,
@@ -30,6 +31,7 @@ import {
   toUiProvider,
 } from "./settingsShared";
 import { GeneralTab } from "./GeneralTab";
+import { VoiceSettings } from "./VoiceSettings";
 import { AppearanceTab } from "./AppearanceTab";
 import { PersonalizationTab } from "./PersonalizationTab";
 import { BrowserIntegrationTab } from "./BrowserIntegrationTab";
@@ -179,6 +181,7 @@ export const SettingsCenter = () => {
   const tabs = [
     { id: "general" as const, group: "个人", label: "常规", description: "设置工作方式、消息跟进、过程展示与内容加载。", keywords: "协作 代码 远程 Markdown 图片", icon: <SlidersHorizontal /> },
     { id: "appearance" as const, group: "个人", label: "外观", description: "调整界面主题、字号与显示密度。", keywords: "系统 浅色 深色 紧凑 缩放", icon: <Palette /> },
+    { id: "voice" as const, group: "个人", label: "语音", description: "设置麦克风与听写服务，录音转成可编辑草稿。", keywords: "听写 录音 转录 麦克风 词汇", icon: <Mic /> },
     { id: "personalization" as const, group: "个人", label: "个性化", description: "管理影响模型行为的指令、任务记忆与来源。", keywords: "INSTRUCTIONS.md AGENTS.md 摘要 偏好 规则", icon: <UserRoundCog /> },
     { id: "shortcuts" as const, group: "个人", label: "快捷键", description: "查看当前可用的键盘操作。", keywords: "命令面板 终端 侧栏 发送 换行", icon: <Keyboard /> },
     { id: "provider" as const, group: "个人", label: "模型", description: "配置提供商、接口、认证与默认模型。", keywords: "API 密钥 Base URL 推理 供应商", icon: <Cpu /> },
@@ -323,6 +326,7 @@ export const SettingsCenter = () => {
                 /></>
               )}
               {tab === "skills" && <SkillsTab onReturnToApp={toggleSettings} />}
+              {tab === "voice" && <VoiceSettings active={settingsOpen && tab === activeTab} />}
               {tab === "connectors" && <ConnectorsTab />}
               {tab === "browser" && <BrowserIntegrationTab active={settingsOpen && tab === activeTab} />}
               {tab === "scheduler" && <SchedulerTab active={settingsOpen && tab === activeTab} title="定时任务" description="自动运行的任务和最近结果。" />}

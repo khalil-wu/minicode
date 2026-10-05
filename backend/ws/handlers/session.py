@@ -120,8 +120,13 @@ async def handle_session_permissions_inspect(session: "WebSocketSession", data: 
 
 
 async def handle_runtime_capabilities_inspect(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    source = str(data.get("source") or "runtime.inspect")
+    if source == "sandbox.setup":
+        # The user has completed host initialization. Refresh only derived
+        # detection; the captured conversation permission policy stays intact.
+        session.session_lifecycle.invalidate_sandbox_capabilities()
     await session.session_lifecycle.send_runtime_capabilities(
-        source=str(data.get("source") or "runtime.inspect")
+        source=source,
     )
     return True
 

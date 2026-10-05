@@ -48,6 +48,46 @@ vi.mock("../overlays/ToastContainer", () => ({
 }));
 
 describe("FooterRow permission picker", () => {
+  it("shows a GitHub connection failure while retaining the last PR and retries in its owner scope", () => {
+    useAppStore.setState({ workingDirectory: "C:/project", prStatusIssue: { message: "gh auth login", code: "auth_required" },
+      prMonitor: { prNumber: 7, prUrl: "https://example.invalid/pr/7", ciStatus: "passed", autoFix: false, autoMerge: false, lastCheckedAt: 1 } });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    expect(screen.getByText("PR #7")).toBeTruthy();
+    expect(screen.getByText(/GitHub 尚未连接/)).toBeTruthy();
+    expect(screen.queryByText(/gh auth login/)).toBeNull();
+    expect((screen.getByRole("button", { name: "自动合并" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "连接 GitHub" }));
+    expect(useAppStore.getState().settingsTab).toBe("workspaceGit");
+    expect(useAppStore.getState().settingsOpen).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    expect(sendClientCommand).toHaveBeenCalledWith({ type: "git.pr_status", conversation_id: "conv-footer", workspace_root: "C:/project" });
+  });
+  it("routes a missing GitHub runtime to connection settings without shell installation instructions", () => {
+    useAppStore.setState({ prStatusIssue: { message: "未找到 GitHub CLI，安装 gh 后重试。", code: "gh_unavailable" } });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    expect(screen.getByText("GitHub 连接组件未就绪。")).toBeTruthy();
+    expect(screen.queryByText(/安装 gh/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "查看连接设置" }));
+    expect(useAppStore.getState().settingsTab).toBe("workspaceGit");
+  });
+  it("scopes remote auto-merge to the PR and branch shown when the user enabled it", async () => {
+    useAppStore.setState({ workingDirectory: "C:/project", workspaceGit: { branch: "feature-a", isWorktree: false },
+      prMonitor: { prNumber: 7, prUrl: "https://github.com/org/repo/pull/7", ciStatus: "passed", autoFix: false, autoMerge: false, lastCheckedAt: 1 } });
+    vi.mocked(showConfirm).mockImplementationOnce(async () => {
+      useAppStore.setState({ workspaceGit: { branch: "feature-b", isWorktree: false } });
+      return true;
+    });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "自动合并" }));
+    await waitFor(() => expect(sendClientCommand).toHaveBeenCalledWith({ type: "git.pr_automation.set", conversation_id: "conv-footer", workspace_root: "C:/project", auto_merge: true, expected_pr_number: 7, expected_branch: "feature-a" }));
+  });
+  it("keeps local auto-fix settings independent from remote auto-merge identity fields", async () => {
+    useAppStore.setState({ workingDirectory: "C:/project", prMonitor: { prNumber: 7, prUrl: "https://github.com/org/repo/pull/7", ciStatus: "passed", autoFix: false, autoMerge: false, lastCheckedAt: 1 } });
+    vi.mocked(showConfirm).mockResolvedValueOnce(true);
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "自动修复" }));
+    await waitFor(() => expect(sendClientCommand).toHaveBeenCalledWith({ type: "git.pr_automation.set", conversation_id: "conv-footer", workspace_root: "C:/project", auto_fix: true }));
+  });
   beforeEach(() => {
     useAppStore.setState({
       permissionMode: "auto",
@@ -62,6 +102,10 @@ describe("FooterRow permission picker", () => {
       availableModels: ["gpt-5"],
       effortLevel: "high",
       prMonitor: null,
+      prStatusIssue: null,
+      settingsOpen: false,
+      settingsTab: "general",
+      workspaceGit: null,
       contextUsage: null,
       budgetBuckets: [],
       totalBudgetPercent: 0,
@@ -134,7 +178,7 @@ describe("FooterRow permission picker", () => {
 
     render(<FooterRow sendState="idle" onSend={() => {}} compact />);
 
-    expect(screen.getByLabelText("查看上下文与任务预算详情")).toBeTruthy();
+    expect(screen.getByLabelText("查看上下文与会话用量详情")).toBeTruthy();
   });
 
   it("shows a known scalar budget feed without context or buckets and inspects its current owner", () => {
@@ -142,8 +186,8 @@ describe("FooterRow permission picker", () => {
     render(<FooterRow sendState="idle" onSend={() => {}} />);
     expect(screen.queryByRole("meter")).toBeNull();
     act(() => useAppStore.getState().setBudget([], 0.75));
-    expect(screen.getByRole("meter", { name: "任务预算 75%" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "查看上下文与任务预算详情" }));
+    expect(screen.getByRole("meter", { name: "上下文 75%" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "查看上下文与会话用量详情" }));
     expect(sendClientCommand).toHaveBeenCalledWith({ type: "session.usage.inspect", conversation_id: "conv-footer", source: "usage_ring" });
   });
 
@@ -603,6 +647,17 @@ describe("FooterRow permission picker", () => {
     expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
   });
 
+  it("closes the model list when keyboard focus moves to the next composer control", async () => {
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByTitle("gpt-5"));
+    const option = screen.getByRole("option", { name: "gpt-5", exact: true });
+    await waitFor(() => expect(document.activeElement).toBe(option));
+    const next = screen.getByRole("button", { name: "配置听写" });
+    act(() => next.focus());
+    expect(screen.queryByRole("listbox", { name: "选择模型" })).toBeNull();
+    expect(document.activeElement).toBe(next);
+  });
+
   it("cancels a slider preview and commits keyboard changes once", async () => {
     useAppStore.setState({ effortLevel: "medium", runtimeCapabilities: { provider_capabilities: {
       reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"],
@@ -678,7 +733,7 @@ describe("FooterRow permission picker", () => {
 
   it("does not display an unknown usage placeholder in the footer", () => {
     render(<FooterRow sendState="idle" onSend={() => {}} />);
-    expect(screen.queryByRole("button", { name: "查看上下文与任务预算详情" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "查看上下文与会话用量详情" })).toBeNull();
   });
 
   it("resets to a declared medium level without inventing unsupported levels", () => {

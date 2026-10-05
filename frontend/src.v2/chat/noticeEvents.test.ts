@@ -36,6 +36,21 @@ const workspaceImportedEvent = (overrides: Record<string, unknown> = {}) => ({
 });
 
 describe("handleNoticeEvent", () => {
+  it("preserves confirmed PR data on a scoped failure and clears the issue after a successful retry", () => {
+    const pr = { number: 7, title: "Change", url: "https://example.invalid/pr/7", branch: "feature", state: "OPEN" };
+    useAppStore.setState({ workingDirectory: "C:/project", prStatus: pr, ciChecks: [{ name: "build", status: "success", url: "" }], prStatusIssue: null,
+      prMonitor: { prNumber: 7, prUrl: pr.url, ciStatus: "passed", autoFix: false, autoMerge: false, lastCheckedAt: 1 } });
+    handlePeripheralEvent({ type: "git.pr_status", conversation_id: "conv-active", workspace_root: "C:/project", error: "gh auth login", error_code: "auth_required" } as ServerEvent);
+    expect(useAppStore.getState().prStatus).toEqual(pr);
+    expect(useAppStore.getState().prMonitor?.prNumber).toBe(7);
+    expect(useAppStore.getState().prStatusIssue?.code).toBe("auth_required");
+    handlePeripheralEvent({ type: "git.pr_status", conversation_id: "other", workspace_root: "C:/project", error: "unrelated" } as ServerEvent);
+    expect(useAppStore.getState().prStatusIssue?.message).toBe("gh auth login");
+    handlePeripheralEvent({ type: "git.pr_status", conversation_id: "conv-active", workspace_root: "C:/project", pr: null, checks: [] } as ServerEvent);
+    expect(useAppStore.getState().prStatusIssue).toBeNull();
+    expect(useAppStore.getState().prStatus).toBeNull();
+    expect(useAppStore.getState().prMonitor).toBeNull();
+  });
   it("rejects a delayed terminal summary after a newer rename and memory setting", () => {
     useAppStore.setState({ conversations: [{ id: "conv-active", title: "User renamed", updatedAt: "2026-10-03T11:00:00Z",
       revision: 8, memoryMode: "disabled", memoryPolluted: false }] });

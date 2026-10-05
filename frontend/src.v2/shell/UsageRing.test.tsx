@@ -37,7 +37,9 @@ describe("UsageRing authoritative context projection", () => {
       />,
     );
 
-    expect(screen.getByRole("meter", { name: "任务预算 0%" }).getAttribute("aria-valuenow")).toBe("0");
+    expect(screen.getByRole("meter", { name: "上下文 0%" }).getAttribute("aria-valuenow")).toBe("0");
+    expect(screen.getByRole("meter").parentElement?.getAttribute("title")).toContain("上下文构成");
+    expect(screen.getByRole("meter").parentElement?.getAttribute("title")).not.toContain("任务预算");
   });
 
   it("uses the unknown marker only when neither context nor budget is known", () => {
@@ -46,6 +48,6 @@ describe("UsageRing authoritative context projection", () => {
     const meter = screen.getByRole("meter", { name: "用量暂无数据" });
     expect(meter.hasAttribute("aria-valuenow")).toBe(false);
     expect(screen.getByText("暂无数据")).toBeTruthy();
-    expect(meter.parentElement?.getAttribute("title")).toContain("暂无上下文或任务预算数据");
+    expect(meter.parentElement?.getAttribute("title")).toContain("暂无上下文数据");
   });
 });

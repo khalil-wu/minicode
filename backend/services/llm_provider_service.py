@@ -442,7 +442,7 @@ def _retain_model_behavior(
     merged = {name: dict(value) for name, value in discovered.items()}
     for name in models:
         behavior = {key: value for key, value in configured.get(name, {}).items()
-                    if key in {"supports_custom_tools", "model_instructions", "responses_websocket", "native_compaction"}}
+                    if key in {"supports_custom_tools", "supports_hosted_web_search", "model_instructions", "responses_websocket", "native_compaction"}}
         if behavior:
             merged[name] = {**merged.get(name, {}), **behavior}
     return merged

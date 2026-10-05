@@ -1,8 +1,9 @@
 /* @vitest-environment jsdom */
-import { act, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAgentEditReview, type AgentEditReviewModel } from "./useAgentEditReview";
 import type { TurnDiffState } from "../stores/types";
+import { useAppStore } from "../stores";
 
 /**
  * A fake Monaco editor recording the edits the hook applies. The buffer is
@@ -58,8 +59,8 @@ function turnDiffFor(path: string, patch: string): TurnDiffState {
 }
 
 describe("useAgentEditReview", () => {
-  beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
+  beforeEach(() => { vi.useFakeTimers(); useAppStore.setState({ agentEditReviewKept: {} }); });
+  afterEach(() => { cleanup(); vi.useRealTimers(); });
 
   const content = "alpha\nBRAVO\ncharlie\n";
   const patch = "@@ -1,3 +1,3 @@\n alpha\n-bravo\n+BRAVO\n charlie";

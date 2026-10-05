@@ -293,9 +293,19 @@ class WorktreeManager:
 
     def has_local_changes(self, path: Path) -> bool:
         """Read worktree changes, including untracked and ignored files."""
-        from backend.services.workspace_service import worktree_has_local_changes
+        if self._git_runner is None:
+            # Cleanup still needs its readonly execution authority. Model
+            # callers supply an already captured runner below; app metadata's
+            # host authority must not become a worktree-removal grant.
+            from backend.services.workspace_service import worktree_has_local_changes
 
-        return worktree_has_local_changes(Path(path), timeout=WORKTREE_GIT_TIMEOUT_SECONDS)
+            return worktree_has_local_changes(Path(path), timeout=WORKTREE_GIT_TIMEOUT_SECONDS)
+        result = self._run_git(
+            ["git", "--no-optional-locks", "status", "--porcelain=v1", "--ignored", "--untracked-files=all"],
+            cwd=Path(path).resolve(), env=sanitized_git_env(), capture_output=True,
+            text=True, encoding="utf-8", check=True, timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
+        )
+        return bool(result.stdout.strip())
 
     def snapshot_worktree(
         self,
@@ -419,7 +429,7 @@ class WorktreeManager:
                 snapshot=record,
                 error="Restore destination is outside the original worktree parent",
             )
-        if dest_path.exists() and any(dest_path.iterdir()):
+        if dest_path.exists() and (not dest_path.is_dir() or any(dest_path.iterdir())):
             candidate = dest_path.parent / f"{dest_path.name}-restored"
             if candidate.exists():
                 candidate = dest_path.parent / f"{dest_path.name}-restored-{record.id[-6:]}"
@@ -461,7 +471,7 @@ class WorktreeManager:
                 restored=False,
                 error="The removed worktree branch could not be identified",
             )
-        if dest_path.exists() and any(dest_path.iterdir()):
+        if dest_path.exists() and (not dest_path.is_dir() or any(dest_path.iterdir())):
             return WorktreeRestore(
                 restored=False,
                 error="The original worktree path is no longer empty",

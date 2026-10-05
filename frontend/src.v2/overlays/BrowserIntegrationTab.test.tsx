@@ -16,6 +16,16 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+it("keeps the confirmed download policy when persistence fails", async () => {
+  update.mockRejectedValueOnce(new Error("settings disk failure"));
+  render(<BrowserIntegrationTab />);
+  await waitFor(() => expect(screen.getByLabelText("浏览器下载策略")).toHaveProperty("value", "ask"));
+  fireEvent.click(screen.getByRole("button", { name: "浏览器下载策略，当前：每次询问" }));
+  fireEvent.click(screen.getByRole("option", { name: "保存到下载目录" }));
+  await waitFor(() => expect(screen.getByLabelText("浏览器下载策略")).toHaveProperty("value", "ask"));
+  expect(update).toHaveBeenCalledWith({ downloadPolicy: "allow" });
+});
+
 it("clears a previous owner's visible tabs while loading and refuses an old late tab response", async () => {
   let finishOld!: (tabs: unknown[]) => void;
   let finishNew!: (tabs: unknown[]) => void;

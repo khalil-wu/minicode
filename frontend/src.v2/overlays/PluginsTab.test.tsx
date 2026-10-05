@@ -41,6 +41,7 @@ vi.mock("../desktop/runtime", () => ({
 
 describe("PluginsTab loading", () => {
   beforeEach(() => {
+    useAppStore.setState({ workingDirectory: "", mcpServers: [] });
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
   });
 
@@ -84,11 +85,15 @@ describe("PluginsTab loading", () => {
   it("installs by canonical marketplace identity and reports runtime refresh failure", async () => {
     const response = (payload: unknown) => new Response(JSON.stringify(payload), { status: 200 });
     const installed = { id: "review@team-a", name: "review", path: "/plugins/a", enabled: true };
+    let installedPlugins = [installed];
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith("/marketplaces")) return Promise.resolve(response({ marketplaces: [{ name: "team-b", status: "ready", source: { source: "github", repo: "org/b" }, plugins: [{ id: "review@team-b", name: "review", description: "Team B review" }] }] }));
-      if (url.endsWith("/install")) return Promise.resolve(response({ plugins: [installed, { ...installed, id: "review@team-b", path: "/plugins/b" }], runtime_refresh: { ok: false, warnings: ["MCP unavailable"] } }));
-      return Promise.resolve(response({ plugins: [installed] }));
+      if (url.endsWith("/install")) {
+        installedPlugins = [installed, { ...installed, id: "review@team-b", path: "/plugins/b" }];
+        return Promise.resolve(response({ plugins: installedPlugins, runtime_refresh: { ok: false, warnings: ["MCP unavailable"] } }));
+      }
+      return Promise.resolve(response({ plugins: installedPlugins }));
     }));
     render(<PluginsTab />);
     const install = await screen.findByRole("button", { name: "安装插件 review@team-b" });
@@ -187,7 +192,7 @@ describe("PluginsTab loading", () => {
   });
 
   it("connects installed MCP components to their real login state and configuration", async () => {
-    useAppStore.setState({ mcpServers: [{ name: "tool_server", status: "error", phase: "auth_required", lastError: "login expired", tools: 0 }] });
+    useAppStore.setState({ mcpServers: [{ name: "tool_server", status: "connected", tools: 1 }, { name: "plugin:tools@local:tool_server", status: "error", phase: "auth_required", lastError: "login expired", tools: 0 }] });
     const plugin = { id: "tools@local", name: "tools", displayName: "工具包", path: "C:/plugins/tools", enabled: true, mcp_server_count: 1, mcp_server_names: ["tool_server"] };
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(JSON.stringify({ plugins: [plugin], marketplaces: [] }), { status: 200 }))));
     render(<PluginsTab />);
@@ -199,7 +204,7 @@ describe("PluginsTab loading", () => {
   });
 
   it("keeps a declared MCP component unknown until its actual status is received", async () => {
-    useAppStore.setState({ mcpServers: [] });
+    useAppStore.setState({ mcpServers: [{ name: "later-server", status: "connected", tools: 1 }] });
     const plugin = { id: "pending@local", name: "pending", path: "C:/plugins/pending", enabled: true, mcp_server_count: 1, mcp_server_names: ["later-server"] };
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(JSON.stringify({ plugins: [plugin], marketplaces: [] }), { status: 200 }))));
     render(<PluginsTab />);
@@ -207,9 +212,44 @@ describe("PluginsTab loading", () => {
     expect(screen.getByText("组件状态待同步")).toBeTruthy();
     expect(screen.getByText("later-server · 状态未知（待同步）")).toBeTruthy();
     expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === "POST" || init?.method === "PUT")).toBe(false);
-    act(() => useAppStore.setState({ mcpServers: [{ name: "later-server", status: "connected", tools: 1 }] }));
+    act(() => useAppStore.setState({ mcpServers: [{ name: "plugin:pending@local:later-server", status: "connected", tools: 1 }] }));
     expect(screen.queryByText("组件状态待同步")).toBeNull();
     expect(screen.getByText("later-server · 已连接")).toBeTruthy();
+  });
+
+  it("loads the current workspace and ignores a late response from the previous workspace", async () => {
+    let finishOld!: (response: Response) => void;
+    useAppStore.setState({ workingDirectory: "C:/A" });
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/marketplaces")) return Promise.resolve(new Response(JSON.stringify({ marketplaces: [] })));
+      if (url.searchParams.get("workspace_root") === "C:/A") return new Promise<Response>((resolve) => { finishOld = resolve; });
+      return Promise.resolve(new Response(JSON.stringify({ plugins: [{ id: "current@local", name: "current", path: "C:/plugins/current", enabled: true }] })));
+    }));
+    render(<PluginsTab />);
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("http://test.local/api/plugins?workspace_root=C%3A%2FA", expect.anything()));
+    act(() => useAppStore.setState({ workingDirectory: "C:/B" }));
+    await screen.findByRole("button", { name: "查看插件详情 current@local" });
+    await act(async () => finishOld(new Response(JSON.stringify({ plugins: [{ id: "old@local", name: "old", path: "C:/plugins/old", enabled: true }] }))));
+    expect(screen.queryByRole("button", { name: "查看插件详情 old@local" })).toBeNull();
+    expect(screen.getByRole("button", { name: "查看插件详情 current@local" })).toBeTruthy();
+  });
+
+  it("re-reads effective workspace state after saving user plugin state", async () => {
+    const plugin = { id: "tools@local", name: "tools", path: "C:/plugins/tools", enabled: false };
+    useAppStore.setState({ workingDirectory: "C:/project" });
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/marketplaces")) return Promise.resolve(new Response(JSON.stringify({ marketplaces: [] })));
+      return Promise.resolve(new Response(JSON.stringify({ plugins: [{ ...plugin, enabled: init?.method === "PUT" }], runtime_refresh: { ok: true } })));
+    }));
+    render(<PluginsTab />);
+    const toggle = await screen.findByRole("checkbox", { name: "启用插件 tools@local" });
+    await waitFor(() => expect(toggle).toHaveProperty("disabled", false));
+    fireEvent.click(toggle);
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.stringContaining("尚未启用"), "warning"));
+    expect(toggle).toHaveProperty("checked", false);
+    expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input) === "http://test.local/api/plugins?workspace_root=C%3A%2Fproject")).toHaveLength(2);
   });
 
 });

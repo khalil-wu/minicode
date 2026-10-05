@@ -1,3 +1,20 @@
+.editor-tab[data-preview] [role="tab"] { font-style: italic; }
+.editor-tab[data-pinned] { border-top: 2px solid var(--text-muted); }
+.mc-editor-symbol-button { display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 5px; background: transparent; color: var(--text-secondary); cursor: pointer; }
+.mc-editor-symbol-button:hover { background: var(--surface-hover); color: var(--text-primary); }
+.mc-symbol-backdrop { position: fixed; inset: 0; z-index: 1200; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; background: var(--backdrop-overlay); }
+.mc-symbol-picker { width: min(620px, 90vw); background: var(--surface-raised); color: var(--text-primary); border: 1px solid var(--border-subtle); border-radius: 12px; box-shadow: var(--shadow-strong-overlay); overflow: hidden; }
+.mc-symbol-search { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border-subtle); }
+.mc-symbol-search input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: inherit; font: inherit; }
+.mc-symbol-search button { border: 0; background: transparent; color: var(--text-muted); cursor: pointer; }
+.mc-symbol-results { max-height: 48vh; overflow: auto; padding: 5px; }
+.mc-symbol-results > button { width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; text-align: left; font: inherit; }
+.mc-symbol-results > button[aria-selected="true"], .mc-symbol-results > button:hover { background: var(--surface-hover); }
+.mc-symbol-results > button > span { flex: 1; min-width: 0; }
+.mc-symbol-results strong { font-weight: 500; }
+.mc-symbol-results small { display: block; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-symbol-results p { padding: 12px; color: var(--text-muted); font-size: var(--text-sm); }
+.mc-symbol-picker footer { display: flex; justify-content: space-between; padding: 9px 14px; border-top: 1px solid var(--border-subtle); color: var(--text-muted); font-size: var(--text-xs); }
 .mc-editor-panel {
   container-type: inline-size;
   container-name: mc-editor-panel;
@@ -152,3 +169,13 @@
   .editor-tab-close { opacity: 1; }
   .mc-editor-tabs::-webkit-scrollbar-thumb { background: var(--mc-scrollbar-color); }
 }
+.mc-inline-edit-trigger { padding: 5px 9px; white-space: nowrap; color: var(--text-secondary); background: var(--surface-raised); border: 1px solid var(--border-subtle); border-radius: 6px; box-shadow: var(--shadow-sm); cursor: pointer; font: 12px var(--font-ui); }
+.mc-inline-edit { margin: 8px 12px; border: 1px solid var(--border-subtle); border-radius: 9px; overflow: hidden; background: var(--surface-raised); color: var(--text-primary); flex-shrink: 0; }
+.mc-inline-edit header, .mc-inline-edit form, .mc-inline-edit footer { display: flex; align-items: center; gap: 8px; padding: 9px 12px; }
+.mc-inline-edit header strong { font-size: var(--text-sm); font-weight: 550; }
+.mc-inline-edit header span, .mc-inline-edit footer span { flex: 1; font-size: var(--text-xs); color: var(--text-muted); }
+.mc-inline-edit button { border: 0; border-radius: 5px; background: var(--surface-soft); padding: 5px 8px; color: inherit; cursor: pointer; }
+.mc-inline-edit button:disabled { opacity: .5; cursor: default; }
+.mc-inline-edit input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: inherit; font: inherit; }
+.mc-inline-edit p { padding: 8px 12px; margin: 0; font-size: var(--text-sm); display: flex; gap: 8px; }
+.mc-inline-edit p[role='alert'] { color: var(--state-danger); }

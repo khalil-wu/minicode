@@ -1,14 +1,17 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as monaco from "monaco-editor/editor/editor.api.js";
 import { useAgentEditReview, type AgentEditReviewModel } from "./useAgentEditReview";
 import type { TurnDiffState } from "../stores/types";
+import { useAppStore } from "../stores";
+import { LS } from "../stores/shared-helpers";
 
 vi.hoisted(() => Object.defineProperty(window, "matchMedia", {
   configurable: true, value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
 }));
 afterEach(() => { cleanup(); for (const model of monaco.editor.getModels()) model.dispose(); });
+beforeEach(() => useAppStore.setState({ agentEditReviewKept: {} }));
 const body = "@@ -1,3 +1,3 @@\n alpha\n-bravo\n+BRAVO\n charlie\n";
 const patch = (body: string) => `diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n${body}`;
 const turn = (body: string, revision = 1, threadId = "A"): TurnDiffState => ({ threadId, turnId: "same-turn", diff: patch(body), revision, updatedAt: revision });
@@ -19,6 +22,25 @@ const handle = (model: monaco.editor.ITextModel): NonNullable<AgentEditReviewMod
 const create = (content = "alpha\nBRAVO\ncharlie\n") => monaco.editor.createModel(content, "plaintext", monaco.Uri.parse("file:///review/src/main.ts"));
 
 describe("actual editor review ownership and native Undo chains", () => {
+  it("retains Keep across file switches, remounts and reloaded decisions without transferring it to another owner", () => {
+    const model = create();
+    const args = { editorRef: { current: handle(model) }, path: "src/main.ts", content: model.getValue(), readOnly: false,
+      turnDiff: turn(body), workingDirectory: "/review", conversationId: "conversation-A", editorEpoch: 1 };
+    const first = renderHook((props) => useAgentEditReview(props), { initialProps: args });
+    act(() => first.result.current.keep());
+    first.rerender({ ...args, path: "src/other.ts" });
+    first.rerender(args);
+    expect(first.result.current.total).toBe(0);
+    first.unmount();
+    const saved = JSON.parse(localStorage.getItem(LS.editorReviewKept)!);
+    act(() => useAppStore.setState({ agentEditReviewKept: saved }));
+    const restored = renderHook((props) => useAgentEditReview(props), { initialProps: args });
+    expect(restored.result.current.total).toBe(0);
+    restored.rerender({ ...args, conversationId: "conversation-B" });
+    expect(restored.result.current.total).toBe(1);
+    restored.rerender({ ...args, turnDiff: { ...args.turnDiff, turnId: "next-turn" } });
+    expect(restored.result.current.total).toBe(1);
+  });
   it("keeps an accepted block dismissed when the same turn publishes another revision", () => {
     const model = create();
     const args = { editorRef: { current: handle(model) }, path: "src/main.ts", content: model.getValue(), readOnly: false,

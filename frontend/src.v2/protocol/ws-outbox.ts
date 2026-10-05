@@ -13,6 +13,7 @@ export const DEFAULT_COMMAND_RESULT_TIMEOUT_MS = 60_000;
 export const LONG_COMMAND_RESULT_TIMEOUT_MS = 10 * 60_000;
 
 let sender: Sender | null = null;
+let senderFailureReason: (() => string) | null = null;
 const pendingCommandResults = new Map<string, {
   expectedCommand: string;
   resolve: (event: CommandResultEvent) => void;
@@ -34,9 +35,12 @@ export const commandWithClientCommandId = (command: ClientCommand): ClientComman
   return { ...command, client_command_id: createClientCommandId() };
 };
 
-export const registerWebSocketSender = (nextSender: Sender | null) => {
+export const registerWebSocketSender = (nextSender: Sender | null, failureReason?: () => string) => {
   sender = nextSender;
+  senderFailureReason = nextSender && failureReason ? failureReason : null;
 };
+
+const sendFailureMessage = (): string => senderFailureReason?.() || "连接已断开";
 
 const shouldNotifyOffline = (command: ClientCommand, options?: SendClientCommandOptions): boolean =>
   !options?.silent && !(command as ClientCommand & { silent?: boolean }).silent;
@@ -50,7 +54,7 @@ export const sendClientCommand = (command: ClientCommand, options?: SendClientCo
   }
   const sent = sender(command);
   if (!sent && shouldNotifyOffline(command, options)) {
-    pushToast("操作失败：连接已断开。", "error", 3000);
+    pushToast(`操作失败：${sendFailureMessage()}。`, "error", 3000);
   }
   return sent;
 };
@@ -117,7 +121,7 @@ export const sendClientCommandAwaitResult = (
     const pending = pendingCommandResults.get(clientCommandId);
     if (pending) clearTimeout(pending.timer);
     pendingCommandResults.delete(clientCommandId);
-    reject(new Error("连接已断开"));
+    reject(new Error(sendFailureMessage()));
   });
 };
 

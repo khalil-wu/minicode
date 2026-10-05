@@ -2,6 +2,7 @@ import { GitCompare, Image as ImageIcon, Layers, Paperclip, RotateCcw, X } from 
 import { useEffect, useMemo, useState } from "react";
 import { fileIcon } from "../lib/file-icons";
 import { useAppStore } from "../stores";
+import { SelectMenu } from "../components/SelectMenu";
 import type { ArtifactPreview, ChatMessage } from "../stores/types";
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
 import { openArtifactPreview } from "../chat/openAttachmentPreview";
@@ -107,9 +108,9 @@ export const LiveArtifacts = () => {
 
         <div style={{ display: "flex", gap: 8, padding: "10px 18px", flexWrap: "wrap", alignItems: "center" }}>
           <input aria-label="搜索实时制品" placeholder="搜索文件名或轮次…" value={query} onChange={(event) => setQuery(event.target.value)} style={{ ...filterStyle, flex: "1 1 200px" }} />
-          <select aria-label="实时制品类型" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)} style={filterStyle}>
+          <SelectMenu ariaLabel="实时制品类型" className="settings-select" value={typeFilter} onValueChange={setTypeFilter} style={{ width: 180 }}>
             <option value="all">全部类型</option>{Object.entries(KIND_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}<option value="execution">执行结果</option>
-          </select>
+          </SelectMenu>
           <label style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)" }}><input type="checkbox" checked={recentOnly} onChange={(event) => setRecentOnly(event.target.checked)} />仅最近 12 项</label>
         </div>
 

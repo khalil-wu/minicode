@@ -11,6 +11,7 @@ import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
 import { openSettings } from "../lib/settings-navigation";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { openPreviewServiceManager } from "../lib/preview-server-actions";
 
 interface PaletteAction {
   id: string;
@@ -149,7 +150,10 @@ export const CommandPalette = () => {
     : conversationCandidates.slice(0, 9);
   const recentConversationActions: PaletteAction[] = matchedConversations.map((c, i) => {
     const shortcut = trimmedQuery ? "" : `Ctrl+${i + 1}`;
-    const goalHint = trimmedQuery && c.goal?.text ? c.goal.text.slice(0, 60) : "";
+    const goal = c.goal?.text ?? "";
+    const goalStart = Math.max(0, goal.toLowerCase().indexOf(trimmedQuery) - 20);
+    const goalHint = trimmedQuery && goal
+      ? `${goalStart ? "…" : ""}${goal.slice(goalStart, goalStart + 80)}` : "";
     return {
       id: `conversation.switch.${c.id}`,
       label: c.title || "未命名会话",
@@ -211,6 +215,27 @@ export const CommandPalette = () => {
       group: "工作区",
       run: () =>
         addPanel({ id: `editor-${Date.now()}`, kind: "editor", label: "Editor" }),
+    },
+    ...(globalSearchEnabled ? [{
+      id: "workspace.search.content",
+      label: "搜索项目内容",
+      hint: "Ctrl+Shift+F · 正文与替换",
+      group: "工作区" as const,
+      run: () => useAppStore.getState().openWorkspaceSearch(),
+    }] : []),
+    {
+      id: "workspace.problems",
+      label: "查看代码问题",
+      hint: "诊断与修复",
+      group: "工作区",
+      run: () => openBottomTab("problems"),
+    },
+    {
+      id: "preview.servers",
+      label: "管理预览服务",
+      hint: "启动、停止、日志与配置",
+      group: "工作区",
+      run: openPreviewServiceManager,
     },
     {
       id: "preview.open",
@@ -408,8 +433,9 @@ export const CommandPalette = () => {
     (left, right) => groupOrder.indexOf(left.group) - groupOrder.indexOf(right.group),
   );
 
-  const filtered = query
-    ? actions.filter((a) => `${a.label} ${a.hint ?? ""}`.toLowerCase().includes(query.toLowerCase()))
+  const filtered = trimmedQuery
+    ? actions.filter((a) => a.group === "最近会话" && globalSearchEnabled
+      || `${a.label} ${a.hint ?? ""}`.toLowerCase().includes(trimmedQuery))
     : actions;
   const activeOptionId = filtered[activeIdx] ? `command-palette-option-${filtered[activeIdx].id}` : undefined;
 

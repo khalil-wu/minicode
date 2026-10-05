@@ -149,6 +149,8 @@ export interface McpServerProgress {
 }
 
 export interface McpServerStatus {
+  enabledTools?: string[] | null;
+  disabledTools?: string[];
   name: string;
   status: "connected" | "disconnected" | "error" | "reconnecting" | "starting" | "offline";
   tools?: number;
@@ -358,6 +360,7 @@ export interface ContextUsage {
 
 export type SettingsTab =
   | "general"
+  | "voice"
   | "appearance"
   | "personalization"
   | "shortcuts"
@@ -419,11 +422,12 @@ export interface UISlice {
   previewLaunchProcesses: PreviewLaunchProcessInfo[];
   previewVerification: PreviewVerificationInfo | null;
   previewOwnerConversationId: string | null;
+  previewServiceManagerRequest: { conversationId: string; workspaceRoot: string } | null;
   fileChanges: { path: string; event: string; timestamp: number; sequence: number; workspaceRoot: string }[];
   fileTreeVersion: number;
   fileTreeRevealRequests: FileTreeRevealRequest[];
   mcpServers: McpServerStatus[];
-  envVars: { name: string; description: string; scope: string }[];
+  envVars: { name: string; description: string; scope: string; credential_status?: "stored" | "missing" }[];
   gitChanges: GitChangesState;
   skillsMarketplaceOpen: boolean;
   skillsMarketplaceTab: "plugins" | "skills";
@@ -500,7 +504,7 @@ export interface UISlice {
   requestFileTreeReveal: (path: string, kind?: FileTreeRevealRequest["kind"]) => void;
   consumeFileTreeRevealRequest: (id: string) => void;
   setMcpServers: (servers: McpServerStatus[]) => void;
-  setEnvVars: (entries: { name: string; description: string; scope: string }[]) => void;
+  setEnvVars: (entries: { name: string; description: string; scope: string; credential_status?: "stored" | "missing" }[]) => void;
   setGitChanges: (changes: Partial<GitChangesState>) => void;
   setGitChangesLoading: (loading: boolean) => void;
   requestGitChanges: () => void;
@@ -571,6 +575,7 @@ export interface TerminalSnapshotInfo {
 }
 
 export interface EditorOpenRequest {
+  preview?: boolean;
   id: string;
   path: string;
   exact?: boolean;
@@ -694,7 +699,7 @@ export interface WorkspaceSlice {
   gitReviewRequest: GitReviewRequest | null;
   dockHeight: number;
   dockCollapsed: boolean;
-  activeBottomTab: "terminal" | "git" | "tasks" | "timeline" | "debug" | "budget";
+  activeBottomTab: "terminal" | "git" | "tasks" | "timeline" | "debug" | "budget" | "problems";
   panelSlots: PanelSlot[];
   sideChatOpen: boolean;
   sideChatPendingContext: CodeSelectionContext | null;
@@ -729,7 +734,7 @@ export interface WorkspaceSlice {
   upsertTerminalSnapshot: (snapshot: TerminalSnapshotInfo) => void;
   removeTerminalSession: (id: string) => void;
   setActiveTerminalSession: (id: string | null) => void;
-  openEditorFile: (path: string, label?: string, target?: { line?: number; column?: number; endLine?: number; endColumn?: number; exact?: boolean }) => void;
+  openEditorFile: (path: string, label?: string, target?: { line?: number; column?: number; endLine?: number; endColumn?: number; exact?: boolean; preview?: boolean }) => void;
   consumeEditorOpenRequest: (id: string) => void;
   toggleSideChat: () => void;
   closeSideChat: () => void;
@@ -1508,6 +1513,7 @@ export interface ComposerSlice {
   agentMode: AgentMode;
   effortLevel: EffortLevel;
   prMonitor: PRMonitorState | null;
+  prStatusIssue: { message: string; code: string } | null;
   actionChip: { label: string; description?: string } | null;
   mentionResults: { path: string; name: string; kind: "file" | "folder"; score?: number }[];
   selectedMentions: Array<FileContextRef | PluginContextRef | BrowserAnnotationContextRef>;
@@ -1525,6 +1531,7 @@ export interface ComposerSlice {
   setAgentMode: (m: AgentMode) => void;
   setEffortLevel: (e: EffortLevel) => Promise<boolean>;
   setPRMonitor: (pr: PRMonitorState | null) => void;
+  setPRStatusIssue: (issue: ComposerSlice["prStatusIssue"]) => void;
   setActionChip: (c: ComposerSlice["actionChip"]) => void;
   setMentionResults: (items: ComposerSlice["mentionResults"]) => void;
   addSelectedMention: (item: ComposerSlice["selectedMentions"][number]) => void;
@@ -1587,6 +1594,11 @@ export interface SubagentState {
   lastProgressAt?: number;
   background?: boolean;
   needsInput?: boolean;
+  teammateName?: string;
+  teamName?: string;
+  awaitingPlanApproval?: boolean;
+  activePlanRequestId?: string;
+  isIdle?: boolean;
   resultAvailable?: boolean;
   readOnly?: boolean;
   writeScope?: string[];
@@ -1724,7 +1736,24 @@ export interface PendingAskUser {
   planReview?: PendingSubagentPlanReview;
 }
 
+export interface AgentPromptDraft {
+  requestId: string;
+  conversationId?: string;
+  answer?: string;
+  selectedOption?: number | null;
+  initialPlan?: string;
+  plan?: string;
+  editing?: boolean;
+  planExpanded?: boolean;
+  rejecting?: boolean;
+  rejectionFeedback?: string;
+  amending?: boolean;
+  feedback?: string;
+}
+
 export interface ApprovalSlice {
+  promptDrafts: Record<string, AgentPromptDraft>;
+  updatePromptDraft: (request: { requestId: string; conversationId?: string }, patch: Partial<AgentPromptDraft>) => void;
   pendingApproval: PendingApproval | null;
   approvalQueue: PendingApproval[];
   pendingDiffReview: PendingDiffReview | null;
@@ -1924,6 +1953,9 @@ export interface InspectorSlice {
 // ── Editor Slice ─────────────────────────────────────────────────
 
 export interface EditorTab {
+  pinned?: boolean;
+  preview?: boolean;
+  lastActivated?: number;
   id: string;
   path: string;
   content: string;
@@ -1936,12 +1968,27 @@ export interface EditorTab {
   loadWarning?: string | null;
   sizeBytes?: number;
   readOnly?: boolean;
+  draftRestorePending?: boolean;
+  draftRestored?: boolean;
+  pendingBufferTransactions?: import("../panels/applyWorkspaceBufferEdits").WorkspaceBufferTransaction[];
 }
 
 export interface EditorSlice {
+  inlineCompletionUsage: { requests: number; inputTokens: number; outputTokens: number; lastError: string };
+  workbenchPreferences: import("../lib/workbench-preferences").WorkbenchPreferences;
+  setWorkbenchPreferences: (patch: Partial<import("../lib/workbench-preferences").WorkbenchPreferences>) => void;
+  pinEditorTab: (path: string, pinned: boolean) => void;
+  keepEditorTab: (path: string) => void;
   editorTabs: EditorTab[];
   activeTabPath: string | null;
-  openEditorTab: (path: string, options?: { activate?: boolean }) => void;
+  workspaceSearchOpen: boolean;
+  openWorkspaceSearch: () => void;
+  closeWorkspaceSearch: () => void;
+  queueEditorBufferTransaction: (path: string, transaction: import("../panels/applyWorkspaceBufferEdits").WorkspaceBufferTransaction, original: string, contentHash: string, workspaceRoot: string) => void;
+  consumeEditorBufferTransactions: (path: string, workspaceRoot: string) => void;
+  agentEditReviewKept: Record<string, string[]>;
+  keepAgentEditBlocks: (scope: string, blockKeys: string[]) => void;
+  openEditorTab: (path: string, options?: { activate?: boolean; preview?: boolean }) => void;
   closeEditorTab: (path: string) => void;
   closeOtherEditorTabs: (path: string) => void;
   closeAllEditorTabs: () => void;

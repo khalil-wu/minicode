@@ -55,6 +55,10 @@ export const LS = {
     activeId: "minicode.conversation.active-id",
   },
   editorTabs: "minicode.editor.tabs",
+  editorDrafts: "minicode.editor.drafts",
+  editorLocation: "minicode.editor.location",
+  editorView: "minicode.editor.view",
+  editorReviewKept: "minicode.editor.review-kept",
 };
 
 export const DEFAULT_WORKSPACE_KEY = "__default__";
@@ -278,13 +282,43 @@ export const automaticRightPanelState = (
 
 // ── Editor tab helpers ─────────────────────────────────────────────
 
-const editorWorkspaceKey = (workspace: string | null | undefined): string => {
+export const editorWorkspaceKey = (workspace: string | null | undefined): string => {
   const value = normalizeWorkspaceRoot(workspace);
   return value || DEFAULT_WORKSPACE_KEY;
 };
 
 const editorTabsStorageKey = (workspace: string | null | undefined): string =>
   `${LS.editorTabs}:${editorWorkspaceKey(workspace)}`;
+
+const editorDraftsStorageKey = (workspace?: string | null): string => `${LS.editorDrafts}:${editorWorkspaceKey(workspace)}`;
+const editorLocationStorageKey = (workspace?: string | null): string => `${LS.editorLocation}:${editorWorkspaceKey(workspace)}`;
+const editorViewStorageKey = (workspace: string, path: string): string =>
+  `${LS.editorView}:${JSON.stringify([editorWorkspaceKey(workspace), editorPathComparisonKey(path, workspace)])}`;
+
+export interface EditorViewSnapshot { kind: "code" | "markdown"; state: unknown; }
+
+export const loadEditorViewState = (workspace: string, path: string): EditorViewSnapshot | null =>
+  safeJsonParse<EditorViewSnapshot | null>(readLS(editorViewStorageKey(workspace, path)) ?? "null", null);
+
+export const persistEditorViewState = (workspace: string, path: string, viewState: EditorViewSnapshot): void => {
+  writeLS(editorViewStorageKey(workspace, path), JSON.stringify(viewState));
+};
+
+export const renameEditorViewState = (workspace: string, path: string, newPath: string): void => {
+  const oldKey = editorViewStorageKey(workspace, path);
+  const view = readLS(oldKey);
+  if (view !== null) {
+    writeLS(editorViewStorageKey(workspace, newPath), view);
+    if (oldKey !== editorViewStorageKey(workspace, newPath)) localStorage.removeItem(oldKey);
+  }
+};
+
+export const persistEditorLocation = (state: Pick<AppStore, "workingDirectory" | "activeTabPath" | "activeEditorPath">): void => {
+  writeLS(editorLocationStorageKey(state.workingDirectory), JSON.stringify({ activeTabPath: state.activeTabPath, activeEditorPath: state.activeEditorPath }));
+};
+
+export const agentEditReviewScope = (workspace: string, conversationId: string, turnId: string, path: string): string =>
+  JSON.stringify([editorWorkspaceKey(workspace), conversationId, turnId, editorPathComparisonKey(path, workspace)]);
 
 const legacyEditorTabsStorageKey = (workspace: string | null | undefined): string => {
   const value = (workspace || "").trim() || DEFAULT_WORKSPACE_KEY;
@@ -338,9 +372,8 @@ type CachedEditorWorkspace = {
   activeEditorPath: string | null;
 };
 
-// Keep the live buffer separate from the path-only localStorage index. The
-// index is intentionally small and durable; this cache preserves unsaved work
-// while the user moves between workspaces during one renderer session.
+// The live cache preserves buffers during workspace switches. Dirty text and
+// disk baselines are also persisted, separately from the open-file path index.
 const editorWorkspaceBuffers = new Map<string, CachedEditorWorkspace>();
 
 /** Dirty buffers include workspaces that are currently hidden from the editor. */
@@ -395,7 +428,6 @@ export const loadPersistedEditorTabs = (workspace?: string | null): EditorTab[] 
     const paths = parsed.filter((path): path is string => typeof path === "string");
     const seen = new Set<string>();
     const normalizedPaths = paths
-      .slice(0, 20)
       .map((path) => normalizeEditorPath(path, workspace ?? ""))
       .filter((path) => {
         if (!path) return false;
@@ -405,10 +437,16 @@ export const loadPersistedEditorTabs = (workspace?: string | null): EditorTab[] 
         return true;
       });
     const normalizedRaw = JSON.stringify(normalizedPaths);
-    if (canonicalRaw == null || normalizedRaw !== JSON.stringify(paths.slice(0, 20))) {
+    if (canonicalRaw == null || normalizedRaw !== JSON.stringify(paths)) {
       writeLS(storageKey, normalizedRaw);
     }
-    return normalizedPaths.map(blankEditorTab);
+    const drafts = safeJsonParse<EditorTab[]>(readLS(editorDraftsStorageKey(workspace)) ?? "[]", []);
+    const tabMeta = safeJsonParse<Record<string, Pick<EditorTab, "pinned" | "preview" | "lastActivated">>>(readLS(storageKey + ":meta") ?? "{}", {});
+    return normalizedPaths.map((path) => {
+      const draft = drafts.find((entry) => editorPathsEqual(entry.path, path, workspace ?? ""));
+      return { ...(draft ? { ...draft, path, loading: true, error: null, draftRestorePending: true, draftRestored: true } : blankEditorTab(path)),
+        ...tabMeta[editorPathComparisonKey(path, workspace ?? "")] };
+    });
   } catch {
     return [];
   }
@@ -424,6 +462,11 @@ export const persistEditorTabs = (tabs: EditorTab[], workspace?: string | null) 
     return [path];
   });
   writeLS(editorTabsStorageKey(workspace), JSON.stringify(paths));
+  writeLS(editorTabsStorageKey(workspace) + ":meta", JSON.stringify(Object.fromEntries(tabs.map((tab) => [
+    editorPathComparisonKey(tab.path, workspace ?? ""), { pinned: tab.pinned, preview: tab.preview, lastActivated: tab.lastActivated },
+  ]))));
+  const drafts = tabs.filter((tab) => !tab.readOnly && !tab.largeFile && tab.content !== tab.original);
+  writeLS(editorDraftsStorageKey(workspace), JSON.stringify(drafts));
 };
 
 export const editorStateForWorkspace = (workspace: string | null | undefined) => {
@@ -441,10 +484,11 @@ export const editorStateForWorkspace = (workspace: string | null | undefined) =>
     };
   }
   const editorTabs = loadPersistedEditorTabs(workspace);
+  const location = safeJsonParse<{ activeTabPath?: string | null; activeEditorPath?: string | null }>(readLS(editorLocationStorageKey(workspace)) ?? "{}", {});
   return {
     editorTabs,
-    activeTabPath: editorTabs[0]?.path ?? null,
-    activeEditorPath: null as string | null,
+    activeTabPath: editorTabs.find((tab) => location.activeTabPath && editorPathsEqual(tab.path, location.activeTabPath, workspace ?? ""))?.path ?? editorTabs[0]?.path ?? null,
+    activeEditorPath: editorTabs.find((tab) => location.activeEditorPath && editorPathsEqual(tab.path, location.activeEditorPath, workspace ?? ""))?.path ?? null,
     editorOpenRequests: [],
     activeEditorOpenRequestId: null,
   };
@@ -641,7 +685,7 @@ export const initialResolvedTheme = (): ResolvedTheme => resolveTheme(initialThe
 
 export const initialCodeTextScale = (): number => {
   const value = parseFloat(readLS(LS.codeTextScale) ?? "");
-  return clamp(0.88, 1.2, Number.isFinite(value) ? value : 1);
+  return clamp(11 / 14, 24 / 14, Number.isFinite(value) ? value : 1);
 };
 
 export const initialReducedMotion = (): boolean => readLS(LS.reducedMotion) === "1";

@@ -491,10 +491,22 @@ def _project_context_snapshot(value: Any) -> dict[str, Any]:
                 )
         raw_subagents = ui_state.get("subagents")
         if isinstance(raw_subagents, list):
-            for row in raw_subagents[-20:]:
+            # Task membership is durable state, not a collapsed-list preview.
+            # Bound optional inline results with the existing text budget;
+            # omitted bodies remain available through subagent.status.
+            result_budget = _MAX_PUBLIC_JSON_TEXT_CHARS
+            for row in raw_subagents:
                 if not isinstance(row, Mapping):
                     continue
-                safe_row = _public_json(row)
+                inline_row = dict(row)
+                result_content = inline_row.get("resultContent")
+                if isinstance(result_content, str):
+                    if len(result_content) > result_budget:
+                        inline_row.pop("resultContent")
+                        inline_row["resultAvailable"] = True
+                    else:
+                        result_budget -= len(result_content)
+                safe_row = _public_json(inline_row)
                 if isinstance(safe_row, dict) and safe_row.get("id"):
                     safe_state["subagents"].append(safe_row)
         raw_progress = ui_state.get("agentProgress")

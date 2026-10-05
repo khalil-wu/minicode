@@ -6,6 +6,10 @@ import { readWorkspaceFile, readWorkspaceProjectIndex, type WorkspaceProjectInde
 import { workspacePathWithin, workspaceRootsEqual } from "../lib/workspace-path";
 import { editorModelUri, syncWorkspaceTypeScriptModels } from "./monacoLanguageServices";
 import { isDependencyIndexPath, isTypeScriptSourcePath, WorkspaceModelIndex } from "./workspaceModelIndex";
+import { normalizeWorkspaceRoot } from "../lib/workspace-path";
+
+// The editor and Problems are two consumers of the same native source models.
+const sharedIndexes = new Map<string, { index: WorkspaceModelIndex; references: number }>();
 
 export interface WorkspaceIndexStatus {
   phase: "idle" | "loading" | "ready" | "partial" | "error";
@@ -16,6 +20,7 @@ const idleStatus: WorkspaceIndexStatus = { phase: "idle", sourceCount: 0, issues
 
 export function useWorkspaceModelIndex(workspaceRoot: string) {
   const registry = useRef<WorkspaceModelIndex | null>(null);
+  const releaseRegistry = useRef<(() => void) | null>(null);
   const loadedDependencies = useRef(false);
   const lastSequence = useRef(0);
   const [epoch, setEpoch] = useState(0);
@@ -28,13 +33,22 @@ export function useWorkspaceModelIndex(workspaceRoot: string) {
     loadedDependencies.current = false;
     lastSequence.current = 0;
     setStatus(idleStatus);
-    return () => { registry.current?.dispose(); registry.current = null; };
+    return () => { releaseRegistry.current?.(); releaseRegistry.current = null; registry.current = null; };
   }, [workspaceRoot]);
 
   const initialize = useCallback((monaco: typeof Monaco) => {
     if (registry.current && workspaceRootsEqual(registry.current.workspaceRoot, workspaceRoot)) return;
-    registry.current?.dispose();
-    registry.current = new WorkspaceModelIndex(monaco, workspaceRoot);
+    releaseRegistry.current?.();
+    const key = normalizeWorkspaceRoot(workspaceRoot);
+    let shared = sharedIndexes.get(key);
+    if (!shared) { shared = { index: new WorkspaceModelIndex(monaco, workspaceRoot), references: 0 }; sharedIndexes.set(key, shared); }
+    shared.references += 1;
+    registry.current = shared.index;
+    const owner = shared;
+    releaseRegistry.current = () => {
+      owner.references -= 1;
+      if (owner.references === 0) { owner.index.dispose(); sharedIndexes.delete(key); }
+    };
     setEpoch((value) => value + 1);
   }, [workspaceRoot]);
 

@@ -29,7 +29,7 @@ describe("Plugins and skills workspace", () => {
       marketplaceSkills: [], selectedSkills: [] });
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
       if (String(input).includes("/api/plugins/marketplaces")) return Promise.resolve(json({ marketplaces: [] }));
-      if (String(input).endsWith("/api/plugins")) return Promise.resolve(json({ plugins: [] }));
+      if (String(input).split("?")[0].endsWith("/api/plugins")) return Promise.resolve(json({ plugins: [] }));
       return Promise.resolve(json(catalog));
     }));
   });

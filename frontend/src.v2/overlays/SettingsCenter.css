@@ -1,3 +1,9 @@
+.settings-font-preview { padding: 16px; border-top: 1px solid var(--border-subtle); }
+.settings-font-preview p { margin: 0 0 10px; font-family: var(--font-prose); font-size: var(--prose-font-size); }
+.settings-font-preview code { font-family: var(--editor-font-family); font-size: var(--editor-font-size); }
+.settings-snippet-form { display: grid; gap: 8px; padding-block: 12px; }
+.settings-snippet-form textarea { font-family: var(--editor-font-family); resize: vertical; }
+.settings-row input[type="number"] { width: 64px; padding: 5px 8px; border: 1px solid var(--border-subtle); border-radius: 6px; background: var(--surface-base); color: var(--text-primary); }
 /*
  * SettingsCenter.css — 设置中心（全屏页面，非对话框）。
  *
@@ -331,7 +337,7 @@
 .settings-row-copy {
   min-width: 0;
   display: grid;
-  gap: 3px;
+  gap: 4px;
 }
 
 .settings-row-title {
@@ -364,6 +370,9 @@
   gap: 8px;
   flex-wrap: wrap;
 }
+
+.settings-row > .settings-select { width: min(240px, 100%); }
+.settings-row-control > .settings-select { width: auto; min-width: 100px; max-width: 260px; }
 
 .settings-path-description {
   overflow: hidden;
@@ -1005,7 +1014,7 @@
 }
 
 .settings-shortcut-row {
-  min-height: 49px;
+  min-height: 56px;
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr) minmax(132px, auto) 28px;
   align-items: center;
@@ -1024,7 +1033,7 @@
   display: inline-grid;
   place-items: center;
   border-radius: var(--mc-control-radius);
-  background: var(--surface-soft);
+  background: transparent;
   color: var(--text-muted);
 }
 
@@ -1038,9 +1047,13 @@
 }
 
 .settings-shortcut-row kbd {
-  padding: 4px 8px;
-  border: 1px solid var(--border-subtle);
-  border-bottom-color: var(--border-strong);
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: 2px 8px;
+  border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
   background: var(--surface-soft);
   color: var(--text-primary);
@@ -1250,6 +1263,11 @@
   font: inherit;
   font-size: var(--text-3xs);
 }
+
+.settings-env-credential-state { display: block; padding-top: 3px; color: var(--text-muted); font-size: var(--text-xs); white-space: normal; }
+.settings-env-credential-state[data-missing="true"] { color: var(--state-warning); }
+.settings-env-actions { display: flex; align-items: center; gap: 12px; }
+.settings-env-actions > button:first-child { color: var(--text-secondary); }
 
 .settings-env-editor {
   display: grid;
@@ -2449,3 +2467,11 @@
     animation: none;
   }
 }
+.settings-environment-output, .settings-import-preview pre { max-height: 280px; overflow: auto; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--editor-font-family); font-size: var(--text-xs); background: var(--surface-soft); }
+.settings-import-preview { padding: 12px; }
+.settings-row > code, .settings-row-description { overflow-wrap: anywhere; }
+
+.settings-mcp-tool-list { max-height: 270px; overflow: auto; }
+.settings-mcp-tool-list > label { display: flex; align-items: flex-start; gap: 8px; padding: 8px 2px; }
+.settings-mcp-tool-list strong { font-size: var(--text-sm); font-weight: 500; }
+.settings-mcp-tool-list small { display: block; color: var(--text-muted); line-height: 1.5; margin-top: 3px; }

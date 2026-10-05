@@ -181,11 +181,12 @@ async def list_mcp_inventory(manager: Any | None, name: str) -> dict[str, Any]:
         return []
 
     try:
-        resources, templates, prompts = await asyncio.wait_for(
+        resources, templates, prompts, tools = await asyncio.wait_for(
             asyncio.gather(
                 client.list_resources() if bool(getattr(capabilities, "resources", False)) else _empty(),
                 client.list_resource_templates() if bool(getattr(capabilities, "resources", False)) else _empty(),
                 client.list_prompts() if bool(getattr(capabilities, "prompts", False)) else _empty(),
+                client.list_tools() if bool(getattr(capabilities, "tools", False)) else _empty(),
             ),
             timeout=MCP_REQUEST_TIMEOUT_SECONDS,
         )
@@ -238,7 +239,8 @@ async def list_mcp_inventory(manager: Any | None, name: str) -> dict[str, Any]:
         "resources": resource_payload,
         "resource_templates": template_payload,
         "prompts": prompt_payload,
-        "empty": not (resource_payload or template_payload or prompt_payload),
+        "tools": [{"name": item.name, "description": item.description} for item in tools],
+        "empty": not (resource_payload or template_payload or prompt_payload or tools),
     }
 
 
@@ -330,6 +332,22 @@ async def update_mcp_server(
 ) -> list[dict[str, Any]]:
     manager = require_mcp_manager(manager)
     original_name = _required_name(data.get("original_name") or data.get("name"), "Server name is required")
+    if data.get("tools_only") is True:
+        enabled = _optional_tool_names(data.get("enabled_tools"), preserve_none=True)
+        async with _MCP_CONFIG_MUTATION_LOCK:
+            current_data = _read_current_config_data()
+            entry = current_data.get("servers", {}).get(original_name)
+            config = manager.get_server_config(original_name)
+            if not isinstance(entry, dict) or config is None or config.source != "user":
+                raise MCPServiceError("此工具策略由项目或管理员提供，请编辑对应来源配置。")
+            if enabled is None:
+                entry.pop("enabled_tools", None)
+            else:
+                entry["enabled_tools"] = enabled
+            entry["disabled_tools"] = []
+            await _write_config_data(current_data, config_change_hook=config_change_hook)
+        await manager.reload_config()
+        return get_mcp_status(manager)
     config = _manual_config_from_payload(data)
     _validate_config_for_service(config)
     async with _MCP_CONFIG_MUTATION_LOCK:

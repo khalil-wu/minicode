@@ -76,6 +76,7 @@ def build_wire_adapter(
             cache_editing_beta_header=cache_editing_beta_header,
             default_headers=dict(settings.default_headers),
             provider_id=resolved_provider_id,
+            supports_hosted_web_search=settings.supports_hosted_web_search,
             proxy_mode=str(getattr(settings, "proxy_mode", "inherit") or "inherit"),
         )
     raise ValueError(f"Unsupported LLM wire API: {wire_api or '<empty>'}")
@@ -166,6 +167,7 @@ def _openai_compatible_settings(
         default_reasoning_effort=str(metadata["default_reasoning_effort"]),
         default_reasoning_summary=str(metadata["default_reasoning_summary"]),
         supports_custom_tools=metadata["supports_custom_tools"],
+        supports_hosted_web_search=metadata["supports_hosted_web_search"],
         responses_websocket=metadata["responses_websocket"],
         native_compaction=metadata["native_compaction"],
         model_instructions=metadata["model_instructions"],
@@ -240,6 +242,7 @@ def build_provider_adapter(
                 base_url=str(base_url or ""),
                 model=model,
                 model_instructions=get_provider_model_metadata(anthropic_settings, model)["model_instructions"],
+                supports_hosted_web_search=get_provider_model_metadata(anthropic_settings, model)["supports_hosted_web_search"],
                 small_fast_model=str(
                     anthropic_settings["small_fast_model"] or ""
                 ),
@@ -331,6 +334,7 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapte
             cache_editing_beta_header="",
             default_headers=spec.headers,
             provider_id=spec.provider_id,
+            supports_hosted_web_search=spec.supports_hosted_web_search,
             proxy_mode=spec.proxy_mode,
         )
 
@@ -366,6 +370,7 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapte
             default_reasoning_effort=spec.default_reasoning_effort,
             default_reasoning_summary=spec.default_reasoning_summary,
             supports_custom_tools=spec.supports_custom_tools,
+            supports_hosted_web_search=spec.supports_hosted_web_search,
             responses_websocket=spec.responses_websocket,
             native_compaction=spec.native_compaction,
             model_instructions=spec.model_instructions,

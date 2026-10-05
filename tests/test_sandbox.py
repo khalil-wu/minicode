@@ -66,7 +66,7 @@ def test_execution_entrypoint_sandbox_coverage_is_explicit() -> None:
     assert "host_command=host_command" in background_manager
     assert "shell_subprocess_env(" in sandbox_runner
     assert "sanitized_subprocess_env" in terminal_session
-    assert "mcp_subprocess_env(self._env)" in mcp_client
+    assert "mcp_subprocess_env(server_env)" in mcp_client
     assert "sanitized_subprocess_env()" in hook_runners
     assert "event_policy(event).default_timeout_seconds" in hook_runners
 

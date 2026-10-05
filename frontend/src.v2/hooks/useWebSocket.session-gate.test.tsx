@@ -101,8 +101,28 @@ const Harness = () => { useWebSocketConnection(); return <InlineAgentPrompt />; 
 // a large capture invents minutes of idle time and trips the heartbeat timeout.
 const FLUSH_MS = 60;
 
-const loadFixture = (name: string): Fixture =>
-  JSON.parse(fs.readFileSync(path.resolve(__dirname, name), "utf8")) as Fixture;
+const loadFixture = (name: string): Fixture => {
+  const fixture = JSON.parse(fs.readFileSync(path.resolve(__dirname, name), "utf8")) as Fixture;
+  if (!process.env.MINICODE_SESSION_GATE_FIXTURE
+    && ["__fixtures__session_gate.json", "__fixtures__approval_gate.json"].includes(name)) {
+    // These two captures predate durable user-input presentation metadata.
+    // Supply only its canonical empty defaults at the legacy fixture boundary;
+    // existing values and live captures still participate in exact wire equality.
+    for (const connection of fixture.connections) {
+      for (const captured of connection.commands) {
+        if (captured.command.type === "user_message") {
+          captured.command = {
+            display_content: captured.command.content,
+            context_refs: [],
+            quoted_message: null,
+            ...captured.command,
+          };
+        }
+      }
+    }
+  }
+  return fixture;
+};
 
 /** Re-key one captured event from the capture's command ids to the renderer's. */
 const rekeyEvent = (

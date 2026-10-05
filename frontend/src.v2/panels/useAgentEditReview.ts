@@ -24,6 +24,10 @@ import { summarizeTurnDiff } from "../lib/turn-diff";
 import type { TurnDiffState } from "../stores/types";
 import { workspaceFilePathsEqual } from "../lib/workspace-path";
 import { withNativeModelUndoGroup, type NativeEditModel } from "./nativeModelUndoGroup";
+import { useAppStore } from "../stores";
+import { agentEditReviewScope } from "../stores/shared-helpers";
+
+const NO_KEPT_BLOCKS: string[] = [];
 
 export interface AgentEditReviewModel {
   editor: {
@@ -52,6 +56,7 @@ interface UseAgentEditReviewArgs {
   workingDirectory: string;
   /** Bumped when the editor mounts so decorations attach to a fresh instance. */
   editorEpoch: number;
+  conversationId?: string | null;
 }
 
 const LINE_CLASS: Record<string, string> = {
@@ -85,24 +90,25 @@ export function useAgentEditReview({
   turnDiff,
   workingDirectory,
   editorEpoch,
+  conversationId,
 }: UseAgentEditReviewArgs) {
-  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
+  const scope = agentEditReviewScope(workingDirectory, conversationId ?? turnDiff?.threadId ?? "", turnDiff?.turnId ?? "", path ?? "");
+  const kept = useAppStore((state) => state.agentEditReviewKept[scope] ?? NO_KEPT_BLOCKS);
+  const keepBlocks = useAppStore((state) => state.keepAgentEditBlocks);
+  const dismissed = useMemo(() => new Set(kept), [kept]);
+  const [undone, setUndone] = useState<Set<string>>(() => new Set());
   const [cursorLine, setCursorLine] = useState(1);
+  useEffect(() => setUndone(new Set()), [scope]);
 
   const patch = useMemo(
     () => patchForActiveFile(turnDiff, path, workingDirectory),
     [turnDiff, path, workingDirectory],
   );
 
-  // Kept blocks keep their text identity while this turn's diff grows.
-  useEffect(() => {
-    setDismissed(new Set());
-  }, [workingDirectory, path, turnDiff?.threadId, turnDiff?.turnId]);
-
   const blocks = useMemo<AgentEditBlock[]>(() => {
     if (!patch || readOnly || content === undefined) return [];
-    return reviewAgentEdits(patch, content).blocks.filter((block) => !dismissed.has(block.key));
-  }, [patch, content, readOnly, dismissed]);
+    return reviewAgentEdits(patch, content).blocks.filter((block) => !dismissed.has(block.key) && !undone.has(block.key));
+  }, [patch, content, readOnly, dismissed, undone]);
 
   // Paint line + glyph decorations for the current blocks.
   useEffect(() => {
@@ -148,16 +154,12 @@ export function useAgentEditReview({
   const keep = useCallback(() => {
     const block = blocks[currentIndex];
     if (!block) return;
-    setDismissed((prev) => new Set(prev).add(block.key));
-  }, [blocks, currentIndex]);
+    keepBlocks(scope, [block.key]);
+  }, [blocks, currentIndex, keepBlocks, scope]);
 
   const keepAll = useCallback(() => {
-    setDismissed((prev) => {
-      const next = new Set(prev);
-      for (const block of blocks) next.add(block.key);
-      return next;
-    });
-  }, [blocks]);
+    keepBlocks(scope, blocks.map((block) => block.key));
+  }, [blocks, keepBlocks, scope]);
 
   const undo = useCallback(() => {
     const block = blocks[currentIndex];
@@ -180,7 +182,7 @@ export function useAgentEditReview({
       });
     } else applyEdit();
     editor.pushUndoStop?.();
-    setDismissed((prev) => new Set(prev).add(block.key));
+    setUndone((previous) => new Set(previous).add(block.key));
     editor.focus();
   }, [blocks, currentIndex, editorRef]);
 

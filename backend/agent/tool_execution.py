@@ -353,9 +353,8 @@ def _execution_arguments_for_tool(
     execution_args = deepcopy(dict(tc.arguments or {}))
     if tc.name in {"write_file", "edit_file", "notebook_edit"}:
         execution_args.pop("expected_hash", None)
-        raw_path = str(
-            tc.arguments.get("file_path") or tc.arguments.get("notebook_path") or ""
-        ).strip()
+        path_argument = "notebook_path" if tc.name == "notebook_edit" else "file_path"
+        raw_path = str(tc.arguments.get(path_argument) or "").strip()
         if raw_path:
             try:
                 resolved = _resolve_workspace_path_for_scope(raw_path, tool_ctx)
@@ -381,7 +380,7 @@ def _read_time_hashes(tool_ctx: ToolExecutionContext) -> dict[str, str] | None:
     return hashes if isinstance(hashes, dict) else None
 
 
-_EXACT_TURN_DIFF_TOOLS = frozenset({"write_file", "edit_file", "apply_patch"})
+_EXACT_TURN_DIFF_TOOLS = frozenset({"write_file", "edit_file", "apply_patch", "notebook_edit"})
 
 
 async def _invalidate_turn_diff_after_inexact_mutation(
@@ -394,7 +393,7 @@ async def _invalidate_turn_diff_after_inexact_mutation(
     """Any executed non-exact mutation invalidates the turn diff.
 
     Exact file tools publish their own committed before/after deltas. Commands,
-    git/worktree, notebooks, MCP and other workspace/external mutations cannot
+    git/worktree, MCP and other workspace/external mutations cannot
     provide that proof, including when they fail after partial effects. Clear
     the aggregate instead of presenting a stale authoritative snapshot.
     """
@@ -409,7 +408,7 @@ async def _invalidate_turn_diff_after_inexact_mutation(
         return
 
     # File tools invalidate their known paths themselves.  Every other tool
-    # that declares workspace mutation may touch arbitrary files (notebook,
+    # that declares workspace mutation may touch arbitrary files (command,
     # worktree, extension, or a future workspace tool), so keep the shared
     # read/list/fuzzy views conservative at the runtime boundary too.  Do this
     # even for an error result: a command can partially mutate before failing.
@@ -664,8 +663,9 @@ def _apply_patch_target_paths(patch_text: str) -> list[str] | None:
 
 
 def _workspace_write_targets(tc: ToolCallEvent) -> list[str] | None:
-    if tc.name in {"write_file", "edit_file"}:
-        raw = tc.arguments.get("file_path")
+    if tc.name in {"write_file", "edit_file", "notebook_edit"}:
+        path_argument = "notebook_path" if tc.name == "notebook_edit" else "file_path"
+        raw = tc.arguments.get(path_argument)
         text = str(raw or "").strip()
         return [text] if text else []
     if tc.name == "apply_patch":
@@ -1980,6 +1980,19 @@ def tool_context_with_live_output(
     return replace(call_context, stream_callback=_stream_tool_output)
 
 
+def tool_result_diff(
+    result: ToolResult,
+    proposed_diff: dict[str, Any] | None,
+    *,
+    status: str | None = None,
+) -> dict[str, Any] | None:
+    if "committed_diff" in result.runtime_metadata:
+        return result.runtime_metadata["committed_diff"]
+    if result.is_error or status_for_result(result, status) != "success":
+        return None
+    return proposed_diff
+
+
 def store_result(
     tc: ToolCallEvent,
     result: ToolResult,
@@ -1996,6 +2009,7 @@ def store_result(
     from backend.tools.base import MAX_TOOL_RESULT_CHARS, truncate_tool_result
 
     final_status = status_for_result(result, status)
+    diff = tool_result_diff(result, diff, status=final_status)
     result_kind = result.result_kind or result_kind_for_tool(tc.name, tool_registry)
     limitation = result.limitation or ""
     started_at = _tool_start_times(state).get(tc.id)
@@ -2061,19 +2075,15 @@ def store_result(
         limitation=limitation or truncated.limitation,
     )
     context_result = truncated
-    hook_context = getattr(tc, "_hook_model_context", None)
-    if isinstance(hook_context, list):
-        context_parts = [
-            str(value).strip() for value in hook_context if str(value).strip()
-        ]
-        if context_parts:
-            context_result = replace(
-                truncated,
-                content=(
-                    f"{truncated.content}\n\nHook context:\n"
-                    + "\n\n".join(context_parts)
-                ),
-            )
+    hook_context = [
+        *(getattr(tc, "_hook_model_context", None) or ()),
+        *result.runtime_metadata.get("hook_model_context", ()),
+    ]
+    if hook_context:
+        context_result = replace(
+            truncated,
+            content=f"{truncated.content}\n\nHook context:\n" + "\n\n".join(hook_context),
+        )
     if tool_ctx is not None and tool_ctx.result_sink is not None:
         # Code-mode consumes the actual tool output; only the script's chosen
         # output enters the model transcript. State/UI/artifact effects below

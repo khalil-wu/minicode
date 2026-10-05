@@ -226,6 +226,7 @@ class ConversationRecord:
     message_count: int = 0
     transcript: list[dict[str, Any]] = field(default_factory=list)
     context_snapshot: dict[str, Any] = field(default_factory=dict)
+    worktree_registrations: list[dict[str, str]] = field(default_factory=list)
     archived: bool = False
     archived_at: str = ""
     workspace_root: str = ""
@@ -331,6 +332,7 @@ class ConversationRecord:
             message_count=int(payload.get("message_count") or len(transcript)),
             transcript=transcript,
             context_snapshot=dict(payload.get("context_snapshot") or {}),
+            worktree_registrations=[dict(entry) for entry in payload.get("worktree_registrations", [])],
             archived=bool(payload.get("archived") or False),
             archived_at=str(payload.get("archived_at") or ""),
             workspace_root=str(payload.get("workspace_root") or ""),

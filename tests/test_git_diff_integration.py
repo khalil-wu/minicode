@@ -33,6 +33,7 @@ def run_real_git_without_platform_sandbox(monkeypatch, tmp_path):
         )
 
     monkeypatch.setattr("backend.tools.git_support._run_git", run)
+    monkeypatch.setattr("backend.tools.git_tools._run_git", run)
 
 
 def test_git_diff_uses_supported_safety_flags_and_returns_changes(tmp_path) -> None:

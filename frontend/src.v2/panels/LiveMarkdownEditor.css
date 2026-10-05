@@ -7,14 +7,14 @@
 
 .live-markdown-editor .cm-editor { height: 100%; background: transparent; }
 .live-markdown-editor .cm-editor.cm-focused { outline: none; }
-.live-markdown-editor .cm-scroller { overflow: auto; font-family: var(--font-ui); }
+.live-markdown-editor .cm-scroller { overflow: auto; font-family: var(--font-prose); }
 .live-markdown-editor .cm-content {
   max-width: 900px;
   min-height: 100%;
   width: 100%;
   margin-inline: auto;
   padding: 28px 36px 80px;
-  font-size: calc(16px * var(--live-md-scale));
+  font-size: var(--prose-font-size, 16px);
   line-height: 1.75;
   caret-color: var(--text-primary);
 }

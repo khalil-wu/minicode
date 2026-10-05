@@ -69,7 +69,7 @@ export const TreeNode = memo(({
 
   const openFile = () => {
     if (!node.is_dir) {
-      useAppStore.getState().openEditorFile(node.path, node.name, { exact: true });
+      useAppStore.getState().openEditorFile(node.path, node.name, { exact: true, preview: true });
       onNavigate?.();
     }
   };
@@ -105,6 +105,7 @@ export const TreeNode = memo(({
         aria-level={depth + 1}
         data-tree-path={node.path}
         onClick={node.is_dir ? toggle : openFile}
+        onDoubleClick={() => { if (!node.is_dir) useAppStore.getState().openEditorFile(node.path, node.name, { exact: true, preview: false }); }}
         onKeyDown={handleKeyDown}
         onContextMenu={handleContextMenu}
         title={formatFileMeta(node)}

@@ -1098,11 +1098,10 @@ export const ProviderTab = ({
                 title={[card.subtitle, card.section.base_url, card.model, wireApiLabel(card.wireApi)].filter(Boolean).join(" · ")}
               >
                 <ModelBrandIcon
-                  model={card.model}
+                  entity="provider"
                   provider={`${card.provider} ${card.title} ${card.section.base_url || ""}`}
                   websiteUrl={card.section.base_url}
                   size={21}
-                  framed
                 />
                 <span className="provider-card-copy">
                   <span className="provider-card-title">{card.title}</span>
@@ -1207,7 +1206,7 @@ export const ProviderTab = ({
               disabled={busy}
               style={presetButtonStyle(provider === item.id)}
             >
-              <ModelBrandIcon model={item.defaultModel} provider={item.id} size={19} framed />
+              <ModelBrandIcon entity="provider" provider={item.id} size={19} />
               <span style={presetTitleStyle}>{item.label}</span>
             </button>
           ))}
@@ -1464,6 +1463,21 @@ export const ProviderTab = ({
               <option value="code_mode_only">仅代码编排</option>
             </SelectMenu>
           </label>
+          {(effectiveWireApi === "responses" || effectiveWireApi === "anthropic") && (
+            <label style={{ display: "grid", gap: 6, marginBottom: 12 }}>
+              <span>提供商联网搜索</span>
+              <SelectMenu ariaLabel="提供商联网搜索" disabled={busy}
+                value={modelMetadata[modelName]?.supports_hosted_web_search == null ? "auto" : modelMetadata[modelName]?.supports_hosted_web_search ? "supported" : "disabled"}
+                onValueChange={(value) => setModelMetadata((previous) => ({ ...previous, [modelName]: {
+                  ...previous[modelName], supports_hosted_web_search: value === "auto" ? null : value === "supported",
+                } }))}>
+                <option value="auto">自动识别官方接口</option>
+                <option value="supported">该接口支持联网搜索</option>
+                <option value="disabled">禁用</option>
+              </SelectMenu>
+              <small>兼容接口需确认支持联网搜索；未启用时可使用已配置的 Tavily 或 MCP 搜索工具。</small>
+            </label>
+          )}
           {effectiveWireApi === "responses" && (
             <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
               <input

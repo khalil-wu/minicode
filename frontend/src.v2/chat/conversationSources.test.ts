@@ -4,6 +4,32 @@ import { buildActivitySidebarState } from "../shell/activitySidebarState";
 import type { ChatMessage } from "../stores/types";
 
 describe("shared conversation sources", () => {
+  it.each([
+    ["failed", "ok"], ["blocked", "ok"], ["timeout", "ok"], ["cancelled", "ok"], ["success", "failed"],
+  ] as const)("does not promote %s/%s Fetch outcomes into successful sources", (status, extractionStatus) => {
+    const message: ChatMessage = {
+      id: "failed-fetch", role: "assistant", timestamp: 1, content: "No usable job data", artifacts: [],
+      blocks: [{ type: "tool_call", record: {
+        id: "fetch", name: "web_fetch", args: { url: "https://example.test/jobs" }, status,
+        extractionStatus, evidenceType: "fetched",
+      } }],
+    };
+    expect(collectConversationSources([message])).toEqual([]);
+  });
+
+  it("retains the limitation when partial page content has an explicit prose link", () => {
+    const message: ChatMessage = {
+      id: "partial-fetch", role: "assistant", timestamp: 1, artifacts: [], content: "[Jobs](https://example.test/jobs)",
+      blocks: [{ type: "tool_call", record: {
+        id: "fetch", name: "web_fetch", args: { url: "https://example.test/jobs" }, status: "partial",
+        extractionStatus: "partial", evidenceType: "fetched",
+      } }],
+    };
+    expect(collectConversationSources([message])).toEqual([{
+      id: "source:https://example.test/jobs", url: "https://example.test/jobs", label: "Jobs",
+      detail: "example.test · 内容不完整", messageId: "partial-fetch",
+    }]);
+  });
   it("keeps literal code links and numeric examples out of both source views", () => {
     const message: ChatMessage = {
       id: "examples", role: "assistant", timestamp: 1, artifacts: [],

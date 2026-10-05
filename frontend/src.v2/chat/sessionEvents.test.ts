@@ -2334,7 +2334,10 @@ describe("handleSessionEvent", () => {
               { id: "todo-1", content: "Persist tasks", activeForm: "Persisting tasks", status: "in_progress" },
             ],
             subagents: [
-              { id: "sa-1", role: "reviewer", status: "running", summary: "Reviewing diff" },
+              { id: "sa-1", role: "reviewer", status: "running", summary: "Reviewing diff",
+                teammate_name: "Ada", team_name: "review", awaiting_plan_approval: true,
+                active_plan_request_id: "plan-sa-1", is_idle: false, needs_input: true,
+                read_only: true, write_scope: ["frontend"], parent_run_id: "parent-agent", agent_path: "/root/review" },
               { id: "wf-pending", role: "workflow step", status: "pending", summary: "Waiting to launch" },
               { id: "wf-blocked", role: "workflow step", status: "blocked", summary: "Waiting on dependency" },
               {
@@ -2391,7 +2394,9 @@ describe("handleSessionEvent", () => {
       expect.objectContaining({ id: "todo-1", status: "in_progress" }),
     ]);
     expect(state.subagents).toEqual([
-      expect.objectContaining({ id: "sa-1", status: "running" }),
+      expect.objectContaining({ id: "sa-1", status: "running", teammateName: "Ada", teamName: "review",
+        awaitingPlanApproval: true, activePlanRequestId: "plan-sa-1", isIdle: false, needsInput: true,
+        readOnly: true, writeScope: ["frontend"], parentRunId: "parent-agent", agentPath: "/root/review" }),
       expect.objectContaining({ id: "wf-pending", status: "pending" }),
       expect.objectContaining({ id: "wf-blocked", status: "blocked" }),
       expect.objectContaining({

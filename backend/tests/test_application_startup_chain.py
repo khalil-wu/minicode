@@ -1,4 +1,7 @@
 import asyncio
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -6,6 +9,16 @@ from backend import main
 from backend.agent import runtime
 from backend.permissions import profiles
 from backend.sandbox.policy import SandboxEnforcement
+
+
+def test_desktop_backend_imports_in_fresh_process():
+    result = subprocess.run(
+        [sys.executable, "-c", "from backend.main import app; assert app is not None"],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        encoding="utf-8",
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.asyncio

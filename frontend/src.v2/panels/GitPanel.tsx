@@ -12,6 +12,7 @@ import { normalizeWorkspaceRoot, workspaceFilePathsEqual, workspaceRootsEqual } 
 import { activateWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import { EmptyState } from "../components/EmptyState";
 import "./GitPanel.css";
+import { GitDelivery } from "./GitDelivery";
 
 interface GitStatus {
   is_git_repo?: boolean;
@@ -128,7 +129,7 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
           icon={<GitBranch size={20} />}
           title="当前文件夹未启用 Git"
           hint="可以继续使用文件编辑和聊天功能。"
-          action={<button type="button" onClick={refresh}>刷新 Git 状态</button>}
+          action={<><button type="button" onClick={refresh}>刷新 Git 状态</button><GitDelivery workspaceRoot={workingDirectory} stagedCount={0} onChanged={refresh} refreshKey={refreshVersion} /></>}
         />
       </div>
     );
@@ -152,6 +153,7 @@ const WorkspaceGitPanel = ({ workingDirectory, onEditorOpened, active }: { worki
         )}
         {repoError && <GitErrorDetails message={repoError} />}
 
+        <GitDelivery workspaceRoot={workingDirectory} stagedCount={status?.staged.length ?? 0} onChanged={refresh} refreshKey={refreshVersion} />
         <SectionTitle label="变更" count={fileRows.length} />
         {fileRows.length === 0 ? (
           <div className="py-1 pb-3" style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>

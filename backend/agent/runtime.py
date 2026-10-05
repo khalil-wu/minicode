@@ -1259,6 +1259,10 @@ class AgentRuntime:
         metadata = self._subagent_task_metadata.get(str(subagent_id or "").strip())
         return dict(metadata) if isinstance(metadata, dict) else None
 
+    def has_live_subagent_task(self, subagent_id: str) -> bool:
+        task = self._subagent_tasks.get(subagent_id)
+        return task is not None and not task.done()
+
     def transfer_subagent_task_owner(
         self,
         subagent_id: str,
@@ -1273,26 +1277,42 @@ class AgentRuntime:
         self._subagent_task_metadata[subagent_id]["cleanup_owner"] = True
         return True
 
-    def _conversation_id_for_agent(self, agent_id: str) -> str:
-        """Resolve conversation ownership through run/subagent parent edges."""
+    def get_agent_owner_run(self, agent_id: str) -> AgentRunRecord | None:
+        """Read the conversation owner through live, queued and durable parent edges.
 
+        Durable records are read without making an evicted agent live again.
+        Transcript payloads and caller-supplied scope are not ownership records.
+        """
         current = str(agent_id or "").strip()
         visited: set[str] = set()
-        while current and current not in visited and len(visited) < 128:
+        while current and current not in visited:
             visited.add(current)
             run = self._runs.get(current)
-            if run is not None:
-                return str(run.conversation_id or "").strip()
             subagent = self._subagents.get(current)
+            metadata = self._subagent_task_metadata.get(current)
+            if run is None and subagent is None and metadata is None:
+                stored_run = self._swarm_store.get_agent_run(current)
+                if stored_run is not None:
+                    run = _agent_run_from_dict(stored_run)
+                else:
+                    subagent = self.load_persisted_subagent(current)
+            if run is not None:
+                if run.conversation_id:
+                    return run
+                current = str(run.parent_run_id or "").strip()
+                continue
             if subagent is not None:
                 current = str(subagent.parent_run_id or "").strip()
                 continue
-            metadata = self._subagent_task_metadata.get(current)
-            if isinstance(metadata, dict):
+            if metadata is not None:
                 current = str(metadata.get("parent_run_id") or "").strip()
                 continue
             break
-        return ""
+        return None
+
+    def _conversation_id_for_agent(self, agent_id: str) -> str:
+        owner = self.get_agent_owner_run(agent_id)
+        return str(owner.conversation_id or "").strip() if owner is not None else ""
 
     def _record_agent_activity(
         self,
@@ -2599,7 +2619,7 @@ class AgentRuntime:
         *,
         include_result: bool = True,
     ) -> dict[str, Any] | None:
-        record = self._subagents.get(subagent_id)
+        record = self._subagents.get(subagent_id) or self.load_persisted_subagent(subagent_id)
         result = self._subagent_results.get(subagent_id)
         task = self._subagent_tasks.get(subagent_id)
         # Retained in-memory results are capped per parent (FIFO eviction), but
@@ -2707,13 +2727,9 @@ class AgentRuntime:
     ) -> ParentNotification | None:
         record = self._subagents.get(subagent_id)
         parent_run_id = str(getattr(record, "parent_run_id", "") or "").strip()
-        conversation_id = self._conversation_id_for_agent(parent_run_id)
-        session_id = ""
-        if parent_run_id:
-            parent_run = self._runs.get(parent_run_id)
-            if parent_run is not None:
-                conversation_id = str(getattr(parent_run, "conversation_id", "") or "").strip()
-                session_id = str(getattr(parent_run, "session_id", "") or "").strip()
+        owner = self.get_agent_owner_run(parent_run_id)
+        conversation_id = str(owner.conversation_id or "").strip() if owner is not None else ""
+        session_id = str(owner.session_id or "").strip() if owner is not None else ""
         if not parent_run_id and not conversation_id:
             return None
         # Synchronous TaskTool results already return to the parent as tool_result.
@@ -2854,24 +2870,10 @@ class AgentRuntime:
             parent_owner_id = str(sender_record.parent_run_id or "").strip()
             if not parent_owner_id:
                 raise ValueError(f"subagent {sender_id} has no parent run mailbox")
-            visited: set[str] = set()
-            parent_run = None
-            while (
-                parent_owner_id
-                and parent_owner_id not in visited
-                and len(visited) < 128
-            ):
-                visited.add(parent_owner_id)
-                parent_run = self.get_run(parent_owner_id)
-                if parent_run is not None:
-                    virtual_parent_run_id = parent_owner_id
-                    break
-                parent_agent = self.get_subagent(parent_owner_id)
-                if parent_agent is None:
-                    break
-                parent_owner_id = str(parent_agent.parent_run_id or "").strip()
+            parent_run = self.get_agent_owner_run(parent_owner_id)
             if parent_run is None:
                 raise ValueError(f"subagent {sender_id} has no valid parent ownership")
+            virtual_parent_run_id = parent_run.run_id
             if conversation_id and str(parent_run.conversation_id or "") != str(conversation_id):
                 raise ValueError("parent mailbox conversation ownership mismatch")
             if team_name:
@@ -2922,8 +2924,7 @@ class AgentRuntime:
             for participant_id, participant in self._subagents.items():
                 if str(participant.status or "") != "running":
                     continue
-                parent = self._runs.get(str(participant.parent_run_id or "").strip())
-                participant_conversation = str(getattr(parent, "conversation_id", "") or "")
+                participant_conversation = self._conversation_id_for_agent(participant_id)
                 if conversation_id and participant_conversation != conversation_id:
                     continue
                 if team_name and str(participant.team_name or "") != str(team_name):
@@ -2955,7 +2956,7 @@ class AgentRuntime:
             # its mailbox. The durable outbox is the only wake signal the
             # session watches, so a child->leader message leaves a marker
             # there; the mailbox itself remains the source of the content.
-            parent_run = self.get_run(virtual_parent_run_id)
+            parent_run = self.get_agent_owner_run(virtual_parent_run_id)
             enqueue_parent_notification(
                 parent_run_id=virtual_parent_run_id,
                 conversation_id=str(getattr(parent_run, "conversation_id", "") or conversation_id),

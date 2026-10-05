@@ -71,6 +71,7 @@ class ArtifactMeta:
     conversation_ids: tuple[str, ...] = ()
     workspace_root: str = ""
     owner_scopes: tuple[OwnerScope, ...] = ()
+    created_at: float = 0.0
 
 
 def _build_preview(content: str, preview_lines: int) -> str:
@@ -150,6 +151,7 @@ class MetaSidecar:
             conversation_ids=self.conversation_ids,
             workspace_root=self.workspace_root,
             owner_scopes=self.owner_scopes,
+            created_at=self.created_at,
         )
 
     @classmethod

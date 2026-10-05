@@ -26,6 +26,7 @@ def test_api_tool_call_record_covers_every_internal_field_or_omits_it_loudly() -
 def test_api_tool_call_record_from_internal_maps_projected_fields() -> None:
     internal = InternalToolCallRecord(
         tool_name="bash",
+        tool_call_id="call-123",
         tool_input={"command": "ls"},
         tool_output="file.txt",
         artifact_kind="file",
@@ -40,12 +41,14 @@ def test_api_tool_call_record_from_internal_maps_projected_fields() -> None:
         model_observation="ok",
         cleanup_receipt={"reaped": True},
         request_digest="abc",
+        result_payload={"id": "call-123", "summary": "internal completed event"},
     )
 
     payload = ApiToolCallRecord.from_internal(internal).model_dump()
 
     assert payload == {
         "tool_name": "bash",
+        "tool_call_id": "call-123",
         "tool_input": {"command": "ls"},
         "tool_output": "file.txt",
         "artifact_id": None,

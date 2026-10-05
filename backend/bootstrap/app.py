@@ -316,6 +316,11 @@ class AppBootstrap:
             except Exception as exc:
                 logger.debug("LSP manager stop error (harmless): %s", exc)
             try:
+                from backend.lsp.editor import editor_language_servers
+                await editor_language_servers.shutdown()
+            except (RuntimeError, OSError) as exc:
+                logger.error("Editor language servers could not stop: %s", exc)
+            try:
                 from backend.preview.launcher import stop_all_preview_launches
 
                 await stop_all_preview_launches()

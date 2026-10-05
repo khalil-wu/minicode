@@ -375,6 +375,73 @@
   gap: 7px;
 }
 
+.subagents-context:empty { display: none; }
+.subagents-context {
+  display: grid;
+  gap: 7px;
+  padding: 0 8px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.subagents-relation,
+.subagents-message-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.subagents-relation-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 1px 3px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+.subagents-relation-link > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subagents-relation-link:hover { background: var(--surface-soft); color: var(--text-primary); }
+.subagents-relation-link:focus-visible { outline: 2px solid var(--focus-ring); }
+.subagents-relation-link .mc-agent-avatar { --agent-avatar-size: 17px; }
+.subagents-scope { overflow-wrap: anywhere; }
+.subagents-scope > div { padding: 5px 0 0 12px; font-family: var(--font-mono); }
+.subagents-attention { padding: 4px 8px; color: var(--state-warning); font-size: var(--text-sm); line-height: 1.6; }
+.subagents-retained-result,
+.subagents-messages { min-width: 0; padding: 0 8px; }
+.subagents-retained-result > summary,
+.subagents-messages > summary,
+.subagents-scope > summary { cursor: pointer; color: var(--text-secondary); font-size: var(--text-xs); line-height: 1.7; }
+.subagents-retained-result-content { padding-top: 10px; overflow-wrap: anywhere; }
+.subagents-message { padding: 12px 0; border-bottom: 1px solid var(--border-subtle); }
+.subagents-message:last-child { border-bottom: 0; }
+.subagents-message-heading { color: var(--text-muted); font-size: var(--text-xs); }
+.subagents-message-heading small { margin-left: auto; font-size: inherit; }
+.subagents-message p { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-sm); line-height: 1.6; }
+.subagents-followup-region { display: grid; min-width: 0; gap: 7px; padding: 10px 8px 0; border-top: 1px solid var(--border-subtle); }
+.subagents-followup-toggle { display: inline-flex; align-items: center; justify-self: start; gap: 5px; padding: 3px 0; border: 0; background: transparent; color: var(--text-muted); font: inherit; font-size: var(--text-xs); cursor: pointer; }
+.subagents-followup-toggle:hover { color: var(--text-secondary); }
+.subagents-followup-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; border-radius: 4px; }
+.subagents-followup-toggle[aria-expanded="true"] > svg { transform: rotate(90deg); }
+.subagents-followup-toggle small { padding-left: 3px; color: var(--text-muted); font: inherit; }
+.subagents-followup { display: grid; min-width: 0; gap: 7px; }
+.subagents-followup-input { display: flex; align-items: flex-end; gap: 6px; padding: 9px; border: 1px solid var(--border-subtle); border-radius: 12px; background: var(--surface-base); }
+.subagents-followup-input:focus-within { border-color: var(--border-strong); }
+.subagents-followup-input textarea { flex: 1; width: 0; min-width: 0; min-height: 44px; max-height: 180px; resize: vertical; border: 0; outline: 0; background: transparent; color: var(--text-primary); font: inherit; font-size: var(--text-sm); line-height: 1.5; }
+.subagents-followup-input textarea::placeholder { color: var(--text-muted); }
+.subagents-followup-input button { display: grid; place-items: center; flex: 0 0 27px; height: 27px; border: 0; border-radius: 50%; background: var(--text-primary); color: var(--surface-base); cursor: pointer; }
+.subagents-followup-input button:disabled { opacity: .3; cursor: default; }
+.subagents-followup-hint,
+.subagents-followup-receipt,
+.subagents-followup-error { font-size: var(--text-xs); line-height: 1.5; }
+.subagents-followup-hint { color: var(--text-muted); }
+.subagents-followup-receipt { color: var(--text-secondary); }
+.subagents-followup-error { color: var(--state-danger); }
+
 @keyframes subagents-surface-enter {
   from { opacity: 0; transform: translateX(5px); }
   to { opacity: 1; transform: translateX(0); }

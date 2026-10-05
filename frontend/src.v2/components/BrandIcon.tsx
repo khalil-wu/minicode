@@ -35,20 +35,20 @@ import openrouterIcon from "@lobehub/icons-static-svg/icons/openrouter.svg?url";
 import vercelIcon from "@lobehub/icons-static-svg/icons/vercel.svg?url";
 import "./BrandIcon.css";
 
-type BrandAsset = { label: string; asset: string };
+type BrandAsset = { label: string; asset: string; color: boolean };
 
 const BRAND_ASSETS: Array<[RegExp, BrandAsset]> = [
-  [/deepseek/, { label: "DeepSeek", asset: deepseekIcon }],
-  [/chatgpt|openai|\bgpt[-_\d]|\bcodex\b|\bo[134](?:[-_\d]|$)/, { label: "OpenAI", asset: openaiIcon }],
-  [/claude/, { label: "Claude", asset: claudeIcon }],
-  [/anthropic/, { label: "Anthropic", asset: anthropicIcon }],
-  [/gemini|google(?:\s|[-_/])?ai\b/, { label: "Google Gemini", asset: geminiIcon }],
-  [/openrouter/, { label: "OpenRouter", asset: openrouterIcon }],
-  [/figma/, { label: "Figma", asset: figmaIcon }],
-  [/notion/, { label: "Notion", asset: notionIcon }],
-  [/vercel/, { label: "Vercel", asset: vercelIcon }],
-  [/microsoft/, { label: "Microsoft", asset: microsoftIcon }],
-  [/\bgoogle\b(?![\s/_-]*drive)/, { label: "Google", asset: googleIcon }],
+  [/deepseek/, { label: "DeepSeek", asset: deepseekIcon, color: true }],
+  [/chatgpt|openai|\bgpt[-_\d]|\bcodex\b|\bo[134](?:[-_\d]|$)/, { label: "OpenAI", asset: openaiIcon, color: false }],
+  [/claude/, { label: "Claude", asset: claudeIcon, color: true }],
+  [/anthropic/, { label: "Anthropic", asset: anthropicIcon, color: false }],
+  [/gemini|google(?:\s|[-_/])?ai\b/, { label: "Google Gemini", asset: geminiIcon, color: true }],
+  [/openrouter/, { label: "OpenRouter", asset: openrouterIcon, color: false }],
+  [/figma/, { label: "Figma", asset: figmaIcon, color: true }],
+  [/notion/, { label: "Notion", asset: notionIcon, color: false }],
+  [/vercel/, { label: "Vercel", asset: vercelIcon, color: false }],
+  [/microsoft/, { label: "Microsoft", asset: microsoftIcon, color: true }],
+  [/\bgoogle\b(?![\s/_-]*drive)/, { label: "Google", asset: googleIcon, color: true }],
 ];
 
 const BRAND_ICONS: Array<[RegExp, { label: string; icon: IconifyIcon }]> = [
@@ -137,7 +137,8 @@ export const BrandIcon = ({
   fallbackIcon?: ReactNode;
   inferBrand?: boolean;
 }) => {
-  const brand = inferBrand ? resolveBrandIcon(value) : null;
+  const brandValue = fallback === "web" && websiteUrl ? safeWebUrl(websiteUrl)?.hostname ?? "" : value;
+  const brand = inferBrand ? resolveBrandIcon(brandValue) : null;
   const remoteCandidates = resolveWebsiteIconCandidates(iconUrl, brand ? undefined : websiteUrl);
   const remoteCandidateKey = remoteCandidates.join("\n");
   const [failedRemoteIcons, setFailedRemoteIcons] = useState<{ scope: string; urls: string[] }>({ scope: remoteCandidateKey, urls: [] });
@@ -163,7 +164,7 @@ export const BrandIcon = ({
             urls: [...(failed.scope === remoteCandidateKey ? failed.urls : []), remoteIcon] }))}
         />
       ) : brand && "asset" in brand ? (
-        <img src={brand.asset} alt="" width={size} height={size} />
+        <img src={brand.asset} alt="" width={size} height={size} className="brand-icon-image" data-icon-kind={brand.color ? "color" : "mono"} />
       ) : brand && "icon" in brand ? (
         <Icon icon={brand.icon} width={size} height={size} />
       ) : fallbackIcon ? (

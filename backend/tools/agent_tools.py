@@ -4103,25 +4103,49 @@ class TaskTool(BaseTool):
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
 
         parts: list[str] = []
+        presentation: list[str] = []
+        subtasks: list[dict[str, Any]] = []
         has_error = False
-        for i, (task, result) in enumerate(zip(tasks, results), 1):
-            heading = f"[{i}/{total}] {task['description']}"
+        for i, (task, result, subagent_id) in enumerate(zip(tasks, results, subagent_ids), 1):
+            artifact_id = None
             if isinstance(result, Exception):
                 has_error = True
-                parts.append(f"{heading}\nError: {result}")
+                status = "failed"
+                content = f"Error: {result}"
             elif isinstance(result, ToolResult):
-                if result.is_error:
+                status = result.status or ("failed" if result.is_error else "completed")
+                if result.is_error or status in {"failed", "error", "blocked", "timeout", "forbidden", "not_found"}:
                     has_error = True
-                parts.append(f"{heading}\n{result.content}")
+                content = result.content
+                artifact_id = result.artifact_id
             else:
                 has_error = True
-                parts.append(f"{heading}\n{result or 'No result returned.'}")
+                status = "failed"
+                content = str(result or "No result returned.")
+            heading = f"[{i}/{total}] {task['description']} ({status})"
+            parts.append(f"{heading}\nsubagent_id: {subagent_id}\n{content}")
+            presentation.append(f"{heading}\n{content}")
+            subtasks.append({
+                "subagent_id": subagent_id,
+                "status": status,
+                "artifact_id": artifact_id,
+            })
+        statuses = {subtask["status"] for subtask in subtasks}
+        overall_status = (
+            "failed" if has_error
+            else "completed" if statuses <= {"completed", "success"}
+            else "cancelled" if statuses == {"cancelled"}
+            else "partial"
+        )
         return ToolResult(
             content="\n".join(parts),
+            content_preview="\n".join(presentation),
             is_error=has_error,
             duration_ms=elapsed_ms,
             display_summary=f"Parallel subtasks: {total} tasks",
             result_kind="subagent",
+            status=overall_status,
+            runtime_metadata={"parallel_subtasks": subtasks},
         )
 
     # ------------------------------------------------------------------

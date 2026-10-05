@@ -301,6 +301,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   previewLaunchProcesses: [],
   previewVerification: null,
   previewOwnerConversationId: null,
+  previewServiceManagerRequest: null,
   fileChanges: [],
   fileTreeVersion: 0,
   fileTreeRevealRequests: [],
@@ -334,7 +335,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     set({ textScale: v });
   },
   setCodeTextScale: (s) => {
-    const value = clamp(0.88, 1.2, s);
+    const value = clamp(11 / 14, 24 / 14, s);
     writeLS(LS.codeTextScale, String(value));
     applyCodeTextScale(value);
     set({ codeTextScale: value });

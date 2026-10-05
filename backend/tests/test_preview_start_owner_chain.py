@@ -78,7 +78,9 @@ async def test_start_readiness_retains_the_original_process_and_request_owner(tm
             assert event.data["workspace_root"] == str(tmp_path)
             assert event.data["request_id"] == "start-1"
             if completion == "live":
-                assert event.type == "preview.verified" and event.data["ok"] is True
+                assert event.type == "command.result" and event.data["level"] == "success"
+                assert event.data["data"]["verification"]["ok"] is True
+                assert any(call.args[0].type == "preview.verified" for call in session.send_event.await_args_list)
             else:
                 assert event.type == "command.result" and event.data["level"] == "error"
                 assert not any(call.args[0].type == "preview.verified" for call in session.send_event.await_args_list)

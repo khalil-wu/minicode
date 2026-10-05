@@ -55,10 +55,36 @@ test("sandboxed renderer preload only imports Electron's supported bridge", () =
 test("IPC capability manifest permits declared channels and rejects unknown channels", () => {
   assert.equal(security.assertIpcCapability("minicode:window:minimize"), "minicode:window:minimize");
   assert.equal(security.assertIpcCapability("minicode:embeddedBrowser:list"), "minicode:embeddedBrowser:list");
+  assert.equal(security.assertIpcCapability("minicode:sandbox:setup"), "minicode:sandbox:setup");
   assert.throws(
     () => security.assertIpcCapability("minicode:unknown"),
     (error) => error?.code === "ERR_UNDECLARED_IPC_CAPABILITY",
   );
+});
+
+test("Windows initialization IPC accepts only the owned main renderer and ignores caller paths", async () => {
+  const handlers = new Map();
+  const moduleBox = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "ipc-handlers.js"), "utf8"), {
+    module: moduleBox, process, console,
+    require(name) {
+      if (name === "electron") return { ipcMain: { on() {}, handle(channel, handler) { handlers.set(channel, handler); } } };
+      return require(name);
+    },
+  });
+  const mainFrame = { url: "file:///minicode/index.html" };
+  const webContents = { mainFrame, getURL: () => mainFrame.url };
+  const win = { webContents, isDestroyed: () => false };
+  const calls = [];
+  moduleBox.exports.init({ getMainWindow: () => win, setupWindowsSandbox: (...args) => {
+    calls.push(args); return Promise.resolve({ ok: true });
+  } });
+  moduleBox.exports.registerIpcHandlers();
+  const setup = handlers.get("minicode:sandbox:setup");
+  assert.throws(() => setup({ sender: webContents, senderFrame: { url: mainFrame.url } }), { code: "ERR_UNTRUSTED_IPC_SENDER" });
+  assert.equal(calls.length, 0);
+  assert.deepEqual(await setup({ sender: webContents, senderFrame: mainFrame }, { userDataRoot: "C:\\foreign", runtimePath: "C:\\foreign.exe" }), { ok: true });
+  assert.deepEqual(calls, [[]]);
 });
 
 test("IPC capability manifest covers every registered invoke handler", () => {

@@ -17,13 +17,26 @@ from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 if TYPE_CHECKING:
     from backend.permissions.context import ToolExecutionContext
 
-# WorktreeCreate hooks can provide a VCS-backed directory outside Git.  Keep a
-# process-local ownership ledger so RemoveWorktreeTool can route those paths
-# back through WorktreeRemove instead of incorrectly invoking `git worktree
-# remove`.  A restarted process can still detect the hook-only path when no
-# Git manager exists, but the ledger preserves the stronger hook-created
-# distinction during a normal session.
+# Conversation metadata owns durable hook registrations. Standalone callers
+# without a conversation repository retain their process-local ownership.
 _HOOK_CREATED_WORKTREES: set[str] = set()
+
+
+def _worktree_repository(context: Any) -> Any | None:
+    return context.run_context.conversation_repository if context and context.run_context else None
+
+
+def _is_registered_hook_worktree(path: str, context: Any) -> bool:
+    from backend.atomic_io import canonical_file_path_key
+
+    repository = _worktree_repository(context)
+    if repository is None or not context.conversation_id:
+        return path in _HOOK_CREATED_WORKTREES
+    record = repository.get_conversation(context.conversation_id)
+    return record is not None and any(
+        entry["backend"] == "hook" and canonical_file_path_key(entry["path"]) == canonical_file_path_key(path)
+        for entry in record.worktree_registrations
+    )
 
 
 def _owned_git_worktree_path(manager: Any, requested_path: Path) -> Path:
@@ -249,6 +262,12 @@ class CreateWorktreeTool(BaseTool):
                     "WorktreeCreate hook completed without returning a worktree path"
                 )
             _HOOK_CREATED_WORKTREES.add(str(hook_path))
+            repository = _worktree_repository(context)
+            if repository is not None and context.conversation_id:
+                repository.register_worktree(
+                    context.conversation_id, path=str(hook_path), backend="hook",
+                    workspace_root=str(context.workspace_root or ""),
+                )
             return self._success_result(
                 f"已通过 WorktreeCreate hook 创建 worktree: {hook_path}"
             )
@@ -337,7 +356,8 @@ class RemoveWorktreeTool(BaseTool):
             else None
         )
         hook_mgr_result = None
-        if normalized_path in _HOOK_CREATED_WORKTREES:
+        registered_hook = _is_registered_hook_worktree(normalized_path, context)
+        if registered_hook:
             hook_mgr_result = await _run_worktree_hook(
                 hook_manager,
                 "remove",
@@ -350,31 +370,18 @@ class RemoveWorktreeTool(BaseTool):
                     f"WorktreeRemove hook blocked removal: {_hook_result_error(hook_mgr_result, event='Remove')}"
                 )
             _HOOK_CREATED_WORKTREES.discard(normalized_path)
+            repository = _worktree_repository(context)
+            if repository is not None and context.conversation_id:
+                repository.unregister_worktree(context.conversation_id, path=normalized_path)
             return self._success_result(
                 f"已通过 WorktreeRemove hook 删除 worktree: {normalized_path}"
             )
+        if registered_hook:
+            return self._error_result("该 worktree 由 hook 创建；请配置 WorktreeRemove hook 后再删除。")
 
         manager = await _resolve_worktree_manager(context)
 
         if manager is None:
-            # A process restart loses the in-memory ownership ledger.  In a
-            # non-Git directory, a configured WorktreeRemove hook is still the
-            # only valid cleanup backend, so route it there rather than
-            # reporting a misleading Git-repository error.
-            hook_result = await _run_worktree_hook(
-                hook_manager,
-                "remove",
-                path=normalized_path,
-                reason="force" if force else "remove",
-            )
-            if hook_result is not None:
-                if getattr(hook_result, "blocked", False) or getattr(hook_result, "failed", False):
-                    return self._error_result(
-                        f"WorktreeRemove hook blocked removal: {_hook_result_error(hook_result, event='Remove')}"
-                    )
-                return self._success_result(
-                    f"已通过 WorktreeRemove hook 删除 worktree: {normalized_path}"
-                )
             return self._error_result("当前目录不是 Git 仓库")
 
         try:
@@ -405,7 +412,7 @@ async def _resolve_worktree_manager(context: "ToolExecutionContext | None"):
             AdditionalPermissionProfile, FileSystemAccessMode, FileSystemPath,
             FileSystemPermissions, FileSystemSandboxEntry, sandbox_policy_for_permission_context,
         )
-        from backend.tools.git_support import _run_git
+        from backend.tools.git_support import _run_git, SandboxRunner
 
         workspace = Path(root).resolve()
         captured_policy = context.sandbox_policy or sandbox_policy_for_permission_context(workspace, context.permission)
@@ -421,14 +428,29 @@ async def _resolve_worktree_manager(context: "ToolExecutionContext | None"):
                 # default metadata mask where this captured policy already
                 # grants write access; explicit readonly/denied paths stay so.
                 if policy.resolve(cwd=workspace).resolve_access(target) is FileSystemAccessMode.WRITE:
+                    entries = []
+                    if policy.protect_workspace_metadata:
+                        # Materialize the metadata parent even before it
+                        # exists. An ancestor scratch/TMP write root must not
+                        # make siblings of this exact worktree writable.
+                        entries.append(FileSystemSandboxEntry(
+                            FileSystemPath.path(workspace / ".minicode"), FileSystemAccessMode.READ,
+                        ))
+                    entries.append(FileSystemSandboxEntry(FileSystemPath.path(target), FileSystemAccessMode.WRITE))
                     policy = policy.with_additional_permissions(AdditionalPermissionProfile(
-                        file_system=FileSystemPermissions((FileSystemSandboxEntry(
-                            FileSystemPath.path(target), FileSystemAccessMode.WRITE,
-                        ),)),
+                        file_system=FileSystemPermissions(tuple(entries)),
                     ))
-            read_only = argv[1] in {"rev-parse", "status"} or argv[1:3] in (["worktree", "list"], ["branch", "--show-current"])
+            git_args = argv[2:] if argv[1] == "--no-optional-locks" else argv[1:]
+            read_only = git_args[0] in {"rev-parse", "status"} or git_args[:2] in (["worktree", "list"], ["branch", "--show-current"])
+            launch_cwd = Path(cwd)
+            if (read_only and launch_cwd.resolve() != workspace
+                    and SandboxRunner(policy).capability(cwd=launch_cwd).backend == "windows-elevated-wfp"):
+                # Prepare the captured repository owner before Git follows a
+                # linked checkout's metadata pointer. Keep status scoped by -C.
+                argv = [argv[0], "-C", str(launch_cwd), *argv[1:]]
+                launch_cwd = workspace
             operation = asyncio.run_coroutine_threadsafe(_run_git(
-                argv, root=workspace, cwd=Path(cwd), context=context,
+                argv, root=workspace, cwd=launch_cwd, context=context,
                 sandbox_policy=policy, write_git_metadata=not read_only,
                 timeout=options["timeout"],
                 index_file=index_file,

@@ -7,7 +7,7 @@ import { fsReadFileInfo, fsSearchFiles, isDesktop } from "../desktop/runtime";
 import { compareWriteWorkspaceFile, readWorkspaceFile, searchWorkspaceFiles } from "../protocol/workspace";
 import { pushToast } from "../overlays/ToastContainer";
 import { useAppStore } from "../stores";
-import { clearEditorWorkspaceBufferCacheForTests, editorStateForWorkspace, persistEditorTabs } from "../stores/shared-helpers";
+import { clearEditorWorkspaceBufferCacheForTests, editorStateForWorkspace, loadPersistedEditorTabs, persistEditorTabs } from "../stores/shared-helpers";
 import { EditorPanel } from "./EditorPanel";
 import type { CodeSelectionRange } from "../stores/types";
 
@@ -15,6 +15,7 @@ const editorMocks = vi.hoisted(() => ({
   actions: [] as Array<{ run: (editor: unknown) => void }>,
   showConfirm: vi.fn(),
   editOperations: [] as string[],
+  trigger: vi.fn(),
 }));
 
 vi.mock("../overlays/DialogService", () => ({ showConfirm: editorMocks.showConfirm }));
@@ -56,7 +57,7 @@ vi.mock("@monaco-editor/react", async () => {
       const propsRef = ReactModule.useRef({ value, path });
       propsRef.current = { value, path };
       const selections = ReactModule.useRef(new Map<string, { start: number; end: number }>());
-      const listeners = ReactModule.useRef({ selection: () => {}, model: () => {}, content: () => {} });
+      const listeners = ReactModule.useRef({ selection: () => {}, model: () => {}, content: () => {}, scroll: () => {} });
       const positionAt = (offset: number) => {
         const before = propsRef.current.value.slice(0, offset).split("\n");
         return { lineNumber: before.length, column: before[before.length - 1].length + 1 };
@@ -65,7 +66,25 @@ vi.mock("@monaco-editor/react", async () => {
         .slice(0, lineNumber - 1).reduce((offset, line) => offset + line.length + 1, 0) + column - 1;
       ReactModule.useEffect(() => {
         let dispose: () => void;
+        const mountedInput = inputRef.current!;
         onMount({
+          trigger: editorMocks.trigger,
+          addContentWidget: vi.fn(),
+          layoutContentWidget: vi.fn(),
+          removeContentWidget: vi.fn(),
+          saveViewState: () => {
+            const input = inputRef.current;
+            if (!input) return null;
+            const start = positionAt(input.selectionStart);
+            const end = positionAt(input.selectionEnd);
+            return { selection: { startLineNumber: start.lineNumber, startColumn: start.column, endLineNumber: end.lineNumber, endColumn: end.column }, scrollTop: input.scrollTop };
+          },
+          restoreViewState: (saved: { selection: CodeSelectionRange; scrollTop: number }) => {
+            const range = saved.selection;
+            inputRef.current!.setSelectionRange(offsetAt(range.startLineNumber, range.startColumn), offsetAt(range.endLineNumber, range.endColumn));
+            inputRef.current!.scrollTop = saved.scrollTop;
+            listeners.current.selection();
+          },
           addAction: (action: { run: (editor: unknown) => void }) => editorMocks.actions.push(action),
           focus: vi.fn(),
           pushUndoStop: () => editorMocks.editOperations.push("stop"),
@@ -76,13 +95,13 @@ vi.mock("@monaco-editor/react", async () => {
               + propsRef.current.value.slice(offsetAt(edit.range.endLineNumber, edit.range.endColumn)));
           },
           getSelection: () => {
-            const start = positionAt(inputRef.current!.selectionStart);
-            const end = positionAt(inputRef.current!.selectionEnd);
+            const start = positionAt(mountedInput.selectionStart);
+            const end = positionAt(mountedInput.selectionEnd);
             return { startLineNumber: start.lineNumber, startColumn: start.column, endLineNumber: end.lineNumber, endColumn: end.column };
           },
           setSelection: (range: CodeSelectionRange) => inputRef.current!.setSelectionRange(offsetAt(range.startLineNumber, range.startColumn), offsetAt(range.endLineNumber, range.endColumn)),
           getPosition: () => {
-            const before = propsRef.current.value.slice(0, inputRef.current!.selectionEnd).split("\n");
+            const before = propsRef.current.value.slice(0, mountedInput.selectionEnd).split("\n");
             return { lineNumber: before.length, column: before[before.length - 1].length + 1 };
           },
           getModel: () => ({
@@ -93,9 +112,10 @@ vi.mock("@monaco-editor/react", async () => {
             getEOL: () => "\n",
           }),
           onDidChangeCursorPosition: vi.fn(),
-          onDidChangeCursorSelection: (listener: () => void) => { listeners.current.selection = listener; },
+          onDidChangeCursorSelection: (listener: () => void) => { listeners.current.selection = listener; return { dispose: vi.fn() }; },
           onDidChangeModel: (listener: () => void) => { listeners.current.model = listener; },
           onDidChangeModelContent: (listener: () => void) => { listeners.current.content = listener; },
+          onDidScrollChange: (listener: () => void) => { listeners.current.scroll = listener; },
           onDidDispose: (listener: () => void) => { dispose = listener; },
         });
         return () => dispose?.();
@@ -113,6 +133,7 @@ vi.mock("@monaco-editor/react", async () => {
         value,
         readOnly: options?.readOnly,
         onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => onChange?.(event.currentTarget.value),
+        onScroll: () => listeners.current.scroll(),
         onSelect: (event: React.SyntheticEvent<HTMLTextAreaElement>) => {
           selections.current.set(path, { start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd });
           listeners.current.selection();
@@ -147,9 +168,12 @@ vi.mock("monaco-editor/editor/editor.api.js", () => ({ editor: {}, languages: {}
 vi.mock("monaco-editor/languages/definitions/typescript/register.js", () => ({}));
 vi.mock("monaco-editor/languages/definitions/javascript/register.js", () => ({}));
 vi.mock("monaco-editor/languages/definitions/css/register.js", () => ({}));
+vi.mock("monaco-editor/languages/definitions/scss/register.js", () => ({}));
+vi.mock("monaco-editor/languages/definitions/less/register.js", () => ({}));
 vi.mock("monaco-editor/languages/definitions/html/register.js", () => ({}));
 vi.mock("monaco-editor/languages/definitions/markdown/register.js", () => ({}));
 vi.mock("monaco-editor/languages/definitions/python/register.js", () => ({}));
+vi.mock("monaco-editor/languages/definitions/yaml/register.js", () => ({}));
 vi.mock("./monacoLanguageServices", async (importOriginal) => ({
   ...await importOriginal<typeof import("./monacoLanguageServices")>(),
   configureMiniCodeMonacoWorkers: vi.fn(),
@@ -218,6 +242,46 @@ describe("EditorPanel", () => {
     expect(editor.value).toBe("before INSERT after");
     expect(editorMocks.editOperations).toEqual(["stop", "chat-code-insert", "stop"]);
     expect(event.detail.handled).toBe(true);
+  });
+
+  it("recovers unsaved text and native reading position after an editor and workspace-cache restart", async () => {
+    const original = "first line\nsecond line\nthird line";
+    const draft = "first draft\nsecond line\nthird line";
+    vi.mocked(readWorkspaceFile).mockResolvedValue({ path: "main.ts", content: original, content_hash: "original" });
+    useAppStore.getState().openEditorFile("main.ts", "main.ts", { exact: true });
+    const first = render(<EditorPanel />);
+    const input = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: draft } });
+    input.setSelectionRange(14, 21);
+    fireEvent.select(input);
+    input.scrollTop = 140;
+    fireEvent.scroll(input);
+    first.unmount();
+    clearEditorWorkspaceBufferCacheForTests();
+    useAppStore.setState({ editorTabs: loadPersistedEditorTabs("C:/projects/demo") });
+    render(<EditorPanel />);
+    const restored = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    await waitFor(() => expect(restored.value).toBe(draft));
+    await waitFor(() => expect([restored.selectionStart, restored.selectionEnd, restored.scrollTop]).toEqual([14, 21, 140]));
+    expect(useAppStore.getState().editorTabs[0]).toMatchObject({ original, contentHash: "original", draftRestored: true });
+    expect(screen.getByText("已恢复草稿")).toBeTruthy();
+  });
+
+  it("routes code toolbar search, definition and references through native editor commands", async () => {
+    vi.mocked(readWorkspaceFile).mockResolvedValue({ path: "main.ts", content: 'const message = "MiniCode";', content_hash: "original" });
+    useAppStore.getState().openEditorFile("main.ts", "main.ts", { exact: true });
+    render(<EditorPanel />);
+    await screen.findByTestId("monaco-editor");
+    fireEvent.click(screen.getByRole("button", { name: "查找" }));
+    fireEvent.click(screen.getByRole("button", { name: "更多编辑器操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^转到定义/ }));
+    fireEvent.click(screen.getByRole("button", { name: "更多编辑器操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^查找所有引用/ }));
+    expect(editorMocks.trigger.mock.calls).toEqual([
+      ["minicode.editor-action", "actions.find", {}],
+      ["minicode.editor-action", "editor.action.revealDefinition", {}],
+      ["minicode.editor-action", "editor.action.referenceSearch.trigger", {}],
+    ]);
   });
 
   it("reports basename resolution failures and can open the file when the service recovers", async () => {
@@ -448,6 +512,32 @@ describe("EditorPanel", () => {
     const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
     expect(editor.value).toBe("from workspace root");
     expect(fsReadFileInfo).toHaveBeenCalledWith("C:/projects/demo/src/app.ts");
+  });
+
+  it("reads an HTML script link from its owning directory through the desktop editor", async () => {
+    vi.mocked(isDesktop).mockReturnValue(true);
+    vi.mocked(fsReadFileInfo).mockResolvedValue({ content: "const game = {};", contentHash: "game-hash" });
+    const { WorkspaceHTMLWorker } = await import("./workspaceHtmlService");
+    const { URI } = await import("monaco-editor/base/common/uri.js");
+    const { editorModelUri, registerMiniCodeEditorOpener } = await vi.importActual<typeof import("./monacoLanguageServices")>("./monacoLanguageServices");
+    const owner = URI.parse(editorModelUri("mario-game/index.html", useAppStore.getState().workingDirectory));
+    const worker = new WorkspaceHTMLWorker({ getMirrorModels: () => [{
+      uri: owner, version: 1, getValue: () => '<script src="js/game.js"></script>',
+    }] }, { languageId: "html", languageSettings: {} });
+    const [link] = await worker.findDocumentLinks(owner.toString());
+    let opener!: import("monaco-editor/editor/editor.api.js").editor.ICodeEditorOpener;
+    const registration = registerMiniCodeEditorOpener({ editor: {
+      registerEditorOpener: (handler: typeof opener) => { opener = handler; return { dispose() {} }; },
+    } } as unknown as typeof import("monaco-editor/editor/editor.api.js"),
+    (path, label, target) => useAppStore.getState().openEditorFile(path, label, target));
+    opener.openCodeEditor({} as import("monaco-editor/editor/editor.api.js").editor.ICodeEditor, URI.parse(link.target));
+
+    render(<EditorPanel />);
+
+    expect((await screen.findByTestId("monaco-editor") as HTMLTextAreaElement).value).toBe("const game = {};");
+    expect(useAppStore.getState().activeTabPath).toBe("mario-game/js/game.js");
+    expect(fsReadFileInfo).toHaveBeenCalledExactlyOnceWith("C:/projects/demo/mario-game/js/game.js");
+    registration.dispose();
   });
 
   it("resolves a unique basename link before opening it from the transcript", async () => {

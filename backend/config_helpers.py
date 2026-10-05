@@ -129,6 +129,7 @@ class LLMSettings:
     image_quality: str = ""
     thinking_budget: int = 0
     tool_mode: str = ""
+    supports_hosted_web_search: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -611,11 +612,12 @@ def _coerce_model_metadata(value: Any) -> dict[str, dict[str, Any]]:
         ).strip().lower()
         if default_reasoning_summary:
             metadata["default_reasoning_summary"] = default_reasoning_summary
-        for key in ("supports_custom_tools", "responses_websocket", "native_compaction", "parallel_tool_calls"):
+        for key in ("supports_custom_tools", "supports_hosted_web_search", "responses_websocket", "native_compaction", "parallel_tool_calls"):
             if isinstance(raw_metadata.get(key), bool):
                 metadata[key] = raw_metadata[key]
-        if "native_compaction" in raw_metadata and raw_metadata["native_compaction"] is None:
-            metadata["native_compaction"] = None
+        for key in ("native_compaction", "supports_hosted_web_search"):
+            if key in raw_metadata and raw_metadata[key] is None:
+                metadata[key] = None
         if isinstance(raw_metadata.get("model_instructions"), str):
             metadata["model_instructions"] = raw_metadata["model_instructions"].strip()
         if isinstance(raw_metadata.get("parallel_tool_calls"), bool):
@@ -706,6 +708,7 @@ def get_provider_model_metadata(
         "default_reasoning_effort": default_reasoning_effort,
         "default_reasoning_summary": default_reasoning_summary,
         "supports_custom_tools": declared.get("supports_custom_tools", False),
+        "supports_hosted_web_search": declared.get("supports_hosted_web_search"),
         "responses_websocket": declared.get("responses_websocket", False),
         "native_compaction": declared.get("native_compaction"),
         "model_instructions": declared.get("model_instructions", ""),
@@ -1851,6 +1854,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
             default_reasoning_effort=anthropic["default_reasoning_effort"],
             default_reasoning_summary=anthropic["default_reasoning_summary"],
             supports_custom_tools=model_metadata["supports_custom_tools"],
+            supports_hosted_web_search=model_metadata["supports_hosted_web_search"],
             responses_websocket=model_metadata["responses_websocket"],
             native_compaction=model_metadata["native_compaction"],
             model_instructions=model_metadata["model_instructions"],
@@ -1902,6 +1906,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
             default_reasoning_effort=custom["default_reasoning_effort"],
             default_reasoning_summary=custom["default_reasoning_summary"],
             supports_custom_tools=model_metadata["supports_custom_tools"],
+            supports_hosted_web_search=model_metadata["supports_hosted_web_search"],
             responses_websocket=model_metadata["responses_websocket"],
             native_compaction=model_metadata["native_compaction"],
             model_instructions=model_metadata["model_instructions"],
@@ -1954,6 +1959,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
         default_reasoning_effort=openai["default_reasoning_effort"],
         default_reasoning_summary=openai["default_reasoning_summary"],
         supports_custom_tools=model_metadata["supports_custom_tools"],
+        supports_hosted_web_search=model_metadata["supports_hosted_web_search"],
         responses_websocket=model_metadata["responses_websocket"],
         native_compaction=model_metadata["native_compaction"],
         model_instructions=model_metadata["model_instructions"],

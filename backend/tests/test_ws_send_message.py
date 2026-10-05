@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from backend.agent.runtime import AgentRuntime
 from backend.agent.run_context import RunContext
 from backend.artifact.store import ArtifactStore
@@ -93,12 +95,18 @@ def test_ui_send_message_resumes_stopped_agent(monkeypatch, tmp_path) -> None:
     session = _Session(tmp_path, task_tool)
     subagent = SimpleNamespace(
         parent_run_id="parent-run",
+        session_id="session-1",
         status="completed",
+        cleanup_pending=False,
         task_id="task-1",
     )
     runtime = SimpleNamespace(
+        state_root=tmp_path / "runtime-state",
         get_subagent=lambda subagent_id: subagent,
         get_run=lambda run_id: SimpleNamespace(conversation_id="conversation-1"),
+        get_subagent_task_metadata=lambda subagent_id: None,
+        has_live_subagent_task=lambda subagent_id: False,
+        get_agent_owner_run=lambda subagent_id: SimpleNamespace(conversation_id="conversation-1", session_id="session-1"),
     )
     monkeypatch.setattr("backend.agent.runtime.default_runtime", lambda: runtime)
 
@@ -109,7 +117,7 @@ def test_ui_send_message_resumes_stopped_agent(monkeypatch, tmp_path) -> None:
     }))
 
     assert handled is True
-    assert len(task_tool.calls) == 1
+    assert len(task_tool.calls) == 1, session.command_results
     call = task_tool.calls[0]
     assert call["subagent_id"] == "subagent-ended"
     assert call["prompt"] == "Check one more edge case."
@@ -134,12 +142,17 @@ def test_ui_send_message_resumes_evicted_agent_from_durable_record(monkeypatch, 
         parent_run_id="parent-run",
         session_id="session-1",
         status="completed",
+        cleanup_pending=False,
         task_id="task-1",
     )
     runtime = SimpleNamespace(
+        state_root=tmp_path / "runtime-state",
         get_subagent=lambda subagent_id: None,
         load_persisted_subagent=lambda subagent_id: subagent,
         get_run=lambda run_id: SimpleNamespace(conversation_id="conversation-1"),
+        get_subagent_task_metadata=lambda subagent_id: None,
+        has_live_subagent_task=lambda subagent_id: False,
+        get_agent_owner_run=lambda subagent_id: SimpleNamespace(conversation_id="conversation-1", session_id="session-1"),
     )
     monkeypatch.setattr("backend.agent.runtime.default_runtime", lambda: runtime)
 
@@ -149,7 +162,7 @@ def test_ui_send_message_resumes_evicted_agent_from_durable_record(monkeypatch, 
         "message_id": "message-2",
     }))
 
-    assert len(task_tool.calls) == 1
+    assert len(task_tool.calls) == 1, session.command_results
     assert task_tool.calls[0]["context"].metadata["run_id"] == "parent-run"
     assert session.command_results[-1]["data"] == {
         "recipient": "subagent-evicted",
@@ -158,9 +171,11 @@ def test_ui_send_message_resumes_evicted_agent_from_durable_record(monkeypatch, 
     }
 
 
+@pytest.mark.parametrize("reopen", [False, True])
 def test_ui_send_message_real_resume_restores_persisted_tool_policy(
     monkeypatch,
     tmp_path,
+    reopen,
 ) -> None:
     class _ResumeLLM(LLMAdapter):
         def __init__(self) -> None:
@@ -232,6 +247,7 @@ def test_ui_send_message_real_resume_restores_persisted_tool_policy(
 
     try:
         async def run() -> tuple[bool, str]:
+            nonlocal runtime
             initial = await task_tool.execute(
                 {
                     "description": "resume probe",
@@ -248,6 +264,15 @@ def test_ui_send_message_real_resume_restores_persisted_tool_policy(
             ]
             assert starts
             subagent_id = str(starts[-1]["subagent_id"])
+            previous_epoch = runtime.get_subagent(subagent_id).mailbox_epoch
+            if reopen:
+                runtime.close(release_lease=True)
+                runtime = AgentRuntime(
+                    metrics_file=tmp_path / "metrics.jsonl",
+                    swarm_store_dir=tmp_path / "swarm",
+                    enable_lease_heartbeat=False,
+                )
+                session.session_id = "reopened-session"
 
             handled = await handle_send_message(
                 session,
@@ -260,6 +285,8 @@ def test_ui_send_message_real_resume_restores_persisted_tool_policy(
             for _ in range(500):
                 resumed = runtime.get_subagent(subagent_id)
                 if resumed is not None and resumed.status == "completed":
+                    assert resumed.session_id == session.session_id
+                    assert resumed.mailbox_epoch > previous_epoch
                     return handled, subagent_id
                 await asyncio.sleep(0.01)
             raise AssertionError(runtime.get_subagent_snapshot(subagent_id, include_result=True))
@@ -302,6 +329,7 @@ def test_ui_send_message_failure_echoes_message_id(monkeypatch, tmp_path) -> Non
     session = _Session(tmp_path, task_tool)
     runtime = SimpleNamespace(
         get_subagent=lambda subagent_id: None,
+        load_persisted_subagent=lambda subagent_id: None,
         load_agent_transcript=lambda subagent_id: {"history": [], "events": []},
     )
     monkeypatch.setattr("backend.agent.runtime.default_runtime", lambda: runtime)
@@ -342,6 +370,7 @@ def test_subagent_transcript_replays_an_evicted_owned_agent(monkeypatch, tmp_pat
         get_subagent_task_metadata=lambda subagent_id: None,
         get_subagent_snapshot=lambda subagent_id, include_result=False: None,
         get_run=lambda run_id: SimpleNamespace(conversation_id="conversation-1"),
+        get_agent_owner_run=lambda subagent_id: SimpleNamespace(conversation_id="conversation-1"),
         load_agent_transcript=lambda subagent_id: transcript,
     )
     monkeypatch.setattr("backend.agent.runtime.default_runtime", lambda: runtime)
@@ -356,7 +385,7 @@ def test_subagent_transcript_replays_an_evicted_owned_agent(monkeypatch, tmp_pat
     assert session.command_results[-1]["data"]["messages"][0]["content"] == "Inspect the implementation"
 
 
-def test_subagent_transcript_rejects_an_evicted_agent_from_another_session(
+def test_subagent_transcript_reads_owned_history_after_session_replacement(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -380,6 +409,7 @@ def test_subagent_transcript_rejects_an_evicted_agent_from_another_session(
         get_subagent_task_metadata=lambda subagent_id: None,
         get_subagent_snapshot=lambda subagent_id, include_result=False: None,
         get_run=lambda run_id: SimpleNamespace(conversation_id="conversation-1"),
+        get_agent_owner_run=lambda subagent_id: SimpleNamespace(conversation_id="conversation-1"),
         load_agent_transcript=lambda subagent_id: transcript,
     )
     monkeypatch.setattr("backend.agent.runtime.default_runtime", lambda: runtime)
@@ -389,6 +419,5 @@ def test_subagent_transcript_rejects_an_evicted_agent_from_another_session(
         "conversation_id": "conversation-1",
     }))
 
-    assert session.command_results == []
-    assert session.events[-1]["level"] == "error"
-    assert "different session" in session.events[-1]["message"]
+    assert session.events == []
+    assert session.command_results[-1]["data"]["messages"][0]["content"] == "private child work"

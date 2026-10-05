@@ -1245,6 +1245,23 @@ describe("SidebarRight activity", () => {
     expect(useAppStore.getState().rightStackTab).toBe("subagents");
     expect(screen.getByRole("tab", { name: "打开子智能体" })).toBeTruthy();
   });
+
+  it("counts only executing agents in the tab badge and updates when waiting clears", () => {
+    useAppStore.setState({ rightStackTab: "subagents", subagents: [
+      { id: "executing", role: "explore", status: "running" },
+      { id: "input", role: "explore", status: "running", needsInput: true },
+      { id: "approval", role: "planner", status: "running", awaitingPlanApproval: true },
+      { id: "idle", role: "explore", status: "running", isIdle: true },
+      { id: "failed", role: "explore", status: "error" },
+    ] });
+    render(<SidebarRight />);
+    const tab = screen.getByRole("tab", { name: "打开子智能体" });
+    expect(tab.querySelector(".mc-sidebar-tab-badge")?.textContent).toBe("1");
+    act(() => useAppStore.setState((state) => ({
+      subagents: state.subagents.map((agent) => agent.id === "input" ? { ...agent, needsInput: false } : agent),
+    })));
+    expect(tab.querySelector(".mc-sidebar-tab-badge")?.textContent).toBe("2");
+  });
 });
 
 describe("SidebarRight diagnostics", () => {

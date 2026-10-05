@@ -56,6 +56,7 @@ function createSmokePage(port) {
           apiBaseUrl: runtime?.apiBaseUrl || "",
           wsBaseUrl: runtime?.wsBaseUrl || "",
           hasRuntimeToken: typeof runtime?.runtimeToken === "string" && runtime.runtimeToken.length >= 16,
+          hasSandboxSetup: typeof runtime?.desktop?.sandbox?.setup === "function",
           nodeIntegrationBlocked: typeof window.require === "undefined",
           diagnosticsOk: false,
           diagnosticsHasElectron: false,
@@ -221,6 +222,7 @@ test("Electron app boots real BrowserWindow with preload runtime and guarded IPC
     assert.equal(payload.apiBaseUrl, baseUrl);
     assert.equal(payload.wsBaseUrl, `ws://127.0.0.1:${port}`);
     assert.equal(payload.hasRuntimeToken, true);
+    assert.equal(payload.hasSandboxSetup, true);
     assert.equal(payload.nodeIntegrationBlocked, true);
     assert.equal(payload.diagnosticsOk, true);
     assert.equal(payload.diagnosticsHasElectron, true);

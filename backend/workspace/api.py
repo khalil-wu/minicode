@@ -46,6 +46,11 @@ from backend.services.workspace_api_service import (
     workspace_git_worktree_snapshots_payload,
 )
 from .service import WorkspaceService
+from .text_search import WorkspaceTextSearchRequest, search_workspace_text
+from .editor_language import EditorLanguageRequest, editor_language_request
+from .editor_ai import EditorCompletionRequest, editor_completion_response
+from .delivery import GitDeliveryRequest, git_delivery_action, git_delivery_status
+from .environment_setup import EnvironmentSetupRequest, environment_setup_response, environment_setup_status
 
 
 def create_workspace_router() -> APIRouter:
@@ -100,6 +105,43 @@ def create_workspace_router() -> APIRouter:
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Workspace search failed: {exc}") from exc
         return WorkspaceSearchResponse(**payload)
+
+    @router.post("/search-content")
+    async def workspace_text_search_api(
+        request: WorkspaceTextSearchRequest,
+        workspace_root: str = Query(..., min_length=1),
+    ) -> dict:
+        return await asyncio.to_thread(search_workspace_text, _service(workspace_root), request)
+
+    @router.post("/language")
+    async def workspace_language_api(
+        request: EditorLanguageRequest,
+        workspace_root: str = Query(..., min_length=1),
+    ) -> dict:
+        return await editor_language_request(_service(workspace_root), request)
+
+    @router.post("/inline-completion")
+    async def workspace_inline_completion_api(
+        request: EditorCompletionRequest,
+        workspace_root: str = Query(..., min_length=1),
+    ):
+        return editor_completion_response(_service(workspace_root), request)
+
+    @router.get("/git/delivery")
+    async def workspace_git_delivery_status(workspace_root: str = Query(..., min_length=1)):
+        return await git_delivery_status(_service(workspace_root).workspace_root_path())
+
+    @router.get("/environment")
+    async def workspace_environment_status(workspace_root: str = Query(..., min_length=1)):
+        return environment_setup_status(_service(workspace_root).workspace_root_path())
+
+    @router.post("/environment/setup")
+    async def workspace_environment_setup(request: EnvironmentSetupRequest, workspace_root: str = Query(..., min_length=1)):
+        return environment_setup_response(_service(workspace_root).workspace_root_path(), request)
+
+    @router.post("/git/delivery")
+    async def workspace_git_delivery_action(request: GitDeliveryRequest, workspace_root: str = Query(..., min_length=1)):
+        return await git_delivery_action(_service(workspace_root).workspace_root_path(), request)
 
     @router.get("/project-index", response_model=WorkspaceProjectIndexResponse)
     async def workspace_project_index_api(

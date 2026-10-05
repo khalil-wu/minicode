@@ -13,6 +13,7 @@ export interface EditorTextSurface {
     pushEOL?: (eol: 0 | 1) => void;
   } | null;
   getAction?: (id: string) => { run: () => void } | null;
+  trigger?: (source: string, command: string, payload: unknown) => void;
   createDecorationsCollection?: (decorations: unknown[]) => { set: (decorations: unknown[]) => void; clear: () => void };
   addAction?: (descriptor: {
     id: string;
@@ -36,5 +37,6 @@ export interface EditorTextSurface {
   onDidChangeCursorSelection: (handler: () => void) => unknown;
   onDidChangeModel: (handler: () => void) => unknown;
   onDidChangeModelContent: (handler: () => void) => unknown;
+  onDidScrollChange?: (handler: () => void) => unknown;
   onDidDispose: (handler: () => void) => unknown;
 }

@@ -25,9 +25,22 @@ describe("ModelBrandIcon", () => {
     expect(container.querySelector('[data-model-brand="deepseek"] img')).toBeTruthy();
   });
 
-  it("uses a theme-aware mask for monochrome brand assets", () => {
+  it("uses shared theme treatment for monochrome brand assets", () => {
     const { container } = render(<ModelBrandIcon model="gpt-5" size={24} />);
-    expect(container.querySelector('[data-model-brand="openai"] img[data-icon-kind="mono"]')).toBeTruthy();
+    expect(container.querySelector('[data-model-brand="openai"] img.brand-icon-image[data-icon-kind="mono"]')).toBeTruthy();
+  });
+
+  it("shows the service identity on provider cards and model identity in model menus", () => {
+    const view = render(<ModelBrandIcon model="gpt-5" provider="OpenRouter" entity="provider" />);
+    expect(view.container.querySelector('[data-model-brand="openrouter"]')).toBeTruthy();
+    view.rerender(<ModelBrandIcon model="gpt-5" provider="OpenRouter" />);
+    expect(view.container.querySelector('[data-model-brand="openai"]')).toBeTruthy();
+  });
+
+  it("does not impersonate a model vendor for an unknown provider", () => {
+    const { container } = render(<ModelBrandIcon model="gpt-5" provider="Private AI" entity="provider" websiteUrl="https://models.example.com/v1" />);
+    expect(container.querySelector('[data-model-brand="custom"] [data-brand="website"]')).toBeTruthy();
+    expect(container.querySelector('[data-model-brand="openai"]')).toBeNull();
   });
 
   it("uses a compact shared frame when a provider card requests one", () => {

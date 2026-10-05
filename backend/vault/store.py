@@ -157,24 +157,29 @@ class EnvVault:
             entry = self._entries.get(name)
             if entry is None:
                 return None
-            try:
-                value = keyring.get_password(self._service, name)
-                if value is not None:
-                    return value
-                # One-time migration from the v1 PBKDF2/XOR file. Successful
-                # migration immediately removes ciphertext from disk.
-                if not entry.encrypted_value or not entry.salt:
-                    raise VaultReadError(f"Vault entry {name} has no credential in the OS store")
-                key = _derive_key(_machine_passphrase(), base64.b64decode(entry.salt))
-                decrypted = _xor_bytes(base64.b64decode(entry.encrypted_value), key)
-                value = decrypted.decode()
-                keyring.set_password(self._service, name, value)
-                entry.encrypted_value = ""
-                entry.salt = ""
-                self._save_unlocked()
+            return self._get_unlocked(name, entry)
+
+    def _get_unlocked(self, name: str, entry: _VaultEntry) -> str | None:
+        try:
+            value = keyring.get_password(self._service, name)
+            if value is not None:
                 return value
-            except (*_CREDENTIAL_ERRORS, ValueError, UnicodeDecodeError) as exc:
-                raise VaultReadError(f"OS credential store could not read vault entry {name}") from exc
+            if not entry.encrypted_value and not entry.salt:
+                return None
+            # One-time migration from the v1 PBKDF2/XOR file. Successful
+            # migration immediately removes ciphertext from disk.
+            if not entry.encrypted_value or not entry.salt:
+                raise VaultReadError(f"Vault entry {name} has incomplete legacy credential data")
+            key = _derive_key(_machine_passphrase(), base64.b64decode(entry.salt, validate=True))
+            decrypted = _xor_bytes(base64.b64decode(entry.encrypted_value, validate=True), key)
+            value = decrypted.decode()
+            keyring.set_password(self._service, name, value)
+            entry.encrypted_value = ""
+            entry.salt = ""
+            self._save_unlocked()
+            return value
+        except (*_CREDENTIAL_ERRORS, ValueError, UnicodeDecodeError) as exc:
+            raise VaultReadError(f"OS credential store could not read vault entry {name}") from exc
 
     def delete(self, name: str) -> bool:
         with file_mutation_locks([self._path]):
@@ -188,16 +193,26 @@ class EnvVault:
         with file_mutation_locks([self._path]):
             self._load_unlocked()
             return [
-                {"name": name, "description": entry.description, "scope": entry.scope}
+                {"name": name, "description": entry.description, "scope": entry.scope,
+                 "credential_status": "stored" if self._get_unlocked(name, entry) is not None else "missing"}
                 for name, entry in self._entries.items()
             ]
 
     def inject_into_env(self, scope: str = "global") -> dict[str, str]:
+        # These records belong to Provider settings/auth, not user tool variables.
+        provider_keys = {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CUSTOM_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
+        provider_prefixes = (
+            "OPENAI_API_KEY_", "ANTHROPIC_API_KEY_", "CUSTOM_API_KEY_",
+            "MINICODE_OPENAI_IMAGE_API_KEY_", "MINICODE_ANTHROPIC_IMAGE_API_KEY_",
+            "MINICODE_CUSTOM_IMAGE_API_KEY_", "MINICODE_PROVIDER_CREDENTIAL_",
+        )
         with file_mutation_locks([self._path]):
             self._load_unlocked()
             names = [
                 name for name, entry in self._entries.items()
                 if entry.scope in (scope, "global")
+                and name.upper() not in provider_keys
+                and not name.upper().startswith(provider_prefixes)
             ]
         result: dict[str, str] = {}
         for name in names:

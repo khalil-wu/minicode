@@ -174,11 +174,14 @@ def test_browser_control_prefers_authenticated_embedded_browser_bridge(monkeypat
 
     assert not result.is_error
     assert "browser_tab_1 [page] MiniCode Browser" in result.content
-    assert calls == [(
-        "http://127.0.0.1:43123/v1/command",
-        {"authorization": "Bearer bridge-token"},
-        {"action": "list_targets", "conversation_id": "conv-browser-owner"},
-    )]
+    assert len(calls) == 1
+    url, headers, payload = calls[0]
+    assert url == "http://127.0.0.1:43123/v1/command"
+    assert headers == {"authorization": "Bearer bridge-token"}
+    assert payload["action"] == "list_targets"
+    assert payload["conversation_id"] == "conv-browser-owner"
+    assert payload["operation_id"].startswith("browser_")
+    assert 0 < payload["operation_timeout_ms"] <= 30000
 
 
 def test_browser_control_get_url_uses_page_target(monkeypatch) -> None:

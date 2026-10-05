@@ -12,7 +12,7 @@
   --mc-font-reading: var(--text-base);
   --mc-font-heading: var(--text-lg);
   --mc-control-radius: var(--radius-md);
-  --mc-card-radius: var(--radius-md);
+  --mc-card-radius: var(--radius-lg);
   --mc-sidebar-row-height: 34px;
   --mc-content-gutter: 24px;
   /* Keep the composer on the same reading axis as assistant answers. */
@@ -49,12 +49,6 @@
   .mc-bottom-drawer
 ) {
   font-family: var(--font-ui);
-}
-
-svg.lucide {
-  stroke-width: var(--mc-icon-stroke) !important;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 
 #root :where(button, a, [role="button"], [role="tab"], [role="menuitem"], [role="option"]):focus-visible {
@@ -127,8 +121,8 @@ svg.lucide {
   .skills-icon-button,
   .mc-pdf-icon-button
 ) svg {
-  width: var(--mc-icon-md);
-  height: var(--mc-icon-md);
+  width: var(--mc-icon-size, var(--mc-icon-md));
+  height: var(--mc-icon-size, var(--mc-icon-md));
 }
 
 /* Application chrome and left navigation */
@@ -572,10 +566,14 @@ svg.lucide {
   margin-top: 0 !important;
   margin-bottom: 20px !important;
   padding: 12px 12px 8px !important;
-  border: 1px solid var(--border-soft) !important;
-  border-radius: 18px !important;
+  border: 1px solid var(--mc-composer-border, var(--border-subtle)) !important;
+  border-radius: 20px !important;
   background: var(--surface-base) !important;
   box-shadow: var(--shadow-sm) !important;
+}
+
+.composer-container:focus-within {
+  --mc-composer-border: var(--border-soft);
 }
 
 /* Command mode is an intentional transient surface; ordinary composing
@@ -754,10 +752,9 @@ svg.lucide {
 .mc-conversation-menu,
 .prompt-history-card {
   border: 1px solid var(--border-subtle) !important;
-  border-radius: var(--mc-control-radius) !important;
+  border-radius: var(--radius-md) !important;
   background: var(--surface-raised) !important;
-  box-shadow: 0 10px 28px color-mix(in oklch, black 12%, transparent),
-    0 1px 3px color-mix(in oklch, black 7%, transparent) !important;
+  box-shadow: var(--shadow-medium) !important;
   animation: mc-dropdown-enter var(--duration-fast) var(--easing-enter) both;
   transform-origin: var(--mc-menu-origin, top center);
 }
@@ -817,7 +814,7 @@ svg.lucide {
 }
 
 .settings-page-heading h2 {
-  font-size: 22px !important;
+  font-size: 24px !important;
   font-weight: var(--fw-semibold) !important;
   letter-spacing: 0 !important;
 }
@@ -825,6 +822,20 @@ svg.lucide {
 .settings-page-heading p {
   font-size: var(--mc-font-body) !important;
   line-height: 1.55 !important;
+}
+
+/* A section heading sits outside its single group of setting rows. */
+.settings-center-main .settings-group {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.settings-center-main .settings-card {
+  padding-inline: 20px;
+  border: 1px solid var(--border-subtle);
 }
 
 .settings-center-main :where(

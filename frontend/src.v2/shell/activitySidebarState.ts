@@ -133,6 +133,7 @@ export interface RuntimeItem {
   automationId?: string;
   previewId?: string;
   agentId?: string;
+  backgroundCommandId?: string;
   startedAt?: number;
   attention?: boolean;
 }
@@ -586,6 +587,7 @@ function buildRuns(input: ActivitySidebarStateInput): ActivityRunItem[] {
     }
     items.push({
       id: `background:${task.id}`,
+      backgroundCommandId: task.id,
       kind: "background-command",
       label: cleanDisplayText(task.command) || "Background command",
       detail: backgroundTaskDetail(task),

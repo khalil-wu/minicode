@@ -751,7 +751,7 @@ async def _run_mcp_server_command(
     await send_mcp_projection(session, manager,
         {"type": "mcp_status", "servers": servers},
     )
-    name = str(data.get("name", "")).strip()
+    name = str(data.get("name") or data.get("original_name") or "").strip()
     await session.send_event(
         AgentEvent.command_result(
             command,

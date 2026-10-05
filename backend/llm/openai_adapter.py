@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import math
+import mimetypes
 import re
 import time
 from dataclasses import replace
@@ -2361,6 +2362,20 @@ class OpenAIAdapter(LLMAdapter):
         self._responses_websocket.fallback_to_http = True
         return True
 
+    async def transcribe_audio(self, content: bytes, *, filename: str, model: str, language: str = "", prompt: str = "") -> str:
+        headers = {key: value for key, value in self._images_headers().items() if key.lower() != "content-type"}
+        data = {"model": model, "response_format": "json"}
+        if language:
+            data["language"] = language
+        if prompt:
+            data["prompt"] = prompt
+        response = await self._http_client.post(
+            _normalized_openai_base_url(self._settings.base_url) + "/audio/transcriptions",
+            headers=headers, files={"file": (filename, content, "audio/webm" if filename.lower().endswith(".webm") else mimetypes.guess_type(filename)[0] or "application/octet-stream")}, data=data, timeout=90,
+        )
+        response.raise_for_status()
+        return str(response.json()["text"])
+
     async def aclose(self) -> None:
         """Close adapter-owned network resources exactly once.
 
@@ -2518,10 +2533,12 @@ class OpenAIAdapter(LLMAdapter):
             )
 
     def supports_hosted_web_search(self) -> bool:
-        return (
-            str(self._settings.provider or "").strip().lower() == "openai"
-            and self._settings.wire_api == "responses"
-        )
+        if self._settings.wire_api != "responses":
+            return False
+        declared = self._settings.supports_hosted_web_search
+        if declared is not None:
+            return declared
+        return urlparse(self._settings.base_url or "https://api.openai.com/v1").hostname in {"api.openai.com", "chatgpt.com"}
 
     async def _create_responses_request(
         self,
@@ -4991,7 +5008,9 @@ class OpenAIAdapter(LLMAdapter):
         # Codex sends this complete tool-control shape even when no tools are
         # projected. Several Responses-compatible coding gateways require it.
         kwargs["tools"] = responses_tools
-        kwargs["tool_choice"] = "auto"
+        kwargs["tool_choice"] = (
+            "required" if side_options is not None and side_options.hosted_web_search else "auto"
+        )
         kwargs["parallel_tool_calls"] = self.capabilities.parallel_tool_calls is not False
         kwargs["client_metadata"] = client_metadata
         if prompt_cache_key:
@@ -5058,6 +5077,8 @@ class OpenAIAdapter(LLMAdapter):
         completed_text = ""
         completed_usage: Any = None
         saw_completed = False
+        hosted_search = context is not None and context.options.hosted_web_search
+        saw_search_result = False
 
         def add_citations(value: Any) -> None:
             for citation in _extract_url_citations(value):
@@ -5090,6 +5111,8 @@ class OpenAIAdapter(LLMAdapter):
                     if isinstance(done_text, str) and done_text:
                         done_parts.append(done_text)
                     add_citations(event)
+                elif hosted_search and event_type == "response.web_search_call.completed":
+                    saw_search_result = True
                 elif event_type == "response.completed":
                     response_obj = _get_attr_or_item(event, "response", None)
                     if not response_obj:
@@ -5110,6 +5133,11 @@ class OpenAIAdapter(LLMAdapter):
                                 == "message"
                             )
                         for item in output:
+                            if hosted_search and str(_get_attr_or_item(item, "type", "") or "") == "web_search_call":
+                                search_status = str(_get_attr_or_item(item, "status", "") or "")
+                                if search_status != "completed":
+                                    raise RuntimeError(f"Hosted web search did not complete (status={search_status})")
+                                saw_search_result = True
                             if str(_get_attr_or_item(item, "type", "") or "") != "message":
                                 continue
                             for content in _get_attr_or_item(item, "content", []) or []:
@@ -5131,6 +5159,8 @@ class OpenAIAdapter(LLMAdapter):
 
             if not saw_completed:
                 raise RuntimeError("Responses API stream closed before response.completed")
+            if hosted_search and not saw_search_result:
+                raise RuntimeError("Hosted web search returned no completed web_search_call")
 
             # Side calls (compaction/recovery/web/memory) contribute to the same
             # turn/global usage accounting as the main stream.
@@ -5153,6 +5183,8 @@ class OpenAIAdapter(LLMAdapter):
             )
             text = f"{text}\n\n{chr(10).join(source_lines)}".strip()
         if not text:
+            if hosted_search:
+                return "Search completed with no results."
             raise RuntimeError("LLM 返回空内容")
         return text
 

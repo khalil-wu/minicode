@@ -39,7 +39,7 @@ def workspace_scope_for(
     return "computer"
 
 
-def refresh_native_os_sandbox(platform_name: str | None = None) -> bool:
+def refresh_native_os_sandbox(platform_name: str | None = None, *, workspace_root: Path | None = None) -> bool:
     """Probe the effective sandbox off the request path and cache the result."""
 
     platform_value = platform_name or sys.platform
@@ -55,7 +55,7 @@ def refresh_native_os_sandbox(platform_name: str | None = None) -> bool:
             from backend.sandbox.policy import sandbox_policy_for_permission_context
             from backend.sandbox.runner import SandboxRunner
 
-            workspace = Path.cwd().resolve()
+            workspace = (workspace_root or Path.cwd()).resolve()
             policy = sandbox_policy_for_permission_context(workspace, PermissionContext(mode="confirm"))
             capability = SandboxRunner(policy).capability()
             available = bool(capability.available and capability.filesystem_isolated)

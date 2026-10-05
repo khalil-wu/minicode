@@ -1,5 +1,5 @@
-import { ChevronRight, FileText, FileType, FolderOpen, Image, Link, Paperclip, Terminal } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { ChevronRight, FileText, FileType, FolderOpen, Image, Link, Paperclip, RefreshCw, Terminal } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { EmptyState } from '../../components/EmptyState'
 import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } from '../../chat/openAttachmentPreview'
 import { useAppStore } from '../../stores'
@@ -9,6 +9,7 @@ import type { ArtifactContentState, ChatMessage, MessageAttachmentRef, ReplyAtta
 import type { ToolCallRecord } from '../../lib/tool-call-reducer'
 import { getToolCallsFromMessage } from '../../lib/content-blocks'
 import { revealConversationMessage } from '../../chat/revealConversationMessage'
+import { fetchConversationResources, type ConversationResource, type ConversationResourcePage } from '../../protocol/conversation-resources'
 import {
   artifactFallbackLabel,
   artifactMediaTypeForProjection,
@@ -43,18 +44,53 @@ type ArtifactItem = {
   occurredAt?: number
   messageId?: string
   turnId?: string
+  workspaceRoot?: string
 }
 
 export const ArtifactsTab = () => {
   const conversationId = useAppStore((s) => s.conversationId)
+  const isConnected = useAppStore((s) => s.isConnected)
+  const workspaceRoot = useAppStore((s) => s.workingDirectory)
   const messages = useAppStore((s) => s.messages)
   const previewArtifact = useAppStore((s) => selectActiveConversationPreview(s).previewArtifact)
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState('all')
   const [recentOnly, setRecentOnly] = useState(false)
+  const [inventory, setInventory] = useState<{ conversationId: string; workspaceRoot: string; query: string; kind: string; page: ConversationResourcePage } | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [refreshVersion, setRefreshVersion] = useState(0)
+  const requestOwner = useRef('')
+  requestOwner.current = `${conversationId}\u0000${workspaceRoot}\u0000${query}\u0000${kind}\u0000${refreshVersion}`
+  const currentInventory = inventory?.conversationId === conversationId && inventory.workspaceRoot === workspaceRoot && inventory.query === query && inventory.kind === kind ? inventory : null
+  useEffect(() => {
+    setLoadError('')
+    if (!conversationId || !isConnected) { setLoading(false); return }
+    const controller = new AbortController()
+    const requestKey = requestOwner.current
+    setLoading(true)
+    const timer = window.setTimeout(() => {
+      void fetchConversationResources(conversationId, { query, kind, workspaceRoot, signal: controller.signal }).then((page) => {
+        if (requestOwner.current === requestKey) setInventory({ conversationId, workspaceRoot, query, kind, page })
+      }).catch((error: unknown) => {
+        if (!controller.signal.aborted) setLoadError(error instanceof Error ? error.message : String(error))
+      }).finally(() => { if (!controller.signal.aborted) setLoading(false) })
+    }, 180)
+    return () => { window.clearTimeout(timer); controller.abort() }
+  }, [conversationId, workspaceRoot, isConnected, query, kind, refreshVersion])
+  const loadMore = async () => {
+    const owner = currentInventory!
+    const requestKey = requestOwner.current
+    setLoading(true); setLoadError('')
+    try {
+      const page = await fetchConversationResources(owner.conversationId, { query: owner.query, kind: owner.kind, workspaceRoot: owner.workspaceRoot, after: owner.page.after })
+      setInventory((current) => current === owner ? { ...owner, page: { ...page, items: [...owner.page.items, ...page.items] } } : current)
+    } catch (error) { if (requestOwner.current === requestKey) setLoadError(error instanceof Error ? error.message : String(error)) }
+    finally { if (requestOwner.current === requestKey) setLoading(false) }
+  }
   const items = useMemo(
-    () => collectArtifacts(messages, previewArtifact, conversationId || undefined),
-    [conversationId, messages, previewArtifact],
+    () => mergeResourceInventory(collectArtifacts(messages, previewArtifact, conversationId || undefined), currentInventory?.page.items ?? []),
+    [conversationId, messages, previewArtifact, currentInventory],
   )
 
   if (!conversationId) {
@@ -62,15 +98,6 @@ export const ArtifactsTab = () => {
       <div style={panelStyle}>
         <PanelHeader title="文件" />
         <EmptyState compact icon={<FolderOpen size={20} />} title="暂无活动对话" hint="开始对话后，文件、附件与执行结果会显示在这里。" />
-      </div>
-    )
-  }
-
-  if (items.length === 0) {
-    return (
-      <div style={panelStyle}>
-        <PanelHeader title="文件" />
-        <EmptyState compact icon={<FolderOpen size={20} />} title="暂无文件、附件或执行结果" hint="生成文件、打开预览或产生执行输出后会显示在这里。" />
       </div>
     )
   }
@@ -84,7 +111,10 @@ export const ArtifactsTab = () => {
 
   return (
     <div style={panelStyle}>
-      <PanelHeader title="文件" meta={`${items.length} 项`} />
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <PanelHeader title="文件" meta={`${Math.max(items.length, currentInventory?.page.total ?? 0)} 项`} />
+        <button type="button" className="btn-ghost mc-icon-button" aria-label="刷新历史资源" disabled={!isConnected || loading} onClick={() => setRefreshVersion((value) => value + 1)}><RefreshCw size={14} /></button>
+      </div>
       <input aria-label="搜索文件、附件与执行结果" placeholder="搜索文件名或轮次…" value={query} onChange={(event) => setQuery(event.target.value)} style={filterInputStyle} />
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <select aria-label="制品类型" value={kind} onChange={(event) => setKind(event.target.value)} style={filterInputStyle}>
@@ -101,7 +131,11 @@ export const ArtifactsTab = () => {
       <ArtifactSection title="生成文件" items={generated} />
       <ArtifactSection title="执行结果" items={executionResults} />
       <ArtifactSection title="附件" items={attachments} />
-      {filtered.length === 0 && <EmptyState compact icon={<FileText size={18} />} title="没有匹配的文件" hint="尝试其他文件名或类型。" />}
+      {loading && <p role="status" style={metaStyle}>正在读取历史资源…</p>}
+      {loadError && <p role="alert" style={{ ...metaStyle, whiteSpace: 'normal' }}>{loadError}<button type="button" className="btn-ghost" onClick={() => setRefreshVersion((value) => value + 1)}>重新读取</button></p>}
+      {currentInventory?.page.has_more && <button type="button" className="btn-ghost" disabled={loading} onClick={() => void loadMore()}>读取更多历史资源</button>}
+      {!isConnected && <p style={metaStyle}>连接后端后可读取完整历史资源。</p>}
+      {filtered.length === 0 && !loading && !loadError && <EmptyState compact icon={<FileText size={18} />} title={query || kind !== 'all' ? '没有匹配的文件' : '暂无文件、附件或执行结果'} hint={query || kind !== 'all' ? '尝试其他文件名或类型。' : '生成文件、上传附件或产生执行输出后会显示在这里。'} />}
     </div>
   )
 }
@@ -137,7 +171,7 @@ const ArtifactSection = ({ title, items }: { title: string; items: ArtifactItem[
         name: item.label,
         mediaType: item.mediaType,
         kind: item.kind,
-        workspaceRoot: conversation?.worktreePath || conversation?.workspaceRoot
+        workspaceRoot: item.workspaceRoot || conversation?.worktreePath || conversation?.workspaceRoot
           || (item.conversationId === store.conversationId ? store.workingDirectory : undefined),
         conversationId: item.conversationId,
       })
@@ -174,6 +208,29 @@ const ArtifactSection = ({ title, items }: { title: string; items: ArtifactItem[
       })}
     </ActivitySection>
   )
+}
+
+export function mergeResourceInventory(liveItems: ArtifactItem[], resources: ConversationResource[]): ArtifactItem[] {
+  const keyFor = (item: ArtifactItem) => item.kind === 'attachment' ? `attachment:${item.artifactId || item.id.replace(/^attachment:/, '')}` : item.artifactId ? `artifact:${item.artifactId}` : `workspace:${item.path}`
+  const items = new Map<string, ArtifactItem>()
+  for (const resource of resources) {
+    const mediaType = resource.media_type
+    const kind = resource.source === 'attachment' ? 'attachment' : canonicalArtifactKind(resource.kind, mediaType)
+    const item: ArtifactItem = {
+      id: resource.id, label: resource.name, kind, detail: sizeLabel(resource.size_bytes),
+      artifactId: resource.artifact_id, path: resource.path, mediaType,
+      conversationId: resource.conversation_id, workspaceRoot: resource.workspace_root,
+      executionResult: resource.execution_result, occurredAt: resource.occurred_at,
+      messageId: resource.message_id, turnId: resource.turn_id,
+    }
+    items.set(keyFor(item), item)
+  }
+  for (const item of liveItems) {
+    const key = keyFor(item)
+    const stored = items.get(key)
+    items.set(key, stored ? { ...mergeArtifactItems(stored, item), label: isPlaceholderLabel(item.label) ? stored.label : item.label } : item)
+  }
+  return [...items.values()].sort((left, right) => (right.occurredAt ?? 0) - (left.occurredAt ?? 0))
 }
 
 export function collectArtifacts(

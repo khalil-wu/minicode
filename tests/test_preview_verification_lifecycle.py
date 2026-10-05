@@ -92,8 +92,12 @@ def test_verification_result_is_bound_to_the_original_process_instance(
                 assert event.data["workspace_root"] == str(tmp_path)
                 assert event.data["request_id"] == "verify-request"
                 if completion == "live":
-                    assert event.type == "preview.verified"
-                    assert event.data["ok"] is True
+                    if command == "preview.verify":
+                        assert event.type == "command.result" and event.data["level"] == "success"
+                        assert event.data["data"]["verification"]["ok"] is True
+                    else:
+                        assert event.type == "preview.verified"
+                        assert event.data["ok"] is True
                 else:
                     assert event.type == "command.result"
                     assert event.data["command"] == command

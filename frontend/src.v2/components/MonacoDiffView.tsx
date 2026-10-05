@@ -4,6 +4,8 @@ import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 import { extractFilePathFromDiff, parseUnifiedDiffLines, type UnifiedDiffLine } from "../lib/unified-diff";
 import { useAppStore } from "../stores";
 import { defineMiniCodeMonacoTheme, miniCodeMonacoThemeName } from "../panels/monacoTheme";
+import { loadMiniCodeEditorFeatures } from "../panels/monacoEditorFeatures";
+import { useOwnedDiffModelCleanup } from "./useOwnedDiffModelCleanup";
 
 const MonacoDiffEditor = lazy(async () => {
   const scope = globalThis as typeof globalThis & { MonacoEnvironment?: { getWorker?: () => Worker } };
@@ -13,6 +15,7 @@ const MonacoDiffEditor = lazy(async () => {
   const [reactMonaco, monaco] = await Promise.all([
     import("@monaco-editor/react"),
     import("monaco-editor/editor/editor.api.js"),
+    loadMiniCodeEditorFeatures(),
     import("monaco-editor/languages/definitions/typescript/register.js"),
     import("monaco-editor/languages/definitions/javascript/register.js"),
     import("monaco-editor/languages/definitions/css/register.js"),
@@ -132,6 +135,7 @@ export function MonacoDiffView({
   const instanceId = useId();
   const theme = useAppStore((state) => state.resolvedTheme);
   const codeTextScale = useAppStore((state) => state.codeTextScale);
+  const preferences = useAppStore((state) => state.workbenchPreferences);
   useLayoutEffect(() => {
     if (monacoRef.current) defineMiniCodeMonacoTheme(monacoRef.current, theme);
   }, [theme]);
@@ -148,6 +152,7 @@ export function MonacoDiffView({
     if (diffEditorRef.current) applySourceLineNumbers(diffEditorRef.current);
   }, [originalLines, modifiedLines]);
   const viewPath = `minicode-diff://preview/${encodeURIComponent(instanceId)}/${encodeURIComponent(filePath || (language === "typescript" ? "preview.ts" : language === "javascript" ? "preview.js" : "preview"))}`;
+  const onOwnedMount = useOwnedDiffModelCleanup(viewPath);
   const scriptExtension = /(?:\.d)?\.[cm]?[jt]sx?$/i.exec(filePath)?.[0] ?? (language === "typescript" ? ".ts" : language === "javascript" ? ".js" : "");
   const onlyEolChanged = original.includes("\r\n") !== modified.includes("\r\n")
     && original.replace(/\r\n/g, "\n") === modified.replace(/\r\n/g, "\n");
@@ -219,10 +224,10 @@ export function MonacoDiffView({
             renderSideBySide: true,
             minimap: { enabled: false },
             scrollBeyondLastLine: false,
-            fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--editor-font-family").trim(),
+            fontFamily: preferences.codeFont || getComputedStyle(document.documentElement).getPropertyValue("--editor-font-family").trim(),
             fontSize: Math.round(14 * codeTextScale),
             lineHeight: Math.round(22 * codeTextScale),
-            fontLigatures: false,
+            fontLigatures: preferences.ligatures,
             lineNumbers: "on",
             wordWrap: "on",
             padding: { top: 8 },
@@ -232,7 +237,7 @@ export function MonacoDiffView({
             monacoRef.current = monaco;
             defineMiniCodeMonacoTheme(monaco, useAppStore.getState().resolvedTheme);
           }}
-          onMount={(editor: Monaco.editor.IStandaloneDiffEditor) => { diffEditorRef.current = editor; applySourceLineNumbers(editor); }}
+          onMount={(editor: Monaco.editor.IStandaloneDiffEditor) => { onOwnedMount(editor); diffEditorRef.current = editor; applySourceLineNumbers(editor); }}
         />
       </Suspense></div>
     </div>

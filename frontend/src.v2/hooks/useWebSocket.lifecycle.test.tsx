@@ -25,7 +25,7 @@ vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn(), dismissToast:
 import { useAppStore } from "../stores";
 import { pushToast } from "../overlays/ToastContainer";
 import type { ClientCommand } from "../protocol/events";
-import { sendPromptResponseCommand } from "../protocol/ws-outbox";
+import { sendClientCommandAwaitResult, sendPromptResponseCommand } from "../protocol/ws-outbox";
 import { InlineAgentPrompt } from "../chat/InlineAgentPrompt";
 import {
   getWebSocket,
@@ -323,6 +323,40 @@ describe("useWebSocketConnection socket ownership", () => {
     expect(useAppStore.getState().connectionPhase).toBe("connected");
     expect(useAppStore.getState().reconnectAttempt).toBe(0);
     expect(useAppStore.getState().connectionError).toBeNull();
+  });
+
+  it.each<ClientCommand>([
+    { type: "subagent.cancel", subagent_id: "child-recovered", conversation_id: "conv-recovered", workspace_root: "C:/repo" },
+    { type: "preview.launch.start", name: "dev", conversation_id: "conv-recovered", workspace_root: "C:/repo" },
+    { type: "diff.git_stage_all", conversation_id: "conv-recovered", workspace_root: "C:/repo" },
+  ])("refuses $type during restore without replaying it when the owner becomes ready", async (command) => {
+    useAppStore.setState({ conversationId: "conv-recovered", workingDirectory: "C:/repo" });
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.emit("open"));
+    expect(useAppStore.getState().isConnected).toBe(false);
+
+    await act(async () => {
+      await expect(sendClientCommandAwaitResult(command, command.type, { silent: true }))
+        .rejects.toThrow("会话正在恢复，请恢复完成后重试");
+    });
+    expect(sentCommandCount(socket, command.type)).toBe(0);
+
+    act(() => socket.emitMessage({
+      type: "session.restored",
+      active_conversation_id: "conv-recovered",
+      conversation_switched_follows: false,
+      replayed_events: 0,
+      session: { active_conversation_id: "conv-recovered", workspace_root: "C:/repo" },
+    }));
+    await flushQueuedCommands();
+    expect(useAppStore.getState().isConnected).toBe(true);
+    expect(sentCommandCount(socket, command.type)).toBe(0);
+
+    act(() => { expect(getWebSocket()?.send(command)).toBe(true); });
+    await flushQueuedCommands();
+    expect(sentCommandCount(socket, command.type)).toBe(1);
   });
 
   it("waits for restore, switch, and replay before declaring a reconnect successful", () => {

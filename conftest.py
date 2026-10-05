@@ -6,7 +6,7 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def isolate_all_runtime_data_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path):
+def isolate_all_runtime_data_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path, tmp_path_factory):
     """One isolation owner for both test trees and every mutable runtime path."""
     scoped_key_prefixes = (
         "OPENAI_API_KEY_", "ANTHROPIC_API_KEY_", "CUSTOM_API_KEY_",
@@ -16,13 +16,18 @@ def isolate_all_runtime_data_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path):
     for name in tuple(os.environ):
         if name.startswith(scoped_key_prefixes):
             monkeypatch.delenv(name)
+    # User configuration lives outside the workspace, as it does in the app.
+    # Native sandbox protection may materialize a missing workspace settings.json.
+    state_root = tmp_path_factory.mktemp("runtime-state")
+    monkeypatch.setenv("MINICODE_STATE_ROOT", str(state_root))
     conversations = tmp_path / "conversations"
     data_root = tmp_path / "state" / "data"
     monkeypatch.setattr("backend.memory.file_memory.DATA_ROOT", data_root)
     monkeypatch.setattr("backend.memory.file_memory.MEMORY_DIR", data_root / "memory")
     monkeypatch.setattr("backend.workspace.recent_projects.DEFAULT_STORE_PATH", data_root / "recent_projects.json")
-    monkeypatch.setattr("backend.config.SETTINGS_FILE", tmp_path / "settings.json", raising=False)
-    monkeypatch.setattr("backend.vault.store.VAULT_FILE", tmp_path / "vault.json", raising=False)
+    monkeypatch.setattr("backend.config.SETTINGS_FILE", state_root / "settings.json", raising=False)
+    monkeypatch.setattr("backend.config_helpers.SETTINGS_FILE", state_root / "settings.json", raising=False)
+    monkeypatch.setattr("backend.vault.store.VAULT_FILE", state_root / "vault.json", raising=False)
     monkeypatch.setattr("backend.conversations.repository.CONVERSATION_DATA_DIR", conversations, raising=False)
     monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", conversations, raising=False)
     monkeypatch.setattr("backend.attachments.store.ATTACHMENT_DATA_DIR", tmp_path / "attachments", raising=False)

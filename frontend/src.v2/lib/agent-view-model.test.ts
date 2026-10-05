@@ -3,6 +3,7 @@ import {
   projectAgentViews,
   sanitizeAgentResultContent,
   visibleAgentChips,
+  agentStatusSummary,
 } from "./agent-view-model";
 
 describe("agent view model", () => {
@@ -63,7 +64,7 @@ describe("agent view model", () => {
     expect(source.map((agent) => agent.id)).toEqual(["done", "running", "error"]);
   });
 
-  it("projects quiet identity tones and relative completion time", () => {
+  it("projects stable identity and relative completion time", () => {
     const now = Date.parse("2026-07-19T12:00:00Z");
     const [view] = projectAgentViews([{
       id: "subagent-review",
@@ -74,10 +75,36 @@ describe("agent view model", () => {
     }], now);
 
     expect(view).toMatchObject({
-      glyphTone: "green",
+      identityKey: "subagent-review",
       relativeTimeLabel: "2 小时",
       status: "completed",
     });
+  });
+
+  it("keeps identities stable across status changes and only resolves known relationships", () => {
+    const agents = [
+      { id: "parent", agentPath: "/root/review", role: "reviewer", status: "running" as const, objective: "审阅界面" },
+      { id: "worker", agentPath: "/root/review/layout", role: "explore", status: "blocked" as const, parentRunId: "parent", blockedBy: ["schema-task", "unknown"], objective: "优化布局" },
+      { id: "schema", taskId: "schema-task", role: "explore", status: "running" as const, objective: "检查结构" },
+    ];
+    const view = projectAgentViews(agents).find((agent) => agent.id === "worker")!;
+    expect(view.identityKey).toBe("/root/review/layout");
+    expect(view.parent).toMatchObject({ id: "parent", title: "审阅界面" });
+    expect(view.blockedDependencies).toEqual([{ id: "schema", title: "检查结构", identityKey: "schema" }]);
+    expect(projectAgentViews([{ ...agents[1], status: "done" }])[0].identityKey).toBe(view.identityKey);
+  });
+
+  it("counts exact states without reporting stopped or failed work as running", () => {
+    const views = projectAgentViews([
+      { id: "a", role: "explore", status: "running" },
+      { id: "b", role: "explore", status: "error" },
+      { id: "c", role: "explore", status: "cancelled", terminationInitiator: "user" },
+      { id: "d", role: "explore", status: "blocked", awaitingPlanApproval: true },
+      { id: "e", role: "explore", status: "running", isIdle: true },
+      { id: "f", role: "explore", status: "done", awaitingPlanApproval: true, needsInput: true },
+    ]);
+    expect(agentStatusSummary(views)).toBe("1 失败 · 1 已停止 · 1 等待批准计划 · 1 运行中 · 1 待命 · 1 已完成");
+    expect(views.find((view) => view.id === "f")!.awaitingPlanApproval).toBe(false);
   });
 
   it("limits compact conversation previews and reports the remainder", () => {
@@ -213,11 +240,11 @@ describe("agent view model", () => {
     expect(JSON.stringify(view)).not.toContain("task-schema-4f9d");
   });
 
-  it("makes a blocked agent's request for user input explicit and actionable", () => {
+  it.each(["pending", "running", "blocked"] as const)("makes a %s agent's request for user input explicit and actionable", (status) => {
     const [view] = projectAgentViews([{
       id: "subagent-input",
       role: "reviewer",
-      status: "blocked",
+      status,
       objective: "确认发布范围",
       needsInput: true,
       waitingOn: "请选择是否包含迁移脚本",

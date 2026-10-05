@@ -280,6 +280,8 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
           status: string;
           tools?: number;
           tools_count?: number;
+          enabled_tools?: string[] | null;
+          disabled_tools?: string[];
           capabilities?: McpServerStatus["capabilities"];
           transport?: string;
           command?: string;
@@ -326,6 +328,8 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
           name: srv.name,
           status: srv.status as "connected" | "disconnected" | "error" | "reconnecting",
           tools: srv.tools_count ?? srv.tools,
+          enabledTools: srv.enabled_tools,
+          disabledTools: srv.disabled_tools,
           capabilities: srv.capabilities,
           transport: srv.transport as McpServerStatus["transport"],
           command: srv.command,
@@ -385,6 +389,11 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
     case "git.pr_status": {
       const ev = e as GitPrStatusEvent;
       if (!eventTargetsActiveWorkspace(e)) return true;
+      if (ev.error) {
+        s.setPRStatusIssue({ message: ev.error, code: ev.error_code || "request_failed" });
+        return true;
+      }
+      s.setPRStatusIssue(null);
       s.setPrStatus(ev.pr ?? null, ev.checks ?? []);
       if (ev.pr) {
         const checks = ev.checks ?? [];

@@ -1,5 +1,5 @@
-import { Bug, Gauge, GitBranch, TerminalSquare, X } from "lucide-react";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { Bug, CircleAlert, Gauge, GitBranch, TerminalSquare, X } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useAppStore } from "../stores";
 import { GitPanel } from "../panels/GitPanel";
 import {
@@ -14,6 +14,7 @@ import "./BottomDock.css";
 
 const TABS = [
   { id: "terminal", label: "终端", icon: TerminalSquare },
+  { id: "problems", label: "问题", icon: CircleAlert },
   { id: "git", label: "Git", icon: GitBranch },
   { id: "budget", label: "用量", icon: Gauge },
   { id: "debug", label: "调试", icon: Bug },
@@ -22,6 +23,7 @@ const TABS = [
 const LazyTerminalPanel = lazy(() =>
   import("../panels/TerminalPanel").then((module) => ({ default: module.TerminalPanel })),
 );
+const LazyProblemsWorkspace = lazy(() => import("../panels/ProblemsWorkspace").then((module) => ({ default: module.ProblemsWorkspace })));
 
 export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
   const dockCollapsed = useAppStore((s) => s.dockCollapsed);
@@ -35,6 +37,12 @@ export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
   const mainVisible = useAppStore((s) => !s.settingsOpen && !s.skillsMarketplaceOpen && !s.rightPanelExpanded) && visible;
   const visibleTab = activeBottomTab === "tasks" || activeBottomTab === "timeline" ? "terminal" : activeBottomTab;
   const isOpen = !dockCollapsed && mainVisible;
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const problemsVisible = isOpen && visibleTab === "problems";
+  const [problemsVisited, setProblemsVisited] = useState(problemsVisible);
+  const [problemsCount, setProblemsCount] = useState<{ workspaceRoot: string; count: number | null }>({ workspaceRoot: workingDirectory, count: null });
+  useEffect(() => { if (problemsVisible) setProblemsVisited(true); }, [problemsVisible]);
+  const updateProblemsCount = useCallback((count: number | null) => setProblemsCount((previous) => previous.workspaceRoot === workingDirectory && previous.count === count ? previous : { workspaceRoot: workingDirectory, count }), [workingDirectory]);
   const terminalVisible = isOpen && visibleTab === "terminal";
   const [terminalVisited, setTerminalVisited] = useState(terminalVisible);
   useEffect(() => { if (terminalVisible) setTerminalVisited(true); }, [terminalVisible]);
@@ -108,6 +116,7 @@ export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
           const Icon = t.icon;
           let badge: string | null = null;
           if (t.id === "budget" && totalBudgetPercent > 0.7) badge = `${Math.round(totalBudgetPercent * 100)}%`;
+          if (t.id === "problems" && problemsCount.workspaceRoot === workingDirectory && problemsCount.count !== null) badge = String(problemsCount.count);
 
           return (
             <button
@@ -117,6 +126,7 @@ export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
               id={`bottom-dock-tab-${t.id}`}
               aria-selected={visibleTab === t.id}
               aria-controls={`bottom-dock-panel-${t.id}`}
+              aria-label={t.id === "problems" ? badge !== null ? `问题 ${badge} 个错误` : "问题" : undefined}
               tabIndex={visibleTab === t.id ? 0 : -1}
               onClick={() => openBottomTab(t.id)}
               onKeyDown={(event) => {
@@ -137,7 +147,7 @@ export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
               <Icon size={14} />
               {t.label}
               {badge && (
-                <span className="mc-bottom-drawer-badge" data-danger={totalBudgetPercent > 0.9 ? "true" : "false"}>{badge}</span>
+                <span className="mc-bottom-drawer-badge" data-danger={(t.id === "problems" ? (problemsCount.count ?? 0) > 0 : totalBudgetPercent > 0.9) ? "true" : "false"}>{badge}</span>
               )}
             </button>
           );
@@ -166,13 +176,14 @@ export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
           {isOpen && visibleTab === "budget" && (
             <div className="p-3">
               <div className="mb-2" style={{ color: "var(--text-secondary)", fontVariantNumeric: "tabular-nums" }}>
-                {hasBudget ? `任务预算：${(totalBudgetPercent * 100).toFixed(1)}%` : "暂无预算数据"}
+                {hasBudget ? `上下文占用：${(totalBudgetPercent * 100).toFixed(1)}%` : "暂无上下文数据"}
               </div>
               <PromptCacheStats />
               <BudgetBars />
             </div>
           )}
           {isOpen && visibleTab === "git" && <GitPanel active={mainVisible} />}
+          {(problemsVisited || problemsVisible) && <div className="h-full" hidden={!problemsVisible} aria-hidden={!problemsVisible}><Suspense fallback={<PanelSkeleton kind="inspector" />}><LazyProblemsWorkspace visible={problemsVisible} onErrorCount={updateProblemsCount} /></Suspense></div>}
           {isOpen && visibleTab === "debug" && <div className="p-3"><DebugLog /></div>}
       </div>
     </section>

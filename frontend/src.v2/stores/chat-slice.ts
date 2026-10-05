@@ -677,6 +677,9 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         slashPanelOpen: false,
         mentionPanelOpen: false,
         prMonitor: null,
+        prStatusIssue: null,
+        prStatus: null,
+        ciChecks: [],
         // --- End cross-slice reset ---
         ...(targetConversation
           ? {

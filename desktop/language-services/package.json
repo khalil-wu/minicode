@@ -1,0 +1,9 @@
+{
+  "name": "minicode-language-services",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "pyright": "^1.1.407",
+    "yaml-language-server": "^1.19.2"
+  }
+}

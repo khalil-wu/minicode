@@ -21,7 +21,7 @@ import {
   onEmbeddedBrowserEvent,
   type EmbeddedBrowserState,
 } from "../desktop/runtime";
-import { projectAgentViews } from "../lib/agent-view-model";
+import { agentStatusSummary, projectAgentViews } from "../lib/agent-view-model";
 import { fileIcon, folderIcon } from "../lib/file-icons";
 import { getToolCallsFromMessage } from "../lib/content-blocks";
 import { mediaTypeForPath } from "../lib/media-types";
@@ -425,8 +425,7 @@ export const ChatContextCard = () => {
     }
   }, [conversationId, rightPanelOpen]);
 
-  const activeAgents = agentViews.filter((agent) => agent.status !== "completed");
-  const completedAgents = agentViews.filter((agent) => agent.status === "completed");
+  const agentSummary = agentStatusSummary(agentViews);
   const scopedBackgroundTasks = backgroundTasks.filter((task) =>
     Boolean(conversationId) && task.conversationId === conversationId
   );
@@ -537,7 +536,7 @@ export const ChatContextCard = () => {
       </button>
 
       <header className="mc-chat-context-card-header" hidden={collapsed}>
-        <span>{hasWorkspace || changes ? "环境信息" : "上下文"}</span>
+        <span>{hasWorkspace ? shortPath(workingDirectory) : "上下文"}</span>
         <span className="mc-chat-context-card-header-actions">
           <button type="button" aria-label="打开上下文详情" title="打开上下文详情" onClick={() => openPanel("tasks")}>
             <PanelRightOpen size={16} strokeWidth={1.8} />
@@ -576,14 +575,14 @@ export const ChatContextCard = () => {
                 type="button"
                 className="mc-chat-context-agent"
                 aria-label={`打开子智能体：${agent.title}`}
-                title={agent.title}
+                title={`${agent.teammateName ? `${agent.teammateName} · ` : ""}${agent.title}\n${agent.statusLabel}${agent.summary && agent.summary !== agent.title ? ` · ${agent.summary}` : ""}`}
                 onClick={() => openAgent(agent.id)}
               >
-                <AgentAvatar tone={agent.glyphTone} status={agent.status} size="small" />
+                <AgentAvatar identityKey={agent.identityKey} status={agent.status} size="small" />
               </button>
             ))}
-            <button type="button" className="mc-chat-context-agent-summary" onClick={() => openAgent()}>
-              {activeAgents.length > 0 ? `${activeAgents.length} 个运行中` : `${completedAgents.length} 个已完成`}
+            <button type="button" className="mc-chat-context-agent-summary" aria-label={agentSummary} title={agentSummary} onClick={() => openAgent()}>
+              {agentSummary.split(" · ").map((part, index) => <span key={part}>{index > 0 ? " · " : ""}{part}</span>)}
             </button>
           </div>
         </section>}

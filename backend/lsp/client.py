@@ -131,6 +131,9 @@ class LSPClient:
         self._stderr_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self.startup_cleanup_pending = False
+        self.capabilities: dict[str, Any] = {}
+        self.diagnostics: dict[str, dict[str, Any]] = {}
+        self.diagnostics_changed = asyncio.Event()
 
     def is_running(self) -> bool:
         return (
@@ -239,7 +242,7 @@ class LSPClient:
         self.startup_cleanup_pending = False
 
     async def _initialize(self) -> None:
-        await self._send_request("initialize", {
+        result = await self._send_request("initialize", {
             "processId": os.getpid(),
             "rootUri": self._path_to_uri(self._workspace_root),
             "capabilities": {
@@ -248,6 +251,9 @@ class LSPClient:
                     "references": {"dynamicRegistration": False},
                     "hover": {"dynamicRegistration": False},
                     "documentSymbol": {"dynamicRegistration": False},
+                    "completion": {"completionItem": {"snippetSupport": True}},
+                    "signatureHelp": {},
+                    "publishDiagnostics": {"versionSupport": True},
                     "synchronization": {
                         "didOpen": True,
                         "didChange": True,
@@ -262,6 +268,7 @@ class LSPClient:
                 {"uri": self._path_to_uri(self._workspace_root), "name": Path(self._workspace_root).name}
             ],
         })
+        self.capabilities = result.get("capabilities", {})
         await self._send_notification("initialized", {})
         self._initialized = True
 
@@ -269,18 +276,20 @@ class LSPClient:
         async with self._lock:
             await self._sync_file(file_path)
 
-    async def _sync_file(self, file_path: str) -> None:
+    async def _sync_file(self, file_path: str, content: str | None = None) -> None:
         abs_path = str(Path(file_path).resolve())
-        try:
-            content = Path(abs_path).read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            raise RuntimeError(f"Unable to read source file for LSP: {abs_path}") from exc
+        if content is None:
+            try:
+                content = Path(abs_path).read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                raise RuntimeError(f"Unable to read source file for LSP: {abs_path}") from exc
         content_hash = __import__("hashlib").sha256(content.encode("utf-8")).hexdigest()
         opened = self._opened_files.get(abs_path)
         if opened is not None:
             version, previous_hash = opened
             if previous_hash == content_hash:
                 return
+            self.diagnostics.pop(os.path.normcase(abs_path), None)
             version += 1
             await self._send_notification("textDocument/didChange", {
                 "textDocument": {"uri": self._path_to_uri(abs_path), "version": version},
@@ -447,6 +456,11 @@ class LSPClient:
                     if "method" in message:
                         if msg_id is not None:
                             await self._respond_to_server_request(message)
+                        elif message["method"] == "textDocument/publishDiagnostics":
+                            params = message["params"]
+                            diagnostic_path = _uri_to_path(params["uri"], path_mapper=self._sandbox_runner.map_path_from_sandbox)
+                            self.diagnostics[os.path.normcase(str(Path(diagnostic_path).resolve()))] = params
+                            self.diagnostics_changed.set()
                         continue
                     if msg_id is not None and msg_id in self._pending:
                         future = self._pending.pop(msg_id)
@@ -786,6 +800,7 @@ def _language_id_for_extension(ext: str) -> str:
         "go": "go", "rs": "rust", "java": "java",
         "c": "c", "cpp": "cpp", "h": "c", "hpp": "cpp",
         "rb": "ruby", "cs": "csharp",
+        "yaml": "yaml", "yml": "yaml",
     }
     return mapping.get(ext, "plaintext")
 

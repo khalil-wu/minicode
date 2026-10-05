@@ -4,6 +4,28 @@ from backend.conversations import public_projection
 from backend.conversations.repository import _normalize_loaded_transcript
 
 
+def test_subagent_membership_is_not_limited_by_the_collapsed_preview() -> None:
+    rows = [{"id": f"child-{index}", "status": "done", "agentPath": f"/root/{index}"} for index in range(35)]
+    projected = public_projection.project_public_conversation({"id": "conversation", "context_snapshot": {
+        "ui_agent_state": {"subagents": rows},
+    }})
+    assert projected["context_snapshot"]["ui_agent_state"]["subagents"] == rows
+
+
+def test_subagent_inline_result_budget_does_not_drop_task_identity(monkeypatch) -> None:
+    monkeypatch.setattr(public_projection, "_MAX_PUBLIC_JSON_TEXT_CHARS", 128)
+    rows = [{"id": f"child-{index}", "status": "done", "resultContent": "x" * 80} for index in range(3)]
+    projected = public_projection.project_public_conversation({"id": "conversation", "context_snapshot": {
+        "ui_agent_state": {"subagents": rows},
+    }})["context_snapshot"]["ui_agent_state"]["subagents"]
+    assert [row["id"] for row in projected] == ["child-0", "child-1", "child-2"]
+    assert projected[0]["resultContent"] == "x" * 80
+    assert "resultContent" not in projected[1]
+    assert projected[1]["resultAvailable"] is True
+    assert projected[2]["resultAvailable"] is True
+    assert rows[1]["resultContent"] == "x" * 80
+
+
 def test_arbitrary_public_json_uses_one_message_wide_text_budget(monkeypatch) -> None:
     monkeypatch.setattr(public_projection, "_MAX_PUBLIC_JSON_TEXT_CHARS", 32)
 

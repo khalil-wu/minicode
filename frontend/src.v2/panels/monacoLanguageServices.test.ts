@@ -23,7 +23,7 @@ const onLanguage = vi.spyOn(Monaco.languages, "onLanguage");
 vi.mock("monaco-editor/editor/editor.worker?worker", () => ({ default: class { kind = "editor"; } }));
 vi.mock("./workspaceTypeScriptWorker?worker", () => ({ default: class { kind = "typescript"; } }));
 vi.mock("monaco-editor/languages/features/css/css.worker?worker", () => ({ default: class { kind = "css"; } }));
-vi.mock("monaco-editor/languages/features/html/html.worker?worker", () => ({ default: class { kind = "html"; } }));
+vi.mock("./workspaceHtmlWorker?worker", () => ({ default: class { kind = "html"; } }));
 vi.mock("monaco-editor/languages/features/json/json.worker?worker", () => ({ default: class { kind = "json"; } }));
 
 // Transform Monaco's native provider graph during suite loading. The tests

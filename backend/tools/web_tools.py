@@ -14,11 +14,11 @@ Web 工具（DESIGN.md §8.2）。
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import re
+import os
 import time
 import urllib.parse
-import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -31,7 +31,7 @@ from backend.permissions.network import (
     snapshot_response_extensions,
 )
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
-from backend.tools.html_sanitizer import assess_extraction, sanitize_html
+from backend.tools.html_sanitizer import assess_extraction, sanitize_html_with_status
 from backend.llm.errors import (
     classify_llm_error,
     llm_error_raw,
@@ -68,6 +68,7 @@ class _WebFetchCacheEntry:
     artifact_type: str
     stored_at: float
     size_bytes: int
+    limitation: str
 
 
 class WebFetchTool(BaseTool):
@@ -177,6 +178,7 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
         extraction_status: str,
         artifact_type: str,
         enforce_network: bool,
+        limitation: str = "",
     ) -> None:
         key = (url, enforce_network)
         previous = self._url_cache.pop(key, None)
@@ -189,6 +191,7 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
             artifact_type=artifact_type,
             stored_at=time.monotonic(),
             size_bytes=size_bytes,
+            limitation=limitation,
         )
         self._url_cache_size_bytes += size_bytes
         self._url_cache.move_to_end(key)
@@ -388,6 +391,7 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
                         is_error=False,
                         source_url=url,
                         extraction_status="partial",
+                        status="partial",
                         evidence_type="fetched",
                         display_summary=f"Cross-host redirect: {urlparse(redirect_url).netloc or redirect_url}",
                         result_kind="web",
@@ -410,6 +414,7 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
                         is_error=False,
                         source_url=url,
                         extraction_status="failed",
+                        status="partial",
                         evidence_type="fetched",
                         limitation="blocked by site",
                         display_summary=f"Fetch limited: {urlparse(url).netloc or url}",
@@ -424,32 +429,66 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
                 )
 
             raw_length = len(raw_text)
+            limitation = ""
+            has_body = bool(raw_text.strip())
             if "application/json" in content_type:
                 cleaned = raw_text.strip()
                 status = "ok" if cleaned else "failed"
                 artifact_type = "json_content"
+                if cleaned and self._boss_blocked_response(url, cleaned):
+                    status = "failed"
+                    limitation = "The site rejected direct extraction."
             else:
-                if "<html" in raw_text.lower() or "<body" in raw_text.lower():
-                    cleaned = sanitize_html(raw_text)
+                if "text/html" in content_type or "<html" in raw_text.lower() or "<body" in raw_text.lower():
+                    cleaned, status, limitation, has_body = sanitize_html_with_status(raw_text)
                 else:
                     cleaned = raw_text.strip()
-                status = assess_extraction(cleaned, raw_length)
+                    status = assess_extraction(cleaned, raw_length)
                 artifact_type = "web_content"
             if len(cleaned) > WEB_FETCH_MAX_CHARS:
                 cleaned = cleaned[:WEB_FETCH_MAX_CHARS] + "\n\n[Content truncated due to length...]"
-            self._cache_content(
-                url,
-                content=cleaned,
-                extraction_status=status,
-                artifact_type=artifact_type,
-                enforce_network=enforce_network,
-            )
+                status = "partial" if status == "ok" else status
+                limitation = " ".join(filter(None, (limitation, "Page content exceeds the extraction limit.")))
+            if status != "failed" and has_body:
+                self._cache_content(
+                    url,
+                    content=cleaned,
+                    extraction_status=status,
+                    artifact_type=artifact_type,
+                    enforce_network=enforce_network,
+                    limitation=limitation,
+                )
         else:
             cleaned = cached.content
             status = cached.extraction_status
             artifact_type = cached.artifact_type
+            limitation = cached.limitation
+            has_body = True
 
         preview = cleaned[:CONTENT_PREVIEW_CHARS] if cleaned else ""
+        artifact_id = self._artifact_store.save(
+            content=cleaned,
+            source=f"web_fetch({url})",
+            type=artifact_type,
+        )
+        artifact_preview = self._artifact_store.get_preview(artifact_id)
+        if status == "failed" or not has_body:
+            return ToolResult(
+                content=_wrap_untrusted_content(
+                    f"No usable page body was fetched. {limitation or 'The response contained no readable content.'}\n{cleaned}",
+                    "web_fetch",
+                ),
+                status="partial",
+                source_url=url,
+                extraction_status=status,
+                evidence_type="fetched",
+                artifact_id=artifact_id,
+                artifact_preview=artifact_preview,
+                content_preview=preview,
+                limitation=limitation or "No readable page body was available.",
+                display_summary=f"Fetch limited: {urlparse(url).netloc or url}",
+                result_kind="web",
+            )
         extraction_error: Exception | None = None
         try:
             extracted = await self._extract_with_prompt(cleaned, prompt, context)
@@ -463,15 +502,12 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
                 extraction_status=status,
                 evidence_type="fetched",
                 content_preview=preview,
+                artifact_id=artifact_id,
+                artifact_preview=artifact_preview,
+                status="partial" if status == "partial" else "success",
+                limitation=limitation,
                 display_summary=f"Fetched {urlparse(url).netloc or url}",
             )
-
-        artifact_id = self._artifact_store.save(
-            content=cleaned,
-            source=f"web_fetch({url})",
-            type=artifact_type,
-        )
-        artifact_preview = self._artifact_store.get_preview(artifact_id)
 
         if extraction_error is not None:
             classification = classify_llm_error(extraction_error)
@@ -541,9 +577,17 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
             ),
         )
 
+    @staticmethod
+    def _boss_blocked_response(url: str, content: str) -> bool:
+        host = urlparse(url).hostname or ""
+        if host != "zhipin.com" and not host.endswith(".zhipin.com"):
+            return False
+        payload = json.loads(content)
+        return isinstance(payload, dict) and payload.get("code") == 37
+
 
 class WebSearchTool(BaseTool):
-    """Search the web through the provider or a direct public RSS endpoint."""
+    """Search through a declared hosted capability or configured search API."""
 
     name = "web_search"
     should_defer = False
@@ -555,6 +599,7 @@ class WebSearchTool(BaseTool):
     timeout_seconds = WEB_REQUEST_TIMEOUT_SECONDS
     description = (
         "Search the web for current information and return candidate titles, URLs, and snippets. "
+        "Use allowed_domains to restrict sites; requires declared hosted search or a configured TAVILY_API_KEY. "
         "CRITICAL REQUIREMENT: after answering the user's question, you MUST include a "
         '"Sources:" section at the end of your response listing all relevant URLs from the '
         "search results as markdown hyperlinks: [Title](URL). This is MANDATORY - never skip "
@@ -563,7 +608,12 @@ class WebSearchTool(BaseTool):
     permission = PermissionLevel.AUTO
 
     def model_description(self) -> str:
-        return "Search the web for current information and return candidate titles, URLs, and snippets."
+        return (
+            "Search the web and return candidate titles, URLs, and snippets. "
+            "Use allowed_domains for site-restricted research instead of building site operators into query. "
+            "Requires a provider with declared hosted search or a configured TAVILY_API_KEY. "
+            "If unavailable, discover an installed search tool with tool_search."
+        )
 
     def _schema_properties(self) -> dict[str, Any]:
         properties: dict[str, Any] = {
@@ -574,19 +624,22 @@ class WebSearchTool(BaseTool):
             "allowed_domains": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Only include search results from these domains.",
+                "description": "Restrict the search request to these domains, e.g. ['zhipin.com', 'nowcoder.com'].",
             },
         }
-        supports_hosted_search = callable(getattr(self._llm_provider, "supports_hosted_web_search", None)) and self._llm_provider.supports_hosted_web_search()
+        # Building the tool directory must not instantiate a model or require
+        # provider credentials. Factory-backed sources are resolved at execute.
+        llm = None if callable(self._llm_provider) else self._llm_provider
+        supports_hosted_search = callable(getattr(llm, "supports_hosted_web_search", None)) and llm.supports_hosted_web_search()
         supports_blocked_domains = not supports_hosted_search or (
-            callable(getattr(self._llm_provider, "hosted_web_search_supports_blocked_domains", None))
-            and self._llm_provider.hosted_web_search_supports_blocked_domains()
+            callable(getattr(llm, "hosted_web_search_supports_blocked_domains", None))
+            and llm.hosted_web_search_supports_blocked_domains()
         )
         if supports_blocked_domains:
             properties["blocked_domains"] = {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Never include search results from these domains.",
+                "description": "Exclude these domains. Requires a search source with domain exclusion support.",
             }
         return properties
 
@@ -622,7 +675,7 @@ class WebSearchTool(BaseTool):
             transport=public_http_transport() if self._proxy_url is None else None,
             headers={
                 "User-Agent": "MiniCode/0.2 (AI Agent; +https://github.com/minicode)",
-                "Accept": "application/rss+xml, application/xml, text/xml, */*;q=0.5",
+                "Accept": "application/json",
             },
         )
         return self._client
@@ -633,16 +686,10 @@ class WebSearchTool(BaseTool):
         return any(host == domain or host.endswith(f".{domain}") for domain in domains)
 
     @staticmethod
-    def _parse_rss(content: str) -> list[tuple[str, str, str]]:
-        root = ET.fromstring(content)
-        results: list[tuple[str, str, str]] = []
-        for item in root.findall("./channel/item"):
-            title = (item.findtext("title") or "").strip()
-            link = (item.findtext("link") or "").strip()
-            snippet = re.sub(r"\s+", " ", (item.findtext("description") or "")).strip()
-            if title and link:
-                results.append((title, link, snippet))
-        return results
+    def _search_api_key() -> str:
+        from backend.vault import EnvVault
+
+        return os.getenv("TAVILY_API_KEY", "").strip() or (EnvVault().get("TAVILY_API_KEY") or "").strip()
 
     async def _direct_search(
         self,
@@ -651,22 +698,54 @@ class WebSearchTool(BaseTool):
         allowed_domains: list[str],
         blocked_domains: list[str],
     ) -> ToolResult:
-        # The regional endpoint returns RSS directly; the global endpoint
-        # redirects there and would trip the same-origin fetch boundary.
-        search_url = "https://cn.bing.com/search?format=rss&q=" + urllib.parse.quote_plus(query)
+        from backend.vault.store import VaultReadError
+
+        try:
+            api_key = self._search_api_key()
+        except VaultReadError as exc:
+            return ToolResult(
+                content=f"Web search credential is unavailable: {exc}",
+                is_error=True,
+                extraction_status="failed",
+                result_kind="search",
+                error_kind="search_configuration",
+                user_summary="搜索凭据不可用，请检查 Tavily 密钥配置。",
+            )
+        if not api_key:
+            return ToolResult(
+                content=(
+                    "Web search is unavailable: the active provider has no declared hosted-search capability "
+                    "and TAVILY_API_KEY is not configured. Use tool_search to discover an installed search tool, "
+                    "or configure a supported search source. No search request was made."
+                ),
+                is_error=True,
+                extraction_status="failed",
+                result_kind="search",
+                error_kind="search_unavailable",
+                user_summary="当前没有可用搜索源。",
+                display_summary="Web search unavailable",
+            )
+        search_url = "https://api.tavily.com/search"
         assessment = await asyncio.to_thread(assess_network_url, search_url)
         if not assessment.allowed:
             return self._error_result(f"Network target blocked: {assessment.reason}")
         client = self._get_client()
-        response = await WebFetchTool._get_limited_response(client, search_url)
-        peer_error = _actual_peer_network_error(response, search_url, proxy_url=self._proxy_url)
-        if peer_error:
-            return self._error_result(peer_error)
-        response.raise_for_status()
-        try:
-            candidates = self._parse_rss(response.content.decode("utf-8", errors="replace"))
-        except ET.ParseError as exc:
-            return self._error_result(f"Web search returned invalid RSS: {exc}")
+        request = {"query": query, "max_results": 8, "search_depth": "basic", "include_answer": False}
+        if allowed_domains:
+            request["include_domains"] = allowed_domains
+        if blocked_domains:
+            request["exclude_domains"] = blocked_domains
+        async with client.stream(
+            "POST", search_url, headers={"Authorization": f"Bearer {api_key}"}, json=request,
+        ) as response:
+            peer_error = _actual_peer_network_error(response, search_url, proxy_url=self._proxy_url)
+            if peer_error:
+                return self._error_result(peer_error)
+            response.raise_for_status()
+            payload = json.loads(await _read_response_bytes(response))
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            return self._error_result("The search provider returned no results array.")
+        candidates = [(item["title"], item["url"], item.get("content", "")) for item in payload["results"]]
         filtered = [
             result for result in candidates
             if (not allowed_domains or self._domain_matches(result[1], allowed_domains))
@@ -675,10 +754,11 @@ class WebSearchTool(BaseTool):
         if not filtered:
             return ToolResult(
                 content=f'No web search results found for "{query}".',
-                extraction_status="partial",
+                extraction_status="ok",
                 evidence_type="candidate",
                 display_summary=f"Searched web: {query}",
                 result_kind="search",
+                provider="tavily",
             )
         lines = [f'Search results for "{query}":']
         for index, (title, link, snippet) in enumerate(filtered, start=1):
@@ -691,7 +771,7 @@ class WebSearchTool(BaseTool):
             extraction_status="ok",
             evidence_type="candidate",
             display_summary=f"Searched web: {query}",
-            provider="bing-rss",
+            provider="tavily",
             result_kind="search",
             content_preview=content[:CONTENT_PREVIEW_CHARS],
         )
@@ -732,7 +812,8 @@ class WebSearchTool(BaseTool):
             )
 
         llm = getattr(context, "llm", None) if context is not None else None
-        llm = llm or self._llm_provider
+        if llm is None:
+            llm = self._llm_provider() if callable(self._llm_provider) else self._llm_provider
         supports_hosted_search = callable(getattr(llm, "supports_hosted_web_search", None)) and llm.supports_hosted_web_search()
         if not supports_hosted_search:
             return await self._direct_search(
@@ -783,6 +864,15 @@ class WebSearchTool(BaseTool):
                 evidence_type="candidate",
             )
 
+        if not str(content or "").strip():
+            return ToolResult(
+                content="The hosted search returned no usable result text.",
+                status="partial",
+                extraction_status="partial",
+                provider=type(llm).__name__,
+                result_kind="search",
+                evidence_type="candidate",
+            )
         return ToolResult(
             content=_wrap_untrusted_content(content, "web_search"),
             extraction_status="ok",

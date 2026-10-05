@@ -11,11 +11,11 @@ import re
 import uuid
 from typing import Any
 
-from backend.atomic_io import atomic_write_text as _atomic_write_text, canonical_path_mapping_key, file_mutation_locks, run_blocking_io
+from backend.atomic_io import atomic_write_text as _atomic_write_text, canonical_path_mapping_key, file_mutation_locks, preserve_text_line_endings, run_blocking_io
 from backend.permissions.context import ToolExecutionContext
 from backend.security.sensitive_files import is_protected_write_path
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
-from backend.tools.file_tools_common import _validate_expected_hash, content_hash, record_file_hash
+from backend.tools.file_tools_common import _emit_write_diff, _validate_expected_hash, _workspace_display_path, content_hash, record_file_hash
 from backend.tools.path_resolution import _is_bypass_mode, _resolve_path
 from backend.workspace.file_state_cache import get_global_file_cache
 
@@ -89,7 +89,18 @@ class NotebookEditTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
-        return await run_blocking_io(self._execute, args, context)
+        result = await run_blocking_io(self._execute, args, context)
+        change = result.runtime_metadata.pop("notebook_change", None)
+        if change is not None:
+            await _emit_write_diff(context, **change)
+            from backend.permissions.review import build_structured_diff_payload, generate_unified_diff
+
+            patch = generate_unified_diff(change["display_path"], change["old_content"], change["new_content"])
+            result.runtime_metadata["committed_diff"] = build_structured_diff_payload(
+                change["display_path"], patch, status="modified",
+                size_bytes=len(change["new_content"].encode("utf-8")),
+            )
+        return result
 
     def _execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         raw_path = str(args.get("notebook_path") or "").strip()
@@ -130,7 +141,8 @@ class NotebookEditTool(BaseTool):
             return self._error_result(message)
 
         try:
-            nb = json.loads(path.read_text(encoding="utf-8"))
+            old_content = path.read_bytes().decode("utf-8")
+            nb = json.loads(old_content)
         except Exception as exc:
             return self._error_result(f"Failed to read notebook JSON: {exc}")
         cells = nb.get("cells")
@@ -183,35 +195,29 @@ class NotebookEditTool(BaseTool):
                 cells.insert(idx, new_cell)
                 action = f"Inserted {cell_type} cell at {idx}"
             else:  # replace
-                if idx == len(cells):
-                    # Replace one past the end is an append.
-                    cell_type = str(args.get("cell_type") or "code").strip().lower()
-                    if cell_type not in {"code", "markdown"}:
-                        return self._error_result(f"Invalid cell_type '{cell_type}'")
-                    cells.append(self._build_cell(cell_type, str(new_source)))
-                    action = f"Appended {cell_type} cell"
+                if not 0 <= idx < len(cells):
+                    return self._error_result(f"cell_id out of range (0..{len(cells) - 1})")
+                target = cells[idx]
+                target["source"] = str(new_source).splitlines(keepends=True)
+                cell_type = str(args.get("cell_type") or target.get("cell_type") or "code").strip().lower()
+                if cell_type not in {"code", "markdown", "raw"}:
+                    return self._error_result(f"Invalid cell_type '{cell_type}'")
+                target["cell_type"] = cell_type
+                if cell_type == "code":
+                    target["execution_count"] = None
+                    target["outputs"] = []
+                    target.pop("attachments", None)
                 else:
-                    if not 0 <= idx < len(cells):
-                        return self._error_result(f"cell_id out of range (0..{len(cells) - 1})")
-                    target = cells[idx]
-                    target["source"] = str(new_source).splitlines(keepends=True)
-                    cell_type = str(args.get("cell_type") or target.get("cell_type") or "code").strip().lower()
-                    if cell_type not in {"code", "markdown", "raw"}:
-                        return self._error_result(f"Invalid cell_type '{cell_type}'")
-                    target["cell_type"] = cell_type
-                    if cell_type == "code":
-                        target["execution_count"] = None
-                        target["outputs"] = []
-                        target.pop("attachments", None)
-                    else:
-                        target.pop("execution_count", None)
-                        target.pop("outputs", None)
-                    # Reuse the existing id so a later call can re-address this cell.
-                    action = f"Replaced cell {target.get('id')}"
+                    target.pop("execution_count", None)
+                    target.pop("outputs", None)
+                # Reuse the existing id so a later call can re-address this cell.
+                action = f"Replaced cell {target.get('id')}"
 
         nb["cells"] = cells
         try:
-            new_text = json.dumps(nb, ensure_ascii=False, indent=1)
+            new_text = preserve_text_line_endings(
+                json.dumps(nb, ensure_ascii=False, indent=1), old_content.encode("utf-8"),
+            )
             # Notebook edits share the same guarded mutation queue as text
             # edits. Revalidate after waiting so a concurrent editor save is
             # rejected instead of silently overwritten.
@@ -228,10 +234,15 @@ class NotebookEditTool(BaseTool):
         except Exception as exc:
             return self._error_result(f"Failed to write notebook: {exc}")
 
-        return self._success_result(
+        result = self._success_result(
             content=f"{action} in {raw_path} ({len(cells)} cells). content_hash: {content_hash(new_text)}",
             display_summary=action,
         )
+        result.runtime_metadata["notebook_change"] = {
+            "file_path": raw_path, "old_content": old_content, "new_content": new_text,
+            "display_path": _workspace_display_path(path, raw_path, context),
+        }
+        return result
 
     @staticmethod
     def _build_cell(cell_type: str, source: str) -> dict[str, Any]:

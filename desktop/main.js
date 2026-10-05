@@ -18,6 +18,7 @@ const windowManager = require("./window-manager");
 const ipcHandlers = require("./ipc-handlers");
 const updater = require("./updater");
 const crashReporting = require("./crash-reporter");
+const { setupWindowsSandbox } = require("./windows-sandbox-setup");
 
 // html.to.design capture is an explicitly enabled development aid. Keep the
 // dependency out of the packaged startup path and save captures locally.
@@ -81,6 +82,15 @@ function resolvePythonCommand() {
 }
 
 const PYTHON_COMMAND = resolvePythonCommand();
+const GITHUB_CLI_COMMAND = process.env.MINICODE_GH_COMMAND || path.join(
+  app.isPackaged ? process.resourcesPath : path.join(getAppRoot(), "desktop"),
+  "github-runtime", "bin", "gh.exe",
+);
+process.env.MINICODE_GH_COMMAND = GITHUB_CLI_COMMAND;
+if (path.isAbsolute(GITHUB_CLI_COMMAND)) {
+  const pathKey = Object.keys(process.env).find((name) => name.toLowerCase() === "path") || "PATH";
+  process.env[pathKey] = [path.dirname(GITHUB_CLI_COMMAND), process.env[pathKey]].filter(Boolean).join(path.delimiter);
+}
 
 const RENDERER_CSP = [
   "default-src 'self'",
@@ -831,6 +841,7 @@ backendSidecar.init({
   config: {
     manageBackend: MANAGE_BACKEND,
     pythonCommand: PYTHON_COMMAND,
+    githubCliCommand: GITHUB_CLI_COMMAND,
     backendHost: BACKEND_HOST,
     get resolvedBackendPort() { return resolvedBackendPort; },
     get resolvedApiBaseUrl() { return resolvedApiBaseUrl; },
@@ -897,6 +908,16 @@ embeddedBrowserBridge.init({
 });
 
 ipcHandlers.init({
+  setupWindowsSandbox: () => setupWindowsSandbox({
+    scriptPath: app.isPackaged
+      ? path.join(process.resourcesPath, "windows-sandbox", "setup-desktop-user-sandbox.ps1")
+      : path.join(__dirname, "scripts", "setup-desktop-user-sandbox.ps1"),
+    apiBaseUrl: resolvedApiBaseUrl,
+    runtimeToken: RUNTIME_TOKEN,
+    shellProcessId: process.pid,
+    powershellCommand: process.platform === "win32"
+      ? path.join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe") : "",
+  }),
   getMainWindow: () => windowManager.getMainWindow(),
   getStartupFailureWindow: () => startupFailureWindow,
   showDesktopNotification,

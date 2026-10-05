@@ -45,7 +45,7 @@ from backend.async_cleanup import (
     cancel_and_drain_receipt,
 )
 from backend.mcp.oauth import MCPAuthenticationRequired
-from backend.runtime_env import mcp_subprocess_env, sanitized_subprocess_env
+from backend.runtime_env import mcp_subprocess_env, sanitized_subprocess_env, vault_subprocess_env
 from backend.security.unicode_sanitizer import (
     UnsafeUnicodeMetadataKey,
     sanitize_untrusted_metadata,
@@ -624,7 +624,8 @@ class MCPClient:
             command = sys.executable if self._command == "python" else self._command
             # Local MCP processes receive the platform core plus variables and
             # values explicitly selected by the MiniCode server config.
-            env = mcp_subprocess_env(self._env)
+            server_env = {**vault_subprocess_env(f"mcp:{self.server_name}"), **self._env}
+            env = mcp_subprocess_env(server_env)
             env = self._fix_stdio_pythonpath(env)
             return stdio_client(
                 StdioServerParameters(

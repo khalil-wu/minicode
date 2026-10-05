@@ -7,6 +7,7 @@ export const SHORTCUT_DEFINITIONS = [
   { id: "clearComposer", label: "清空输入框", action: "Clear composer", defaultBinding: "Mod+L" },
   { id: "processDetail", label: "切换过程详情", action: "Cycle process detail", defaultBinding: "Mod+O" },
   { id: "globalSearch", label: "全局搜索", action: "Global search", defaultBinding: "Mod+P" },
+  { id: "workspaceSearch", label: "搜索项目内容", action: "Search project text", defaultBinding: "Mod+Shift+F" },
   { id: "toggleDiff", label: "切换差异面板", action: "Toggle diff panel", defaultBinding: "Mod+Shift+D" },
   { id: "openPreview", label: "打开预览", action: "Open preview", defaultBinding: "Mod+Shift+P" },
   { id: "permissionMenu", label: "权限菜单", action: "Permission menu", defaultBinding: "Mod+Shift+M" },

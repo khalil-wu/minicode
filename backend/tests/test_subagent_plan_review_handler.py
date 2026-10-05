@@ -40,6 +40,7 @@ def _request_message(request_id: str) -> Any:
 @dataclass
 class _Teammate:
     status: str = "running"
+    session_id: str = "sess-1"
     parent_run_id: str = "run-parent"
     team_name: str = "team-a"
     teammate_name: str = "tester"
@@ -64,6 +65,15 @@ class _FakeRuntime:
 
     def get_run(self, run_id: str) -> Any:
         return _ParentRun() if run_id == "run-parent" else None
+
+    def get_subagent_task_metadata(self, subagent_id: str) -> Any:
+        return None
+
+    def load_persisted_subagent(self, subagent_id: str) -> Any:
+        return None
+
+    def get_agent_owner_run(self, subagent_id: str) -> Any:
+        return _ParentRun() if subagent_id == "t1" else None
 
     def respond_to_teammate_plan(self, **kwargs: Any) -> Any:
         self.sent.append(kwargs)

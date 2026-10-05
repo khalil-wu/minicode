@@ -123,8 +123,8 @@ describe("BottomDock", () => {
   it("shows an absent task budget without turning missing data into zero use", () => {
     useAppStore.setState({ budgetBuckets: [], totalBudgetPercent: 0 });
     render(<BottomDock />);
-    expect(screen.getByText("暂无预算数据")).toBeTruthy();
-    expect(screen.queryByText("任务预算：0.0%")).toBeNull();
+    expect(screen.getByText("暂无上下文数据")).toBeTruthy();
+    expect(screen.queryByText("上下文占用：0.0%")).toBeNull();
     expect(screen.getByText("模型用量")).toBeTruthy();
   });
 

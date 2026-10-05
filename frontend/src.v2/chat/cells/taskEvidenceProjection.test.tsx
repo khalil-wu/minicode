@@ -23,7 +23,7 @@ const cell = (tool: ToolCallRecord): ActivityCellState => ({
   activityKind: tool.activityKind as ActivityCellState["activityKind"],
   subtitle: tool.inputSummary, collapsed: true, startedAt: 1000,
   status: tool.status === "success" ? "done" : tool.status === "cancelled" ? "interrupted"
-    : tool.status === "partial" ? "partial" : tool.status === "pending" ? "running" : "failed",
+    : tool.status === "partial" ? "partial" : tool.status === "pending" || tool.status === "running" ? "running" : "failed",
   toolCallRecords: [tool],
 });
 const expectTaskEvidenceOnly = (element: HTMLElement) => {
@@ -34,6 +34,89 @@ const expectTaskEvidenceOnly = (element: HTMLElement) => {
 
 beforeEach(() => useAppStore.setState({ viewMode: "normal", conversationId: "conv_owner", workingDirectory: "C:/workspace", isConnected: false, inspectorEntries: [], inspectorFocus: null, messages: [] }));
 afterEach(cleanup);
+
+describe("activity disclosure content", () => {
+  it.each(["tool_exec", "tool_wait"])("does not render an empty disclosure for %s", (name) => {
+    const emptyReports: Partial<ToolCallRecord>[] = [
+      { status: "running", outputPreview: undefined },
+      { status: "running", outputPreview: JSON.stringify({ cell_id: source.cell_id, status: "running", output: [], pending_tools: [] }) },
+      { status: "success", displaySummary: "Script yielded", outputPreview: JSON.stringify({ cell_id: source.cell_id, status: "running", output: [] }) },
+      { status: "success", outputPreview: JSON.stringify({ cell_id: source.cell_id, status: "completed", output: [" \n "] }) },
+      { status: "failed", outputPreview: undefined },
+    ];
+    const base = record({ name, activityKind: "genericTool", resultKind: "generic", durationMs: undefined,
+      args: name === "tool_exec" ? { code: "await tools.read_file({ file_path: 'src/main.ts' });" } : { cell_id: source.cell_id } });
+    const ui = render(<ActivityCell cell={{ ...cell({ ...base, ...emptyReports[0] }), collapsed: false }} />);
+    for (const report of emptyReports) {
+      const tool = { ...base, ...report };
+      const original = JSON.stringify(tool);
+      ui.rerender(<ActivityCell cell={{ ...cell(tool), collapsed: false }} />);
+      expect(ui.container.querySelector(".activity-cell-name")?.textContent).toMatch(/code|Wait/i);
+      expect(ui.container.querySelector(".activity-cell-expanded")).toBeNull();
+      expect(ui.container.querySelector(".activity-cell-toggle")).toBeNull();
+      expect(ui.container.querySelector(".activity-cell-main-button")?.hasAttribute("aria-expanded")).toBe(false);
+      expectTaskEvidenceOnly(ui.container);
+      expect(JSON.stringify(tool)).toBe(original);
+    }
+  });
+
+  it("updates disclosure availability when code finishes with real output", () => {
+    const running = record({ name: "tool_exec", status: "running", activityKind: "genericTool", resultKind: "generic", durationMs: undefined,
+      args: { code: "text('result oracle');" }, outputPreview: undefined });
+    const completed = { ...running, status: "success" as const,
+      outputPreview: JSON.stringify({ cell_id: source.cell_id, status: "completed", output: ["result oracle"] }) };
+    const ui = render(<ActivityCell cell={{ ...cell(running), collapsed: false }} />);
+    expect(ui.container.querySelector(".activity-cell-expanded")).toBeNull();
+    ui.rerender(<ActivityCell cell={{ ...cell(completed), collapsed: false }} />);
+    expect(ui.container.querySelector(".activity-cell-expanded")?.textContent).toBe("result oracle");
+    fireEvent.click(ui.getByRole("button", { name: "收起活动详情" }));
+    ui.rerender(<ActivityCell cell={{ ...cell(running), collapsed: false }} />);
+    expect(ui.container.querySelector(".activity-cell-toggle")).toBeNull();
+    ui.rerender(<ActivityCell cell={{ ...cell(completed), collapsed: false }} />);
+    expect(ui.getByRole("button", { name: "展开活动详情" }).getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(ui.getByRole("button", { name: "展开活动详情" }));
+    expect(ui.container.querySelector(".activity-cell-expanded")?.textContent).toBe("result oracle");
+    expectTaskEvidenceOnly(ui.container);
+  });
+
+  it("retains code errors as expandable evidence", () => {
+    const tool = record({ name: "tool_wait", status: "failed", activityKind: "genericTool", resultKind: "generic", durationMs: undefined,
+      args: { cell_id: source.cell_id }, outputPreview: JSON.stringify({ cell_id: source.cell_id, status: "failed", error: "operation could not complete" }) });
+    const ui = render(<ActivityCell cell={cell(tool)} />);
+    fireEvent.click(ui.getByRole("button", { name: "展开活动详情" }));
+    expect(ui.container.querySelector(".activity-cell-expanded")?.textContent).toBe("operation could not complete");
+  });
+
+  it("keeps artifact-only Fetch evidence available", () => {
+    const tool = record({ name: "web_fetch", activityKind: "webSearch", resultKind: "web", durationMs: undefined,
+      args: { url: "https://example.org" }, outputPreview: undefined, artifactId: "artifact_body", artifactMediaType: "text/plain" });
+    const ui = render(<ActivityCell cell={cell(tool)} conversationId="conv_owner" />);
+    fireEvent.click(ui.getByRole("button", { name: "展开活动详情" }));
+    expect(ui.getByRole("button", { name: "查看页面正文" })).toBeTruthy();
+  });
+
+  it("does not render empty browser cards but retains evaluation expressions", () => {
+    const tool = record({ name: "browser_control", activityKind: "browser", resultKind: "browser", status: "running", durationMs: undefined,
+      args: { action: "navigate", url: "https://example.org" }, outputPreview: undefined });
+    const ui = render(<ActivityCell cell={{ ...cell(tool), collapsed: false }} />);
+    expect(ui.container.querySelector(".activity-cell-expanded")).toBeNull();
+    const evaluate = { ...tool, args: { action: "evaluate", expression: "document.title" } };
+    ui.rerender(<ActivityCell cell={{ ...cell(evaluate), collapsed: false }} />);
+    expect(ui.getByLabelText("JavaScript").textContent).toBe("document.title");
+    ui.rerender(<ActivityCell cell={{ ...cell({ ...evaluate, args: { action: "evaluate", expression: " \n" }, outputPreview: "Page title" }), collapsed: false }} />);
+    expect(ui.queryByLabelText("JavaScript")).toBeNull();
+    expect(ui.getByLabelText("操作结果").textContent).toBe("Page title");
+  });
+
+  it("does not add empty output blocks to inline records with visible targets", () => {
+    const first = record({ durationMs: undefined, args: { file_path: "src/first.ts" }, outputPreview: " \n" });
+    const second = record({ id: "second-read", durationMs: undefined, args: { file_path: "src/second.ts" }, outputPreview: "\t" });
+    const ui = render(<ActivityCell cell={{ ...cell(first), collapsed: false, toolCallRecords: [first, second] }} />);
+    expect(ui.container.textContent).toContain("src/first.ts");
+    expect(ui.container.textContent).toContain("src/second.ts");
+    expect(ui.container.querySelector(".activity-cell-inline-output")).toBeNull();
+  });
+});
 
 describe("task evidence and runtime diagnostics have separate projections", () => {
   it.each(["normal", "summary", "verbose"] as ViewMode[])("keeps both collapsed and expanded reads free of provenance in %s", (mode) => {

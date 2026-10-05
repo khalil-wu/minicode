@@ -112,6 +112,13 @@
   --state-danger-soft:  oklch(0.71 0.16 28 / 0.12);
   --state-info:         oklch(0.74 0.10 240);
   --state-info-soft:    oklch(0.74 0.10 240 / 0.12);
+  /* Agent identity colors remain independent of execution state. */
+  --agent-identity-teal:   oklch(0.76 0.10 183);
+  --agent-identity-blue:   oklch(0.75 0.10 242);
+  --agent-identity-violet: oklch(0.77 0.11 300);
+  --agent-identity-rose:   oklch(0.77 0.11 12);
+  --agent-identity-amber:  oklch(0.79 0.11 77);
+  --agent-identity-green:  oklch(0.76 0.11 149);
   --command-accent:        oklch(0.82 0.045 245);
   --command-accent-strong: oklch(0.86 0.055 245);
   --command-border:        oklch(0.82 0.045 245 / 0.48);
@@ -412,7 +419,7 @@ uses in its UI. The `--cjk-leading` and
   --editor-bracket-3: #43767c;
 
   /* Separate reading text, secondary controls, and quiet process evidence. */
-  --text-primary:   oklch(0.300 0.004 250);
+  --text-primary:   oklch(0.235 0.007 258);
   --text-secondary: oklch(0.470 0.005 250);
   --text-muted:     oklch(0.560 0.005 250);
   --text-disabled:  oklch(0.300 0.004 250 / 0.48);
@@ -445,6 +452,12 @@ uses in its UI. The `--cjk-leading` and
   --state-danger-soft:  oklch(0.55 0.18 28 / 0.12);
   --state-info:         oklch(0.52 0.13 240);
   --state-info-soft:    oklch(0.52 0.13 240 / 0.12);
+  --agent-identity-teal:   oklch(0.55 0.10 183);
+  --agent-identity-blue:   oklch(0.55 0.11 242);
+  --agent-identity-violet: oklch(0.56 0.12 300);
+  --agent-identity-rose:   oklch(0.57 0.12 12);
+  --agent-identity-amber:  oklch(0.56 0.12 77);
+  --agent-identity-green:  oklch(0.54 0.12 149);
   --command-accent:        oklch(0.62 0.075 245);
   --command-accent-strong: oklch(0.47 0.085 245);
   --command-border:        oklch(0.62 0.075 245 / 0.42);

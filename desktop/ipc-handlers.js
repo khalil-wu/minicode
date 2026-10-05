@@ -213,6 +213,7 @@ function registerIpcHandlers() {
   ipcHandlersRegistered = true;
 
   const {
+    setupWindowsSandbox,
     getMainWindow,
     showDesktopNotification,
     dispatchDeepLink,
@@ -751,6 +752,7 @@ function registerIpcHandlers() {
       home: require("node:os").homedir(),
     };
   }));
+  ipcMain.handle("minicode:sandbox:setup", withMainSender("minicode:sandbox:setup", () => setupWindowsSandbox()));
 }
 
 // ---------------------------------------------------------------------------

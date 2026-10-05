@@ -461,7 +461,7 @@ describe("preview verification lifecycle", () => {
       ...preview, conversationId: "conv-active", messages: [], todos: [], plan: null, agentProgress: [],
     });
     expect(activity.runs[0]).toMatchObject({
-      previewId: launch.id, status: "failed", detail: "清理未完成，请重试停止", attention: true,
+      previewId: launch.id, status: "cleanup_pending", detail: "清理未完成，请重试停止", attention: true,
     });
     send({ type: "preview.launch.stopped", id: launch.id, port: launch.port, cleanup_pending: false });
     expect(useAppStore.getState().previewLaunchProcesses).toEqual([]);

@@ -509,10 +509,10 @@ describe("ChatTurn", () => {
 
     render(<ChatTurn turn={turn} />);
 
-    expect(screen.getAllByText("Sent message · 1 agent")).toHaveLength(3);
+    expect(screen.getAllByText("已发送消息 · 1 个子任务")).toHaveLength(3);
     expect(screen.getByText("请完整审计渲染链路并返回证据。")).toBeTruthy();
     expect(screen.getByText("优先核对真实生产问题。")).toBeTruthy();
-    expect(screen.getByText("Closed · 1 agent")).toBeTruthy();
+    expect(screen.getByText("已停止 · 1 个子任务")).toBeTruthy();
     expect(screen.getAllByText("Kant", { selector: "strong" })).toHaveLength(2);
   });
 

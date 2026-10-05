@@ -2,11 +2,15 @@ import type * as Monaco from "monaco-editor/editor/editor.api.js";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 import TypeScriptWorker from "./workspaceTypeScriptWorker?worker";
 import CssWorker from "monaco-editor/languages/features/css/css.worker?worker";
-import HtmlWorker from "monaco-editor/languages/features/html/html.worker?worker";
+import HtmlWorker from "./workspaceHtmlWorker?worker";
 import JsonWorker from "monaco-editor/languages/features/json/json.worker?worker";
 import { normalizeWorkspacePath } from "../lib/workspace-path";
 import type { IExtraLibs } from "monaco-editor/languages/features/typescript/register.js";
 import { WORKSPACE_TYPESCRIPT_METADATA_URI, type WorkspaceTypeScriptMetadata } from "./workspaceTypeScriptContract";
+import { loadMiniCodeEditorFeatures } from "./monacoEditorFeatures";
+import { registerEditorLanguageServices } from "./editorLanguageClient";
+import { registerEditorSnippets } from "./editorSnippets";
+import { registerInlinePrediction } from "./editorInlineCompletion";
 
 export function configureMiniCodeMonacoWorkers(): void {
   globalThis.MonacoEnvironment = {
@@ -40,6 +44,7 @@ export function loadMiniCodeLanguageServices(): Promise<void> {
       import("monaco-editor/languages/features/json/register.js"),
       import("monaco-editor/editor/standalone/browser/standaloneServices.js"),
       import("monaco-editor/editor/common/languages/language.js"),
+      loadMiniCodeEditorFeatures(),
     ]);
     typescriptServices = typescript;
     const compilerOptions = {
@@ -65,12 +70,22 @@ export function loadMiniCodeLanguageServices(): Promise<void> {
     languages.requestRichLanguageFeatures("typescript");
     languages.requestRichLanguageFeatures("javascript");
     await Promise.all([typescript.getTypeScriptWorker(), typescript.getJavaScriptWorker()]);
+    registerEditorLanguageServices(await import("monaco-editor/editor/editor.api.js"));
+    registerEditorSnippets(await import("monaco-editor/editor/editor.api.js"));
+    registerInlinePrediction(await import("monaco-editor/editor/editor.api.js"));
   })();
 }
 
 export function setWorkspaceTypeScriptFiles(metadata: WorkspaceTypeScriptMetadata, files: Array<{ filePath: string; content: string }>): void {
   const extraLibs = [...files, { filePath: WORKSPACE_TYPESCRIPT_METADATA_URI, content: JSON.stringify(metadata) }];
   for (const defaults of [typescriptServices.typescriptDefaults, typescriptServices.javascriptDefaults]) defaults.setExtraLibs(extraLibs);
+}
+
+export async function getWorkspaceTypeScriptWorker(resource: Monaco.Uri) {
+  const factory = /\.[cm]?tsx?$/i.test(resource.path)
+    ? await typescriptServices.getTypeScriptWorker()
+    : await typescriptServices.getJavaScriptWorker();
+  return factory(resource);
 }
 
 export async function syncWorkspaceTypeScriptModels(resources: Monaco.Uri[]): Promise<{

@@ -126,6 +126,26 @@ describe("BrowserPanel", () => {
     });
   });
 
+  it("applies real viewport dimensions and keeps multiple picked elements in one feedback draft", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("a", "Page A", "https://a.example/", true)]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Page A" });
+    fireEvent.change(screen.getByRole("combobox", { name: "预览设备" }), { target: { value: "phone" } });
+    await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenCalledWith(expect.objectContaining({ viewport: { width: 390, height: 844, mobile: true } })));
+    fireEvent.click(screen.getByRole("button", { name: "旋转" }));
+    await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenCalledWith(expect.objectContaining({ viewport: { width: 844, height: 390, mobile: true } })));
+    for (const selector of ["#first", "#second"]) {
+      runtimeMocks.inspect.mockResolvedValueOnce({ ok: true, value: { selector, text: selector, rect: { x: 5, y: 5, width: 30, height: 20 }, viewport: { width: 844, height: 390 } } } as never);
+      fireEvent.click(screen.getByRole("button", { name: "选择元素" }));
+      await screen.findByText(selector);
+    }
+    fireEvent.change(screen.getByRole("textbox", { name: "批注内容" }), { target: { value: "一起统一间距" } });
+    fireEvent.click(screen.getByRole("button", { name: "加入对话" }));
+    expect(useAppStore.getState().browserAnnotations.map((item) => item.selector).sort()).toEqual(["#first", "#second"]);
+    expect(useAppStore.getState().selectedMentions).toHaveLength(2);
+    expect(useAppStore.getState().browserAnnotations.every((item) => item.viewportWidth === 844 && item.note === "一起统一间距")).toBe(true);
+  });
+
   it("does not reactivate a native page when navigation resolves after the panel unmounts", async () => {
     runtimeMocks.list.mockResolvedValueOnce([page("a", "Page A", "https://a.example/", true)]);
     const navigation = pending<ReturnType<typeof page>>();

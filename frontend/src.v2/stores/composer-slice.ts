@@ -72,6 +72,7 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   // which effort levels are actually exposed and accepted.
   effortLevel: "medium" as const,
   prMonitor: null,
+  prStatusIssue: null,
   actionChip: null,
   mentionResults: [],
   selectedMentions: [],
@@ -161,6 +162,7 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
     );
   },
   setPRMonitor: (pr) => set({ prMonitor: pr }),
+  setPRStatusIssue: (prStatusIssue) => set({ prStatusIssue }),
   setActionChip: (c) => set({ actionChip: c }),
   setMentionResults: (items) => set({ mentionResults: items }),
   addSelectedMention: (item) =>

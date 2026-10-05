@@ -24,8 +24,7 @@
    Shared bits
    ════════════════════════════════════════════════════════ */
 
-/* Small icon button (copy / recall / per-cell actions). Surface + border come
-   from the workbench polish pass; focus ring is the global button rule. */
+/* Transcript actions stay quiet until hover; focus uses the global button rule. */
 .cell-action-btn {
   display: inline-flex;
   align-items: center;
@@ -33,23 +32,19 @@
   width: 24px;
   height: 24px;
   padding: 0;
-  border: 1px solid var(--border-subtle);
+  border: 0;
   border-radius: var(--radius-sm);
-  background: var(--surface-page);
+  background: transparent;
   color: var(--text-muted);
   cursor: pointer;
   transition:
     background-color var(--transition-fast),
-    border-color var(--transition-fast),
-    color var(--transition-fast),
-    transform var(--transition-fast);
+    color var(--transition-fast);
 }
 
 .cell-action-btn:hover {
-  background: var(--surface-hover);
-  border-color: var(--border-soft);
+  background: var(--workbench-hover);
   color: var(--text-secondary);
-  transform: translateY(-1px);
 }
 
 .cell-action-btn:active {
@@ -1231,7 +1226,7 @@
   padding: 8px 10px;
   overflow: hidden;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--workbench-tool);
   animation: expand-detail var(--duration-fast) cubic-bezier(0.2, 0.8, 0.2, 1);
 }
@@ -1239,6 +1234,37 @@
 .activity-cell-file-change-expanded,
 .activity-cell-artifact-gallery {
   background: var(--surface-base);
+}
+
+.activity-cell-evidence-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 4px;
+}
+
+.activity-cell-evidence-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.activity-cell-evidence-button:hover {
+  background: var(--workbench-hover);
 }
 
 .activity-cell-added {
@@ -1695,7 +1721,7 @@
   margin: 4px 0 6px;
   padding: 8px 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--workbench-tool);
   box-shadow: none;
   animation: expand-detail var(--duration-fast) cubic-bezier(0.2, 0.8, 0.2, 1);

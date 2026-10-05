@@ -689,6 +689,8 @@ describe("runtime capability catalog hydration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useAppStore.setState({
+      conversationId: "conv-capability-catalog",
+      workingDirectory: "C:/capability-catalog",
       runtimeCapabilities: null,
       availableSkills: [],
       slashCommands: [],
@@ -698,6 +700,8 @@ describe("runtime capability catalog hydration", () => {
   it("hydrates composer skills and slash commands from runtime.capabilities", () => {
     expect(handleRuntimeEvent({
       type: "runtime.capabilities",
+      conversation_id: "conv-capability-catalog",
+      workspace_root: "C:/capability-catalog",
       capabilities: {
         skills: [{
           name: "openai-docs",
@@ -1251,6 +1255,8 @@ describe("runtime capability events", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useAppStore.setState({
+      conversationId: "conv-capabilities",
+      workingDirectory: "C:/capabilities",
       runtimeCapabilities: null,
     });
   });
@@ -1266,6 +1272,8 @@ describe("runtime capability events", () => {
     expect(handleRuntimeEvent({
       type: "runtime.capabilities",
       session_id: "session-capabilities",
+      conversation_id: "conv-capabilities",
+      workspace_root: "C:/capabilities",
       capabilities: {
         tools: [{ type: "function", function: { name: "read_file" } }],
         tool_views: [
@@ -1298,6 +1306,19 @@ describe("runtime capability events", () => {
     expect(useAppStore.getState().quickOpenResults).toEqual([]);
     expect(useAppStore.getState().quickOpenLoading).toBe(false);
     expect(useAppStore.getState().agentEditorOpen).toBe(false);
+  });
+
+  it.each([
+    {},
+    { conversation_id: "conv-other", workspace_root: "C:/capabilities" },
+    { conversation_id: "conv-capabilities", workspace_root: "C:/other" },
+    { conversation_id: "conv-capabilities" },
+  ])("does not replace the capability catalog with an unowned or foreign snapshot: %j", (scope) => {
+    expect(handleRuntimeEvent({
+      type: "runtime.capabilities", ...scope,
+      capabilities: { skills: [{ name: "foreign-skill" }] },
+    } as unknown as ServerEvent)).toBe(true);
+    expect(useAppStore.getState().runtimeCapabilities).toBeNull();
   });
 });
 
@@ -1371,6 +1392,28 @@ describe("runtime subagent events", () => {
         activityLog: ["Reading README.md"],
       }),
     ]);
+  });
+
+  it("projects actual teammate, relationship and attention metadata without inferring it from prose", () => {
+    handleRuntimeEvent({
+      type: "subagent.start", subagent_id: "metadata-child", parent_id: "parent-child", role: "explore",
+      record: { agent_path: "/root/child", mailbox_epoch: 1, teammate_name: "Ada", team_name: "审阅组",
+        awaiting_plan_approval: true, active_plan_request_id: "plan-child", is_idle: false,
+        read_only: true, depends_on: ["schema"], write_scope: ["frontend"] },
+    } as unknown as ServerEvent);
+    expect(useAppStore.getState().subagents[0]).toMatchObject({
+      id: "metadata-child", agentPath: "/root/child", parentRunId: "parent-child", teammateName: "Ada", teamName: "审阅组",
+      awaitingPlanApproval: true, activePlanRequestId: "plan-child", isIdle: false, readOnly: true,
+      dependsOn: ["schema"], writeScope: ["frontend"],
+    });
+    expect(useAppStore.getState().subagents[0].needsInput).toBeUndefined();
+    handleRuntimeEvent({
+      type: "subagent.progress", subagent_id: "metadata-child", agent_path: "/root/child", mailbox_epoch: 1,
+      status: "blocked", needs_input: true, awaiting_plan_approval: false, active_plan_request_id: "",
+    } as unknown as ServerEvent);
+    expect(useAppStore.getState().subagents[0]).toMatchObject({
+      status: "blocked", needsInput: true, awaitingPlanApproval: false, activePlanRequestId: "",
+    });
   });
 
   it("keeps refreshed pending and blocked subagents non-terminal", () => {

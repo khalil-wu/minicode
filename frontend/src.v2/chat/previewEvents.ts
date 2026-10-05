@@ -149,6 +149,8 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
           port: ev.port,
           url: ev.url,
           pid: ev.pid,
+          exit_code: ev.exit_code,
+          last_error: ev.last_error,
           status: ev.status ?? "running",
           cleanup_pending: ev.cleanup_pending,
           cleanup_reason: ev.cleanup_reason,
@@ -156,7 +158,7 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
           output_tail: ev.output_tail,
         }, eventConversationId);
         if (ev.url) {
-          if (ev.status === "ready" || ev.status === "running") updateLivePreview(ev.url);
+          if (ev.status === "ready") updateLivePreview(ev.url);
           else s.setLivePreviewUrl(ev.url, eventConversationId);
         }
       }
@@ -213,6 +215,7 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
         s.upsertPreviewLaunchProcess({
           ...current,
           status: "crashed",
+          exit_code: ev.exit_code,
           stderr_tail: ev.stderr_tail,
         }, eventConversationId);
         s.removePreviewServer(current.port, eventConversationId);
@@ -231,6 +234,7 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
         s.upsertPreviewLaunchProcess({
           ...current,
           status: "unhealthy",
+          last_error: ev.last_error,
           cleanup_pending: ev.cleanup_pending ?? current.cleanup_pending,
           cleanup_reason: ev.cleanup_reason ?? current.cleanup_reason,
         }, eventConversationId);

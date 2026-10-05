@@ -58,6 +58,23 @@ describe("ws-outbox", () => {
     expect(pushToast).toHaveBeenCalledOnce();
   });
 
+  it("reports the transport's recovery refusal to both direct and awaiting callers", async () => {
+    registerWebSocketSender(() => false, () => "会话正在恢复，请恢复完成后重试");
+
+    expect(sendClientCommand({ type: "subagent.cancel", subagent_id: "child-1" })).toBe(false);
+    expect(pushToast).toHaveBeenCalledWith("操作失败：会话正在恢复，请恢复完成后重试。", "error", 3000);
+    await expect(sendClientCommandAwaitResult(
+      { type: "subagent.cancel", subagent_id: "child-1" },
+      "subagent.cancel", { silent: true },
+    )).rejects.toThrow("会话正在恢复，请恢复完成后重试");
+
+    registerWebSocketSender(null);
+    await expect(sendClientCommandAwaitResult(
+      { type: "subagent.cancel", subagent_id: "child-1" },
+      "subagent.cancel", { silent: true },
+    )).rejects.toThrow("连接已断开");
+  });
+
   it("can send background commands silently while offline", () => {
     const sent = sendClientCommand({ type: "conversation.list" }, { silent: true });
 

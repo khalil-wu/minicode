@@ -100,6 +100,7 @@ function startBackendSidecar() {
 
   const {
     pythonCommand = "python3",
+    githubCliCommand = "",
     backendHost = "127.0.0.1",
     resolvedBackendPort = 8000,
     resolvedApiBaseUrl = "",
@@ -114,7 +115,8 @@ function startBackendSidecar() {
   } = config;
   const pathKey = Object.keys(process.env).find((name) => name.toLowerCase() === "path") || "PATH";
   const pythonDirectory = path.isAbsolute(pythonCommand) ? path.dirname(pythonCommand) : "";
-  const childPath = [pythonDirectory, process.env[pathKey]].filter(Boolean).join(path.delimiter);
+  const githubDirectory = path.isAbsolute(githubCliCommand) ? path.dirname(githubCliCommand) : "";
+  const childPath = [...new Set([pythonDirectory, githubDirectory, ...(process.env[pathKey] || "").split(path.delimiter)])].filter(Boolean).join(path.delimiter);
 
   const child = spawnProcess(pythonCommand, ["-m", "backend"], {
     cwd: getAppRoot(),
@@ -133,7 +135,9 @@ function startBackendSidecar() {
       MINICODE_RUNTIME_TOKEN: runtimeToken,
       MINICODE_STATE_ROOT: stateRoot,
       MINICODE_APP_RESOURCES_DIR: appResourcesDir,
+      MINICODE_GH_COMMAND: githubCliCommand,
       MINICODE_DESKTOP_DIR: desktopDir,
+      MINICODE_EDITOR_NODE: process.execPath,
       MINICODE_DOCUMENTS_DIR: documentsDir,
       MINICODE_DOWNLOADS_DIR: downloadsDir,
       PYTHONPATH: [getAppRoot(), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),

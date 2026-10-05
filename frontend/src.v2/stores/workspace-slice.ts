@@ -351,6 +351,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
             {
               id: requestId,
               path: normalizedPath,
+              preview: target?.preview,
               ...(target?.exact || /[/\\]/.test(path) ? { exact: true } : {}),
               ...(line ? { line } : {}),
               ...(column ? { column } : {}),

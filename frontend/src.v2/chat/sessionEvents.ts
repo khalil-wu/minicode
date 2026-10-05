@@ -416,6 +416,18 @@ const normalizeSubagentsFromSnapshot = (value: unknown): SubagentState[] => {
         objective: maybeString(subagent.objective as string | null | undefined),
         currentActivity: normalizeDelegatedText(subagent.currentActivity ?? subagent.current_activity),
         waitingOn: maybeString((subagent.waitingOn ?? subagent.waiting_on) as string | null | undefined),
+        needsInput: typeof (subagent.needsInput ?? subagent.needs_input) === "boolean"
+          ? Boolean(subagent.needsInput ?? subagent.needs_input) : undefined,
+        teammateName: maybeString((subagent.teammateName ?? subagent.teammate_name) as string | null | undefined),
+        teamName: maybeString((subagent.teamName ?? subagent.team_name) as string | null | undefined),
+        awaitingPlanApproval: typeof (subagent.awaitingPlanApproval ?? subagent.awaiting_plan_approval) === "boolean"
+          ? Boolean(subagent.awaitingPlanApproval ?? subagent.awaiting_plan_approval) : undefined,
+        activePlanRequestId: maybeString((subagent.activePlanRequestId ?? subagent.active_plan_request_id) as string | null | undefined),
+        isIdle: typeof (subagent.isIdle ?? subagent.is_idle) === "boolean"
+          ? Boolean(subagent.isIdle ?? subagent.is_idle) : undefined,
+        readOnly: typeof (subagent.readOnly ?? subagent.read_only) === "boolean"
+          ? Boolean(subagent.readOnly ?? subagent.read_only) : undefined,
+        writeScope: stringList(subagent.writeScope ?? subagent.write_scope),
         background: typeof subagent.background === "boolean" ? subagent.background : undefined,
         resultAvailable: typeof (subagent.resultAvailable ?? subagent.result_available) === "boolean"
           ? Boolean(subagent.resultAvailable ?? subagent.result_available)
@@ -1066,6 +1078,9 @@ const clearActiveConversationView = () => {
     slashPanelOpen: false,
     mentionPanelOpen: false,
     prMonitor: null,
+    prStatusIssue: null,
+    prStatus: null,
+    ciChecks: [],
     ...(hasCodeContext ? { appMode: "code" as const } : {}),
   });
 };

@@ -495,3 +495,16 @@
 @media (prefers-reduced-motion: reduce) {
   .mc-browser-spin { animation: none; }
 }
+.mc-browser-device, .mc-browser-viewport-controls, .mc-browser-diagnostic-filters { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: var(--text-xs); }
+.mc-browser-device select { background: transparent; color: inherit; border: 0; max-width: 82px; }
+.mc-browser-viewport-controls, .mc-browser-diagnostic-filters { padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); }
+.mc-browser-viewport-controls small { flex: 1; color: var(--text-muted); }
+.mc-browser-viewport-controls input { width: 66px; }
+.mc-browser-viewport-controls input, .mc-browser-diagnostic-filters input, .mc-browser-diagnostic-filters select { border: 1px solid var(--border-subtle); border-radius: 5px; padding: 4px 6px; background: var(--surface-base); color: var(--text-primary); }
+.mc-browser-diagnostic-filters input { flex: 1; min-width: 0; }
+.mc-browser-selected-target button, .mc-browser-viewport-controls button { border: 0; background: transparent; color: var(--text-secondary); cursor: pointer; }
+.mc-browser-inspector-row { flex-wrap: wrap; }
+.mc-browser-diagnostic-detail { max-width: 100%; }
+.mc-browser-diagnostic-detail summary { cursor: pointer; color: var(--text-muted); }
+.mc-browser-diagnostic-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px; border-radius: 5px; background: var(--surface-soft); }
+.mc-browser-diagnostic-detail button { background: transparent; border: 0; color: var(--accent-primary); cursor: pointer; margin-right: 12px; }

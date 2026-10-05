@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 
@@ -17,18 +20,18 @@ def provide_websocket_regression_model(monkeypatch: pytest.MonkeyPatch, request)
 
 
 @pytest.fixture(autouse=True)
-def isolate_runtime_data_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path):
+def isolate_runtime_data_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path, isolate_all_runtime_data_dirs):
     """Keep websocket/API tests from writing into the desktop user's data dir."""
     # Checkpoints and background-task records resolve through
     # MINICODE_STATE_ROOT, so without this they land in the real ~/.minicode and
     # one run can read another run's leftovers.
-    monkeypatch.setenv("MINICODE_STATE_ROOT", str(tmp_path / "state"))
+    state_root = Path(os.environ["MINICODE_STATE_ROOT"])
     conversations = tmp_path / "conversations"
     attachments = tmp_path / "attachments"
     artifacts = tmp_path / "artifacts"
     checkpoints = tmp_path / "checkpoints"
-    settings_file = tmp_path / "settings.json"
-    vault_file = tmp_path / "vault.json"
+    settings_file = state_root / "settings.json"
+    vault_file = state_root / "vault.json"
 
     for name in (
         "OPENAI_API_KEY",

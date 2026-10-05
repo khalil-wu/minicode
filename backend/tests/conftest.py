@@ -1,21 +1,24 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 
 @pytest.fixture(autouse=True)
-def isolate_runtime_data_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path):
+def isolate_runtime_data_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path, isolate_all_runtime_data_dirs):
     # Checkpoints and background-task records resolve through
     # MINICODE_STATE_ROOT, so without this they land in the real ~/.minicode and
     # one run can read another run's leftovers.
-    monkeypatch.setenv("MINICODE_STATE_ROOT", str(tmp_path / "state"))
+    state_root = Path(os.environ["MINICODE_STATE_ROOT"])
     conversations = tmp_path / "conversations"
     attachments = tmp_path / "attachments"
     artifacts = tmp_path / "artifacts"
     checkpoints = tmp_path / "checkpoints"
-    settings_file = tmp_path / "settings.json"
-    vault_file = tmp_path / "vault.json"
-    provider_models_file = tmp_path / "models-store.json"
+    settings_file = state_root / "settings.json"
+    vault_file = state_root / "vault.json"
+    provider_models_file = state_root / "models-store.json"
 
     for name in (
         "OPENAI_API_KEY",
@@ -48,7 +51,7 @@ def isolate_runtime_data_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setattr("backend.attachments.store.ATTACHMENT_DATA_DIR", attachments, raising=False)
     monkeypatch.setattr("backend.artifact.store.ARTIFACT_DATA_DIR", artifacts, raising=False)
     monkeypatch.setattr("backend.checkpoint.store.CHECKPOINT_DATA_DIR", checkpoints, raising=False)
-    runtime_root = tmp_path / "state" / "data" / "agent-runtime"
+    runtime_root = state_root / "data" / "agent-runtime"
     monkeypatch.setattr(
         "backend.agent.runtime.METRICS_FILE",
         runtime_root / "metrics" / "agent_metrics.jsonl",

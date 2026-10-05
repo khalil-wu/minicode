@@ -222,7 +222,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 .agent-loop-process-cell .exec-cell-header-button {
   flex-wrap: nowrap;
   overflow: hidden;
-  min-height: 28px;
+  min-height: 30px;
   padding: 3px 0;
   border: 0;
   border-radius: 0;
@@ -497,7 +497,7 @@ html[data-theme="light"] .agent-loop-process-summary-status {
 .agent-loop-timeline-group-title {
   display: flex;
   align-items: center;
-  min-height: 28px;
+  min-height: 30px;
   width: 100%;
   gap: 8px;
   padding: 3px 0;

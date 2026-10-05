@@ -22,6 +22,7 @@ import { showConfirm } from "./DialogService";
 import { SelectMenu } from "../components/SelectMenu";
 import { reportCommandFailure } from "./commandFeedback";
 import { normalizeWorkspaceRoot } from "../lib/workspace-path";
+import { McpToolsEditor } from "./McpToolsEditor";
 import {
   Section,
   inputStyle,
@@ -594,6 +595,7 @@ export const ConnectorsTab = () => {
                       )}
                       {inventoryView.status === "loaded" && inventory && !inventory.empty && (
                         <div className="flex flex-col gap-2">
+                          {Boolean(inventory.tools?.length) && <McpToolsEditor key={inventoryScope + server.name} server={server} tools={inventory.tools!} />}
                           {inventory.resources.length > 0 && (
                             <div>
                               <div style={{ ...miniMetaStyle, fontWeight: 600, marginBottom: 3 }}>资源 · {inventory.resources.length}</div>

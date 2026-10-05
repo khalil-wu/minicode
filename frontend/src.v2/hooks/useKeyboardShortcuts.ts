@@ -152,6 +152,11 @@ export const useKeyboardShortcuts = () => {
         if (capabilityFeatureEnabled(s.runtimeCapabilities, "global_search", true)) s.toggleQuickOpen();
         return;
       }
+      if (match("workspaceSearch")) {
+        e.preventDefault();
+        if (capabilityFeatureEnabled(s.runtimeCapabilities, "global_search", true)) s.openWorkspaceSearch();
+        return;
+      }
       if (match("permissionMenu")) {
         e.preventDefault();
         routeToComposer(() => document.dispatchEvent(new CustomEvent("open-permission-menu")));

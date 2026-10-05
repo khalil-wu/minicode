@@ -188,6 +188,8 @@ _DEFINITION_NODE_TYPES: dict[str, set[str]] = {
         "type_spec",
         "type_alias",
         "short_var_declaration",
+        "var_spec",
+        "const_spec",
     },
     "rust": {
         "function_item",
@@ -195,6 +197,8 @@ _DEFINITION_NODE_TYPES: dict[str, set[str]] = {
         "enum_item",
         "trait_item",
         "let_declaration",
+        "const_item",
+        "static_item",
     },
     "java": {
         "method_declaration",
@@ -327,6 +331,8 @@ def find_references(
 
 def _definition_identifiers(node: Any) -> list[Any]:
     """Read only declaration binding fields, never types, initializers or bodies."""
+    if node.type in {"var_spec", "const_spec"}:
+        return [identifier for binding in node.children_by_field_name("name") for identifier in _pattern_identifiers(binding)]
     field = "left" if node.type == "short_var_declaration" else "pattern" if node.type == "let_declaration" else "name"
     binding = node.child_by_field_name(field)
     if binding is None:

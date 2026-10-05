@@ -17,8 +17,9 @@ vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn(), sendClient
   commandResultSucceeded: (event: { level: string }) => event.level !== "error" && event.level !== "failed" }));
 vi.mock("./DialogService", () => ({ showConfirm: mocks.confirm, showAlert: vi.fn() }));
 vi.mock("./ToastContainer", () => ({ pushToast: mocks.toast }));
+vi.mock("./GithubConnection", () => ({ GithubConnection: () => null }));
 vi.mock("../desktop/runtime", () => ({ isDesktop: () => true, envDetect: mocks.detect, exportDiagnostics: vi.fn(),
-  desktop: () => ({ updates: { getStatus: mocks.getStatus, onStatus: mocks.onStatus } }) }));
+  desktop: () => ({ platformInfo: { isDesktop: true, platform: "linux", arch: "x64" }, updates: { getStatus: mocks.getStatus, onStatus: mocks.onStatus } }) }));
 vi.mock("../protocol/workspace", () => ({ fetchWorkspaceGitStatus: mocks.status, fetchWorkspaceGitWorktree: mocks.worktree,
   fetchWorkspaceGitDiff: mocks.diff, removeWorkspaceGitWorktree: vi.fn() }));
 const deferred = <T,>() => {
@@ -88,7 +89,7 @@ describe("overlay transaction chains", () => {
     expect(screen.queryByRole("alert")).toBeNull();
     expect(mocks.command).toHaveBeenLastCalledWith({ type: "scheduler.list", owner_conversation_id: "A", workspace_root: "C:/B" }, "scheduler.list");
   });
-  it.each(["prompt", "timezone", "owner"])("preserves the entire new schedule draft after changing %s while adding", async (field) => {
+  it.each(["prompt", "timezone"])("preserves the entire new schedule draft after changing %s while adding", async (field) => {
     const saved = deferred<ReturnType<typeof receipt>>();
     mocks.command.mockImplementation((command: { type: string }) => command.type === "scheduler.add" ? saved.promise : Promise.resolve(receipt(command.type)));
     render(<SchedulerTab />);
@@ -96,10 +97,24 @@ describe("overlay transaction chains", () => {
     fireEvent.click(screen.getByRole("button", { name: "添加" }));
     if (field === "prompt") fireEvent.change(screen.getByPlaceholderText("要运行的提示词"), { target: { value: "下一份草稿" } });
     if (field === "timezone") fireEvent.change(screen.getByLabelText("时区"), { target: { value: "America/New_York" } });
-    if (field === "owner") act(() => useAppStore.setState({ conversationId: "B" }));
     await act(async () => saved.resolve(receipt("scheduler.add")));
     expect((screen.getByPlaceholderText("任务名称") as HTMLInputElement).value).toBe("审计");
     expect((screen.getByPlaceholderText("要运行的提示词") as HTMLTextAreaElement).value).toBe(field === "prompt" ? "下一份草稿" : "原草稿");
+  });
+  it("keeps each owner's schedule draft when an old owner's add receipt arrives", async () => {
+    const saved = deferred<ReturnType<typeof receipt>>();
+    mocks.command.mockImplementation((command: { type: string }) => command.type === "scheduler.add" ? saved.promise : Promise.resolve(receipt(command.type)));
+    render(<SchedulerTab />);
+    fillTask();
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+    act(() => useAppStore.setState({ conversationId: "B" }));
+    expect((screen.getByPlaceholderText("任务名称") as HTMLInputElement).value).toBe("");
+    fireEvent.change(screen.getByPlaceholderText("任务名称"), { target: { value: "B 的草稿" } });
+    await act(async () => saved.resolve(receipt("scheduler.add")));
+    expect((screen.getByPlaceholderText("任务名称") as HTMLInputElement).value).toBe("B 的草稿");
+    act(() => useAppStore.setState({ conversationId: "A" }));
+    expect((screen.getByPlaceholderText("任务名称") as HTMLInputElement).value).toBe("审计");
+    expect((screen.getByPlaceholderText("要运行的提示词") as HTMLTextAreaElement).value).toBe("原草稿");
   });
   it.each(["cancel", "switch", "approve"])("keeps schedule actions mutually exclusive through %s confirmation", async (mode) => {
     const confirmed = deferred<boolean>();
@@ -148,7 +163,7 @@ describe("overlay transaction chains", () => {
     useAppStore.setState({ envVars: [{ name: "TOKEN", description: "", scope: "global" }] });
     render(<AdvancedTab />);
     fillEnv();
-    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新保存" }));
     expect((screen.getByRole("button", { name: "删除环境变量 TOKEN" }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => saved.resolve(receipt("env.set")));
     expect((screen.getByRole("button", { name: "删除环境变量 TOKEN" }) as HTMLButtonElement).disabled).toBe(false);
@@ -160,10 +175,32 @@ describe("overlay transaction chains", () => {
     render(<AdvancedTab />);
     fillEnv();
     fireEvent.click(screen.getByRole("button", { name: "删除环境变量 TOKEN" }));
-    expect((screen.getByRole("button", { name: "添加" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "重新保存" }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => confirmed.resolve(false));
-    expect((screen.getByRole("button", { name: "添加" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "重新保存" }) as HTMLButtonElement).disabled).toBe(false);
     expect(mocks.command.mock.calls.some(([command]) => command.type === "env.delete")).toBe(false);
+  });
+  it("shows missing OS credentials and repairs them through the existing editor without leaking a previous value or changing scope", async () => {
+    useAppStore.setState({ envVars: [{ name: "SEARCH_KEY", description: "Search service", scope: "mcp:search", credential_status: "missing" }] });
+    render(<AdvancedTab />);
+    expect(screen.getByText("未存储／已失效 · 不会注入命令")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "重新保存环境变量 SEARCH_KEY" }));
+    expect((screen.getByPlaceholderText("变量名") as HTMLInputElement).value).toBe("SEARCH_KEY");
+    expect((screen.getByPlaceholderText("说明（可选）") as HTMLInputElement).value).toBe("Search service");
+    expect((screen.getByPlaceholderText("变量值") as HTMLInputElement).value).toBe("");
+    fireEvent.change(screen.getByPlaceholderText("变量值"), { target: { value: "replacement-test-value" } });
+    fireEvent.click(screen.getByRole("button", { name: "重新保存" }));
+    await waitFor(() => expect(mocks.command).toHaveBeenCalledWith({ type: "env.set", name: "SEARCH_KEY", value: "replacement-test-value", description: "Search service", scope: "mcp:search" }, "env.set"));
+    act(() => useAppStore.setState({ envVars: [{ name: "SEARCH_KEY", description: "Search service", scope: "mcp:search", credential_status: "stored" }] }));
+    expect(screen.getByText("已存储")).toBeTruthy();
+    expect(screen.queryByText("未存储／已失效 · 不会注入命令")).toBeNull();
+  });
+  it("allows removing an indexed variable whose OS value is already missing", async () => {
+    useAppStore.setState({ envVars: [{ name: "SEARCH_KEY", description: "", scope: "global", credential_status: "missing" }] });
+    render(<AdvancedTab />);
+    fireEvent.click(screen.getByRole("button", { name: "删除环境变量 SEARCH_KEY" }));
+    await waitFor(() => expect(mocks.command).toHaveBeenCalledWith({ type: "env.delete", name: "SEARCH_KEY" }, "env.delete"));
+    expect(mocks.confirm).toHaveBeenCalled();
   });
   it("does not let a superseded StrictMode detector failure erase current environment", async () => {
     const old = deferred<{ git: boolean }>();
@@ -207,7 +244,7 @@ describe("overlay transaction chains", () => {
     const openEditorFile = vi.fn();
     useAppStore.setState({ openEditorFile });
     render(<WorkspaceGitTab />);
-    fireEvent.click(await screen.findByRole("button", { name: "main.ts" }));
+    fireEvent.click(await screen.findByRole("button", { name: "已修改 main.ts" }));
     fireEvent.click(screen.getByRole("button", { name: "在编辑器中打开文件" }));
     expect(openEditorFile).toHaveBeenCalledWith("main.ts", "main.ts", { exact: true });
     expect(useAppStore.getState().settingsOpen).toBe(false);

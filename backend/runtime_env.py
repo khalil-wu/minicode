@@ -313,11 +313,19 @@ class ShellEnvironmentPolicy:
         )
 
 
+def vault_subprocess_env(scope: str) -> dict[str, str]:
+    """Read user execution variables without publishing provider credentials."""
+    from backend.vault import EnvVault
+
+    return EnvVault().inject_into_env(scope)
+
+
 def shell_subprocess_env(
     policy: Mapping[str, Any] | ShellEnvironmentPolicy | None = None,
     extra: Mapping[str, str] | None = None,
     *,
     allow_process_control_overrides: bool = False,
+    vault_scope: str | None = None,
 ) -> dict[str, str]:
     """Build a MiniCode shell environment and apply launch overrides."""
 
@@ -343,6 +351,8 @@ def shell_subprocess_env(
             for key, value in env.items()
             if not _matches_any_env_pattern(key, resolved.exclude)
         }
+    if vault_scope is not None:
+        env.update(_validated_env_mapping(vault_subprocess_env(vault_scope), reject_process_control=True))
     env.update(resolved.set_values)
     if resolved.include_only:
         env = {

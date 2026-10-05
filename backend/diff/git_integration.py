@@ -88,7 +88,12 @@ def _parse_diff_output(output: str) -> StructuredDiff:
         if not is_binary:
             in_hunk = False
             for line in chunk.split("\n"):
-                if line.startswith("@@"):
+                # A type change joins a deletion patch and an addition patch.
+                # The next file header ends the previous hunk, so its ---/+++
+                # metadata must not be counted as changed content.
+                if _DIFF_HEADER_RE.fullmatch(line):
+                    in_hunk = False
+                elif line.startswith("@@"):
                     in_hunk = True
                 elif in_hunk and line.startswith("+"):
                     additions += 1

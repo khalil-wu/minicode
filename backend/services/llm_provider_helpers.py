@@ -250,7 +250,7 @@ def _extract_model_discovery(payload: Any) -> ModelDiscovery:
             if default_summary:
                 metadata["default_reasoning_summary"] = default_summary
                 break
-        for key in ("supports_custom_tools", "native_compaction"):
+        for key in ("supports_custom_tools", "supports_hosted_web_search", "native_compaction"):
             for source in (item, item.get("capabilities") or {}):
                 if isinstance(source, dict) and isinstance(source.get(key), bool):
                     metadata[key] = source[key]

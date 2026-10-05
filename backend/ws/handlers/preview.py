@@ -72,20 +72,22 @@ async def handle_preview_launch_config(session: "WebSocketSession", data: dict[s
             session,
             "preview.launch.config",
             str(exc),
-            data={"workspace_root": workspace_root, "source": exc.source, "reason": exc.reason},
+            data=scope.apply({"source": exc.source, "reason": exc.reason}),
         )
         return True
-    await session.send_event(
-        _scope_event(preview_launch_config_event(
+    snapshot = preview_launch_config_event(
+        workspace_root=workspace_root,
+        configs=configs,
+        running=running_preview_processes(
+            session_id=session.session_id,
+            conversation_id=scope.conversation_id,
             workspace_root=workspace_root,
-            configs=configs,
-            running=running_preview_processes(
-                session_id=session.session_id,
-                conversation_id=scope.conversation_id,
-                workspace_root=workspace_root,
-            ),
-        ), scope)
+        ),
     )
+    await session.send_event(_scope_event(snapshot, scope))
+    await session.send_event(_scope_event(AgentEvent.command_result(
+        "preview.launch.config", "", level="success", data=dict(snapshot.data),
+    ), scope))
     return True
 
 
@@ -124,7 +126,7 @@ async def handle_preview_launch_start(session: "WebSocketSession", data: dict[st
             conversation_id=scope.conversation_id,
         )
     except Exception as exc:
-        await emit_command_error(session, "preview.launch.start", f"Failed to start preview: {exc}")
+        await emit_command_error(session, "preview.launch.start", f"Failed to start preview: {exc}", data=scope.apply({}))
         return True
     await session.send_event(_scope_event(preview_launch_started_event(process), scope))
     await session.send_event(_scope_event(preview_launch_detected_event(process), scope))
@@ -140,6 +142,11 @@ async def handle_preview_launch_start(session: "WebSocketSession", data: dict[st
             error="Preview process stopped before readiness could be confirmed.",
         )
     await session.send_event(_scope_event(preview_verified_event(verification), scope))
+    await session.send_event(_scope_event(AgentEvent.command_result(
+        "preview.launch.start", "" if verification.ok else "进程已启动，HTTP 检测尚未通过。",
+        level="success" if verification.ok else "warning" if process.is_active else "error",
+        data={"process": process.to_dict(), "verification": verification.to_dict()},
+    ), scope))
     return True
 
 
@@ -162,12 +169,15 @@ async def handle_preview_launch_stop(session: "WebSocketSession", data: dict[str
     except RuntimeError as exc:
         # A preview whose exit could not be proven keeps running; say so instead
         # of reporting a stop that did not happen.
-        await emit_command_error(session, "preview.launch.stop", str(exc))
+        await emit_command_error(session, "preview.launch.stop", str(exc), data=scope.apply({}))
         return True
     for process in stopped:
         await session.send_event(_scope_event(preview_launch_stopped_event(process), scope))
     if not stopped:
         await session.send_event(_scope_event(no_preview_launch_notice(), scope))
+    await session.send_event(_scope_event(AgentEvent.command_result(
+        "preview.launch.stop", "", level="success", data={"stopped": [process.to_dict() for process in stopped]},
+    ), scope))
     return True
 
 
@@ -237,7 +247,7 @@ async def handle_preview_verify(session: "WebSocketSession", data: dict[str, Any
         workspace_root=scope.workspace_root,
     )
     if error_event is not None:
-        await emit_command_error(session, "preview.verify", error_event)
+        await emit_command_error(session, "preview.verify", error_event, data=scope.apply({}))
         return True
     try:
         result = await verify_preview_url(url, process=process)
@@ -245,6 +255,10 @@ async def handle_preview_verify(session: "WebSocketSession", data: dict[str, Any
         await session.send_event(_scope_event(AgentEvent.command_result("preview.verify", str(exc), level="error"), scope))
         return True
     await session.send_event(_scope_event(preview_verified_event(result), scope))
+    await session.send_event(_scope_event(AgentEvent.command_result(
+        "preview.verify", "" if result.ok else result.error,
+        level="success" if result.ok else "warning", data={"verification": result.to_dict()},
+    ), scope))
     return True
 
 

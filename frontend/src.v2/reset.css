@@ -36,11 +36,6 @@ select {
   font-family: inherit;
 }
 
-/* ── Global icon styling (M3 风格，2026-07-25) ────────── */
-svg {
-  stroke-width: var(--mc-icon-stroke);
-}
-
 /* ── Keyframe Animations ─────────────────────────────── */
 
 @keyframes cursorBlink {

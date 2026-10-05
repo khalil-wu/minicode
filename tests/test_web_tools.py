@@ -691,35 +691,38 @@ def test_web_search_provider_failure_does_not_fall_back_to_scraping() -> None:
     assert result.content == "Hosted web search failed: provider unavailable"
 
 
-def test_web_search_uses_direct_rss_fallback_without_hosted_provider(monkeypatch) -> None:
+def test_web_search_uses_configured_search_api_with_request_domain_filters(monkeypatch) -> None:
     from backend.tools.web_tools import WebSearchTool
 
-    class _Response:
-        status_code = 200
-        headers = {"content-type": "application/rss+xml"}
-        content = b"""<?xml version=\"1.0\"?><rss><channel>
-          <item><title>Example headline</title><link>https://example.com/news</link><description>Example summary</description></item>
-        </channel></rss>"""
-
-        def raise_for_status(self) -> None:
-            return None
+    calls = []
 
     class _Client:
-        def stream(self, *_args, **_kwargs):
-            return _FakeStreamResponse(_Response.content, headers=_Response.headers)
+        def stream(self, method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return _FakeStreamResponse(
+                b'{"results":[{"title":"Agent backend role","url":"https://www.zhipin.com/job/1","content":"Python and LangGraph"},'
+                b'{"title":"Unrelated site","url":"https://example.com/word","content":"irrelevant"}]}',
+                headers={"content-type": "application/json"},
+            )
 
     tool = WebSearchTool()
     tool._client = _Client()
     tool._proxy_url = "http://proxy.example"
+    monkeypatch.setattr(tool, "_search_api_key", lambda: "fixture-search-key")
     monkeypatch.setattr("backend.tools.web_tools.assess_network_url", lambda _url: type("A", (), {"allowed": True})())
 
-    result = asyncio.run(tool.execute({"query": "example news"}))
+    result = asyncio.run(tool.execute({"query": "Agent Python LangGraph", "allowed_domains": ["zhipin.com"]}))
 
     assert not result.is_error
     assert result.extraction_status == "ok"
-    assert "Example headline" in result.content
-    assert "https://example.com/news" in result.content
-    assert result.provider == "bing-rss"
+    assert "Agent backend role" in result.content
+    assert "https://www.zhipin.com/job/1" in result.content
+    assert "example.com" not in result.content
+    assert result.provider == "tavily"
+    assert calls[0][0:2] == ("POST", "https://api.tavily.com/search")
+    assert calls[0][2]["json"]["query"] == "Agent Python LangGraph"
+    assert calls[0][2]["json"]["include_domains"] == ["zhipin.com"]
+    assert "fixture-search-key" not in result.to_context_string()
 
 
 def test_web_fetch_anti_bot_site_is_limited_not_fatal(tmp_path: Path) -> None:

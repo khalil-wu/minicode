@@ -603,6 +603,9 @@
 }
 
 .composer-model-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   max-width: 180px;
   cursor: pointer;
   font-family: var(--font-ui);
@@ -610,6 +613,18 @@
   transition: background-color var(--duration-base) var(--easing-standard),
               color var(--duration-base) var(--easing-standard);
 }
+
+.composer-model-select > svg { flex-shrink: 0; color: var(--text-muted); transition: transform var(--transition-fast); }
+.composer-model-select[aria-expanded="true"] > svg { transform: rotate(180deg); }
+.composer-model-picker { --composer-menu-width: 320px; --composer-menu-height: 420px; }
+.composer-model-menu { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+.composer-model-options { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+.composer-model-option { min-height: 36px; background: transparent; }
+.composer-model-option[aria-selected="true"] { background: var(--surface-soft); }
+.composer-model-option:is(:hover, :focus-visible),
+.composer-model-menu-footer button:is(:hover, :focus-visible) { background: var(--surface-hover); outline: 0; }
+.composer-model-option-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-model-menu-footer { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border-subtle); }
 
 .composer-control-label {
   min-width: 0;
@@ -976,3 +991,13 @@
     overflow-y: auto;
   }
 }
+
+.composer-voice-btn { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 50%; background: transparent; color: var(--text-muted); cursor: pointer; }
+.composer-voice-btn:hover { color: var(--text-primary); background: var(--surface-hover); }
+.composer-voice-btn[data-recording='true'] { color: var(--state-danger); background: var(--surface-soft); }
+.composer-dictation { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.composer-dictation-status { color: var(--text-muted); font-size: var(--text-xs); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.composer-dictation[data-phase='recording'] .composer-dictation-status { color: var(--state-danger); }
+.composer-dictation-meter { display: inline-block; width: 32px; height: 3px; overflow: hidden; border-radius: 2px; background: var(--border-subtle); }
+.composer-dictation-meter i { display: block; width: 100%; height: 100%; background: var(--state-danger); transform-origin: left; transition: transform 150ms linear; }
+@media (prefers-reduced-motion: reduce) { .composer-dictation-meter i { transition: none; } }

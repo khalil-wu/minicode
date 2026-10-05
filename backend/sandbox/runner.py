@@ -1173,6 +1173,7 @@ class SandboxRunner:
         env = shell_subprocess_env(
             self._policy.shell_environment_policy,
             self._policy.env_overrides,
+            vault_scope="run_command",
         )
         # Nudge child processes toward UTF-8 so their output decodes cleanly.
         # PYTHONUTF8/PYTHONIOENCODING cover Python children; PYTHONUNBUFFERED

@@ -298,9 +298,6 @@ class MCPToolProxy(BaseTool):
             return self._error_result(f"MCP tool '{self._tool_def.name}' failed: {exc}")
 
         result_text = result.summary_text
-        if result.is_error:
-            return self._error_result(result_text or "MCP tool execution failed")
-
         images: list[dict[str, str]] = []
         audios: list[dict[str, str]] = []
         resource_text: list[str] = []
@@ -366,7 +363,9 @@ class MCPToolProxy(BaseTool):
                 f"[resource artifact: {item['uri']} -> {item['artifact_id']}]"
                 for item in resource_artifacts
             )
-        typed_content = "\n\n".join(content_parts) or result_text
+        typed_content = "\n\n".join(content_parts) or result_text or (
+            "MCP tool execution failed" if result.is_error else ""
+        )
         first_artifact = resource_artifacts[0] if resource_artifacts else None
 
         # Result sizing and artifact promotion belong to the shared tool
@@ -375,6 +374,7 @@ class MCPToolProxy(BaseTool):
         # policy and made the same tool behave differently through MCP.
         return ToolResult(
             content=typed_content,
+            is_error=result.is_error,
             images=images,
             audios=audios,
             artifact_id=first_artifact["artifact_id"] if first_artifact else None,
@@ -385,7 +385,7 @@ class MCPToolProxy(BaseTool):
             ) if first_artifact else None,
             artifact_media_type=first_artifact["media_type"] if first_artifact else None,
             artifact_bytes=first_artifact["bytes"] if first_artifact else None,
-            status="success",
+            status="failed" if result.is_error else "success",
             runtime_metadata={
                 "mcp": {"structuredContent": result.structured_content, "_meta": result.meta},
                 "mcp_resource_artifacts": resource_artifacts,

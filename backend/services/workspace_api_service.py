@@ -8,9 +8,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from backend.diff.git_integration import is_not_git_repository
-from backend.services.workspace_service import readonly_git_host_path, readonly_git_policy, run_readonly_git
-from backend.sandbox import SandboxPolicy
-from backend.sandbox.runner import SandboxUnavailableError
+from backend.runtime_env import sanitized_git_env
 
 
 def search_workspace_directories(root: Path, query: str, limit: int) -> list[dict[str, Any]]:
@@ -193,26 +191,37 @@ def resolve_workspace_git_root(path: str, fallback_root: Path) -> Path:
     return fallback_root
 
 
-def _run_workspace_git(root: Path, *args: str, sandbox_policy: SandboxPolicy) -> str:
-    result = run_readonly_git(root, "--literal-pathspecs", *args, timeout=10, sandbox_policy=sandbox_policy)
+def run_ui_git_metadata(root: Path, *args: str, timeout: float = 10) -> subprocess.CompletedProcess[str]:
+    """Fixed app-owned metadata queries for an authenticated, trusted workspace.
+
+    Model Git tools retain their ToolExecutionContext and sandbox runner; the
+    workbench's own inventory does not require a model execution environment.
+    """
+    return subprocess.run(
+        ["git", "--no-optional-locks", "--literal-pathspecs", *args], cwd=root,
+        env=sanitized_git_env(root), stdin=subprocess.DEVNULL, capture_output=True,
+        text=True, encoding="utf-8", timeout=timeout,
+    )
+
+
+def _run_workspace_git(root: Path, *args: str) -> str:
+    result = run_ui_git_metadata(root, *args)
     result.check_returncode()
     return result.stdout
 
 
 def workspace_git_status_payload(root: Path, *, workspace_root: Path | None = None) -> dict[str, Any]:
     try:
-        policy = readonly_git_policy(workspace_root or root)
-        prefix = _run_workspace_git(root, "rev-parse", "--show-prefix", sandbox_policy=policy).removesuffix("\n")
+        prefix = _run_workspace_git(root, "rev-parse", "--show-prefix").removesuffix("\n")
         status = parse_workspace_git_status(_run_workspace_git(
             root, "status", "--porcelain=v1", "--branch", "-z", "--untracked-files=all", "--", ".",
-            sandbox_policy=policy,
         ))
         # Porcelain paths are repository-relative even when Git runs in a
         # subdirectory. The workspace API and file buttons use workspace paths.
         for field in ("modified", "staged", "untracked"):
             status[field] = [path.removeprefix(prefix) for path in status[field]]
         return {"is_git_repo": True, **status}
-    except (OSError, subprocess.SubprocessError, SandboxUnavailableError) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         if isinstance(exc, subprocess.CalledProcessError) and is_not_git_repository(exc.returncode, exc.stderr or ""):
             return {"is_git_repo": False, "branch": "", "modified": [], "staged": [], "untracked": []}
         return {"branch": "", "modified": [], "staged": [], "untracked": [], "error": str(getattr(exc, "stderr", None) or exc).strip()}
@@ -243,32 +252,31 @@ def parse_workspace_git_status(stdout: str) -> dict[str, Any]:
 
 def workspace_git_diff_payload(root: Path, file: str, *, workspace_root: Path | None = None) -> dict[str, Any]:
     try:
-        policy = readonly_git_policy(workspace_root or root)
         # Verify the repository separately: an unborn HEAD is a normal state,
         # while a failed Git command must never look like an empty diff.
-        _run_workspace_git(root, "rev-parse", "--show-toplevel", sandbox_policy=policy)
+        _run_workspace_git(root, "rev-parse", "--show-toplevel")
         try:
-            baseline = _run_workspace_git(root, "rev-parse", "--verify", "--quiet", "HEAD", sandbox_policy=policy).strip()
+            baseline = _run_workspace_git(root, "rev-parse", "--verify", "--quiet", "HEAD").strip()
         except subprocess.CalledProcessError as exc:
             if exc.returncode != 1:
                 raise
-            baseline = _run_workspace_git(root, "hash-object", "-t", "tree", "--stdin", sandbox_policy=policy).strip()
+            baseline = _run_workspace_git(root, "hash-object", "-t", "tree", "--stdin").strip()
 
         paths = (file,) if file else (".",)
         diff_args = ("diff", "--relative", "--no-color", "--no-textconv", "--no-ext-diff")
-        patches = [_run_workspace_git(root, *diff_args, baseline, "--", *paths, sandbox_policy=policy)]
-        untracked = _run_workspace_git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", *paths, sandbox_policy=policy)
+        patches = [_run_workspace_git(root, *diff_args, baseline, "--", *paths)]
+        untracked = _run_workspace_git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", *paths)
         for path in untracked.split("\0"):
             if not path:
                 continue
             try:
-                patches.append(_run_workspace_git(root, *diff_args, "--no-index", "--", "/dev/null", path, sandbox_policy=policy))
+                patches.append(_run_workspace_git(root, *diff_args, "--no-index", "--", "/dev/null", path))
             except subprocess.CalledProcessError as exc:
                 if exc.returncode != 1:  # --no-index returns 1 when there are differences.
                     raise
                 patches.append(exc.stdout)
         return {"is_git_repo": True, "diff": "".join(patches)}
-    except (OSError, subprocess.SubprocessError, SandboxUnavailableError) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         if isinstance(exc, subprocess.CalledProcessError) and is_not_git_repository(exc.returncode, exc.stderr or ""):
             return {"is_git_repo": False, "diff": ""}
         return {"diff": "", "error": str(getattr(exc, "stderr", None) or exc).strip()}
@@ -278,7 +286,7 @@ def workspace_git_worktree_payload(root: Path, *, workspace_root: Path | None = 
     try:
         from backend.workspace.worktree import WorktreeManager, isolated_worktree_root, summarize_worktree_status
 
-        common_dir = resolve_git_common_dir(root, sandbox_policy=readonly_git_policy(workspace_root or root))
+        common_dir = resolve_git_common_dir(root)
         manager = WorktreeManager(root)
         worktrees = manager.list_worktrees()
         status = summarize_worktree_status(root, worktrees)
@@ -316,14 +324,11 @@ def workspace_git_worktree_payload(root: Path, *, workspace_root: Path | None = 
         return {"current_path": str(root), "error": str(exc)}
 
 
-def resolve_git_common_dir(root: Path, *, sandbox_policy: SandboxPolicy | None = None) -> Path | None:
-    policy = sandbox_policy or readonly_git_policy(root)
-    result = run_readonly_git(root, "rev-parse", "--git-common-dir", sandbox_policy=policy)
-    result.check_returncode()
-    common_dir_raw = result.stdout.strip()
+def resolve_git_common_dir(root: Path) -> Path | None:
+    common_dir_raw = _run_workspace_git(root, "rev-parse", "--git-common-dir").strip()
     if not common_dir_raw:
         return None
-    common_dir_path = readonly_git_host_path(root, common_dir_raw, sandbox_policy=policy)
+    common_dir_path = Path(common_dir_raw)
     if common_dir_path.is_absolute():
         return common_dir_path.resolve()
     return (root / common_dir_path).resolve()

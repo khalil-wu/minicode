@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { lazy, Suspense } from "react";
-import { ChevronRight, Circle, FileCode2, FileWarning, GitCompare, Image, LockKeyhole, MessageSquare, RefreshCw, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Braces, ChevronRight, Circle, FileCode2, FileWarning, GitCompare, Image, LockKeyhole, MessageSquare, RefreshCw, X } from "lucide-react";
 import { fileGlyphColor, fileIcon } from "../lib/file-icons";
 import { defaultUrlTransform } from "react-markdown";
 import { useAppStore } from "../stores";
 import type { EditorOpenRequest, EditorTab } from "../stores/types";
-import { editorPathComparisonKey, editorPathsEqual, editorStateForWorkspace } from "../stores/shared-helpers";
+import { editorPathComparisonKey, editorPathsEqual, editorStateForWorkspace, loadEditorViewState, persistEditorViewState } from "../stores/shared-helpers";
 import { workspaceRawResourceUrlWithToken } from "../protocol/api";
 import {
   compareWriteWorkspaceFile,
@@ -41,7 +41,13 @@ import { defineMiniCodeMonacoTheme, miniCodeMonacoThemeName } from "./monacoThem
 import { configureMiniCodeMonacoWorkers, editorModelUri, loadMiniCodeLanguageServices, registerMiniCodeEditorOpener } from "./monacoLanguageServices";
 import { renameMonacoModel } from "./monacoModelRename";
 import { useWorkspaceModelIndex } from "./useWorkspaceModelIndex";
+import { registerWorkspaceEditorSurface, retainsWorkspaceBufferEditModel } from "./applyWorkspaceBufferEdits";
+import { miniCodeCodeEditingOptions } from "./monacoEditorFeatures";
 import "./EditorChrome.css";
+import { EditorNavigation } from "./editorNavigation";
+import { formatEditorModel } from "./editorNativeServices";
+const LazyEditorSymbols = lazy(() => import("./EditorSymbols").then((module) => ({ default: module.EditorSymbols })));
+const LazyEditorInlineEdit = lazy(() => import("./EditorInlineEdit").then((module) => ({ default: module.EditorInlineEdit })));
 
 const LazyMonacoEditor = lazy(async () => {
   configureMiniCodeMonacoWorkers();
@@ -52,9 +58,12 @@ const LazyMonacoEditor = lazy(async () => {
     import("monaco-editor/languages/definitions/typescript/register.js"),
     import("monaco-editor/languages/definitions/javascript/register.js"),
     import("monaco-editor/languages/definitions/css/register.js"),
+    import("monaco-editor/languages/definitions/scss/register.js"),
+    import("monaco-editor/languages/definitions/less/register.js"),
     import("monaco-editor/languages/definitions/html/register.js"),
     import("monaco-editor/languages/definitions/markdown/register.js"),
     import("monaco-editor/languages/definitions/python/register.js"),
+    import("monaco-editor/languages/definitions/yaml/register.js"),
   ]);
   reactMonaco.loader?.config?.({ monaco });
   return { default: reactMonaco.default };
@@ -74,10 +83,10 @@ const guessLanguage = (path: string): string => {
   if (["ts", "tsx", "mts", "cts"].includes(ext)) return "typescript";
   if (["js", "jsx", "mjs", "cjs"].includes(ext)) return "javascript";
   if (ext === "py") return "python";
-  if (ext === "json") return "json";
+  if (ext === "json" || ext === "jsonc") return "json";
   if (ext === "md" || ext === "mdx") return "markdown";
-  if (ext === "css") return "css";
-  if (ext === "html") return "html";
+  if (["css", "scss", "less"].includes(ext)) return ext;
+  if (ext === "html" || ext === "htm") return "html";
   if (["yml", "yaml"].includes(ext)) return "yaml";
   if (ext === "toml") return "toml";
   return "plaintext";
@@ -419,12 +428,31 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const markTabExternalChanged = useAppStore((s) => s.markTabExternalChanged);
 
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
+  const navigation = useMemo(() => new EditorNavigation(), [workingDirectory]);
+  const navigating = useRef(false);
+  const [, refreshNavigation] = useState(0);
+  const [symbolMode, setSymbolMode] = useState<"file" | "project" | null>(null);
+  const [inlineEditOpen, setInlineEditOpen] = useState(false);
+  useEffect(() => { setInlineEditOpen(false); setSymbolMode(null); }, [workingDirectory, activeTabPath]);
+  const navigateHistory = (direction: number) => {
+    const location = navigation.go(direction);
+    if (!location) return;
+    navigating.current = true;
+    useAppStore.getState().openEditorFile(location.path, undefined, { ...location, exact: true });
+    refreshNavigation((version) => version + 1);
+  };
   const [editorSelection, setEditorSelection] = useState({ modelPath: "", hasText: false });
   const savingPathsRef = useRef(new Map<string, Promise<SaveResult>>());
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "error">("idle");
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; path: string; workspaceRoot: string } | null>(null);
   const tabListRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<MonacoEditorInstance | null>(null);
+  const persistReadingPositionRef = useRef(() => {});
+  useEffect(() => {
+    const persist = () => persistReadingPositionRef.current();
+    window.addEventListener("pagehide", persist);
+    return () => window.removeEventListener("pagehide", persist);
+  }, []);
   const monacoRef = useRef<typeof import("monaco-editor") | null>(null);
   const monacoOpenerRef = useRef<{ dispose: () => void } | null>(null);
   const monacoModelPaths = useRef(new Map<string, string>());
@@ -433,8 +461,11 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     renamed: import("monaco-editor").editor.ITextModel;
     viewState: unknown;
   } | null>(null);
-  const [wordWrap, setWordWrap] = useState(true);
-  const [minimap, setMinimap] = useState(false);
+  const preferences = useAppStore((state) => state.workbenchPreferences);
+  const wordWrap = preferences.wordWrap;
+  const minimap = preferences.minimap;
+  const setWordWrap = (change: (value: boolean) => boolean) => useAppStore.getState().setWorkbenchPreferences({ wordWrap: change(wordWrap) });
+  const setMinimap = (change: (value: boolean) => boolean) => useAppStore.getState().setWorkbenchPreferences({ minimap: change(minimap) });
   const markdownSessions = useRef(new Map<string, MarkdownEditorSession>());
   const [editorEpoch, setEditorEpoch] = useState(0);
   const pendingRevealRef = useRef<EditorTarget | null>(null);
@@ -481,7 +512,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const showEditorTabs = chrome === "full";
   const supportedEditorActions: EditorAction[] = canRenderMarkdown
     ? ["find", "replace", "gotoLine"]
-    : ["find", "replace", "gotoLine", "foldAll", "unfoldAll", ...(["typescript", "javascript", "json", "html", "css"].includes(language) ? ["format" as const] : []), ...(["typescript", "javascript"].includes(language) ? ["definition", "references", "rename"] as const : [])];
+    : ["find", "replace", "gotoLine", "foldAll", "unfoldAll", ...(["typescript", "javascript", "json", "html", "css", "scss", "less", "python", "yaml"].includes(language) ? ["format" as const] : []), ...(["typescript", "javascript", "python"].includes(language) ? ["definition", "references", "rename"] as const : [])];
   const runEditorAction = (action: EditorAction) => {
     const ids: Record<EditorAction, string> = {
       find: "actions.find", replace: "editor.action.startFindReplaceAction", gotoLine: "editor.action.gotoLine",
@@ -489,7 +520,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       definition: "editor.action.revealDefinition", references: "editor.action.referenceSearch.trigger", rename: "editor.action.rename",
     };
     editorRef.current?.focus();
-    void editorRef.current?.getAction?.(ids[action])?.run();
+    if (canRenderMarkdown) void editorRef.current?.getAction?.(ids[action])?.run();
+    else editorRef.current?.trigger!("minicode.editor-action", ids[action], {});
   };
 
   useLayoutEffect(() => {
@@ -539,6 +571,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   }, [activeTabPath, workingDirectory, gitChanges.workingTree, gitChanges.staged]);
 
   const agentEditReview = useAgentEditReview({
+    conversationId,
     editorRef,
     path: activeTab?.path,
     content: activeTab?.content,
@@ -569,7 +602,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         const state = useAppStore.getState();
         if (!state.editorOpenRequests.includes(request)) return;
         const activate = state.activeEditorOpenRequestId === request.id;
-        openEditorTab(resolvedPath, { activate: false });
+        openEditorTab(resolvedPath, { activate: false, preview: request.preview });
         if (activate) {
           handleSetActive(resolvedPath, { ...request, path: resolvedPath });
         }
@@ -668,10 +701,22 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     if (editorPathsEqual(pendingRevealRef.current?.path, target.path, workingDirectory)) {
       pendingRevealRef.current = null;
     }
+    navigating.current = false;
     return true;
   };
 
   const handleSetActive = (path: string, target?: EditorTarget) => {
+    persistReadingPositionRef.current();
+    if (target?.line && !navigating.current) {
+      const position = editorRef.current?.getPosition();
+      if (activeTabPath && position) navigation.record({ path: activeTabPath, line: position.lineNumber, column: position.column });
+      navigation.record({ path, line: target.line, column: target.column ?? 1 }, true);
+      navigating.current = true;
+      refreshNavigation((version) => version + 1);
+    } else if (!target?.line) {
+      navigating.current = false;
+      pendingRevealRef.current = null;
+    }
     setActiveTab(path);
     if (target?.line) {
       const column = target.column ?? 1;
@@ -702,7 +747,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     if (existing) return existing;
     const request = (async (): Promise<SaveResult> => {
       const savePath = tab.path;
-      const saveContent = tab.content;
+      let saveContent = tab.content;
       const saveOriginal = tab.original;
       const expectedHash = tab.contentHash ?? "";
       const saveEpochKey = tab.id;
@@ -711,6 +756,15 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       const saveEpoch = (loadEpochRef.current.get(saveEpochKey) ?? 0) + 1;
       loadEpochRef.current.set(saveEpochKey, saveEpoch);
       try {
+        if (useAppStore.getState().workbenchPreferences.formatOnSave && monacoRef.current) {
+          const monaco = monacoRef.current;
+          const model = monaco.editor.getModel(monaco.Uri.parse(editorModelUri(savePath, saveWorkspace)));
+          if (model) {
+            await formatEditorModel(monaco, model);
+            saveContent = model.getValue();
+            useAppStore.getState().adoptEditorModelChanges([{ path: savePath, content: saveContent, original: saveOriginal, contentHash: expectedHash }], saveWorkspace);
+          }
+        }
         // Both single-file and project saves share the backend's guarded mutation
         // queue and acknowledge the exact submitted buffer, preserving newer edits.
         const result = await compareWriteWorkspaceFile(savePath, expectedHash, saveContent, saveWorkspace);
@@ -989,9 +1043,60 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
 
   const mountTextSurface = (editor: EditorTextSurface) => {
     const mountedEditor = editor;
+    if (!isMarkdownPath(activeTab!.path)) {
+      const native = editor as unknown as import("monaco-editor").editor.IStandaloneCodeEditor;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "mc-inline-edit-trigger";
+      button.textContent = "小改 · Ctrl+K";
+      button.onclick = () => setInlineEditOpen(true);
+      const widget = {
+        getId: () => "minicode.selection.edit",
+        getDomNode: () => button,
+        getPosition: () => { const selection = native.getSelection(); return !native.getRawOptions().readOnly && selection && !selection.isEmpty() ? { position: selection.getEndPosition(), preference: [2, 1] } : null; },
+      };
+      native.addContentWidget(widget);
+      const selectionChanged = native.onDidChangeCursorSelection(() => native.layoutContentWidget(widget));
+      native.onDidDispose(() => { selectionChanged.dispose(); native.removeContentWidget(widget); });
+    }
+    const mountedWorkspace = workingDirectory;
+    let modelPath = activeTab!.path;
+    let releaseSurface = registerWorkspaceEditorSurface(mountedWorkspace, modelPath, mountedEditor);
+    let modelResource = mountedEditor.getModel()?.uri.path;
+    let restoringReading = false;
+    const persistReadingPosition = () => {
+      if (restoringReading || mountedEditor.getModel()?.uri.path !== modelResource) return;
+      const reading = mountedEditor.saveViewState?.();
+      if (reading) persistEditorViewState(mountedWorkspace, modelPath, { kind: isMarkdownPath(modelPath) ? "markdown" : "code", state: reading });
+    };
+    const restoreReadingPosition = () => {
+      const state = useAppStore.getState();
+      const workspace = workspaceRootsEqual(state.workingDirectory, mountedWorkspace) ? state : editorStateForWorkspace(mountedWorkspace);
+      const resource = mountedEditor.getModel()?.uri.path;
+      if (!resource) return;
+      const filePath = resource.replace(/^\/(?=[A-Za-z]:\/)/, "");
+      const tab = workspace.editorTabs.find((entry) => isMarkdownPath(entry.path)
+        ? resource === `/${entry.id}` : editorPathsEqual(filePath, entry.path, mountedWorkspace));
+      if (!tab) return;
+      modelPath = tab.path;
+      releaseSurface();
+      releaseSurface = registerWorkspaceEditorSurface(mountedWorkspace, modelPath, mountedEditor);
+      modelResource = resource;
+      const reading = loadEditorViewState(mountedWorkspace, modelPath);
+      // The wrapper restores in-memory state after setModel. Apply the
+      // persisted state afterwards, before the existing source-link reveal.
+      restoringReading = true;
+      queueMicrotask(() => {
+        if (editorRef.current === mountedEditor && mountedEditor.getModel()?.uri.path === resource && reading?.kind === (isMarkdownPath(modelPath) ? "markdown" : "code")) mountedEditor.restoreViewState?.(reading.state);
+        restoringReading = false;
+      });
+    };
+    persistReadingPositionRef.current = persistReadingPosition;
     editorRef.current = mountedEditor;
     setEditorEpoch((epoch) => epoch + 1);
     editor.onDidDispose(() => {
+      releaseSurface();
+      persistReadingPosition();
       if (editorRef.current === editor) {
         editorRef.current = null;
         setEditorSelection({ modelPath: "", hasText: false });
@@ -1007,10 +1112,15 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       const position = mountedEditor.getPosition();
       if (position) {
         setCursor({ line: position.lineNumber, column: position.column });
+        if (!restoringReading && !navigating.current && modelResource === model?.uri.path) {
+          navigation.record({ path: modelPath, line: position.lineNumber, column: position.column });
+          refreshNavigation((version) => version + 1);
+        }
         agentEditReview.onCursorLine(position.lineNumber);
       }
     };
-    mountedEditor.onDidChangeCursorSelection(syncSelection);
+    mountedEditor.onDidChangeCursorSelection(() => { syncSelection(); persistReadingPosition(); });
+    mountedEditor.onDidScrollChange?.(persistReadingPosition);
     mountedEditor.onDidChangeModel(() => {
       const pending = pendingModelRename.current;
       if (pending && mountedEditor.getModel() === pending.renamed) {
@@ -1023,12 +1133,14 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         });
       }
       syncSelection();
+      restoreReadingPosition();
       // Monaco restores the incoming model's saved position after setModel.
       queueMicrotask(() => {
         if (editorRef.current === mountedEditor) syncSelection();
       });
     });
     mountedEditor.onDidChangeModelContent(syncSelection);
+    restoreReadingPosition();
     syncSelection();
     mountedEditor.addAction?.({
       id: "minicode.ask-about-selection",
@@ -1041,7 +1153,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       setCursor({ line: event.position.lineNumber, column: event.position.column });
       agentEditReview.onCursorLine(event.position.lineNumber);
     });
-    window.setTimeout(() => revealEditorTarget(), 0);
+    window.setTimeout(() => { revealEditorTarget(); syncSelection(); }, 0);
   };
 
   useEffect(() => {
@@ -1091,7 +1203,13 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
 
   return (
     <div className="mc-editor-panel flex-1 min-h-0 flex flex-col" onKeyDownCapture={(event) => {
-      if (event.altKey && !event.ctrlKey && !event.metaKey && event.code === "KeyZ") {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k" && hasActiveSelection && !canRenderMarkdown && !activeTab?.readOnly) {
+        event.preventDefault(); event.stopPropagation(); setInlineEditOpen(true);
+      } else if (event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+        event.preventDefault(); event.stopPropagation(); navigateHistory(event.key === "ArrowLeft" ? -1 : 1);
+      } else if ((event.ctrlKey || event.metaKey) && (event.key.toLowerCase() === "t" || (event.shiftKey && event.key.toLowerCase() === "o")) && !canRenderMarkdown) {
+        event.preventDefault(); event.stopPropagation(); setSymbolMode(event.key.toLowerCase() === "t" ? "project" : "file");
+      } else if (event.altKey && !event.ctrlKey && !event.metaKey && event.code === "KeyZ") {
         event.preventDefault();
         event.stopPropagation();
         setWordWrap((value) => !value);
@@ -1108,6 +1226,9 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                 role="presentation"
                 className="editor-tab"
                 data-active={active || undefined}
+                data-preview={tab.preview || undefined}
+                data-pinned={tab.pinned || undefined}
+                onDoubleClick={() => useAppStore.getState().keepEditorTab(tab.path)}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   setCtxMenu({ x: e.clientX, y: e.clientY, path: tab.path, workspaceRoot: workingDirectory });
@@ -1144,7 +1265,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                     {fileIcon(tab.path, { size: 16, className: "editor-tab-file-icon-svg" })}
                   </span>
                 <span className="overflow-hidden text-ellipsis whitespace-nowrap text-xs">
-                  {basename(tab.path)}
+                  {tab.pinned ? "· " : ""}{basename(tab.path)}
                 </span>
                 </button>
                 <button
@@ -1169,6 +1290,10 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       )}
       {showEditorToolbar && (
         <div className="mc-editor-toolbar">
+          <div className="mc-editor-actions" role="toolbar" aria-label="代码导航">
+            <button type="button" aria-label="返回上一位置" title="返回 · Alt+←" disabled={navigation.index <= 0} onClick={() => navigateHistory(-1)}><ArrowLeft size={14} /></button>
+            <button type="button" aria-label="前进到下一位置" title="前进 · Alt+→" disabled={navigation.index >= navigation.entries.length - 1} onClick={() => navigateHistory(1)}><ArrowRight size={14} /></button>
+          </div>
           <nav aria-label="文件路径" title={activeDisplayPath} className="mc-editor-breadcrumbs">
             <ol className="flex items-center gap-1 min-w-0 overflow-hidden">
               {activePathSegments.map((segment, index) => (
@@ -1202,9 +1327,12 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
             showMinimap={!canRenderMarkdown}
             readOnly={Boolean(activeTab?.readOnly)}
           />
+          {!canRenderMarkdown && <button type="button" className="mc-editor-symbol-button" aria-label="文件大纲" title="文件大纲 · Ctrl+Shift+O（Shift 点击：项目符号）" onClick={(event) => setSymbolMode(event.shiftKey ? "project" : "file")}><Braces size={15} /></button>}
         </div>
       )}
 
+      {symbolMode && monacoRef.current && <Suspense fallback={null}><LazyEditorSymbols monaco={monacoRef.current} workspaceRoot={workingDirectory} path={activeMonacoUri} project={symbolMode === "project"} onClose={() => setSymbolMode(null)} /></Suspense>}
+      {inlineEditOpen && editorRef.current && <Suspense fallback={null}><LazyEditorInlineEdit editor={editorRef.current as unknown as import("monaco-editor").editor.IStandaloneCodeEditor} workspaceRoot={workingDirectory} onClose={() => setInlineEditOpen(false)} /></Suspense>}
       {activeTab?.externalChanged && !isPreviewableMediaPath(activeTab.path) && (
         <div
           className="min-h-9 px-3 py-1.5 flex items-center gap-2 border-b"
@@ -1261,6 +1389,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                   resolveUrl={resolveMarkdownUrl}
                   onChange={(value) => updateTabContent(activeTab.path, value)}
                   onMount={mountTextSurface}
+                  bufferTransactions={activeTab.pendingBufferTransactions}
+                  onConsumeBufferTransactions={() => useAppStore.getState().consumeEditorBufferTransactions(activeTab.path, workingDirectory)}
                 />
               </Suspense>
               <AgentEditReviewBar
@@ -1291,7 +1421,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                   monacoOpenerRef.current = registerMiniCodeEditorOpener(monaco, (path, label, target) => useAppStore.getState().openEditorFile(path, label, target));
                 }}
                 path={activeMonacoUri}
-                keepCurrentModel={!activeTab.readOnly && projectIndex.retainsModel(activeTab.path)}
+                keepCurrentModel={!activeTab.readOnly && (projectIndex.retainsModel(activeTab.path) || retainsWorkspaceBufferEditModel(workingDirectory, activeTab.path))}
                 loading={<EditorLoading />}
                 value={activeTab.content}
                 onChange={(value) => {
@@ -1299,15 +1429,21 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                 }}
                 onMount={(editor) => mountTextSurface(editor as MonacoEditorInstance)}
                 options={{
+                  ...miniCodeCodeEditingOptions,
+                  inlineSuggest: { enabled: preferences.aiEnabled, showToolbar: "onHover" },
                   automaticLayout: true,
                   readOnly: Boolean(activeTab.readOnly),
-                  fontFamily: "var(--editor-font-family)",
+                  fontFamily: preferences.codeFont || "var(--editor-font-family)",
                   fontSize: Math.round(14 * codeTextScale),
                   lineHeight: Math.round(22 * codeTextScale),
                   minimap: { enabled: minimap },
                   scrollBeyondLastLine: false,
                   wordWrap: wordWrap ? "on" : "off",
-                  fontLigatures: false,
+                  fontLigatures: preferences.ligatures,
+                  tabSize: preferences.tabSize,
+                  insertSpaces: preferences.insertSpaces,
+                  detectIndentation: false,
+                  lineNumbers: preferences.lineNumbers ? "on" : "off",
                   cursorBlinking: reducedMotion ? "solid" : "smooth",
                   cursorSmoothCaretAnimation: reducedMotion ? "off" : "on",
                   renderLineHighlight: "all",
@@ -1322,7 +1458,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                   bracketPairColorization: { enabled: true },
                   guides: { indentation: true, bracketPairs: true },
                   smoothScrolling: !reducedMotion,
-                  stickyScroll: { enabled: true },
+                  stickyScroll: { enabled: preferences.stickyScroll },
                   scrollbar: {
                     verticalScrollbarSize: 12,
                     horizontalScrollbarSize: 12,
@@ -1363,6 +1499,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
           {activeTabPath ? basename(activeTabPath) : "未打开文件"}{dirty ? " · 已修改" : ""}
         </span>
         {activeTab?.sizeBytes != null && <span className="mc-editor-status-size">{formatBytes(activeTab.sizeBytes)}</span>}
+        {activeTab?.draftRestored && <span title={activeTab.loadWarning || "未保存正文已从本机草稿恢复"}>已恢复草稿</span>}
         {activeTab?.readOnly && (
           <span className="inline-flex items-center gap-1" title="MiniCode 生成的只读工具结果">
             <LockKeyhole size={14} /> 只读
@@ -1404,11 +1541,14 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
           position={{ x: ctxMenu.x, y: ctxMenu.y }}
           onClose={() => setCtxMenu(null)}
           items={[
+            { label: tabs.find((tab) => tab.path === ctxMenu.path)?.pinned ? "取消固定标签" : "固定标签",
+              onClick: () => useAppStore.getState().pinEditorTab(ctxMenu.path, !tabs.find((tab) => tab.path === ctxMenu.path)?.pinned) },
+            { label: "保留标签", onClick: () => useAppStore.getState().keepEditorTab(ctxMenu.path) },
             { label: "关闭标签页", onClick: () => handleCloseTab(ctxMenu.path) },
             {
               label: "关闭其他标签页",
               onClick: () => {
-                const paths = tabs.filter((tab) => !editorPathsEqual(tab.path, ctxMenu.path, workingDirectory)).map((tab) => tab.path);
+                const paths = tabs.filter((tab) => !tab.pinned && !editorPathsEqual(tab.path, ctxMenu.path, workingDirectory)).map((tab) => tab.path);
                 void handleCloseTabs(paths);
               },
             },
@@ -1417,7 +1557,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
               label: "关闭右侧标签页",
               onClick: () => {
                 const idx = tabs.findIndex((t) => editorPathsEqual(t.path, ctxMenu.path, workingDirectory));
-                void handleCloseTabs(tabs.slice(idx + 1).map((tab) => tab.path));
+                void handleCloseTabs(tabs.slice(idx + 1).filter((tab) => !tab.pinned).map((tab) => tab.path));
               },
             },
             { separator: true, label: "" },

@@ -1162,13 +1162,13 @@ export const useWebSocketConnection = () => {
         if (!alive || reconnectExhausted) return false;
         const ws = ref.current;
         if (ws && ws.readyState === WebSocket.OPEN) {
-          // The backend has not restored the active conversation, pending
-          // approval futures, or stream ownership yet. Defer every durable
-          // session-scoped action, not only user messages; otherwise an
-          // approval/answer sent in this window can be applied to an empty or
-          // stale session and leave the real tool call blocked forever.
-          if (awaitingSessionRestore && shouldDeferCommandUntilSessionRestore(cmd)) {
-            return enqueueOfflineCommand(cmd);
+          // An open socket is not an admitted session. Keep the existing
+          // offline replay policy during restore; other actions must be
+          // retried explicitly once the canonical owner is ready.
+          if (awaitingSessionRestore) {
+            return shouldDeferCommandUntilSessionRestore(cmd)
+              ? enqueueOfflineCommand(cmd)
+              : false;
           }
           return sendOrCoalesceCommand(cmd);
         }
@@ -1205,7 +1205,11 @@ export const useWebSocketConnection = () => {
         return () => { subscribers.delete(handler); };
       },
     };
-    registerWebSocketSender(singleton.send);
+    registerWebSocketSender(singleton.send, () =>
+      awaitingSessionRestore && ref.current?.readyState === WebSocket.OPEN
+        ? "会话正在恢复，请恢复完成后重试"
+        : "连接已断开",
+    );
 
     return () => {
       alive = false;

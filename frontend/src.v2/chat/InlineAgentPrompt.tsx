@@ -24,6 +24,7 @@ import type {
   SubagentState,
 } from "../stores/types";
 import { pendingPromptTargetsConversation } from "../lib/pending-prompts";
+import { promptDraftKey } from "../stores/prompt-drafts";
 import { ToolGlyph, summarizeArgs, humanizeKey } from "./toolUtils";
 import { readableToolLabel } from "./toolDisplayName";
 import { deriveCommandPrefix } from "./commandPrefix";
@@ -103,8 +104,10 @@ export const InlineAgentPrompt = ({ conversationId }: { conversationId?: string 
 
 const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue: PendingApproval[] }) => {
   const [responding, setResponding] = useState(false);
-  const [amending, setAmending] = useState(false);
-  const [feedback, setFeedback] = useState("");
+  const draft = useAppStore((s) => s.promptDrafts[promptDraftKey(request)]);
+  const updatePromptDraft = useAppStore((s) => s.updatePromptDraft);
+  const amending = draft?.amending ?? false;
+  const feedback = draft?.feedback ?? "";
   const subagents = useAppStore((s) => s.subagents);
   const collaborationTool = ["task", "task_status", "task_stop", "send_message"].includes(request.toolName);
   const collaborationArgs = request.toolName === "task" && Array.isArray(request.args.parallel_tasks)
@@ -139,8 +142,6 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
 
   useEffect(() => {
     setResponding(false);
-    setAmending(false);
-    setFeedback("");
   }, [request.requestId]);
 
   const respond = async (allowed: boolean, fb?: string) => {
@@ -335,7 +336,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
           <div className="inline-prompt-feedback">
             <textarea
               value={feedback}
-              onChange={(e) => setFeedback(e.target.value)}
+              onChange={(e) => updatePromptDraft(request, { feedback: e.target.value })}
               placeholder="给 Agent 补充说明，例如拒绝原因或需要调整的内容…"
               aria-label="给 Agent 补充说明"
               rows={2}
@@ -345,7 +346,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
               <Button variant="primary" size="sm" onClick={() => respond(false, feedback)} disabled={responding || !feedback.trim()}>
                 拒绝并发送说明
               </Button>
-              <Button variant="secondary" size="sm" onClick={() => setAmending(false)} disabled={responding}>
+              <Button variant="secondary" size="sm" onClick={() => updatePromptDraft(request, { amending: false })} disabled={responding}>
                 取消
               </Button>
             </div>
@@ -371,7 +372,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
           <Check size={14} />
           允许
         </Button>
-        <Button variant="secondary" size="sm" onClick={() => setAmending((v) => !v)} disabled={responding} aria-label="补充说明" title="为本次决定补充说明">
+        <Button variant="secondary" size="sm" onClick={() => updatePromptDraft(request, { amending: !amending })} disabled={responding} aria-label="补充说明" title="为本次决定补充说明">
           <MessageSquare size={14} />
           说明
         </Button>
@@ -411,22 +412,23 @@ const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
   const initialPlan = typeof request.args.plan === "string" ? request.args.plan : "";
   const planFilePath = typeof request.args.plan_file_path === "string" ? request.args.plan_file_path : "";
   const commandPrompts = normalizeCommandPrompts(request.args.command_prompts);
-  const [plan, setPlan] = useState(initialPlan);
-  const [editing, setEditing] = useState(false);
-  const [planExpanded, setPlanExpanded] = useState(false);
-  const [rejecting, setRejecting] = useState(false);
-  const [rejectionFeedback, setRejectionFeedback] = useState("");
+  const savedDraft = useAppStore((s) => s.promptDrafts[promptDraftKey(request)]);
+  const updatePromptDraft = useAppStore((s) => s.updatePromptDraft);
+  const draft = savedDraft?.initialPlan === initialPlan ? savedDraft : undefined;
+  const plan = draft?.plan ?? initialPlan;
+  const editing = draft?.editing ?? false;
+  const planExpanded = draft?.planExpanded ?? false;
+  const rejecting = draft?.rejecting ?? false;
+  const rejectionFeedback = draft?.rejectionFeedback ?? "";
+  const updatePlanDraft = (patch: Partial<NonNullable<typeof draft>>) => updatePromptDraft(request, {
+    initialPlan, plan, editing, planExpanded, rejecting, rejectionFeedback, ...patch,
+  });
   const [responding, setResponding] = useState(false);
   const planWasEdited = plan !== initialPlan;
   const isLongPlan = plan.length > 1200 || plan.split("\n").length > 14;
   const planDocumentId = useId();
 
   useEffect(() => {
-    setPlan(initialPlan);
-    setEditing(false);
-    setPlanExpanded(false);
-    setRejecting(false);
-    setRejectionFeedback("");
     setResponding(false);
   }, [initialPlan, request.requestId]);
 
@@ -476,7 +478,7 @@ const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
         {editing ? (
           <textarea
             value={plan}
-            onChange={(event) => setPlan(event.target.value)}
+            onChange={(event) => updatePlanDraft({ plan: event.target.value })}
             aria-label="编辑计划"
             rows={14}
             disabled={responding}
@@ -496,7 +498,7 @@ const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
           className="inline-prompt-plan-expand"
           aria-expanded={planExpanded}
           aria-controls={planDocumentId}
-          onClick={() => setPlanExpanded((value) => !value)}
+          onClick={() => updatePlanDraft({ planExpanded: !planExpanded })}
         >
           {planExpanded ? "收起计划" : "展开计划"}
         </Button>
@@ -518,7 +520,7 @@ const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
       {rejecting && (
         <textarea
           value={rejectionFeedback}
-          onChange={(event) => setRejectionFeedback(event.target.value)}
+          onChange={(event) => updatePlanDraft({ rejectionFeedback: event.target.value })}
           placeholder="说明需要调整的内容…"
           aria-label="计划拒绝反馈"
           rows={3}
@@ -529,13 +531,13 @@ const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
       )}
 
       <div className="inline-prompt-button-row">
-        <Button variant="secondary" size="sm" onClick={() => setEditing((value) => !value)} disabled={responding}>
+        <Button variant="secondary" size="sm" onClick={() => updatePlanDraft({ editing: !editing })} disabled={responding}>
           {editing ? "预览计划" : "编辑计划"}
         </Button>
         <Button
           variant="secondary"
           size="sm"
-          onClick={() => rejecting ? void respond(false) : setRejecting(true)}
+          onClick={() => rejecting ? void respond(false) : updatePlanDraft({ rejecting: true })}
           disabled={responding}
           aria-label={rejecting ? "提交计划拒绝反馈" : "拒绝计划"}
         >
@@ -557,7 +559,7 @@ const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
   );
 };
 
-const SubagentPlanReviewCard = (
+export const SubagentPlanReviewCard = (
   { request, review }: { request: PendingAskUser; review: PendingSubagentPlanReview },
 ) => {
   const [responding, setResponding] = useState(false);
@@ -589,7 +591,14 @@ const SubagentPlanReviewCard = (
         ...(request.conversationId ? { conversation_id: request.conversationId } : {}),
       }, "subagent.plan_review");
       if (!commandResultSucceeded(result)) throw new Error(result.message || "计划审批未被后端接受");
-      useAppStore.getState().clearAskUser(request.requestId);
+      const store = useAppStore.getState();
+      const agents = request.conversationId && request.conversationId !== store.conversationId
+        ? store.conversationAgentStates[request.conversationId]?.subagents ?? [] : store.subagents;
+      const agent = agents.find((item) => item.id === review.subagentId);
+      if (agent?.activePlanRequestId === request.requestId) {
+        store.updateSubagent(agent.id, { awaitingPlanApproval: false, activePlanRequestId: "" }, request.conversationId);
+      }
+      store.clearAskUser(request.requestId);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "计划审批提交失败，请重试。";
       setError(message);
@@ -806,8 +815,17 @@ const useApprovalExpiry = (expiresAt?: number): { label: string; urgent: boolean
 };
 
 const AskUserCard = ({ request }: { request: PendingAskUser }) => {
-  const [answer, setAnswer] = useState("");
-  const [selectedOption, setSelectedOption] = useState<number | null>(null);
+  const draft = useAppStore((s) => s.promptDrafts[promptDraftKey(request)]);
+  const updatePromptDraft = useAppStore((s) => s.updatePromptDraft);
+  const persistDraft = !request.secret && !request.provider && request.promptType !== "secret" && request.promptType !== "manual_code";
+  const [transientAnswer, setTransientAnswer] = useState("");
+  const [transientOption, setTransientOption] = useState<number | null>(null);
+  const answer = persistDraft ? draft?.answer ?? "" : transientAnswer;
+  const selectedOption = persistDraft ? draft?.selectedOption ?? null : transientOption;
+  const updateAnswer = (answer: string, selectedOption: number | null) => {
+    if (persistDraft) updatePromptDraft(request, { answer, selectedOption });
+    else { setTransientAnswer(answer); setTransientOption(selectedOption); }
+  };
   const [responding, setResponding] = useState(false);
   const [error, setError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -819,8 +837,8 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
   const canSubmit = selectedOption !== null || request.allowEmpty === true || answer.length > 0;
 
   useEffect(() => {
-    setAnswer("");
-    setSelectedOption(null);
+    setTransientAnswer("");
+    setTransientOption(null);
     setResponding(false);
     setError("");
     if (hasCustomInput && !hasOptions) window.setTimeout(() => inputRef.current?.focus(), 40);
@@ -909,8 +927,7 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
               tabIndex={index === (selectedOption ?? 0) ? 0 : -1}
               disabled={responding}
               onClick={() => {
-                setSelectedOption(index);
-                setAnswer("");
+                updateAnswer("", index);
               }}
               onKeyDown={(event) => {
                 const count = request.options!.length;
@@ -921,8 +938,7 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
                 else if (event.key === "End") next = count - 1;
                 else return;
                 event.preventDefault();
-                setSelectedOption(next);
-                setAnswer("");
+                updateAnswer("", next);
                 optionRefs.current[next]?.focus();
               }}
               className="inline-prompt-choice"
@@ -954,8 +970,7 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
               value={answer}
               disabled={responding}
               onChange={(event) => {
-                setSelectedOption(null);
-                setAnswer(event.target.value);
+                updateAnswer(event.target.value, null);
               }}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && (event.nativeEvent.isComposing || event.keyCode === 229)) {

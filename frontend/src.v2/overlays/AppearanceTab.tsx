@@ -1,6 +1,7 @@
 import { Check, Monitor, Moon, Sun, Type } from "lucide-react";
 import { useAppStore } from "../stores";
 import type { KeyboardEvent } from "react";
+import { EditorPreferencesSettings } from "./EditorPreferencesSettings";
 
 const onRadioGroupKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
   if (!["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"].includes(event.key)) return;
@@ -88,7 +89,7 @@ export const AppearanceTab = () => {
           <div className="settings-row">
             <div className="settings-row-copy">
               <div className="settings-row-title">界面字号</div>
-              <div className="settings-row-description">调整导航、对话和设置页面的基础字号。</div>
+              <div className="settings-row-description">调整导航与设置页面的基础字号；正文可单独设置。</div>
             </div>
             <div className="settings-row-control">
               <div className="settings-segmented" role="radiogroup" aria-label="界面字号" onKeyDown={onRadioGroupKeyDown}>
@@ -160,6 +161,7 @@ export const AppearanceTab = () => {
           </div>
         </div>
       </section>
+      <EditorPreferencesSettings />
     </>
   );
 };

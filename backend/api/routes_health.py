@@ -5,12 +5,15 @@ from __future__ import annotations
 import logging
 import asyncio
 import time
+import os
+import sys
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Query, Response
 
 from backend.agent.instruction_discovery import load_project_guideline_bundle
-from backend.config import PROJECT_ROOT
+from backend.config import PROJECT_ROOT, STATE_ROOT, DATA_ROOT
 from backend.workspace.state import get_active_workspace_root
 from backend.services.health_service import (
     build_capability_unavailable_payload,
@@ -74,6 +77,58 @@ async def doctor_status(response: Response) -> dict[str, Any]:
     """Aggregate desktop workbench diagnostics for the right-side Doctor panel."""
     response.headers["Cache-Control"] = "no-store"
     return await _build_doctor_payload()
+
+
+def _build_sandbox_status_payload() -> dict[str, Any]:
+    from backend.permissions.context import PermissionContext
+    from backend.permissions.profiles import refresh_native_os_sandbox, sandbox_capability_for_context
+
+    # Initialization changes OS/runtime state. Re-probe the same default
+    # managed profile used at startup and replace its cached detection.
+    refresh_native_os_sandbox(workspace_root=PROJECT_ROOT)
+    capability = sandbox_capability_for_context(
+        PROJECT_ROOT, PermissionContext(mode="confirm", workspace_root=PROJECT_ROOT),
+    )
+    available = capability["backend_available"] is True and capability["filesystem_isolated"] is True
+    native_available = False
+    setup_supported = False
+    sandbox_executable = None
+    if sys.platform == "win32":
+        from backend.sandbox.windows_native import _candidate_executables, discover_runtime
+
+        runtime, _native_reason = discover_runtime()
+        native_available = runtime is not None
+        sandbox_executable = next((str(path.resolve()) for path in _candidate_executables() if path.is_file()), None)
+        setup_supported = sandbox_executable is not None
+    setup_required = sys.platform == "win32" and not available and not native_available
+    description = (
+        "受限命令执行环境已就绪。" if available
+        else "Windows 执行环境已初始化，当前策略仍受限制。" if native_available
+        else "需要初始化 Windows 命令执行环境。" if setup_supported
+        else "Windows 隔离组件尚未安装。" if sys.platform == "win32"
+        else "当前系统没有可用的受限命令执行环境。"
+    )
+    return {
+        "platform": sys.platform,
+        "available": available,
+        "backend": capability["backend"],
+        "reason": capability["reason"],
+        "description": description,
+        "setup_required": setup_required,
+        "setup_supported": setup_supported,
+        "native_available": native_available,
+        "permission_mode": "confirm",
+        "state_root": str(STATE_ROOT),
+        "sandbox_home": str(Path(str(os.environ.get("MINICODE_WINDOWS_SANDBOX_HOME") or "").strip() or DATA_ROOT / "windows-sandbox").expanduser().resolve()),
+        "sandbox_executable": sandbox_executable,
+    }
+
+
+@router.get("/api/sandbox/status")
+async def sandbox_status(response: Response) -> dict[str, Any]:
+    """Read actual managed capability and refresh its host detection cache."""
+    response.headers["Cache-Control"] = "no-store"
+    return await asyncio.to_thread(_build_sandbox_status_payload)
 
 
 @router.get("/api/guidelines")

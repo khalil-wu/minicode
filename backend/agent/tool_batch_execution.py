@@ -54,6 +54,7 @@ from backend.agent.tool_execution import (
     run_tool_with_timeout,
     store_result_events,
     subagent_scope_guard_reason,
+    tool_result_diff,
     toolset_policy_guard_reason,
 )
 from backend.agent.tool_execution_guardrails import (
@@ -240,6 +241,7 @@ def _store_final_tool_result(
     )
     if result.request_digest != request_digest:
         result = replace(result, request_digest=request_digest)
+    diff = tool_result_diff(result, diff, status=status)
     if tc.name in {"read_file", "run_command"} and not result.is_error and tool_ctx.run_context is not None:
         skill_manager = tool_ctx.run_context.skill_manager
         if skill_manager is not None:
@@ -263,7 +265,7 @@ def _store_final_tool_result(
                         type="system_notice",
                         data={"content": f"Skill '{skill.name}' requires MCP server(s) that are not connected: {names}."},
                     ))
-    if not result.is_error:
+    if not result.is_error or "committed_diff" in result.runtime_metadata:
         _track_created_file_edits(tc, diff, tool_ctx)
     removed_records = _reconcile_removed_created_file_edits(tool_ctx)
     if removed_records:

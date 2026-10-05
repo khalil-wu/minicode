@@ -1,14 +1,7 @@
-/*
- * AgentAvatar — 子任务字形头像。
- *
- * data-tone 不是身份色而是**状态色**：agent-view-model.ts 的 glyphToneFor()
- * 按 AgentDisplayStatus 派发（attention→rose、completed→green、running→blue、
- * waiting→amber）。因此色值一律引用 --state-* 语义 token，随主题翻转；
- * 此前的 7 个 hex 字面量脱离设计系统且在浅色主题下不跟随，已移除。
- */
+/* Identity stays fixed; the small corner mark alone communicates status. */
 .mc-agent-avatar {
-  --agent-avatar-color: var(--state-info);
   --agent-avatar-size: 30px;
+  --agent-avatar-color: var(--agent-identity-teal);
   position: relative;
   display: inline-grid;
   width: var(--agent-avatar-size);
@@ -16,43 +9,39 @@
   flex: 0 0 auto;
   place-items: center;
   color: var(--agent-avatar-color);
-  filter: drop-shadow(0 2px 3px color-mix(in oklch, var(--agent-avatar-color) 24%, transparent));
 }
 
 .mc-agent-avatar[data-size="small"] { --agent-avatar-size: 24px; }
 .mc-agent-avatar[data-size="large"] { --agent-avatar-size: 38px; }
-/* waiting → 等待人工/排队；running → 进行中；completed → 成功；attention → 需处理。 */
-.mc-agent-avatar[data-tone="amber"]  { --agent-avatar-color: var(--state-warning); }
-.mc-agent-avatar[data-tone="blue"]   { --agent-avatar-color: var(--state-info); }
-.mc-agent-avatar[data-tone="green"]  { --agent-avatar-color: var(--state-success); }
-.mc-agent-avatar[data-tone="rose"]   { --agent-avatar-color: var(--state-danger); }
+.mc-agent-avatar[data-identity-color="teal"] { --agent-avatar-color: var(--agent-identity-teal); }
+.mc-agent-avatar[data-identity-color="blue"] { --agent-avatar-color: var(--agent-identity-blue); }
+.mc-agent-avatar[data-identity-color="violet"] { --agent-avatar-color: var(--agent-identity-violet); }
+.mc-agent-avatar[data-identity-color="rose"] { --agent-avatar-color: var(--agent-identity-rose); }
+.mc-agent-avatar[data-identity-color="amber"] { --agent-avatar-color: var(--agent-identity-amber); }
+.mc-agent-avatar[data-identity-color="green"] { --agent-avatar-color: var(--agent-identity-green); }
 
 .mc-agent-avatar-art {
   display: block;
-  width: 100%;
-  height: 100%;
-  overflow: visible;
+  width: calc(100% - 4px);
+  height: calc(100% - 4px);
   fill: currentColor;
 }
 
-.mc-agent-avatar[data-status="completed"] { opacity: 0.9; }
-.mc-agent-avatar[data-status="waiting"] { opacity: 0.78; }
-.mc-agent-avatar[data-status="attention"] {
-  filter:
-    drop-shadow(0 0 0.5px color-mix(in oklch, var(--state-danger) 88%, transparent))
-    drop-shadow(0 3px 5px color-mix(in oklch, var(--agent-avatar-color) 28%, transparent));
+.mc-agent-avatar-status {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  display: grid;
+  place-items: center;
+  width: clamp(5px, calc(var(--agent-avatar-size) / 4), 9px);
+  height: clamp(5px, calc(var(--agent-avatar-size) / 4), 9px);
+  outline: 1px solid var(--surface-base);
+  border-radius: 50%;
+  background: var(--surface-base);
+  color: var(--text-muted);
 }
 
-.mc-agent-avatar[data-status="running"] .mc-agent-avatar-art {
-  animation: mc-agent-avatar-breathe 1.9s ease-in-out infinite;
-  transform-origin: center;
-}
-
-@keyframes mc-agent-avatar-breathe {
-  0%, 100% { transform: scale(0.96) rotate(-1deg); opacity: 0.88; }
-  50% { transform: scale(1.04) rotate(2deg); opacity: 1; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .mc-agent-avatar[data-status="running"] .mc-agent-avatar-art { animation: none; }
-}
+.mc-agent-avatar-status > svg { display: block; width: 100%; height: 100%; }
+.mc-agent-avatar[data-status="running"] .mc-agent-avatar-status { color: var(--state-info); }
+.mc-agent-avatar[data-status="attention"] .mc-agent-avatar-status { color: var(--state-warning); }
+.mc-agent-avatar[data-status="completed"] .mc-agent-avatar-status { color: var(--state-success); }

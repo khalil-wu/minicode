@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import threading
 from datetime import datetime, timezone
@@ -54,8 +55,11 @@ def write_mcp_config(content: str, config_path: Path = MCP_CONFIG_FILE) -> dict[
             for name, server in data["servers"].items():
                 if server["transport"] in MCP_REMOTE_TRANSPORTS:
                     try:
+                        from backend.runtime_env import vault_subprocess_env
+
+                        environment = {**os.environ, **vault_subprocess_env(f"mcp:{name}")}
                         normalize_mcp_remote_url(
-                            resolve_env_placeholders(server["url"]), server["transport"]
+                            resolve_env_placeholders(server["url"], environment), server["transport"]
                         )
                     except ValueError as exc:
                         raise ValueError(f"MCP server '{name}' has an invalid URL: {exc}.") from exc

@@ -1,0 +1,44 @@
+.collaboration-cell-avatars {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+.collaboration-cell-avatars .mc-agent-avatar,
+.collaboration-agent-link .mc-agent-avatar { --agent-avatar-size: 18px; }
+.collaboration-cell-live-summary {
+  margin-left: 6px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: normal;
+  overflow-wrap: anywhere;
+}
+.collaboration-agent-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px 4px;
+  margin-left: -4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.collaboration-agent-link strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.collaboration-agent-link:hover { background: var(--surface-soft); color: var(--text-primary); }
+.collaboration-agent-link:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.collaboration-agent-status { color: var(--text-muted); font-size: var(--text-xs); white-space: nowrap; }
+.collaboration-task-instructions { display: inline-block; margin: 0 0 4px 8px; vertical-align: middle; }
+.collaboration-task-instructions[open] { display: block; margin-left: 0; }
+.collaboration-task-instructions > summary { display: inline-flex; align-items: center; gap: 4px; color: var(--text-muted); font-size: var(--text-xs); line-height: 1.6; list-style: none; cursor: pointer; }
+.collaboration-task-instructions > summary::-webkit-details-marker { display: none; }
+.collaboration-task-instructions > summary:hover { color: var(--text-secondary); }
+.collaboration-task-instructions > summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 4px; }
+.collaboration-task-instructions[open] > summary > svg { transform: rotate(90deg); }
+.collaboration-task-instructions .collaboration-cell-message { padding: 5px 0 0 16px; font-size: var(--text-xs); line-height: 1.6; }
+@media (max-width: 600px) { .collaboration-cell-live-summary { display: none; } }

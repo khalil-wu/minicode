@@ -16,6 +16,7 @@ import {
   Scan,
   Search,
   Settings2,
+  Smartphone,
   ShieldCheck,
   Trash2,
   X,
@@ -23,6 +24,7 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { ContextMenu } from "../components/ContextMenu";
+import { NumberInput } from "../components/NumberInput";
 import {
   embeddedBrowserActivate,
   embeddedBrowserClearSiteData,
@@ -47,6 +49,7 @@ import { BrandIcon } from "../components/BrandIcon";
 import { SelectMenu } from "../components/SelectMenu";
 import { useAppStore } from "../stores";
 import { useTurnChanges } from "../chat/useTurnChanges";
+import { PreviewServerManager } from "./PreviewServerManager";
 import {
   acknowledgeBrowserRequest,
   subscribeBrowserRequests,
@@ -80,6 +83,7 @@ const navigateTabList = (event: KeyboardEvent<HTMLDivElement>) => {
 };
 
 interface BrowserDiagnosticItem {
+  durationMs?: number;
   timestamp?: number;
   level?: number | string;
   message?: string;
@@ -94,6 +98,7 @@ interface BrowserDiagnosticItem {
 }
 
 interface PickedElement {
+  source?: { path: string; line: number; column?: number };
   selector: string;
   rect: { x: number; y: number; width: number; height: number };
   viewport: { width: number; height: number; devicePixelRatio?: number };
@@ -101,6 +106,7 @@ interface PickedElement {
 }
 
 interface AnnotationDraft {
+  elements?: PickedElement[];
   open: boolean;
   note: string;
   selector: string;
@@ -125,6 +131,13 @@ const sitePermissionOptions = [
 const diagnosticTimestamp = (timestamp?: number) => timestamp
   ? new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
   : "";
+
+const diagnosticSource = (item: BrowserDiagnosticItem) => {
+  const source = item.sourceId ?? "";
+  const match = /^(?:https?:\/\/[^/]+)\/(@fs\/)?(src\/[^?#]+|[^?#]+\.[cm]?[jt]sx?)(?:[?#].*)?$/.exec(source);
+  if (!match || (!match[1] && !match[2].startsWith("src/"))) return null;
+  return { path: decodeURIComponent(match[2]), line: item.line ?? 1 };
+};
 
 const blankTab = (id = createTabId()): BrowserTab => ({
   id,
@@ -180,6 +193,11 @@ export const BrowserPanel = () => {
   const [inspectorPage, setInspectorPage] = useState<string | null>(null);
   const [inspectorKind, setInspectorKind] = useState<InspectorKind>("console");
   const [diagnostics, setDiagnostics] = useState<BrowserDiagnosticItem[]>([]);
+  const [diagnosticQuery, setDiagnosticQuery] = useState("");
+  const [diagnosticFilter, setDiagnosticFilter] = useState("all");
+  const [viewport, setViewport] = useState<{ width: number; height: number; mobile: boolean } | null>(null);
+  const viewportRef = useRef(viewport);
+  viewportRef.current = viewport;
   const [inspectorLoading, setInspectorLoading] = useState(false);
   const [inspectorError, setInspectorError] = useState("");
   const [settingsPage, setSettingsPage] = useState<string | null>(null);
@@ -212,6 +230,14 @@ export const BrowserPanel = () => {
   const pageKey = JSON.stringify([conversationId, activeId, activeTab.url]);
   const annotationDraft = annotationDrafts[pageKey] ?? EMPTY_ANNOTATION_DRAFT;
   const { open: annotationOpen, note: annotationNote, selector: annotationSelector, pickedElement } = annotationDraft;
+  const pickedElements = annotationDraft.elements ?? (pickedElement ? [pickedElement] : []);
+  const visibleDiagnostics = diagnostics.filter((item) => {
+    const isError = inspectorKind === "console" ? item.level === 3 || item.level === "error" : Boolean(item.error) || (item.statusCode ?? 0) >= 400;
+    return (diagnosticFilter !== "errors" || isError)
+      && (diagnosticFilter !== "warnings" || item.level === 2 || item.level === "warning")
+      && (diagnosticFilter !== "fetch" || ["xhr", "fetch"].includes(item.resourceType ?? ""))
+      && JSON.stringify(item).toLocaleLowerCase().includes(diagnosticQuery.toLocaleLowerCase());
+  });
   const updateAnnotationDraft = (patch: Partial<AnnotationDraft>) => {
     setAnnotationDrafts((drafts) => ({
       ...drafts,
@@ -342,8 +368,10 @@ export const BrowserPanel = () => {
       y: rect.top,
       width: obscured ? 0 : rect.width,
       height: obscured ? 0 : rect.height,
+      viewport: viewportRef.current,
     });
   }, []);
+  useEffect(() => { syncBounds(); }, [viewport, syncBounds]);
 
   const reconcileNativeTab = useCallback(async (tabId: string): Promise<boolean> => {
     const owner = ownerRef.current;
@@ -683,10 +711,11 @@ export const BrowserPanel = () => {
   const saveAnnotation = () => {
     const note = annotationNote.trim();
     if (!note || !activeTab?.url) return;
+    for (const selectedElement of (pickedElements.length ? pickedElements : [null])) {
     const id = `browser_note_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-    const selector = annotationSelector.trim();
-    const viewport = pickedElement?.viewport;
-    const rect = pickedElement?.rect;
+    const selector = selectedElement?.selector || annotationSelector.trim();
+    const viewport = selectedElement?.viewport;
+    const rect = selectedElement?.rect;
     const xPercent = viewport && rect ? (rect.x + rect.width / 2) / viewport.width : undefined;
     const yPercent = viewport && rect ? (rect.y + rect.height / 2) / viewport.height : undefined;
     const annotation = {
@@ -722,7 +751,8 @@ export const BrowserPanel = () => {
       viewportWidth: annotation.viewportWidth,
       viewportHeight: annotation.viewportHeight,
     });
-    updateAnnotationDraft(EMPTY_ANNOTATION_DRAFT);
+    }
+    updateAnnotationDraft({ ...EMPTY_ANNOTATION_DRAFT, elements: [] });
     const store = useAppStore.getState();
     const chatPanel = store.panelSlots.find((slot) => slot.kind === "chat");
     if (chatPanel) store.focusPanel(chatPanel.id);
@@ -770,6 +800,7 @@ export const BrowserPanel = () => {
       if (!value?.rect || !value.viewport) throw new Error("页面没有返回可用的选取结果。");
       updateAnnotationDraft({
         pickedElement: value,
+        elements: [...pickedElements.filter((item) => !value.selector || item.selector !== value.selector), value],
         selector: value.selector || "",
       });
     } catch (error) {
@@ -898,17 +929,18 @@ export const BrowserPanel = () => {
 
   if (!isDesktop()) {
     return (
-      <div className="mc-browser-unavailable">
+      <div className="mc-browser-panel"><div className="mc-browser-toolbar"><PreviewServerManager /></div><div className="mc-browser-unavailable">
         <Globe2 size={24} strokeWidth={1.8} />
         <strong>内置浏览器仅在桌面版可用</strong>
         <span>请在 MiniCode 桌面应用中打开网页。</span>
-      </div>
+      </div></div>
     );
   }
 
   if (!conversationId) {
     return (
       <div className="mc-browser-panel">
+        <div className="mc-browser-toolbar"><PreviewServerManager /></div>
         <div className="mc-browser-surface" data-empty="true">
           <div className="mc-browser-empty" role="status" tabIndex={0}>
             <Globe2 size={24} strokeWidth={1.8} aria-hidden="true" />
@@ -923,6 +955,7 @@ export const BrowserPanel = () => {
   if (!browserHydrated) {
     return (
       <div className="mc-browser-panel">
+        <div className="mc-browser-toolbar"><PreviewServerManager /></div>
         <div className="mc-browser-surface">
           <div className="mc-browser-empty" role="status">
             <LoaderCircle className="mc-browser-spin" size={24} />
@@ -961,6 +994,7 @@ export const BrowserPanel = () => {
         <button type="button" className="mc-browser-new-tab" aria-label="新建标签页" title="新建标签页" onClick={() => openTab()}>
           <Plus size={16} />
         </button>
+        <PreviewServerManager />
       </div>
 
       <div className="mc-browser-toolbar">
@@ -1015,6 +1049,14 @@ export const BrowserPanel = () => {
             spellCheck={false}
           />
         </form>
+        <label className="mc-browser-device"><Smartphone size={15} /><select aria-label="预览设备"
+          value={viewport ? (viewport.width === 390 ? "phone" : viewport.width === 768 ? "tablet" : viewport.width === 1440 ? "desktop" : "custom") : "auto"}
+          onChange={(event) => setViewport(event.target.value === "auto" ? null : {
+            phone: { width: 390, height: 844, mobile: true }, tablet: { width: 768, height: 1024, mobile: true },
+            desktop: { width: 1440, height: 900, mobile: false }, custom: { width: 1024, height: 768, mobile: false },
+          }[event.target.value]!)}>
+          <option value="auto">自适应</option><option value="phone">手机</option><option value="tablet">平板</option><option value="desktop">桌面</option><option value="custom">自定义</option>
+        </select></label>
         <button
           type="button"
           className="mc-browser-select-target"
@@ -1136,14 +1178,21 @@ export const BrowserPanel = () => {
               <RefreshCw className={inspectorLoading ? "mc-browser-spin" : undefined} size={14} /> 刷新
             </button>
           </div>
+          <div className="mc-browser-diagnostic-filters">
+            <input aria-label="搜索页面诊断" placeholder="搜索消息或 URL" value={diagnosticQuery} onChange={(event) => setDiagnosticQuery(event.target.value)} />
+            <select aria-label="筛选页面诊断" value={diagnosticFilter} onChange={(event) => setDiagnosticFilter(event.target.value)}>
+              <option value="all">全部</option><option value="errors">错误</option>
+              {inspectorKind === "console" ? <option value="warnings">警告</option> : <option value="fetch">Fetch / XHR</option>}
+            </select><small>{visibleDiagnostics.length} / {diagnostics.length}</small>
+          </div>
           <div className="mc-browser-inspector-list">
             {inspectorError ? (
               <span role="alert" className="mc-browser-inspector-empty">{inspectorError}</span>
             ) : inspectorLoading ? (
               <span className="mc-browser-inspector-empty">正在读取页面诊断…</span>
-            ) : diagnostics.length === 0 ? (
+            ) : visibleDiagnostics.length === 0 ? (
               <span className="mc-browser-inspector-empty">尚未记录{inspectorKind === "console" ? "控制台" : "网络"}事件</span>
-            ) : diagnostics.slice(-50).reverse().map((item, index) => (
+            ) : visibleDiagnostics.slice().reverse().map((item, index) => (
               <div className="mc-browser-inspector-row" key={`${item.timestamp ?? "event"}-${index}`}>
                 <time>{diagnosticTimestamp(item.timestamp)}</time>
                 {inspectorKind === "console" ? (
@@ -1153,14 +1202,29 @@ export const BrowserPanel = () => {
                     <b>{item.statusCode || "ERR"}</b>
                     <span>{item.method || "GET"}</span>
                     <span title={item.url}>{item.url || item.error || "网络请求"}</span>
+                    {item.durationMs != null && <small>{Math.round(item.durationMs)} ms</small>}
                   </>
                 )}
+                <details className="mc-browser-diagnostic-detail"><summary>详情</summary>
+                  <pre>{JSON.stringify(item, null, 2)}</pre>
+                  {diagnosticSource(item) && <button type="button" onClick={() => { const source = diagnosticSource(item)!; useAppStore.getState().openEditorFile(source.path, undefined, { line: source.line, exact: true }); }}>打开源码</button>}
+                  <button type="button" onClick={() => {
+                    addSelectedMention({ kind: "browser_annotation", path: "browser-diagnostic:" + crypto.randomUUID(), name: "页面诊断",
+                      url: activeTab.url, targetId: activeTab.id, note: JSON.stringify(item, null, 2) });
+                    window.dispatchEvent(new Event("composer:focus"));
+                  }}>加入对话</button>
+                </details>
               </div>
             ))}
           </div>
         </section>
       )}
 
+      {viewport && <div className="mc-browser-viewport-controls" role="group" aria-label="设备视口">
+        {(["width", "height"] as const).map((axis) => <label key={axis}>{axis === "width" ? "宽" : "高"} <NumberInput aria-label={axis === "width" ? "视口宽度" : "视口高度"} min={240} max={3840} value={viewport[axis]} onCommit={(value) => setViewport({ ...viewport, [axis]: value })} /></label>)}
+        <span>px</span><button type="button" onClick={() => setViewport({ ...viewport, width: viewport.height, height: viewport.width })}>旋转</button><small>按可用空间缩放显示，网页以设定尺寸布局</small>
+        <button type="button" aria-label="恢复自适应视口" onClick={() => setViewport(null)}><X size={14} /></button>
+      </div>}
       {annotationOpen && activeTab.url && (
         <div className="mc-browser-annotation" role="region" aria-label="页面批注">
           <div className="mc-browser-annotation-heading">
@@ -1179,12 +1243,12 @@ export const BrowserPanel = () => {
               {pickerMode === "region" ? "在页面中拖拽区域…" : "框选区域"}
             </button>
           </div>
-          {pickedElement && <div className="mc-browser-selected-target" title={pickedElement.selector || "页面区域"}><Crosshair size={14} /><strong>{pickedElement.text || pickedElement.selector || "选中的区域"}</strong></div>}
-          {pickedElement && (
-            <small className="mc-browser-picker-result">
-              已选择 {Math.round(pickedElement.rect.width)} × {Math.round(pickedElement.rect.height)} px
-            </small>
-          )}
+          {pickedElements.map((element, index) => <div key={index} className="mc-browser-selected-target" title={element.selector || "页面区域"}>
+            <Crosshair size={14} /><strong>{element.text || element.selector || "选中的区域"}</strong>
+            <small>已选择 {Math.round(element.rect.width)} × {Math.round(element.rect.height)} px</small>
+            {element.source && <button type="button" onClick={() => useAppStore.getState().openEditorFile(element.source!.path, undefined, { line: element.source!.line, column: element.source!.column, exact: true })}>源代码</button>}
+            <button type="button" aria-label={"移除元素 " + (index + 1)} onClick={() => updateAnnotationDraft({ elements: pickedElements.filter((_, itemIndex) => itemIndex !== index), pickedElement: null, selector: "" })}><X size={13} /></button>
+          </div>)}
           <textarea
             ref={annotationNoteRef}
             value={annotationNote}
@@ -1196,7 +1260,7 @@ export const BrowserPanel = () => {
           />
           <details className="mc-browser-element-details">
             <summary>高级元素信息</summary>
-            <input value={annotationSelector} onChange={(event) => updateAnnotationDraft({ selector: event.target.value, pickedElement: null })} placeholder="元素选择器（可选，例如 #save）" aria-label="元素选择器" spellCheck={false} />
+            <input value={annotationSelector} onChange={(event) => updateAnnotationDraft({ selector: event.target.value, pickedElement: null, elements: [] })} placeholder="元素选择器（可选，例如 #save）" aria-label="元素选择器" spellCheck={false} />
           </details>
           <div className="mc-browser-annotation-actions">
             <button type="button" onClick={() => updateAnnotationDraft({ open: false })}>收起</button>

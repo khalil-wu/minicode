@@ -23,6 +23,7 @@ class ToolCallRecord(BaseModel):
     """Tool call record payload (REST projection of backend.agent.state.ToolCallRecord)."""
 
     tool_name: str
+    tool_call_id: str = ""
     tool_input: dict[str, Any] = Field(default_factory=dict)
     tool_output: str | None = None
     artifact_id: str | None = None
@@ -59,12 +60,16 @@ class ToolCallRecord(BaseModel):
         # How the call was sourced (direct, nested, code mode, …). Provenance
         # for the runtime, not part of the transcript contract.
         "call_source",
+        # Completed event snapshot used for internal replay/reconciliation.
+        # REST exposes the call identity and curated fields, not this payload.
+        "result_payload",
     })
 
     @classmethod
     def from_internal(cls, record: Any) -> "ToolCallRecord":
         return cls(
             tool_name=record.tool_name,
+            tool_call_id=record.tool_call_id,
             tool_input=record.tool_input,
             tool_output=record.tool_output,
             artifact_id=record.artifact_id,

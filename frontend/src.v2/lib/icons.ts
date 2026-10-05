@@ -9,7 +9,7 @@
  *      use @lobehub/icons or @iconify/react — never lucide, never custom SVG.
  *   3. No emoji or glyph characters as icons in components. The only
  *      exception is AgentAvatar, the per-agent identity art system.
- *   4. Default size 14–16px, strokeWidth 1.75 (mc-icon-button rules).
+ *   4. Default size 14–16px; stroke comes from --mc-icon-stroke in components.css.
  *
  * The list below is exactly the set already in use across src.v2 — add new
  * lucide icons here first, then import from this module.

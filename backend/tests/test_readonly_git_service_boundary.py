@@ -50,34 +50,33 @@ def test_sync_snapshot_from_async_host_waits_for_canonical_owner(monkeypatch, tm
 
 
 @pytest.mark.parametrize("unborn", [False, True])
-def test_workspace_status_and_diff_share_canonical_boundary(monkeypatch, tmp_path, unborn):
+def test_ui_workspace_status_and_diff_share_host_metadata_boundary(monkeypatch, tmp_path, unborn):
     calls = []
 
-    async def canonical(argv, *, root, cwd, sandbox_policy, timeout):
-        assert cwd == root and sandbox_policy.workspace_root == root
+    def host_metadata(root, *args, timeout=10):
         assert root == tmp_path
         assert timeout == 10
-        args = argv[2:]
-        assert argv[:2] == ["git", "--literal-pathspecs"]
+        argv = ["git", *args]
+        args = list(args)
         calls.append(tuple(args))
         if args == ["rev-parse", "--show-prefix"]:
-            return _result(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
         if args[:2] == ["status", "--porcelain=v1"]:
-            return _result(argv, "## main\0 M tracked.txt\0?? new.txt\0")
+            return subprocess.CompletedProcess(argv, 0, "## main\0 M tracked.txt\0?? new.txt\0", "")
         if args == ["rev-parse", "--show-toplevel"]:
-            return _result(argv, "/workspace\n")
+            return subprocess.CompletedProcess(argv, 0, str(tmp_path) + "\n", "")
         if args == ["rev-parse", "--verify", "--quiet", "HEAD"]:
-            return _result(argv, "" if unborn else "head\n", code=1 if unborn else 0)
+            return subprocess.CompletedProcess(argv, 1 if unborn else 0, "" if unborn else "head\n", "")
         if args == ["hash-object", "-t", "tree", "--stdin"]:
-            return _result(argv, "empty-tree\n")
+            return subprocess.CompletedProcess(argv, 0, "empty-tree\n", "")
         if args[0] == "ls-files":
-            return _result(argv, "new.txt\0")
+            return subprocess.CompletedProcess(argv, 0, "new.txt\0", "")
         if args[0] == "diff":
             assert "--no-textconv" in args and "--no-ext-diff" in args
-            return _result(argv, "new patch\n" if "--no-index" in args else "tracked patch\n", code=1 if "--no-index" in args else 0)
+            return subprocess.CompletedProcess(argv, 1 if "--no-index" in args else 0, "new patch\n" if "--no-index" in args else "tracked patch\n", "")
         raise AssertionError(args)
 
-    monkeypatch.setattr(git_support, "_run_git", canonical)
+    monkeypatch.setattr(workspace_api_service, "run_ui_git_metadata", host_metadata)
     status = workspace_api_service.workspace_git_status_payload(tmp_path)
     assert status == {"is_git_repo": True, "branch": "main", "modified": ["tracked.txt"], "staged": [], "untracked": ["new.txt"]}
     assert workspace_api_service.workspace_git_diff_payload(tmp_path, "") == {"is_git_repo": True, "diff": "tracked patch\nnew patch\n"}
@@ -112,6 +111,8 @@ def test_doctor_services_and_handoff_read_snapshots_use_request_root(monkeypatch
     assert workspace_service.git_branch_for(main) == "main"
     assert workspace_service.main_worktree_root(main) == main
     assert not workspace_service.worktree_has_local_changes(main)
+    monkeypatch.setattr(health_service, "run_ui_git_metadata", lambda root, *args, **kwargs:
+        subprocess.CompletedProcess(["git", *args], 0, "main\n" if args[0] == "branch" else "", ""))
     assert health_service.build_git_doctor_payload(main) == {"available": True, "branch": "main", "changed": 0, "clean": True, "error": ""}
     conversation = SimpleNamespace(id="target-b", git_isolated=False, workspace_root=str(main), worktree_path="", git_branch="")
     preflight = handoff.build_handoff_preflight(
@@ -158,32 +159,28 @@ def test_handoff_mutations_keep_explicit_control_plane(monkeypatch, tmp_path):
     assert [args[:2] for args in writes] == [("stash", "push"), ("stash", "list"), ("stash", "apply"), ("switch", "next"), ("switch", "main"), ("branch", "-D")]
 
 
-def test_namespace_unavailable_is_not_an_empty_success(monkeypatch, tmp_path):
+def test_host_git_and_model_namespace_failures_remain_distinct(monkeypatch, tmp_path):
     async def canonical(argv, *, root, cwd, sandbox_policy, timeout):
         raise SandboxUnavailableError("actual namespace unavailable")
 
     monkeypatch.setattr(git_support, "_run_git", canonical)
-    assert workspace_api_service.workspace_git_status_payload(tmp_path)["error"] == "actual namespace unavailable"
-    assert workspace_api_service.workspace_git_diff_payload(tmp_path, "")["error"] == "actual namespace unavailable"
+    def host_unavailable(*args, **kwargs):
+        raise OSError("host Git unavailable")
+    monkeypatch.setattr(workspace_api_service, "run_ui_git_metadata", host_unavailable)
+    monkeypatch.setattr(health_service, "run_ui_git_metadata", host_unavailable)
+    assert workspace_api_service.workspace_git_status_payload(tmp_path)["error"] == "host Git unavailable"
+    assert workspace_api_service.workspace_git_diff_payload(tmp_path, "")["error"] == "host Git unavailable"
     doctor = health_service.build_git_doctor_payload(tmp_path)
     assert doctor["available"] is False and doctor["clean"] is False
     assert handoff._status(tmp_path) == "<status unavailable>"
 
 
-def test_repository_path_outputs_use_boundary_mapping(monkeypatch, tmp_path):
-    async def canonical(argv, *, root, cwd, sandbox_policy, timeout):
-        return _result(argv, "/workspace/.git\n")
-
-    monkeypatch.setattr(git_support, "_run_git", canonical)
-    seen = []
-
-    def host_path(root, value, **kwargs):
-        seen.append((root, value))
-        return root / ".git"
-
-    monkeypatch.setattr(workspace_api_service, "readonly_git_host_path", host_path)
+@pytest.mark.parametrize("absolute", [False, True])
+def test_ui_repository_path_outputs_are_host_paths(monkeypatch, tmp_path, absolute):
+    common_dir = str(tmp_path / ".git") if absolute else ".git"
+    monkeypatch.setattr(workspace_api_service, "run_ui_git_metadata", lambda root, *args:
+        subprocess.CompletedProcess(["git", *args], 0, common_dir + "\n", ""))
     assert workspace_api_service.resolve_git_common_dir(tmp_path) == tmp_path / ".git"
-    assert seen == [(tmp_path, "/workspace/.git")]
 
 
 def test_readonly_metadata_grant_comes_from_trusted_original_registry(monkeypatch, tmp_path):
@@ -216,38 +213,20 @@ def test_readonly_metadata_grant_comes_from_trusted_original_registry(monkeypatc
     assert policy.allow_network is False
 
 
-@pytest.mark.parametrize("backend", ["windows-elevated-wfp", "docker", "linux-bwrap"])
-def test_workspace_subdirectory_keeps_captured_owner_and_policy(monkeypatch, tmp_path, backend):
-    from backend.sandbox import SandboxRunner
-
+def test_ui_workspace_subdirectory_keeps_requested_host_root_and_relative_paths(monkeypatch, tmp_path):
     child = tmp_path / "sub"
     child.mkdir()
-    policies = []
-    captures = []
-    builder = workspace_api_service.readonly_git_policy
-
-    def capture(owner):
-        captures.append(owner)
-        return builder(owner)
-
-    async def canonical(argv, *, root, cwd, sandbox_policy, timeout):
-        assert root == tmp_path
-        if backend == "windows-elevated-wfp":
-            assert cwd == tmp_path and argv[:3] == ["git", "-C", str(child)]
-        else:
-            assert cwd == child and "-C" not in argv
-        policies.append(sandbox_policy)
-        if "--show-prefix" in argv:
-            return _result(argv, "sub/\n")
-        return _result(argv, "## main\0 M sub/tracked.txt\0")
-
-    monkeypatch.setattr(git_support, "_run_git", canonical)
-    monkeypatch.setattr(SandboxRunner, "capability", lambda self, **kwargs: SimpleNamespace(backend=backend))
-    monkeypatch.setattr(workspace_api_service, "readonly_git_policy", capture)
+    calls = []
+    def host_metadata(root, *args):
+        assert root == child
+        calls.append(args)
+        stdout = "sub/\n" if "--show-prefix" in args else "## main\0 M sub/tracked.txt\0"
+        return subprocess.CompletedProcess(["git", *args], 0, stdout, "")
+    monkeypatch.setattr(workspace_api_service, "run_ui_git_metadata", host_metadata)
     result = workspace_api_service.workspace_git_status_payload(child, workspace_root=tmp_path)
     assert result["modified"] == ["tracked.txt"]
-    assert captures == [tmp_path]
-    assert len(policies) == 2 and policies[0] is policies[1]
+    assert len(calls) == 2
+    assert calls[1][-2:] == ("--", ".")
 
 
 def test_real_requirements_deny_survives_snapshot_and_metadata_grants(monkeypatch, tmp_path):

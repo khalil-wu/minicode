@@ -27,10 +27,85 @@ from backend.services.chat_api_service import (
 from . import _state
 from .models import ChatRequest, ChatResponse, UploadResponse
 from backend.services.tool_registry_factory import get_attachment_store as _get_attachment_store
+from backend.services.conversation_resources_service import background_command_detail, conversation_resource_page
+from backend.ws.command_scope import resolve_command_scope
+from backend.conversations.import_export import import_conversation_tree
 
 _UPLOAD_READ_CHUNK = 1024 * 1024
 
 router = APIRouter()
+
+@router.post("/api/conversations/import")
+async def import_conversations(
+    file: UploadFile = File(...), session_id: str = Query(..., min_length=1), workspace_root: str = Query(""),
+):
+    import json
+    from pathlib import Path
+    from backend.workspace.trust import is_workspace_trusted
+    session = _state.ws_manager.get_session(session_id)
+    if session is None: raise HTTPException(status_code=404, detail="Session is not connected.")
+    if workspace_root and not is_workspace_trusted(Path(workspace_root)):
+        raise HTTPException(status_code=403, detail="目标项目尚未受信任。")
+    content = await file.read(25 * 1024 * 1024 + 1)
+    if len(content) > 25 * 1024 * 1024: raise HTTPException(status_code=413, detail="会话导入文件不能超过 25 MiB。")
+    try:
+        payload = json.loads(content)
+        return await run_in_threadpool(import_conversation_tree, session.conversation_repo, payload, workspace_root)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/api/conversations/{conversation_id}/resources")
+async def conversation_resources(
+    conversation_id: str, session_id: str = Query(..., min_length=1),
+    after: str = Query(""), limit: int = Query(60, ge=1, le=200),
+    query: str = Query(""), kind: str = Query("all", pattern="^(all|file|image|attachment|execution)$"),
+    workspace_root: str | None = Query(None),
+) -> dict:
+    try:
+        return await run_in_threadpool(conversation_resource_page, session_id=session_id,
+                                       conversation_id=conversation_id, ws_manager=_state.ws_manager,
+                                       after=after, limit=limit, query=query, kind=kind, expected_workspace_root=workspace_root)
+    except ChatApiServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@router.get("/api/conversations/{conversation_id}/background-commands/{command_id}")
+async def background_command(
+    conversation_id: str, command_id: str, session_id: str = Query(..., min_length=1),
+    cursor: int = Query(0, ge=0), max_chars: int = Query(20000, ge=1, le=100000),
+) -> dict:
+    session = _state.ws_manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session is not connected.")
+    try:
+        return await run_in_threadpool(background_command_detail, session, conversation_id, command_id,
+                                       cursor=cursor, max_chars=max_chars)
+    except ChatApiServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/api/conversations/{conversation_id}/background-commands/{command_id}/stop")
+async def stop_background_command(
+    conversation_id: str, command_id: str, session_id: str = Query(..., min_length=1),
+) -> dict:
+    session = _state.ws_manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session is not connected.")
+    try:
+        scope = resolve_command_scope(session, {"conversation_id": conversation_id})
+        if session.background_manager.get_status(command_id, conversation_id=scope.conversation_id) is None:
+            raise ChatApiServiceError(404, "Background command was not found in this conversation.")
+        stopped = await session.background_manager.cancel(command_id, conversation_id=scope.conversation_id)
+        detail = await run_in_threadpool(background_command_detail, session, scope.conversation_id, command_id,
+                                        cursor=0, max_chars=20000)
+        return {**detail, "stopped": stopped}
+    except ChatApiServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 @router.get("/api/conversations/{conversation_id}/messages")
 async def conversation_messages(

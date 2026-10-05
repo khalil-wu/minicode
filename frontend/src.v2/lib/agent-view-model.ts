@@ -2,7 +2,11 @@ import { effectiveSubagentStatus } from "./collaborationDisplay";
 import type { SubagentState } from "../stores/types";
 
 export type AgentDisplayStatus = "attention" | "running" | "waiting" | "completed";
-export type AgentGlyphTone = "amber" | "blue" | "green" | "rose";
+export interface AgentLink {
+  id: string;
+  title: string;
+  identityKey: string;
+}
 
 /**
  * Ordinary UI projection for delegated work.
@@ -19,7 +23,14 @@ export interface AgentView {
   status: AgentDisplayStatus;
   statusLabel: string;
   relativeTimeLabel: string;
-  glyphTone: AgentGlyphTone;
+  identityKey: string;
+  teammateName?: string;
+  teamName?: string;
+  parent?: AgentLink;
+  dependencies: AgentLink[];
+  blockedDependencies: AgentLink[];
+  children: AgentLink[];
+  awaitingPlanApproval: boolean;
   effectiveStatus: SubagentState["status"];
   hasResult: boolean;
   needsResult: boolean;
@@ -36,13 +47,14 @@ const titleFor = (agent: SubagentState): string => {
 
 const displayStatus = (agent: SubagentState): AgentDisplayStatus => {
   if (agent.cleanupPending) return "attention";
+  if (isLiveAgent(agent) && agent.awaitingPlanApproval) return "attention";
+  if (isLiveAgent(agent) && agent.needsInput) return "attention";
+  if (isLiveAgent(agent) && agent.isIdle) return "waiting";
   switch (effectiveSubagentStatus(agent)) {
     case "error":
       return "attention";
     case "blocked":
-      return agent.needsInput
-        ? "attention"
-        : agent.blockedBy?.length || String(agent.waitingOn || "").trim()
+      return agent.blockedBy?.length || String(agent.waitingOn || "").trim()
           ? "waiting"
           : "attention";
     case "running":
@@ -68,9 +80,11 @@ const statusLabel = (status: AgentDisplayStatus): string => {
 
 const statusLabelFor = (agent: SubagentState, status: AgentDisplayStatus): string => {
   if (agent.cleanupPending) return "清理未完成";
+  if (isLiveAgent(agent) && agent.awaitingPlanApproval) return "等待批准计划";
+  if (isLiveAgent(agent) && agent.needsInput) return "等待你回复";
+  if (isLiveAgent(agent) && agent.isIdle) return "待命";
   const effective = effectiveSubagentStatus(agent);
   if (effective === "blocked") {
-    if (agent.needsInput) return "等待你回复";
     if (agent.blockedBy?.length || String(agent.waitingOn || "").trim()) return "等待中";
     return "已阻塞";
   }
@@ -89,6 +103,12 @@ const statusLabelFor = (agent: SubagentState, status: AgentDisplayStatus): strin
 
 const summaryFor = (agent: SubagentState): string => {
   if (agent.cleanupPending) return agent.cleanupReason || "进程退出尚未确认，请重试停止";
+  if (isLiveAgent(agent) && agent.awaitingPlanApproval) return "计划已提交，等待你审阅";
+  if (isLiveAgent(agent) && agent.needsInput) {
+    return String(agent.waitingOn || agent.detail || agent.summary || "").trim()
+      || "需要你的输入才能继续";
+  }
+  if (isLiveAgent(agent) && agent.isIdle) return "当前工作已结束，可以补充下一步说明";
   const status = effectiveSubagentStatus(agent);
   const activity = String(agent.currentActivity || "").trim();
   const detail = String(agent.detail || "").trim();
@@ -102,10 +122,6 @@ const summaryFor = (agent: SubagentState): string => {
     return summary || "已完成部分工作";
   }
   if (status === "cancelled") return agent.terminationInitiator === "user" ? "已由你停止" : "任务已取消";
-  if (status === "blocked" && agent.needsInput) {
-    return String(agent.waitingOn || agent.detail || agent.summary || "").trim()
-      || "需要你的输入才能继续";
-  }
   if (status === "blocked" && agent.blockedBy?.length) return "等待前置任务完成";
   if (status === "blocked") {
     return String(agent.waitingOn || agent.currentActivity || agent.detail || agent.summary || "").trim()
@@ -138,10 +154,19 @@ const rank: Record<AgentDisplayStatus, number> = {
   completed: 3,
 };
 
-const glyphToneFor = (status: AgentDisplayStatus): AgentGlyphTone => {
-  if (status === "attention") return "rose";
-  if (status === "completed") return "green";
-  return status === "running" ? "blue" : "amber";
+const isLiveAgent = (agent: SubagentState): boolean => ["pending", "running", "blocked"].includes(agent.status);
+
+const agentLink = (agent: SubagentState): AgentLink => ({
+  id: agent.id,
+  title: agent.teammateName || titleFor(agent),
+  identityKey: agent.agentPath || agent.id,
+});
+
+/** Count exact display states; a stopped or failed task is never "running". */
+export const agentStatusSummary = (views: AgentView[]): string => {
+  const counts = new Map<string, number>();
+  for (const view of views) counts.set(view.statusLabel, (counts.get(view.statusLabel) ?? 0) + 1);
+  return [...counts].map(([label, count]) => `${count} ${label}`).join(" · ");
 };
 
 const relativeTimeLabelFor = (agent: SubagentState, now: number): string => {
@@ -161,6 +186,11 @@ export function projectAgentViews(
   agents: SubagentState[],
   now = Date.now(),
 ): AgentView[] {
+  const resolve = (id: string) => agents.find((agent) => agent.id === id || agent.taskId === id);
+  const links = (ids: string[] = []) => ids.flatMap((id) => {
+    const agent = resolve(id);
+    return agent ? [agentLink(agent)] : [];
+  });
   return [...agents]
     .filter((agent) => agent.role !== "message" && agent.role !== "workflow")
     // Keep the creation order stable within each status group so progress
@@ -181,6 +211,7 @@ export function projectAgentViews(
         && !resultError
         && (source.resultAvailable || terminalWithoutResult),
       );
+      const parent = source.parentRunId ? resolve(source.parentRunId) : undefined;
       return {
         id: source.id,
         title: titleFor(source),
@@ -188,7 +219,14 @@ export function projectAgentViews(
         status,
         statusLabel: statusLabelFor(source, status),
         relativeTimeLabel: relativeTimeLabelFor(source, now),
-        glyphTone: glyphToneFor(status),
+        identityKey: source.agentPath || source.id,
+        teammateName: source.teammateName,
+        teamName: source.teamName,
+        parent: parent ? agentLink(parent) : undefined,
+        dependencies: links(source.dependsOn),
+        blockedDependencies: links(source.blockedBy),
+        children: agents.filter((agent) => agent.parentRunId === source.id).map(agentLink),
+        awaitingPlanApproval: isLiveAgent(source) && Boolean(source.awaitingPlanApproval),
         effectiveStatus,
         hasResult: Boolean(resultError || resultContent || source.resultAvailable),
         needsResult,

@@ -158,10 +158,10 @@ export type McpServerMutationPayload = McpServerMutationCommon & (
 
 export type McpAddCommand = { type: "mcp.add" } & McpServerMutationPayload;
 
-export type McpUpdateCommand = {
+export type McpUpdateCommand = ({
   type: "mcp.update";
   original_name: string;
-} & McpServerMutationPayload;
+} & McpServerMutationPayload) | { type: "mcp.update"; original_name: string; tools_only: true; enabled_tools?: string[] | null };
 
 export interface McpInventoryListCommand extends WorkspaceOwnedCommand {
   type: "mcp.inventory.list";
@@ -202,6 +202,7 @@ export interface McpInventoryPrompt {
 }
 
 export interface McpInventoryPayload {
+  tools?: Array<{ name: string; description?: string }>;
   server_name: string;
   capabilities: {
     resources: boolean;

@@ -1,0 +1,17 @@
+.github-connection-title { display: flex; align-items: center; gap: 8px; }
+.github-connection-controls { display: flex; align-items: center; gap: 10px; }
+.github-connection-status { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; font-size: var(--text-xs); color: var(--text-muted); }
+.github-connection-status[data-connected="true"] { color: var(--state-success); }
+.github-authorization { padding: 16px 20px; border-top: 1px solid var(--border-subtle); }
+.github-authorization p { margin: 0 0 12px; color: var(--text-primary); font-size: var(--text-sm); }
+.github-authorization-code { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
+.github-authorization-code code { font-size: 22px; letter-spacing: 3px; font-weight: 600; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.github-authorization p.github-authorization-help { color: var(--text-muted); font-size: var(--text-xs); line-height: 1.6; }
+.github-authorization-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.github-authorization-actions button { display: inline-flex; align-items: center; gap: 6px; }
+.github-connection-note, .github-connection-error { padding: 0 20px 14px; margin: 0; font-size: var(--text-xs); line-height: 1.6; overflow-wrap: anywhere; }
+.github-connection-note { color: var(--text-muted); }
+.github-connection-error { color: var(--state-danger); }
+@media (max-width: 620px) {
+  .github-connection-controls { flex-wrap: wrap; justify-content: flex-end; }
+}

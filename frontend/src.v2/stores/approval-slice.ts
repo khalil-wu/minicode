@@ -1,8 +1,17 @@
 import type { StateCreator } from "zustand";
 import type { AppStore, ApprovalSlice } from "./types";
 import { promptTargetsConversation, visibleDiffReviewForConversation } from "./shared-helpers";
+import { loadPromptDrafts, persistPromptDrafts, promptDraftKey, removePromptDrafts } from "./prompt-drafts";
 
 export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> = (set, get) => ({
+  promptDrafts: loadPromptDrafts(),
+  updatePromptDraft: ({ requestId, conversationId }, patch) => set((s) => {
+    const key = promptDraftKey({ requestId, conversationId });
+    return { promptDrafts: persistPromptDrafts({
+      ...s.promptDrafts,
+      [key]: { ...s.promptDrafts[key], ...patch, requestId, conversationId },
+    }) };
+  }),
   pendingApproval: null,
   approvalQueue: [],
   pendingDiffReview: null,
@@ -50,11 +59,13 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
     set((s) => {
       if (requestId && s.pendingApproval?.requestId !== requestId) {
         return {
+          promptDrafts: removePromptDrafts(s.promptDrafts, [requestId]),
           approvalQueue: s.approvalQueue.filter((queued) => queued.requestId !== requestId),
         };
       }
       const [next, ...rest] = s.approvalQueue;
       return {
+        promptDrafts: removePromptDrafts(s.promptDrafts, [requestId ?? s.pendingApproval?.requestId ?? ""]),
         pendingApproval: next ?? null,
         approvalQueue: rest,
       };
@@ -69,6 +80,7 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
       const approvalQueue = s.approvalQueue.filter((queued) => !ids.has(queued.requestId));
       const [next, ...rest] = approvalQueue;
       return {
+        promptDrafts: removePromptDrafts(s.promptDrafts, requestIds),
         pendingApproval: pendingApproval ?? next ?? null,
         approvalQueue: pendingApproval ? approvalQueue : rest,
       };
@@ -155,11 +167,13 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
     set((s) => {
       if (requestId && s.pendingAskUser?.requestId !== requestId) {
         return {
+          promptDrafts: removePromptDrafts(s.promptDrafts, [requestId]),
           askUserQueue: s.askUserQueue.filter((queued) => queued.requestId !== requestId),
         };
       }
       const [next, ...rest] = s.askUserQueue;
-      return { pendingAskUser: next ?? null, askUserQueue: rest };
+      return { pendingAskUser: next ?? null, askUserQueue: rest,
+        promptDrafts: removePromptDrafts(s.promptDrafts, [requestId ?? s.pendingAskUser?.requestId ?? ""]) };
     }),
   clearAskUsers: (requestIds) =>
     set((s) => {
@@ -169,8 +183,9 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
         ? null
         : s.pendingAskUser;
       const queue = s.askUserQueue.filter((queued) => !ids.has(queued.requestId));
-      if (pending) return { pendingAskUser: pending, askUserQueue: queue };
+      const promptDrafts = removePromptDrafts(s.promptDrafts, requestIds);
+      if (pending) return { pendingAskUser: pending, askUserQueue: queue, promptDrafts };
       const [next, ...rest] = queue;
-      return { pendingAskUser: next ?? null, askUserQueue: rest };
+      return { pendingAskUser: next ?? null, askUserQueue: rest, promptDrafts };
     }),
 });

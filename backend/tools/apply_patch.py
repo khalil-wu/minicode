@@ -19,8 +19,6 @@ from backend.atomic_io import (
     atomic_write_bytes,
     canonical_path_mapping_key,
     file_mutation_locks,
-    normalize_text_newlines,
-    preserve_text_line_endings,
     run_blocking_io,
 )
 from backend.permissions.context import ToolExecutionContext
@@ -244,13 +242,14 @@ class ApplyPatchTool(BaseTool):
         summary_lines: list[str] = []
         total_add = 0
         total_del = 0
-        committed_paths: list[str] = []
+        committed_changes: list[_ChangePlan] = []
         mutation_paths = [
             path
             for plan in plans
             for path in (plan.path, plan.move_to_path)
             if path is not None
         ]
+        failure_reason = ""
         try:
             # Acquire every source/destination in canonical order, then repeat
             # the review check and perform all synchronous per-file commits.
@@ -264,54 +263,49 @@ class ApplyPatchTool(BaseTool):
                     if stale_error:
                         raise ApplyPatchError(stale_error)
                     for plan in plans:
-                        adds, dels = self._commit_plan(plan, cache, context)
+                        adds, dels = self._commit_plan(plan, cache, context, committed_changes)
                         total_add += adds
                         total_del += dels
                         summary_lines.append(plan.summary(adds, dels))
-                        committed_paths.append(plan.raw_path)
 
             await run_blocking_io(commit_patch)
         except (PermissionError, OSError) as exc:
-            reason = (
+            failure_reason = (
                 f"No permission to write: {exc}"
                 if isinstance(exc, PermissionError)
                 else f"I/O error while writing: {exc}"
             )
-            if committed_paths:
-                invalidate_workspace_file_caches(
-                    file_tree_changed=any(
-                        plan.kind in {ChangeKind.ADD, ChangeKind.DELETE} or plan.move_to_path is not None
-                        or plan.path.name == ".gitignore"
-                        for plan in plans
-                    )
-                )
-            return self._error_result(self._partial_apply_message(reason, committed_paths))
         except ApplyPatchError as exc:
-            if committed_paths:
-                invalidate_workspace_file_caches(
-                    file_tree_changed=any(
-                        plan.kind in {ChangeKind.ADD, ChangeKind.DELETE} or plan.move_to_path is not None
-                        or plan.path.name == ".gitignore"
-                        for plan in plans
-                    )
+            failure_reason = str(exc)
+        finally:
+            invalidate_workspace_file_caches(
+                file_tree_changed=any(
+                    plan.kind in {ChangeKind.ADD, ChangeKind.DELETE} or plan.move_to_path is not None
+                    or plan.path.name == ".gitignore"
+                    for plan in committed_changes
                 )
-            return self._error_result(self._partial_apply_message(str(exc), committed_paths))
-
-        invalidate_workspace_file_caches(
-            file_tree_changed=any(
-                plan.kind in {ChangeKind.ADD, ChangeKind.DELETE} or plan.move_to_path is not None
-                or plan.path.name == ".gitignore"
-                for plan in plans
             )
-        )
-        # Event publication can await and therefore belongs outside the file
-        # mutation critical section. All files are already durably committed.
-        for plan in plans:
-            await self._emit_plan_diff(plan, context)
+            # Every entry is a completed disk operation, including a move's
+            # destination write when removing its source failed.
+            for plan in committed_changes:
+                await self._emit_plan_diff(plan, context)
+        committed_diff = _plans_diff_payload(committed_changes)
+        if failure_reason:
+            result = self._error_result(self._partial_apply_message(
+                failure_reason, [plan.display_path for plan in committed_changes],
+            ))
+            if committed_changes:
+                result.status = "partial"
+                result.user_summary = "补丁仅部分完成，已写入的改动已列出。"
+                result.model_observation = result.developer_detail
+            result.runtime_metadata["committed_diff"] = committed_diff
+            return result
         header = (
             f"Applied patch to {len(plans)} file(s): +{total_add} -{total_del}."
         )
-        return self._success_result("\n".join([header, *summary_lines]))
+        result = self._success_result("\n".join([header, *summary_lines]))
+        result.runtime_metadata["committed_diff"] = committed_diff
+        return result
 
     def plan_changes(
         self,
@@ -396,9 +390,8 @@ class ApplyPatchTool(BaseTool):
         try:
             if change.hunks:
                 new_content = apply_update_hunks(
-                    normalize_text_newlines(old_content), change.hunks, change.path,
+                    old_content, change.hunks, change.path,
                 )
-                new_content = preserve_text_line_endings(new_content, old_content.encode("utf-8"))
             else:
                 # A pure rename must not manufacture a trailing newline or
                 # normalize mixed line endings in the original file.
@@ -499,7 +492,10 @@ class ApplyPatchTool(BaseTool):
             overwritten_new_content=plan.overwritten_move_content,
         )
 
-    def _commit_plan(self, plan: "_ChangePlan", cache: Any, context: ToolExecutionContext | None = None) -> tuple[int, int]:
+    def _commit_plan(
+        self, plan: "_ChangePlan", cache: Any, context: ToolExecutionContext | None,
+        committed_changes: list["_ChangePlan"],
+    ) -> tuple[int, int]:
         if plan.kind == ChangeKind.DELETE:
             try:
                 plan.path.unlink()
@@ -507,6 +503,7 @@ class ApplyPatchTool(BaseTool):
                 pass
             record_file_hash(context, plan.path, None)
             cache.invalidate(plan.path)
+            committed_changes.append(plan)
             _, adds, dels = self._diff_stats(plan.old_content, "")
             return adds, dels
 
@@ -520,6 +517,12 @@ class ApplyPatchTool(BaseTool):
         record_file_hash(context, target, content_hash(plan.new_content))
         cache.invalidate(plan.path)
         if plan.move_to_path is not None and plan.move_to_path != plan.path:
+            destination_change = _ChangePlan(
+                kind=ChangeKind.ADD, raw_path=plan.display_path, path=target,
+                old_content="", new_content=plan.new_content, display_path=plan.display_path,
+            )
+            committed_changes.append(destination_change)
+            cache.invalidate(target)
             # Rename: remove the original after writing the destination.
             try:
                 plan.path.unlink()
@@ -527,6 +530,9 @@ class ApplyPatchTool(BaseTool):
                 pass
             cache.invalidate(plan.move_to_path)
             record_file_hash(context, plan.path, None)
+            committed_changes[-1] = plan
+        else:
+            committed_changes.append(plan)
         _, adds, dels = self._diff_stats(plan.old_content, plan.new_content)
         return adds, dels
 
@@ -593,8 +599,6 @@ def build_apply_patch_diff_payload(
     expected_hashes: dict[str, str] | None = None,
     read_time_hashes: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
-    from backend.permissions.review import build_structured_diff_payload, generate_unified_diff
-
     plans = ApplyPatchTool().plan_changes(patch_text, context)
     if isinstance(plans, str):
         return None
@@ -606,6 +610,12 @@ def build_apply_patch_diff_payload(
                 read_time_hashes=read_time_hashes,
             )
         )
+
+    return _plans_diff_payload(plans)
+
+
+def _plans_diff_payload(plans: list[_ChangePlan]) -> dict[str, Any] | None:
+    from backend.permissions.review import build_structured_diff_payload, generate_unified_diff
 
     files: list[dict[str, Any]] = []
     additions = 0

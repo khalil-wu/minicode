@@ -9,6 +9,7 @@ function harness(found) {
   let clock = 0;
   let evaluations = 0;
   const waits = [];
+  const insertions = [];
   const session = { setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, on() {}, webRequest: {} };
   class View {
     constructor() {
@@ -16,7 +17,8 @@ function harness(found) {
         id: 1, session, url: "", navigationHistory: {},
         setWindowOpenHandler() {}, getURL() { return this.url; }, getTitle: () => "", isLoading: () => false,
         isDestroyed: () => false, close() {}, async loadURL(url) { this.url = url; },
-        async executeJavaScript() { evaluations++; return found; },
+        async executeJavaScript() { evaluations++; return typeof found === "function" ? found() : found; },
+        async insertText(value) { insertions.push(value); },
       });
     }
     getBounds() { return { x: 0, y: 0, width: 0, height: 0 }; }
@@ -36,7 +38,7 @@ function harness(found) {
   });
   const manager = moduleValue.exports;
   manager.init({ getMainWindow: () => ownerWindow, browserSettingsPath: path.join(__dirname, ".nonexistent-wait-audit-settings.json") });
-  return { manager, waits, evaluations: () => evaluations };
+  return { manager, waits, insertions, evaluations: () => evaluations };
 }
 
 for (const found of [true, false]) test(`zero selector timeout checks the ${found ? "present" : "missing"} element once`, async () => {
@@ -63,5 +65,19 @@ test("malformed external selector timeout rejects instead of polling forever", a
   await manager.create({ id: "target", conversation_id: "owner", url: "about:blank" });
   await assert.rejects(manager.executeControlCommand({ action: "wait_for_element", target_id: "target", conversation_id: "owner", selector: "#fixture", timeout_ms: "not-a-number" }), /finite number/);
   assert.deepEqual(waits, []);
+  manager.disposeAll();
+});
+
+test("a cancelled selector-focus does not submit the following text insertion", async () => {
+  let completeFocus;
+  const focus = new Promise((resolve) => { completeFocus = resolve; });
+  const { manager, insertions } = harness(() => focus);
+  await manager.create({ id: "target", conversation_id: "owner", url: "about:blank" });
+  const controller = new AbortController();
+  const operation = manager.executeControlCommand({ action: "type", target_id: "target", conversation_id: "owner", selector: "#fixture", text: "pending text" }, { signal: controller.signal });
+  controller.abort(new Error("cancelled fixture"));
+  completeFocus({ ok: true });
+  await assert.rejects(operation, /cancelled fixture/);
+  assert.deepEqual(insertions, []);
   manager.disposeAll();
 });

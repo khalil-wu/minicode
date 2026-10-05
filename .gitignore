@@ -92,6 +92,7 @@ data/backend-startup.*.log
 cc/
 nul
 desktop/python-runtime/
+desktop/github-runtime/
 data/sidechains/
 data/swarm/
 data/tool-results/
@@ -186,3 +187,4 @@ data/sandbox-native-temp/
 /sandbox-native-temp/
 /.*.consolidation-*/
 data/windows-sandbox/
+data/worktree-snapshots/

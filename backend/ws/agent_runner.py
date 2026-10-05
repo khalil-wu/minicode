@@ -840,6 +840,35 @@ def _project_task_update(state: dict[str, Any], data: dict[str, Any]) -> dict[st
     return state
 
 
+def _subagent_ui_metadata(data: dict[str, Any]) -> dict[str, Any]:
+    """Keep user-facing identity and relationships in the durable UI projection."""
+    record = data.get("record") or data.get("snapshot") or {}
+    source = {**record, **data}
+    fields = {
+        "agent_path": "agentPath", "mailbox_epoch": "mailboxEpoch",
+        "parent_run_id": "parentRunId", "task_id": "taskId", "turn_id": "turnId",
+        "objective": "objective", "depends_on": "dependsOn", "blocked_by": "blockedBy",
+        "background": "background", "read_only": "readOnly", "write_scope": "writeScope",
+        "current_activity": "currentActivity", "waiting_on": "waitingOn",
+        "last_progress_at": "lastProgressAt", "needs_input": "needsInput",
+        "teammate_name": "teammateName", "team_name": "teamName",
+        "awaiting_plan_approval": "awaitingPlanApproval", "active_plan_request_id": "activePlanRequestId",
+        "is_idle": "isIdle", "cleanup_pending": "cleanupPending", "cleanup_reason": "cleanupReason",
+    }
+    metadata = {target: source[key] for key, target in fields.items() if key in source}
+    # Lifecycle envelopes supply empty parent IDs and a default task ID. The
+    # durable record owns identity; absence in a refresh is not a reparenting.
+    for key in ("agent_path", "parent_run_id", "task_id", "turn_id", "objective", "teammate_name", "team_name"):
+        value = record.get(key) or data.get(key)
+        if value:
+            metadata[fields[key]] = value
+        else:
+            metadata.pop(fields[key], None)
+    if "parentRunId" not in metadata and data.get("parent_id"):
+        metadata["parentRunId"] = data["parent_id"]
+    return metadata
+
+
 def _project_subagent_start(state: dict[str, Any], data: dict[str, Any]) -> dict[str, Any] | None:
     subagent_id = str(data.get("subagent_id") or "").strip()
     if not subagent_id:
@@ -851,7 +880,8 @@ def _project_subagent_start(state: dict[str, Any], data: dict[str, Any]) -> dict
         "summary": str(data.get("prompt") or ""),
         **({"parentRunId": str(data.get("parent_run_id"))} if data.get("parent_run_id") is not None else {}),
         **({"turnId": str(data.get("turn_id"))} if data.get("turn_id") else {}),
-    })[-20:]
+        **_subagent_ui_metadata(data),
+    })
     return state
 
 
@@ -869,10 +899,11 @@ def _project_subagent_progress(state: dict[str, Any], data: dict[str, Any]) -> d
     }:
         return state
     summary = _subagent_summary(data)
+    reported_status = str(data.get("status") or "running")
     state["subagents"] = _upsert_by_id(list(state.get("subagents") or []), {
         "id": subagent_id,
-        "role": "subagent",
-        "status": "running",
+        "role": str((existing_subagent or {}).get("role") or "subagent"),
+        "status": reported_status if reported_status in {"pending", "running", "blocked"} else "running",
         **({"summary": summary} if summary else {}),
         **({"iteration": data.get("iteration")} if isinstance(data.get("iteration"), int) else {}),
         **({"maxIterations": data.get("max_iterations")} if isinstance(data.get("max_iterations"), int) else {}),
@@ -881,7 +912,8 @@ def _project_subagent_progress(state: dict[str, Any], data: dict[str, Any]) -> d
         **({"currentActivity": str(data.get("current_activity"))} if data.get("current_activity") is not None else {}),
         **({"waitingOn": str(data.get("waiting_on"))} if data.get("waiting_on") is not None else {}),
         **({"lastProgressAt": data.get("last_progress_at")} if isinstance(data.get("last_progress_at"), int) else {}),
-    })[-20:]
+        **_subagent_ui_metadata(data),
+    })
     return state
 
 
@@ -928,7 +960,8 @@ def _project_subagent_done(state: dict[str, Any], data: dict[str, Any]) -> dict[
         **({"objective": str(record.get("objective"))} if record.get("objective") else {}),
         **({"parentRunId": str(record.get("parent_run_id"))} if record.get("parent_run_id") else {}),
         **({"turnId": str(data.get("turn_id"))} if data.get("turn_id") else {}),
-    })[-20:]
+        **_subagent_ui_metadata(data),
+    })
     return state
 
 
@@ -1126,12 +1159,19 @@ def _reconcile_ui_agent_state_with_runtime(
 
     state = _coerce_ui_agent_state(current)
     changed = False
-    for existing in list(state.get("subagents") or []):
-        if not isinstance(existing, dict):
-            continue
-        subagent_id = str(existing.get("id") or "").strip()
-        if not subagent_id:
-            continue
+    inventory = runtime.list_runs(conversation_id=conversation_id, include_subagents=True)
+    owned_ids = {
+        str(record["subagent_id"])
+        for record in inventory.get("subagents", [])
+        if record.get("subagent_id")
+    }
+    # Seed from the durable runtime inventory as well: older UI snapshots only
+    # retained twenty rows and cannot themselves recover the omitted children.
+    candidate_ids = list(dict.fromkeys([
+        *(str(row.get("id") or "") for row in state["subagents"] if isinstance(row, dict) and row.get("id")),
+        *(str(record["subagent_id"]) for record in inventory.get("subagents", []) if record.get("subagent_id")),
+    ]))
+    for subagent_id in candidate_ids:
         try:
             subagent_snapshot = runtime.get_subagent_snapshot(
                 subagent_id,
@@ -1150,7 +1190,7 @@ def _reconcile_ui_agent_state_with_runtime(
 
         parent_run_id = str(subagent_snapshot.get("parent_run_id") or "").strip()
         parent_run = runtime.get_run(parent_run_id) if parent_run_id else None
-        if (
+        if subagent_id not in owned_ids and (
             parent_run is None
             or str(getattr(parent_run, "conversation_id", "") or "").strip()
             != str(conversation_id or "").strip()

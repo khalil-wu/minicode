@@ -905,6 +905,9 @@ class LLMAdapter(ABC):
         """Switch a replayable request to another supported transport, if any."""
         return False
 
+    async def transcribe_audio(self, content: bytes, *, filename: str, model: str, language: str = "", prompt: str = "") -> str:
+        raise NotImplementedError("当前服务商不支持语音转文字，请选择兼容 audio/transcriptions 的服务。")
+
     @abstractmethod
     async def stream_chat(
         self,

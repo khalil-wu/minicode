@@ -122,15 +122,15 @@ class WorkspaceService:
         )
 
     def read_file(self, path: str) -> WorkspaceFileResponse:
-        self.ensure_not_sensitive_file(
-            self.resolve_workspace_path(path, follow_final_symlink=False)
-        )
         target = self.resolve_workspace_path(path)
+        self.ensure_editor_file_allowed(
+            self.workspace_root_path() / self.normalize_workspace_relative(path),
+            resolved_path=target,
+        )
         if not target.exists():
             raise HTTPException(status_code=404, detail=f"Path not found: {path}")
         if not target.is_file():
             raise HTTPException(status_code=400, detail="Path must point to a file.")
-        self.ensure_not_sensitive_file(target)
 
         return self._read_file_snapshot(target, self.workspace_root_path(), path)
 
@@ -302,9 +302,12 @@ class WorkspaceService:
         )
 
     def compare_and_write_file(self, path: str, expected_hash: str, content: str) -> WorkspaceFileResponse:
-        self.ensure_write_allowed(self.resolve_workspace_path(path, follow_final_symlink=False))
         target = self.resolve_workspace_path(path)
-        self.ensure_write_allowed(target)
+        self.ensure_editor_file_allowed(
+            self.workspace_root_path() / self.normalize_workspace_relative(path),
+            operation="modify",
+            resolved_path=target,
+        )
         normalized_expected = (expected_hash or "").strip().lower()
         try:
             with file_mutation_locks([target]):
@@ -562,6 +565,23 @@ class WorkspaceService:
     def ensure_not_workspace_root(self, path: Path) -> None:
         if path.resolve() == self.workspace_root_path():
             raise HTTPException(status_code=400, detail="Operation on workspace root is not allowed.")
+
+    def ensure_editor_file_allowed(
+        self,
+        path: Path,
+        *,
+        operation: str = "read",
+        resolved_path: Path | None = None,
+    ) -> None:
+        """Allow the user's preview config in the GUI without widening agent access."""
+        root = self.workspace_root_path()
+        target = path.resolve() if resolved_path is None else resolved_path
+        launch_path = root / ".minicode" / "launch.json"
+        if path == launch_path and target == launch_path:
+            self.ensure_not_sensitive_file(root, operation=operation)
+            return
+        self.ensure_not_sensitive_file(path, operation=operation, resolved_path=target)
+        self.ensure_not_sensitive_file(target, operation=operation, resolved_path=target)
 
     @staticmethod
     def ensure_not_sensitive_file(

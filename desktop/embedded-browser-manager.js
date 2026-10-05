@@ -5,6 +5,7 @@ const net = require("node:net");
 const dns = require("node:dns").promises;
 const fs = require("node:fs");
 const path = require("node:path");
+const { atomicWriteTextSync } = require("./utils");
 
 const DEFAULT_PARTITION = "persist:minicode-browser";
 const ID_PATTERN = /^[a-zA-Z0-9_-]{1,96}$/;
@@ -81,15 +82,9 @@ function loadBrowserSettings() {
   }
 }
 
-function saveBrowserSettings() {
-  const file = settingsPath();
-  if (!file) return;
-  try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, `${JSON.stringify(browserSettings, null, 2)}\n`, "utf8");
-  } catch (error) {
-    appendDesktopLog(`[desktop] failed to save browser settings: ${error instanceof Error ? error.message : String(error)}`);
-  }
+function saveBrowserSettings(settings) {
+  atomicWriteTextSync(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`);
+  browserSettings = settings;
 }
 
 function getBrowserSettings(url = "") {
@@ -117,14 +112,15 @@ function setBrowserSettings(payload = {}) {
   if (origin && permission) {
     if (!SITE_PERMISSIONS.has(permission)) throw new Error("Unsupported browser site permission.");
   }
-  if (policy != null) browserSettings.downloadPolicy = policy;
+  const next = { ...browserSettings, sitePermissions: { ...browserSettings.sitePermissions } };
+  if (policy != null) next.downloadPolicy = policy;
   if (origin && permission) {
-    const current = new Set(Array.isArray(browserSettings.sitePermissions[origin]) ? browserSettings.sitePermissions[origin] : []);
+    const current = new Set(next.sitePermissions[origin] || []);
     if (payload.allowed) current.add(permission); else current.delete(permission);
-    if (current.size) browserSettings.sitePermissions[origin] = Array.from(current).sort();
-    else delete browserSettings.sitePermissions[origin];
+    if (current.size) next.sitePermissions[origin] = Array.from(current).sort();
+    else delete next.sitePermissions[origin];
   }
-  saveBrowserSettings();
+  saveBrowserSettings(next);
   return getBrowserSettings(origin);
 }
 
@@ -402,7 +398,9 @@ function makeNetworkLogEntry(details = {}, error = "") {
 function recordNetworkEvent(details, error = "") {
   const entry = entriesByWebContentsId.get(Number(details?.webContentsId));
   if (!entry) return;
-  entry.networkLogs.push(makeNetworkLogEntry(details, error));
+  const started = entry.networkStarted?.get(details.id);
+  entry.networkStarted?.delete(details.id);
+  entry.networkLogs.push({ ...makeNetworkLogEntry(details, error), durationMs: started == null ? undefined : Math.max(0, Date.now() - started) });
   if (entry.networkLogs.length > 200) entry.networkLogs.splice(0, entry.networkLogs.length - 200);
 }
 
@@ -445,6 +443,11 @@ function configureGuestSession(session) {
   const navigationFilter = { urls: ["http://*/*", "https://*/*"] };
   if (webRequest?.onBeforeRequest) {
     webRequest.onBeforeRequest(navigationFilter, (details, callback) => {
+      const owner = entriesByWebContentsId.get(Number(details.webContentsId));
+      if (owner) {
+        owner.networkStarted ??= new Map();
+        owner.networkStarted.set(details.id, Date.now());
+      }
       if (details.resourceType !== "mainFrame") {
         callback({ cancel: false });
         return;
@@ -549,7 +552,9 @@ function selectEntry(id, conversationId) {
 
 const scriptValue = (value) => JSON.stringify(value ?? null);
 
-async function evaluateInEntry(entry, expression) {
+async function evaluateInEntry(entry, expression, control = {}) {
+  control.signal?.throwIfAborted();
+  control.onSubmitted?.();
   return entry.view.webContents.executeJavaScript(expression, true);
 }
 
@@ -592,12 +597,12 @@ function recentLogsWithin(entries, maxChars) {
   return selected;
 }
 
-async function waitForSelector(entry, selector, timeoutMs) {
+async function waitForSelector(entry, selector, timeoutMs, control = {}) {
   const timeout = timeoutMs == null ? 5000 : Number(timeoutMs);
   if (!Number.isFinite(timeout)) throw new Error("timeout_ms must be a finite number");
   const deadline = Date.now() + Math.max(0, Math.min(timeout, 30000));
   while (true) {
-    if (await evaluateInEntry(entry, `Boolean(document.querySelector(${scriptValue(selector)}))`)) return true;
+    if (await evaluateInEntry(entry, `Boolean(document.querySelector(${scriptValue(selector)}))`, control)) return true;
     const remaining = deadline - Date.now();
     if (remaining <= 0) return false;
     await new Promise((resolve) => setTimeout(resolve, Math.min(150, remaining)));
@@ -657,11 +662,16 @@ const ELEMENT_PICKER_SCRIPT = `new Promise((resolve) => {
     if (!target) return;
     event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation();
     const rect = target.getBoundingClientRect();
+    const fiberKey = Object.keys(target).find((key) => key.startsWith('__reactFiber$'));
+    let fiber = fiberKey ? target[fiberKey] : null;
+    while (fiber && !fiber._debugSource) fiber = fiber.return;
+    const source = fiber?._debugSource;
     cleanup({
       selector: selectorFor(target),
       rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
-      text: String(target.innerText || target.textContent || '').trim().slice(0, 240)
+      text: String(target.innerText || target.textContent || '').trim().slice(0, 240),
+      source: source ? { path: source.fileName, line: source.lineNumber, column: source.columnNumber } : undefined
     });
   };
   const keydown = (event) => { if (event.key === 'Escape') cleanup(null); };
@@ -826,7 +836,7 @@ function attachViewEvents(entry) {
     appendDesktopLog(`[desktop] embedded browser renderer exited: ${details?.reason || "unknown"}`);
     emit(entry, "error", { error: "页面进程已退出，请刷新后重试。" });
   });
-  webContents.on("console-message", (_event, level, message, line, sourceId) => {
+  webContents.on("console-message", ({ level, message, lineNumber: line, sourceId }) => {
     entry.consoleLogs.push({
       level,
       message: String(message || "").slice(0, CONTROL_DEFAULT_MAX_CHARS),
@@ -838,7 +848,8 @@ function attachViewEvents(entry) {
   });
 }
 
-async function create(payload = {}) {
+async function create(payload = {}, control = {}) {
+  control.signal?.throwIfAborted();
   const { id, url } = payload;
   const conversationId = conversationIdFrom(payload);
   const requestedId = assertViewId(id);
@@ -854,6 +865,7 @@ async function create(payload = {}) {
   };
   try {
     const navigation = await confirmNavigationUrl(url, conversationId, entry);
+    control.signal?.throwIfAborted();
     assertCurrent();
     const requestedUrl = navigation.url;
     // Approval/DNS can yield; only this still-owned request may publish a view.
@@ -892,6 +904,8 @@ async function create(payload = {}) {
     if (navigation.privateNetworkApproved) {
       entry.approvedPrivateOrigins.add(normalizeOrigin(requestedUrl));
     }
+    control.signal?.throwIfAborted();
+    control.onSubmitted?.();
     await entry.view.webContents.loadURL(requestedUrl);
     assertCurrent();
     return navigationState(entry, "updated");
@@ -912,6 +926,29 @@ function setBounds(payload = {}) {
   const zoomFactor = Number(mainWindow.webContents.getZoomFactor?.()) || 1;
   const bounds = normalizeViewBounds({ x, y, width, height }, content, zoomFactor);
   entry.view.setBounds(bounds);
+  if ("viewport" in payload && bounds.width > 0 && bounds.height > 0) {
+    const viewport = payload.viewport;
+    if (viewport === null) {
+      if (entry.deviceViewport) entry.view.webContents.disableDeviceEmulation();
+      entry.deviceViewport = null;
+    } else {
+      if (!Number.isInteger(viewport?.width) || !Number.isInteger(viewport?.height)
+        || viewport.width < 240 || viewport.width > 3840 || viewport.height < 240 || viewport.height > 3840) {
+        throw new Error("预览视口宽高必须在 240–3840 px 之间。");
+      }
+      const scale = Math.min(bounds.width / viewport.width, bounds.height / viewport.height, 1);
+      const key = JSON.stringify([viewport.width, viewport.height, viewport.mobile, scale]);
+      if (entry.deviceViewport !== key) {
+        entry.view.webContents.enableDeviceEmulation({
+          screenPosition: viewport.mobile ? "mobile" : "desktop",
+          screenSize: { width: viewport.width, height: viewport.height },
+          viewPosition: { x: 0, y: 0 }, viewSize: { width: viewport.width, height: viewport.height },
+          deviceScaleFactor: 1, scale,
+        });
+        entry.deviceViewport = key;
+      }
+    }
+  }
   entry.view.setVisible(activeViewId === entry.id && bounds.width > 0 && bounds.height > 0);
   return true;
 }
@@ -927,13 +964,16 @@ async function clearSiteData(payload = {}) {
     storages: ["cookies", "filesystem", "indexdb", "localstorage", "serviceworkers", "cachestorage"],
   });
   loadBrowserSettings();
-  delete browserSettings.sitePermissions[origin];
+  const next = { ...browserSettings, sitePermissions: { ...browserSettings.sitePermissions } };
+  delete next.sitePermissions[origin];
+  saveBrowserSettings(next);
   if (entry.approvedPrivateOrigins instanceof Set) entry.approvedPrivateOrigins.delete(origin);
-  saveBrowserSettings();
   return true;
 }
 
-async function executeControlCommand(payload = {}) {
+async function executeControlCommand(payload = {}, control = {}) {
+  control.signal?.throwIfAborted();
+  const submit = () => { control.signal?.throwIfAborted(); control.onSubmitted?.(); };
   const conversationId = conversationIdFrom(payload);
   const action = String(payload.action || "").trim().toLowerCase();
   if (action === "discover" || action === "list_targets") {
@@ -950,11 +990,11 @@ async function executeControlCommand(payload = {}) {
     } catch (error) {
       if (requestedTargetId) throw error;
       const agentTabId = `agent_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-      await navigate({ id: agentTabId, url, conversation_id: conversationId });
+      await navigate({ id: agentTabId, url, conversation_id: conversationId }, control);
       entry = selectEntry(agentTabId, conversationId);
       alreadyNavigated = true;
     }
-    if (!alreadyNavigated) await navigate({ id: entry.id, url, conversation_id: conversationId });
+    if (!alreadyNavigated) await navigate({ id: entry.id, url, conversation_id: conversationId }, control);
     const waitMs = Math.max(0, Math.min(Number(payload.wait_ms) || 0, 5000));
     if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
     return { ok: true, action, target: targetState(entry) };
@@ -962,6 +1002,7 @@ async function executeControlCommand(payload = {}) {
   const entry = selectEntry(payload.target_id, conversationId);
   const webContents = entry.view.webContents;
   if (action === "screenshot") {
+    submit();
     const image = await webContents.capturePage();
     const size = image.getSize();
     const png = image.toPNG();
@@ -972,34 +1013,35 @@ async function executeControlCommand(payload = {}) {
     return { ok: true, action, target: targetState(entry), mimeType: "image/png", data: png.toString("base64"), width: size.width, height: size.height };
   }
   if (action === "get_url") return { ok: true, action, target: targetState(entry) };
-  if (action === "get_text") return { ok: true, action, target: targetState(entry), value: await evaluateInEntry(entry, pageStringExpression("document.body ? document.body.innerText : ''", payload.max_chars)) };
-  if (action === "get_html") return { ok: true, action, target: targetState(entry), value: await evaluateInEntry(entry, pageStringExpression("document.documentElement ? document.documentElement.outerHTML : ''", payload.max_chars)) };
+  if (action === "get_text") return { ok: true, action, target: targetState(entry), value: await evaluateInEntry(entry, pageStringExpression("document.body ? document.body.innerText : ''", payload.max_chars), control) };
+  if (action === "get_html") return { ok: true, action, target: targetState(entry), value: await evaluateInEntry(entry, pageStringExpression("document.documentElement ? document.documentElement.outerHTML : ''", payload.max_chars), control) };
   if (action === "get_dom") {
     const value = await evaluateInEntry(entry, `(() => Array.from(document.querySelectorAll('body *')).slice(0, 800).map((el) => ({
       tag: el.tagName.toLowerCase(), id: el.id || undefined, role: el.getAttribute('role') || undefined,
       ariaLabel: el.getAttribute('aria-label') || undefined,
       text: (el.childElementCount === 0 ? el.textContent : '').trim().slice(0, 240) || undefined
-    })))()`);
+    })))()`, control);
     return { ok: true, action, target: targetState(entry), value };
   }
   if (action === "wait_for_element") {
     const selector = String(payload.selector || "");
-    const found = await waitForSelector(entry, selector, payload.timeout_ms);
+    const found = await waitForSelector(entry, selector, payload.timeout_ms, control);
     return { ok: found, action, target: targetState(entry), value: found, error: found ? undefined : `Timed out waiting for element: ${selector}` };
   }
   if (action === "get_console_logs") return { ok: true, action, target: targetState(entry), value: recentLogsWithin(entry.consoleLogs, payload.max_chars) };
   if (action === "get_network_logs") return { ok: true, action, target: targetState(entry), value: recentLogsWithin(entry.networkLogs, payload.max_chars) };
   if (action === "pick_element" || action === "pick_region") {
     webContents.focus();
-    const value = await evaluateInEntry(entry, action === "pick_element" ? ELEMENT_PICKER_SCRIPT : REGION_PICKER_SCRIPT);
+    const value = await evaluateInEntry(entry, action === "pick_element" ? ELEMENT_PICKER_SCRIPT : REGION_PICKER_SCRIPT, control);
     return { ok: true, action, target: targetState(entry), value };
   }
   if (action === "click") {
     const selector = String(payload.selector || "").trim();
     if (selector) {
-      const result = await evaluateInEntry(entry, `(() => { const el = document.querySelector(${scriptValue(selector)}); if (!el) return { ok: false }; el.scrollIntoView({ block: 'center', inline: 'center' }); el.click(); return { ok: true }; })()`);
+      const result = await evaluateInEntry(entry, `(() => { const el = document.querySelector(${scriptValue(selector)}); if (!el) return { ok: false }; el.scrollIntoView({ block: 'center', inline: 'center' }); el.click(); return { ok: true }; })()`, control);
       if (!result?.ok) throw new Error(`Element not found: ${selector}`);
     } else {
+      submit();
       webContents.sendInputEvent({ type: "mouseDown", x: Number(payload.x), y: Number(payload.y), button: "left", clickCount: 1 });
       webContents.sendInputEvent({ type: "mouseUp", x: Number(payload.x), y: Number(payload.y), button: "left", clickCount: 1 });
     }
@@ -1008,13 +1050,15 @@ async function executeControlCommand(payload = {}) {
   if (action === "type") {
     const selector = String(payload.selector || "").trim();
     if (selector) {
-      const result = await evaluateInEntry(entry, `(() => { const el = document.querySelector(${scriptValue(selector)}); if (!el) return { ok: false }; el.focus(); if (${Boolean(payload.clear)}) { if ('value' in el) el.value = ''; else if (el.isContentEditable) el.textContent = ''; el.dispatchEvent(new Event('input', { bubbles: true })); } return { ok: true }; })()`);
+      const result = await evaluateInEntry(entry, `(() => { const el = document.querySelector(${scriptValue(selector)}); if (!el) return { ok: false }; el.focus(); if (${Boolean(payload.clear)}) { if ('value' in el) el.value = ''; else if (el.isContentEditable) el.textContent = ''; el.dispatchEvent(new Event('input', { bubbles: true })); } return { ok: true }; })()`, control);
       if (!result?.ok) throw new Error(`Element not found: ${selector}`);
     }
+    submit();
     await webContents.insertText(String(payload.text || ""));
     return { ok: true, action, target: targetState(entry), value: String(payload.text || "").length };
   }
   if (action === "press_key") {
+    submit();
     const key = String(payload.key || "");
     webContents.sendInputEvent({ type: "keyDown", keyCode: key });
     webContents.sendInputEvent({ type: "keyUp", keyCode: key });
@@ -1026,11 +1070,11 @@ async function executeControlCommand(payload = {}) {
     const deltaY = payload.delta_y == null ? 600 : Number(payload.delta_y) || 0;
     const value = await evaluateInEntry(entry, selector
       ? `(() => { const el = document.querySelector(${scriptValue(selector)}); if (!el) return { ok: false }; el.scrollBy(${deltaX}, ${deltaY}); return { ok: true, left: el.scrollLeft, top: el.scrollTop }; })()`
-      : `(() => { window.scrollBy(${deltaX}, ${deltaY}); return { ok: true, x: window.scrollX, y: window.scrollY }; })()`);
+      : `(() => { window.scrollBy(${deltaX}, ${deltaY}); return { ok: true, x: window.scrollX, y: window.scrollY }; })()`, control);
     if (!value?.ok) throw new Error(`Element not found: ${selector}`);
     return { ok: true, action, target: targetState(entry), value };
   }
-  if (action === "evaluate") return { ok: true, action, target: targetState(entry), value: await evaluateInEntry(entry, evaluatedValueExpression(String(payload.expression || ""), payload.max_chars)) };
+  if (action === "evaluate") return { ok: true, action, target: targetState(entry), value: await evaluateInEntry(entry, evaluatedValueExpression(String(payload.expression || ""), payload.max_chars), control) };
   throw new Error(`Unsupported embedded browser action: ${action}`);
 }
 

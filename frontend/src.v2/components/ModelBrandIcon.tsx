@@ -1,4 +1,4 @@
-import { Sparkles } from "lucide-react";
+import { Sparkles } from "../lib/icons";
 import type { CSSProperties } from "react";
 import "./ModelBrandIcon.css";
 import { BrandIcon } from "./BrandIcon";
@@ -86,6 +86,7 @@ export const resolveModelBrand = (value: string): BrandDefinition | null => {
 export const ModelBrandIcon = ({
   model,
   provider,
+  entity = "model",
   size = 16,
   framed = false,
   className,
@@ -93,12 +94,15 @@ export const ModelBrandIcon = ({
 }: {
   model?: string;
   provider?: string;
+  entity?: "model" | "provider";
   size?: number;
   framed?: boolean;
   className?: string;
   websiteUrl?: string;
 }) => {
-  const brand = resolveModelBrand(model ?? "") ?? resolveModelBrand(provider ?? "");
+  const brand = entity === "provider"
+    ? resolveModelBrand(provider ?? "")
+    : resolveModelBrand(model ?? "") ?? resolveModelBrand(provider ?? "");
   const iconSize = framed ? Math.max(13, Math.round(size * 0.72)) : size;
   const wrapperStyle: CSSProperties = {
     width: size,
@@ -119,10 +123,11 @@ export const ModelBrandIcon = ({
       style={wrapperStyle}
       aria-hidden="true"
       data-model-brand={brand?.id ?? "custom"}
+      data-brand-entity={entity}
     >
       {!brand ? (
         <BrandIcon
-          value={`${model || ""} ${provider || ""}`}
+          value={entity === "provider" ? provider || "" : `${model || ""} ${provider || ""}`}
           websiteUrl={websiteUrl}
           fallback="skill"
           fallbackIcon={<Sparkles size={iconSize} strokeWidth={1.8} />}
@@ -134,7 +139,7 @@ export const ModelBrandIcon = ({
           alt=""
           width={iconSize}
           height={iconSize}
-          className={brand.color ? "model-brand-icon-color" : "model-brand-icon-mono"}
+          className={`brand-icon-image ${brand.color ? "model-brand-icon-color" : "model-brand-icon-mono"}`}
           data-icon-kind={brand.color ? "color" : "mono"}
         />
       )}

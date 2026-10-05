@@ -5,7 +5,7 @@
  * Inspector. This panel only answers: what is being worked on, where it stands,
  * and what result is available.
  */
-import { ArrowLeft, Bot, ChevronDown, ChevronRight, RefreshCw, Square } from "lucide-react";
+import { ArrowLeft, ArrowUp, Bot, ChevronDown, ChevronRight, RefreshCw, Square } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { projectMessagesToTurns } from "../../chat/chatSurfaceState";
 import { ChatTurn } from "../../chat/components/ChatTurn";
@@ -14,16 +14,20 @@ import {
   type BackendTranscriptMessage,
 } from "../../chat/transcriptHydration";
 import { AgentAvatar } from "../../components/AgentAvatar";
+import { MarkdownRenderer } from "../../chat/messages/MarkdownRenderer";
+import { SubagentPlanReviewCard } from "../../chat/InlineAgentPrompt";
 import {
   projectAgentViews,
   type AgentView,
+  type AgentLink,
 } from "../../lib/agent-view-model";
 import {
   commandResultSucceeded,
   sendClientCommandAwaitResult,
 } from "../../protocol/ws-outbox";
 import { useAppStore } from "../../stores";
-import type { ChatMessage } from "../../stores/types";
+import { promptDraftKey } from "../../stores/prompt-drafts";
+import type { ChatMessage, PendingAskUser, SubagentState } from "../../stores/types";
 import { pushToast } from "../../overlays/ToastContainer";
 import { EmptyLine, SmallButton } from "../SidebarShared";
 import "./SubagentsTab.css";
@@ -99,7 +103,7 @@ const AgentGlyph = ({ view, large = false }: { view: AgentView; large?: boolean 
   return (
     <AgentAvatar
       className="subagents-glyph"
-      tone={view.glyphTone}
+      identityKey={view.identityKey}
       status={view.status}
       size={large ? "large" : "medium"}
     />
@@ -137,6 +141,92 @@ const AgentRow = ({
   </button>
 );
 
+const AgentRelationLink = ({ agent }: { agent: AgentLink }) => (
+  <button type="button" className="subagents-relation-link" onClick={() => useAppStore.getState().setFocusedSubagentId(agent.id)}>
+    <AgentAvatar identityKey={agent.identityKey} size="small" showStatus={false} />
+    <span>{agent.title}</span>
+  </button>
+);
+
+const AgentFollowup = ({ view, conversationId, workspaceRoot }: {
+  view: AgentView;
+  conversationId: string;
+  workspaceRoot: string;
+}) => {
+  const draftOwner = { conversationId, requestId: `subagent-followup:${JSON.stringify([workspaceRoot, view.id])}` };
+  const draftKey = promptDraftKey(draftOwner);
+  const draft = useAppStore((state) => state.promptDrafts[draftKey]?.answer ?? "");
+  const updatePromptDraft = useAppStore((state) => state.updatePromptDraft);
+  const [expanded, setExpanded] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [receipt, setReceipt] = useState("");
+  const [error, setError] = useState("");
+  const isConnected = useAppStore((state) => state.isConnected);
+  const willResume = ["done", "partial", "cancelled", "error"].includes(view.effectiveStatus);
+  const send = async () => {
+    const message = draft.trim();
+    if (!message || sending || !isConnected) return;
+    setSending(true);
+    setError("");
+    setReceipt("");
+    try {
+      const result = await sendClientCommandAwaitResult({
+        type: "send_message", recipient: view.id, message,
+        conversation_id: conversationId, workspace_root: workspaceRoot,
+      }, "send_message", { silent: true });
+      if (!commandResultSucceeded(result)) throw new Error(result.message || "补充说明未被接收");
+      if (useAppStore.getState().promptDrafts[draftKey]?.answer === draft) {
+        updatePromptDraft(draftOwner, { answer: "" });
+      }
+      setReceipt(result.data?.resumed === true ? "说明已送达，任务已继续。" : "已投递给子智能体，等待它处理。");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "发送失败，请重试。");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <section className="subagents-followup-region">
+      <button type="button" className="subagents-followup-toggle" aria-expanded={expanded}
+        aria-controls={expanded ? `agent-followup-form-${view.id}` : undefined}
+        onClick={() => setExpanded(!expanded)}>
+        <ChevronRight size={13} aria-hidden="true" />
+        <span>补充指令</span>
+        {draft && <small>草稿</small>}
+      </button>
+      {expanded && <form id={`agent-followup-form-${view.id}`} className="subagents-followup" onSubmit={(event) => { event.preventDefault(); void send(); }}>
+      <div className="subagents-followup-input">
+        <textarea
+          id={`agent-followup-${view.id}`}
+          aria-label={`给${view.title}补充说明`}
+          placeholder={willResume ? "继续这个任务，说明下一步…" : "补充方向、要求或上下文…"}
+          rows={2}
+          autoFocus
+          value={draft}
+          disabled={sending}
+          onChange={(event) => {
+            updatePromptDraft(draftOwner, { answer: event.target.value });
+            setReceipt("");
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+              event.preventDefault(); void send();
+            }
+          }}
+        />
+        <button type="submit" disabled={!isConnected || sending || !draft.trim()} aria-label={willResume ? "发送说明并继续任务" : "发送补充说明"} title="Ctrl+Enter 发送">
+          <ArrowUp size={15} />
+        </button>
+      </div>
+      <span className="subagents-followup-hint">{!isConnected ? "连接恢复后可发送" : sending ? "正在发送…" : willResume ? "发送后将继续这个子任务 · Ctrl+Enter" : "仅发送给当前子任务 · Ctrl+Enter"}</span>
+      </form>}
+      {receipt && <span className="subagents-followup-receipt" role="status">{receipt}</span>}
+      {error && <span className="subagents-followup-error" role="alert">{error}</span>}
+    </section>
+  );
+};
+
 const AgentDetail = ({
   view,
   onBack,
@@ -149,6 +239,9 @@ const AgentDetail = ({
   transcriptError,
   onRefreshTranscript,
   pendingAction,
+  source,
+  agents,
+  planRequest,
 }: {
   view: AgentView;
   onBack: () => void;
@@ -162,6 +255,9 @@ const AgentDetail = ({
   transcriptError: string;
   onRefreshTranscript: () => void;
   pendingAction: "stop" | "result" | null;
+  source: SubagentState;
+  agents: AgentView[];
+  planRequest?: PendingAskUser;
 }) => {
   const isLive = view.status === "running" || view.status === "waiting";
   const turns = useMemo(
@@ -216,6 +312,21 @@ const AgentDetail = ({
       </header>
 
       <div className="subagents-detail-body">
+        <div className="subagents-context" aria-label="任务关系">
+          {view.teammateName && <span className="subagents-identity-name">{view.teammateName}{view.teamName ? ` · ${view.teamName}` : ""}</span>}
+          {view.parent && <div className="subagents-relation"><span>由</span><AgentRelationLink agent={view.parent} /><span>委派</span></div>}
+          {(view.blockedDependencies.length > 0 || view.dependencies.length > 0) && <div className="subagents-relation">
+            <span>{view.blockedDependencies.length > 0 ? "正在等待" : "前置任务"}</span>
+            {(view.blockedDependencies.length > 0 ? view.blockedDependencies : view.dependencies).map((agent) => <AgentRelationLink key={agent.id} agent={agent} />)}
+          </div>}
+          {view.children.length > 0 && <div className="subagents-relation"><span>已委派</span>{view.children.map((agent) => <AgentRelationLink key={agent.id} agent={agent} />)}</div>}
+          {source.readOnly === true && <span>只读任务</span>}
+          {source.writeScope?.length ? <details className="subagents-scope"><summary>允许修改的范围</summary>{source.writeScope.map((path) => <div key={path}>{path}</div>)}</details> : null}
+        </div>
+        {planRequest?.planReview && <SubagentPlanReviewCard request={planRequest} review={planRequest.planReview} />}
+        {view.status === "attention" && !planRequest && !view.resultError && !source.cleanupPending && (
+          <div className="subagents-attention" role="status">{view.summary}</div>
+        )}
         {view.canStop && view.effectiveStatus !== "running" && view.statusLabel === "清理未完成" && (
           <div className="subagents-transcript-error" role="status">{view.summary}</div>
         )}
@@ -235,9 +346,13 @@ const AgentDetail = ({
         )}
         {!transcriptLoading && !transcriptError && turns.length === 0 && (
           <div className="subagents-transcript-empty">
-            {isLive ? "子智能体正在启动，工作记录会实时显示在这里。" : "这个子智能体没有可回放的工作记录。"}
+            {isLive ? "子智能体正在启动，工作记录会实时显示在这里。" : view.resultContent ? "此任务保留了结果，暂无可回放的工作记录。" : "这个子智能体没有可回放的工作记录。"}
           </div>
         )}
+        {view.resultContent && <details className="subagents-retained-result" open={turns.length === 0 || undefined}>
+          <summary>保留结果</summary>
+          <div className="subagents-retained-result-content"><MarkdownRenderer content={view.resultContent} conversationId={conversationId} workspaceRoot={workspaceRoot} /></div>
+        </details>}
         {turns.length > 0 && (
           <div className="subagents-transcript" aria-label="子智能体工作记录">
             {turns.map((turn) => (
@@ -255,6 +370,25 @@ const AgentDetail = ({
           <div className="subagents-detail-actions">
             <SmallButton icon={<ChevronRight size={14} />} label={pendingAction === "result" ? "正在获取" : "获取结果"} onClick={onFetchResult} disabled={pendingAction != null} />
           </div>
+        )}
+        {source.messages?.length ? <details className="subagents-messages">
+          <summary>协作消息 · {source.messages.length}</summary>
+          {source.messages.map((message) => {
+            const sender = agents.find((agent) => agent.id === message.senderId || agent.teammateName === message.senderId);
+            const recipient = agents.find((agent) => agent.id === message.recipientId || agent.teammateName === message.recipientId);
+            return <div className="subagents-message" key={message.messageId}>
+              <div className="subagents-message-heading">
+                {sender ? <AgentRelationLink agent={sender} /> : <span>{message.senderId === "user" ? "你" : message.senderId === "parent" ? "主任务" : "协作者"}</span>}
+                <span>→</span>
+                {recipient ? <AgentRelationLink agent={recipient} /> : <span>{message.recipientId === "parent" ? "主任务" : "协作者"}</span>}
+                {message.deliveryStatus && <small>{message.deliveryStatus === "sent" ? "已投递" : message.deliveryStatus === "sending" ? "发送中" : "发送失败"}</small>}
+              </div>
+              <p>{message.content}</p>
+            </div>;
+          })}
+        </details> : null}
+        {conversationId && !planRequest && !view.awaitingPlanApproval && !source.cleanupPending && (
+          <AgentFollowup key={JSON.stringify([conversationId, workspaceRoot, view.id])} view={view} conversationId={conversationId} workspaceRoot={workspaceRoot} />
         )}
       </div>
     </section>
@@ -278,6 +412,8 @@ export const SubagentsTab = () => {
   const views = projectAgentViews(subagents);
   const selectedView = views.find((view) => view.id === selectedAgentId);
   const selectedAgent = subagents.find((agent) => agent.id === selectedAgentId);
+  const pendingAskUser = useAppStore((state) => state.pendingAskUser);
+  const askUserQueue = useAppStore((state) => state.askUserQueue);
   const conversationId = useAppStore((state) => state.conversationId);
   const workingDirectory = useAppStore((state) => state.workingDirectory);
   const visibleTranscript = transcriptPresentation.ownerId === selectedAgentId
@@ -470,11 +606,19 @@ export const SubagentsTab = () => {
     }
   };
 
-  if (selectedView) {
+  if (selectedView && selectedAgent) {
+    const planRequest = [pendingAskUser, ...askUserQueue].find((request) =>
+      ["pending", "running", "blocked"].includes(selectedAgent.status)
+      && request?.conversationId === conversationId && request?.planReview?.subagentId === selectedView.id
+      && (!selectedAgent.activePlanRequestId || selectedAgent.activePlanRequestId === request.requestId),
+    ) ?? undefined;
     return (
       <AgentDetail
         key={`${conversationId}:${selectedView.id}`}
         view={selectedView}
+        source={selectedAgent}
+        agents={views}
+        planRequest={planRequest}
         onBack={() => setSelectedAgentId(null)}
         onFetchResult={() => void fetchResult(selectedView.id)}
         onStop={() => void stop(selectedView.id)}
@@ -506,8 +650,8 @@ export const SubagentsTab = () => {
   const attentionViews = views.filter((view) => view.status === "attention");
   const completedViews = views.filter((view) => view.status === "completed");
   const groups = [
-    { key: "active", label: "进行中", items: activeViews },
     { key: "attention", label: "需要处理", items: attentionViews },
+    { key: "active", label: "进行中", items: activeViews },
     { key: "completed", label: "已完成", items: completedViews },
   ] as const;
 

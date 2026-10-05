@@ -120,7 +120,7 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
         border: "1px solid var(--border-subtle)",
         borderRadius: "var(--radius-md)",
         boxShadow: "var(--shadow-strong-overlay)",
-        padding: "5px",
+        padding: "6px",
         outline: "none",
       }}
     >
@@ -132,7 +132,7 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
             style={{
               height: 1,
               background: "var(--border-subtle)",
-              margin: "5px 8px",
+              margin: "5px 10px",
             }}
           />
         ) : (
@@ -154,7 +154,7 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
               alignItems: "center",
               gap: 8,
               width: "100%",
-              minHeight: 32,
+              minHeight: 34,
               textAlign: "left",
               background: "transparent",
               border: 0,
@@ -162,7 +162,7 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
                 ? "var(--text-muted)"
                 : item.danger ? "var(--state-danger)" : "var(--text-primary)",
               cursor: item.disabled ? "default" : "pointer",
-              padding: "5px 8px",
+              padding: "6px 10px",
               fontSize: "var(--mc-font-body)",
               lineHeight: "var(--leading-snug)",
               opacity: item.disabled ? 0.45 : 1,

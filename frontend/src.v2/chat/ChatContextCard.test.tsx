@@ -78,6 +78,22 @@ describe("ChatContextCard", () => {
 
   afterEach(cleanup);
 
+  it("summarizes failed, stopped, waiting and completed agents truthfully", () => {
+    useAppStore.setState({ subagents: [
+      { id: "running", role: "explore", status: "running", objective: "检查代码" },
+      { id: "failed", role: "explore", status: "error", objective: "检查样式" },
+      { id: "stopped", role: "explore", status: "cancelled", terminationInitiator: "user" },
+      { id: "waiting", role: "explore", status: "blocked", blockedBy: ["build"] },
+      { id: "done", role: "explore", status: "done" },
+    ] });
+    render(<ChatContextCard />);
+    expect(screen.getByRole("button", { name: "1 失败 · 1 已停止 · 1 运行中 · 1 等待中 · 1 已完成" })).toBeTruthy();
+    expect(screen.queryByText("4 个运行中")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "打开子智能体：检查样式" }));
+    expect(useAppStore.getState().focusedSubagentId).toBe("failed");
+    expect(useAppStore.getState().rightStackTab).toBe("subagents");
+  });
+
   it("does not render the context card for text-only stream updates", () => {
     const onRender = vi.fn();
     render(<Profiler id="context" onRender={onRender}><ChatContextCard /></Profiler>);
@@ -93,7 +109,7 @@ describe("ChatContextCard", () => {
     const { container } = render(<ChatContextCard />);
 
     expect(screen.getByRole("complementary", { name: "工作区上下文摘要" })).toBeTruthy();
-    expect(screen.getByText("环境信息")).toBeTruthy();
+    expect(container.querySelector(".mc-chat-context-card-header")?.textContent).toContain("MiniCode");
     expect(screen.getByText("附件")).toBeTruthy();
     expect(screen.getByText("layout-reference.png")).toBeTruthy();
     expect(screen.getByText("Layout guide")).toBeTruthy();

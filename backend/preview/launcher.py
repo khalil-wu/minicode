@@ -100,6 +100,7 @@ class PreviewLaunchProcess:
             "port": self.effective_port,
             "url": self.effective_url,
             "pid": self.process.pid,
+            "exit_code": self.process.returncode,
             "status": self.status,
             "cleanup_pending": self.cleanup_pending,
             "cleanup_reason": self.cleanup_reason,

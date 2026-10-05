@@ -29,6 +29,7 @@ model can correct the call without entering a second execution path.
 from __future__ import annotations
 
 import difflib
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -66,6 +67,7 @@ class PatchHunk:
     new_lines: list[str] = field(default_factory=list)
     is_eof: bool = False
     change_context: str | None = None
+    context_line_indices: list[tuple[int, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -239,10 +241,12 @@ def _parse_update_hunks(
             current.old_lines.append(row[1:])
         elif row.startswith(" "):
             # Context line belongs to both sides.
+            current.context_line_indices.append((len(current.old_lines), len(current.new_lines)))
             current.old_lines.append(row[1:])
             current.new_lines.append(row[1:])
         elif row == "":
             # A bare empty line is treated as an empty context line.
+            current.context_line_indices.append((len(current.old_lines), len(current.new_lines)))
             current.old_lines.append("")
             current.new_lines.append("")
         else:
@@ -263,9 +267,14 @@ def apply_update_hunks(original: str, hunks: list[PatchHunk], path: str) -> str:
     only then relaxes whitespace/punctuation (see ``_find_block``). Raises
     ApplyPatchError if a hunk's context cannot be found.
     """
-    orig_lines = original.split("\n")
-    if orig_lines and orig_lines[-1] == "":
-        orig_lines.pop()
+    source_lines = re.findall(r"[^\r\n]*(?:\r\n|\r|\n|$)", original)
+    if source_lines and source_lines[-1] == "":
+        source_lines.pop()
+    orig_lines = [line.rstrip("\r\n") for line in source_lines]
+    line_ending = next(
+        (line[len(text):] for line, text in zip(source_lines, orig_lines) if len(line) > len(text)),
+        "\n",
+    )
     replacements: list[tuple[int, int, list[str]]] = []
     cursor = 0
 
@@ -288,7 +297,7 @@ def apply_update_hunks(original: str, hunks: list[PatchHunk], path: str) -> str:
         if not old_block:
             # Codex treats a chunk without old lines as an append, including
             # when an orientation anchor was provided.
-            insertion = len(orig_lines) - int(bool(orig_lines and orig_lines[-1] == ""))
+            insertion = len(orig_lines)
             replacements.append((insertion, 0, list(hunk.new_lines)))
             continue
         new_block = hunk.new_lines
@@ -308,15 +317,27 @@ def apply_update_hunks(original: str, hunks: list[PatchHunk], path: str) -> str:
                     label="hunk",
                 )
             )
-        replacements.append((match_at, len(old_block), list(new_block)))
+        old_start = new_start = 0
+        for old_context, new_context in hunk.context_line_indices:
+            if old_context >= len(old_block) or new_context >= len(new_block):
+                break
+            if old_start != old_context or new_start != new_context:
+                replacements.append((
+                    match_at + old_start, old_context - old_start,
+                    list(new_block[new_start:new_context]),
+                ))
+            old_start = old_context + 1
+            new_start = new_context + 1
+        if old_start != len(old_block) or new_start != len(new_block):
+            replacements.append((match_at + old_start, len(old_block) - old_start, list(new_block[new_start:])))
         cursor = match_at + len(old_block)
 
-    result = list(orig_lines)
+    result = list(source_lines)
     for start, old_length, replacement in reversed(sorted(replacements, key=lambda item: item[0])):
-        result[start:start + old_length] = replacement
-    if not result or result[-1] != "":
-        result.append("")
-    return "\n".join(result)
+        result[start:start + old_length] = [line + line_ending for line in replacement]
+    # Preserve unchanged lines byte-for-byte, retaining the existing trailing-
+    # newline convention for an unterminated final line moved by an insertion.
+    return "".join(line if line.endswith(("\r", "\n")) else line + line_ending for line in result)
 
 
 def _find_block(haystack: list[str], block: list[str], start: int, *, eof: bool = False) -> int:

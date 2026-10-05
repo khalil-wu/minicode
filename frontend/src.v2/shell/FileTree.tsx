@@ -15,6 +15,7 @@ import {
   type WorkspaceTreeNode,
 } from "../protocol/workspace";
 import { useAppStore } from "../stores";
+import { WorkspaceSearchPanel } from "../panels/WorkspaceSearchPanel";
 import type { FileTreeRevealRequest } from "../stores/types";
 import { isDesktop, fsListTree, fsSearchFiles, trustWorkspace } from "../desktop/runtime";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
@@ -67,6 +68,7 @@ import {
 } from "../lib/workspace-path";
 
 export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
+  const workspaceSearchOpen = useAppStore((state) => state.workspaceSearchOpen);
   const [tree, setTree] = useState<WorkspaceTreeNode | null>(null);
   const [isListScrolling, setIsListScrolling] = useState(false);
   const scrollFadeTimerRef = useRef<number | null>(null);
@@ -587,6 +589,8 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     }
   };
 
+  if (workspaceSearchOpen) return <WorkspaceSearchPanel onNavigate={onNavigate} />;
+
   if (loading && !tree) {
     return (
       <div style={{ padding: 12, color: "var(--text-muted)", fontSize: "var(--text-sm)", display: "grid", gap: 8 }}>
@@ -667,6 +671,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       </div>
       {workspaceMenu && workspaceRootsEqual(workspaceMenu.path, workingDirectory) && <WorkspaceContextMenu path={workspaceMenu.path} position={workspaceMenu} onClose={() => setWorkspaceMenu(null)} />}
       <div style={fileTreeToolbarStyle}>
+        <button type="button" className="mc-icon-button mc-icon-button-compact file-tree-action" aria-label="搜索项目内容" title="搜索项目内容 · Ctrl+Shift+F" onClick={() => useAppStore.getState().openWorkspaceSearch()}><Search size={14} /></button>
         <div style={fileTreeSearchStyle}>
           <Search size={14} aria-hidden="true" />
           <input aria-label="搜索工作区文件" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文件" style={fileTreeSearchInputStyle} />

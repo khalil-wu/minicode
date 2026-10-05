@@ -39,10 +39,45 @@ vi.mock("./DialogService", () => ({
 }));
 
 describe("CommandPalette pending user action guard", () => {
+  it.each([
+    ["搜索项目内容", "search"],
+    ["查看代码问题", "problems"],
+    ["管理预览服务", "preview"],
+  ] as const)("opens %s through its concrete workspace entry", (label, target) => {
+    useAppStore.setState({ conversationId: "conv-entry", workingDirectory: "C:/Workspace", runtimeSession: null,
+      runtimeCapabilities: null, workspaceSearchOpen: false, dockCollapsed: true, rightPanelOpen: false,
+      previewServiceManagerRequest: null, appMode: "cowork" });
+    render(<CommandPalette />);
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: label } });
+    fireEvent.click(screen.getByRole("option", { name: new RegExp(label) }));
+    const state = useAppStore.getState();
+    expect(state.commandPaletteOpen).toBe(false);
+    if (target === "search") {
+      expect(state.workspaceSearchOpen).toBe(true);
+      expect(state.appMode).toBe("code");
+    } else if (target === "problems") {
+      expect(state.activeBottomTab).toBe("problems");
+      expect(state.dockCollapsed).toBe(false);
+    } else {
+      expect(state.rightStackTab).toBe("browser");
+      expect(state.rightPanelOpen).toBe(true);
+      expect(state.previewServiceManagerRequest).toMatchObject({ conversationId: "conv-entry", workspaceRoot: "C:/Workspace" });
+    }
+  });
+  it("finds the end of a long conversation goal using a trimmed query", () => {
+    useAppStore.setState({ commandPaletteOpen: true, runtimeSession: null, runtimeCapabilities: null,
+      conversationId: "active", conversations: [{ id: "goal-result", title: "Review the project", goal: { text: `${"Earlier details ".repeat(8)}needle-at-the-end`, status: "active" } }],
+      pendingApproval: null, pendingDiffReview: null, pendingAskUser: null, slashCommands: [] });
+    render(<CommandPalette />);
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "  needle-at-the-end  " } });
+    expect(screen.getByRole("option", { name: /Review the project/ })).toBeTruthy();
+    expect(screen.getByText(/needle-at-the-end/)).toBeTruthy();
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     useAppStore.setState({
       commandPaletteOpen: true,
+      conversations: [],
       pendingApproval: null,
       pendingDiffReview: null,
       pendingAskUser: null,

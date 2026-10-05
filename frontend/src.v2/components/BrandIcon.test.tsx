@@ -22,6 +22,15 @@ describe("BrandIcon", () => {
     expect(container.querySelector('[data-brand="generic"] svg')).toBeTruthy();
   });
 
+  it("applies monochrome theme treatment only to known monochrome assets", () => {
+    const view = render(<BrandIcon value="OpenAI" />);
+    expect(view.container.querySelector('img.brand-icon-image[data-icon-kind="mono"]')).toBeTruthy();
+    view.rerender(<BrandIcon value="Claude" />);
+    expect(view.container.querySelector('img.brand-icon-image[data-icon-kind="color"]')).toBeTruthy();
+    view.rerender(<BrandIcon value="OpenAI" iconUrl="https://example.com/extension-color.svg" />);
+    expect(view.container.querySelector('img')?.hasAttribute("data-icon-kind")).toBe(false);
+  });
+
   it("uses a website favicon when no official brand icon is known", () => {
     expect(resolveWebsiteIcon(undefined, "https://example.com/docs/start")).toBe(
       "https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fexample.com&sz=64",
@@ -30,6 +39,15 @@ describe("BrandIcon", () => {
     expect(container.querySelector('[data-brand="website"] img')?.getAttribute("src")).toBe(
       "https://www.google.com/s2/favicons?domain_url=https%3A%2F%2Fexample.com&sz=64",
     );
+  });
+
+  it.each([
+    "https://news.bjd.com.cn/report?utm_source=openai",
+    "https://example.com/articles/claude?ref=github",
+  ])("identifies a web source by its hostname, ignoring article text and tracking parameters: %s", (websiteUrl) => {
+    const { container } = render(<BrandIcon value={`OpenAI Claude GitHub ${websiteUrl}`} websiteUrl={websiteUrl} fallback="web" />);
+    expect(container.querySelector('[data-brand="website"] img')?.getAttribute("src")).toContain(encodeURIComponent(new URL(websiteUrl).origin));
+    expect(container.querySelector(".brand-icon-image")).toBeNull();
   });
 
   it("tries domain discovery and the site favicon before the neutral icon", () => {

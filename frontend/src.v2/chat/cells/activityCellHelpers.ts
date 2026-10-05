@@ -60,6 +60,16 @@ export function isWebFetchRecord(record: ActivityToolRecord): boolean {
   return name === "web_fetch" || name === "webfetch" || resultKind === "web";
 }
 
+export function webFetchEvidenceLabel(record: ActivityToolRecord): string {
+  if (!isWebFetchRecord(record) && record.evidenceType !== "fetched") return "";
+  if (record.extractionStatus === "failed" || ["failed", "blocked", "timeout", "cancelled"].includes(record.status)) {
+    return "未获取有效内容";
+  }
+  if (record.extractionStatus === "partial" || record.status === "partial") return "内容不完整";
+  if (record.extractionStatus === "ok") return "已获取正文";
+  return record.status === "success" ? "抓取状态未确认" : "";
+}
+
 export function isWebFetchActivity(
   cell: Pick<ActivityCellState, "activityKind" | "toolCallRecords">,
 ): boolean {
@@ -324,10 +334,10 @@ export const isCodeModeRecord = (record: ActivityToolRecord): boolean =>
  * Only these two known tools produce this envelope: code, DOM and stdout
  * that happen to mention cell/call ids must retain their actual bytes. */
 export function getRecordOutputText(record: ActivityToolRecord): string {
-  if (["monitor", "task_status", "task_get", "task_list", "task_create", "task_update", "task_output"].includes(record.name) && record.contentPreview) {
+  if (["monitor", "task", "task_status", "task_get", "task_list", "task_create", "task_update", "task_output"].includes(record.name) && record.contentPreview) {
     return record.contentPreview;
   }
-  const raw = [record.outputPreview, record.contentPreview, record.stdoutPreview, record.summary]
+  const raw = [record.outputPreview, record.summary, record.stdoutPreview, record.contentPreview]
     .find((value) => value?.trim()) || "";
   if (isCodeModeRecord(record)) {
     const report = safeJsonParse<Record<string, unknown> | null>(raw, null);

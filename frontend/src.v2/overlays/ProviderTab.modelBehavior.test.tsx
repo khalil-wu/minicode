@@ -39,9 +39,14 @@ it("edits each model independently and submits native tools and prompt settings 
   fireEvent.click(screen.getByRole("option", { name: "提供商原生压缩" }));
   fireEvent.click(screen.getByRole("button", { name: "工具调用模式，当前：跟随 MiniCode 默认" }));
   fireEvent.click(screen.getByRole("option", { name: "直接工具" }));
+  fireEvent.click(screen.getByRole("button", { name: "提供商联网搜索，当前：自动识别官方接口" }));
+  fireEvent.click(screen.getByRole("option", { name: "该接口支持联网搜索" }));
   fireEvent.click(screen.getByRole("button", { name: "默认模型，当前：alpha" }));
   fireEvent.click(screen.getByRole("option", { name: "beta" }));
   expect(instructions.value).toBe("Beta guidance");
+  expect(screen.getByRole("button", { name: "提供商联网搜索，当前：自动识别官方接口" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "提供商联网搜索，当前：自动识别官方接口" }));
+  fireEvent.click(screen.getByRole("option", { name: "禁用", exact: true }));
   fireEvent.click(screen.getByRole("button", { name: "工具调用模式，当前：跟随 MiniCode 默认" }));
   fireEvent.click(screen.getByRole("option", { name: "仅代码编排" }));
   expect(screen.getByRole("button", { name: "上下文压缩方式，当前：自动选择" })).toBeTruthy();
@@ -50,11 +55,12 @@ it("edits each model independently and submits native tools and prompt settings 
   fireEvent.click(screen.getByRole("button", { name: "默认模型，当前：beta" }));
   fireEvent.click(screen.getByRole("option", { name: "alpha" }));
   expect(instructions.value).toBe("Edited alpha guidance");
+  expect(screen.getByRole("button", { name: "提供商联网搜索，当前：该接口支持联网搜索" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "工具调用模式，当前：直接工具" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "保存", exact: true }));
   await waitFor(() => expect(saved).toHaveBeenCalledOnce());
   expect(saved.mock.calls[0][0].openai.model_metadata).toEqual({
-    alpha: { context_window: 128000, model_instructions: "Edited alpha guidance", supports_custom_tools: true, responses_websocket: true, native_compaction: true, tool_mode: "direct" },
-    beta: { model_instructions: "Beta guidance", tool_mode: "code_mode_only" },
+    alpha: { context_window: 128000, model_instructions: "Edited alpha guidance", supports_custom_tools: true, responses_websocket: true, native_compaction: true, tool_mode: "direct", supports_hosted_web_search: true },
+    beta: { model_instructions: "Beta guidance", tool_mode: "code_mode_only", supports_hosted_web_search: false },
   });
 });

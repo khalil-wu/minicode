@@ -57,14 +57,17 @@ vi.mock("../protocol/ws-outbox", () => ({
 
 import { InlineAgentPrompt } from "./InlineAgentPrompt";
 import { useAppStore } from "../stores";
+import { loadPromptDrafts } from "../stores/prompt-drafts";
 
 describe("InlineAgentPrompt control protocol responses", () => {
   beforeEach(() => {
+    localStorage.removeItem("minicode.agentPromptDrafts");
     mocks.sendClientCommand.mockClear();
     mocks.sendClientCommandAwaitResult.mockClear();
     mocks.sendPromptResponseCommand.mockClear();
     useAppStore.setState({
       conversationId: "conv-inline",
+      promptDrafts: {},
       pendingApproval: null,
       approvalQueue: [],
       pendingDiffReview: null,
@@ -78,6 +81,49 @@ describe("InlineAgentPrompt control protocol responses", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("keeps a chosen answer through a conversation switch and clears its saved draft only after submission", async () => {
+    useAppStore.getState().setAskUser({ requestId: "draft-answer", conversationId: "conv-inline", question: "Which view?",
+      options: [{ label: "Code", value: "code" }, { label: "Preview", value: "preview" }] });
+    render(<InlineAgentPrompt />);
+    fireEvent.click(screen.getByRole("radio", { name: /Preview/ }));
+    expect(mocks.sendPromptResponseCommand).not.toHaveBeenCalled();
+    act(() => useAppStore.setState({ conversationId: "other" }));
+    expect(screen.queryByText("Which view?")).toBeNull();
+    act(() => useAppStore.setState({ conversationId: "conv-inline", promptDrafts: loadPromptDrafts() }));
+    expect(screen.getByRole("radio", { name: /Preview/ }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    await waitFor(() => expect(screen.queryByText("Which view?")).toBeNull());
+    expect(loadPromptDrafts()).toEqual({});
+    expect(mocks.sendPromptResponseCommand).toHaveBeenCalledWith(expect.objectContaining({ response: expect.objectContaining({ response: { answer: "preview" } }) }));
+  });
+
+  it("restores edited plans and rejection feedback after leaving their owner", () => {
+    useAppStore.getState().setApproval({ requestId: "draft-plan", conversationId: "conv-inline", toolName: "exit_plan_mode",
+      args: { plan: "# Initial plan" } });
+    render(<InlineAgentPrompt />);
+    fireEvent.click(screen.getByRole("button", { name: "编辑计划" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "编辑计划" }), { target: { value: "# Revised plan\nKeep the current layout." } });
+    fireEvent.click(screen.getByRole("button", { name: "拒绝计划" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "计划拒绝反馈" }), { target: { value: "Complete the existing chain first." } });
+    act(() => useAppStore.setState({ conversationId: "other" }));
+    act(() => useAppStore.setState({ conversationId: "conv-inline", promptDrafts: loadPromptDrafts() }));
+    expect((screen.getByRole("textbox", { name: "编辑计划" }) as HTMLTextAreaElement).value).toBe("# Revised plan\nKeep the current layout.");
+    expect((screen.getByRole("textbox", { name: "计划拒绝反馈" }) as HTMLTextAreaElement).value).toBe("Complete the existing chain first.");
+    expect(mocks.sendPromptResponseCommand).not.toHaveBeenCalled();
+    act(() => useAppStore.getState().clearApproval("draft-plan"));
+    expect(loadPromptDrafts()).toEqual({});
+  });
+
+  it("keeps authentication input transient instead of saving it with ordinary answers", () => {
+    useAppStore.getState().setAskUser({ requestId: "auth-draft", conversationId: "conv-inline", question: "Credential", secret: true });
+    render(<InlineAgentPrompt />);
+    fireEvent.change(screen.getByLabelText("输入认证密钥"), { target: { value: "test-credential" } });
+    expect(loadPromptDrafts()).toEqual({});
+    act(() => useAppStore.setState({ conversationId: "other" }));
+    act(() => useAppStore.setState({ conversationId: "conv-inline" }));
+    expect((screen.getByLabelText("输入认证密钥") as HTMLInputElement).value).toBe("");
   });
 
   it.each(["approval", "plan", "diff", "answer", "cancel"])(

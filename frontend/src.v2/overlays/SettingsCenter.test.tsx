@@ -1982,10 +1982,11 @@ describe("SettingsCenter reasoning effort visibility", () => {
   });
 
   it("shows local plugins and toggles plugin enablement from settings", async () => {
+    let pluginEnabled = true;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.endsWith("/api/plugins/marketplaces")) return new Response(JSON.stringify({ marketplaces: [] }), { status: 200 });
-      if (url.endsWith("/api/plugins") && (!init?.method || init.method === "GET")) {
+      if (url.split("?")[0].endsWith("/api/plugins") && (!init?.method || init.method === "GET")) {
         return new Response(JSON.stringify({
           plugins: [
             {
@@ -1996,12 +1997,13 @@ describe("SettingsCenter reasoning effort visibility", () => {
               manifest_path: "C:\\Users\\ago\\.minicode\\plugins\\demo-plugin\\.minicode-plugin\\plugin.json",
               command_count: 2,
               skill_count: 1,
-              enabled: true,
+              enabled: pluginEnabled,
             },
           ],
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
       if (url.includes("/api/plugins/demo-plugin/state") && init?.method === "PUT") {
+        pluginEnabled = JSON.parse(String(init.body)).enabled;
         return new Response(JSON.stringify({
           plugins: [
             {
@@ -2044,9 +2046,11 @@ describe("SettingsCenter reasoning effort visibility", () => {
   });
 
   it("imports a local plugin folder from the plugins settings tab", async () => {
+    let imported = false;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.includes("/api/plugins/import") && init?.method === "POST") {
+        imported = true;
         return new Response(JSON.stringify({
           imported: { name: "demo-plugin" },
           plugins: [
@@ -2095,8 +2099,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
       if (url.endsWith("/api/plugins/marketplaces")) return new Response(JSON.stringify({ marketplaces: [] }), { status: 200 });
-      if (url.endsWith("/api/plugins") && (!init?.method || init.method === "GET")) {
-        return new Response(JSON.stringify({ plugins: [] }), { status: 200, headers: { "content-type": "application/json" } });
+      if (url.split("?")[0].endsWith("/api/plugins") && (!init?.method || init.method === "GET")) {
+        return new Response(JSON.stringify({ plugins: imported ? [{ name: "demo-plugin", path: "C:/plugins/demo-plugin", enabled: true }] : [] }), { status: 200, headers: { "content-type": "application/json" } });
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -2124,9 +2128,11 @@ describe("SettingsCenter reasoning effort visibility", () => {
   });
 
   it("imports a packaged plugin zip from the plugins settings tab", async () => {
+    let imported = false;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.includes("/api/plugins/import") && init?.method === "POST") {
+        imported = true;
         return new Response(JSON.stringify({
           imported: { name: "zip-plugin", kind: "package" },
           plugins: [
@@ -2141,8 +2147,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
       if (url.endsWith("/api/plugins/marketplaces")) return new Response(JSON.stringify({ marketplaces: [] }), { status: 200 });
-      if (url.endsWith("/api/plugins") && (!init?.method || init.method === "GET")) {
-        return new Response(JSON.stringify({ plugins: [] }), { status: 200, headers: { "content-type": "application/json" } });
+      if (url.split("?")[0].endsWith("/api/plugins") && (!init?.method || init.method === "GET")) {
+        return new Response(JSON.stringify({ plugins: imported ? [{ name: "zip-plugin", path: "C:/plugins/zip-plugin", enabled: true }] : [] }), { status: 200, headers: { "content-type": "application/json" } });
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -2209,7 +2215,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
       if (url.endsWith("/api/plugins/marketplaces")) return new Response(JSON.stringify({ marketplaces: [] }), { status: 200 });
-      if (url.endsWith("/api/plugins") && (!init?.method || init.method === "GET")) {
+      if (url.split("?")[0].endsWith("/api/plugins") && (!init?.method || init.method === "GET")) {
         return new Response(JSON.stringify({ plugins: [] }), { status: 200, headers: { "content-type": "application/json" } });
       }
       throw new Error(`Unexpected fetch: ${url}`);

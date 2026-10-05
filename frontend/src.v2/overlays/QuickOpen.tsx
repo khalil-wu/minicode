@@ -93,7 +93,7 @@ export const QuickOpen = () => {
   // "recents" section without new state, since tabs ARE the recents.
   const showingOpenTabs = !query.trim();
   const results = showingOpenTabs
-    ? editorTabs.map((tab) => ({ path: tab.path, name: fileNameOf(tab.path) }))
+    ? [...editorTabs].sort((a, b) => (b.lastActivated ?? 0) - (a.lastActivated ?? 0)).map((tab) => ({ path: tab.path, name: fileNameOf(tab.path) }))
     : storeResults;
 
   useEffect(() => {

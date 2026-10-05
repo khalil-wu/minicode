@@ -23,7 +23,7 @@ import { openWebInBrowser } from "../openWebInBrowser";
 import { openArtifactPreview } from "../openAttachmentPreview";
 import { CommandToolRenderer } from "./renderers/CommandRenderer";
 import { WebSearchResultsView } from "./renderers/WebSearchRenderer";
-import { getRecordOutputText, isBrowserRecord, isCodeModeRecord, isHttpUrl, readableRecordLabel, recordInputTarget } from "../cells/activityCellHelpers";
+import { getRecordOutputText, isBrowserRecord, isCodeModeRecord, isHttpUrl, isWebFetchRecord, readableRecordLabel, recordInputTarget, webFetchEvidenceLabel } from "../cells/activityCellHelpers";
 import { InlineDiff } from "../diff/InlineDiff";
 import { workspaceRelativeDiffPath } from "../diffPaths";
 import { getWebSocket } from "../../hooks/useWebSocket";
@@ -46,8 +46,9 @@ function isWebSearchRecord(record: ToolCallRecord): boolean {
 }
 
 function evidenceLabel(record: ToolCallRecord): string {
+  const fetchedLabel = webFetchEvidenceLabel(record);
+  if (fetchedLabel) return fetchedLabel;
   if (record.evidenceType === "candidate") return "候选来源";
-  if (record.evidenceType === "fetched") return "已获取证据";
   return "";
 }
 
@@ -180,7 +181,7 @@ export const ToolCallCard = memo(({
     if (!ownerConversationId) return;
     openArtifactPreview({
       artifactId: record.artifactId,
-      name: isBrowserRecord(record) && imageArtifact ? "浏览器截图" : artifactFallbackLabel(record.artifactKind, record.artifactMediaType),
+      name: isWebFetchRecord(record) ? "页面正文" : isBrowserRecord(record) && imageArtifact ? "浏览器截图" : artifactFallbackLabel(record.artifactKind, record.artifactMediaType),
       kind: record.artifactKind || record.resultKind,
       mediaType: record.artifactMediaType,
       conversationId: ownerConversationId,
@@ -281,9 +282,9 @@ export const ToolCallCard = memo(({
           )}
         </button>
         {record.artifactId && (
-          <SmallAction label="打开产物预览" onClick={openArtifact}>
+          <SmallAction label={isWebFetchRecord(record) ? "查看页面正文" : "打开产物预览"} onClick={openArtifact}>
             <FileText size={14} />
-            产物
+            {isWebFetchRecord(record) ? "页面正文" : "产物"}
           </SmallAction>
         )}
         {evidence && (

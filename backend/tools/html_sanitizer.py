@@ -14,8 +14,12 @@ class _ReadableHTMLParser(HTMLParser):
         self.parts: list[str] = []
         self._ignored_depth = 0
         self._links: list[str] = []
+        self._in_title = False
+        self.has_body_text = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "title":
+            self._in_title = True
         if tag in _NOISE_ELEMENTS:
             self._ignored_depth += 1
         if self._ignored_depth:
@@ -26,6 +30,8 @@ class _ReadableHTMLParser(HTMLParser):
             self._links.append(dict(attrs).get("href") or "")
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self._in_title = False
         if tag in _NOISE_ELEMENTS and self._ignored_depth:
             self._ignored_depth -= 1
             return
@@ -47,6 +53,8 @@ class _ReadableHTMLParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if not self._ignored_depth:
             self.parts.append(data)
+            if not self._in_title and data.strip():
+                self.has_body_text = True
 
 
 def sanitize_html(html: str) -> str:
@@ -55,6 +63,11 @@ def sanitize_html(html: str) -> str:
     Ignore noise containers and attributes, decode HTML entities and retain
     text/link structure. HTML tokenization owns quotes and nested markup.
     """
+    return sanitize_html_with_status(html)[0]
+
+
+def sanitize_html_with_status(html: str) -> tuple[str, str, str, bool]:
+    """Extract readable text and distinguish a page shell from its body."""
     parser = _ReadableHTMLParser()
     parser.feed(html)
     parser.close()
@@ -64,7 +77,12 @@ def sanitize_html(html: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     lines = [line.strip() for line in text.splitlines()]
     text = "\n".join(line for line in lines if line)
-    return text.strip()
+    text = text.strip()
+    status = assess_extraction(text, len(html))
+    if text and not parser.has_body_text:
+        return text, "partial", "Only the page title was available; the page body was not fetched.", False
+    limitation = "Only part of the page's readable content was available." if status == "partial" else ""
+    return text, status, limitation, parser.has_body_text
 
 
 def assess_extraction(cleaned: str, raw_length: int) -> str:

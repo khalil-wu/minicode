@@ -1942,6 +1942,9 @@ class ModelRuntime:
             supports_custom_tools=_declared_boolean(
                 definition.get("supports_custom_tools"), field=f"Model {model_id}: supports_custom_tools",
             ),
+            supports_hosted_web_search=_declared_optional_boolean(
+                definition.get("supports_hosted_web_search"), field=f"Model {model_id}: supports_hosted_web_search",
+            ),
             responses_websocket=_declared_boolean(
                 definition.get("responses_websocket"), field=f"Model {model_id}: responses_websocket",
             ),
@@ -2134,6 +2137,10 @@ class ModelRuntime:
                     supports_custom_tools=_declared_boolean(
                         override.get("supports_custom_tools"), field=f"Model {model.id}: supports_custom_tools",
                         default=model.supports_custom_tools,
+                    ),
+                    supports_hosted_web_search=_declared_optional_boolean(
+                        override.get("supports_hosted_web_search", model.supports_hosted_web_search),
+                        field=f"Model {model.id}: supports_hosted_web_search",
                     ),
                     responses_websocket=_declared_boolean(
                         override.get("responses_websocket"), field=f"Model {model.id}: responses_websocket",
@@ -2420,6 +2427,10 @@ class ModelRuntime:
                     supports_custom_tools=_declared_boolean(
                         model.get("supports_custom_tools"), field=f"Model {model_id}: supports_custom_tools",
                         default=defaults.supports_custom_tools if defaults is not None else False,
+                    ),
+                    supports_hosted_web_search=_declared_optional_boolean(
+                        model.get("supports_hosted_web_search", defaults.supports_hosted_web_search if defaults is not None else None),
+                        field=f"Provider {provider_id}, model {model_id}: supports_hosted_web_search",
                     ),
                     responses_websocket=_declared_boolean(
                         model.get("responses_websocket"), field=f"Model {model_id}: responses_websocket",
@@ -3219,6 +3230,7 @@ class ModelRuntime:
             default_reasoning_effort=model.default_reasoning_effort,
             default_reasoning_summary=model.default_reasoning_summary,
             supports_custom_tools=model.supports_custom_tools,
+            supports_hosted_web_search=model.supports_hosted_web_search,
             responses_websocket=model.responses_websocket,
             native_compaction=model.native_compaction,
             model_instructions=model.model_instructions,
@@ -3316,6 +3328,7 @@ class ModelRuntime:
             "max_output_tokens_verified": bool(metadata["max_output_tokens_verified"]),
             "default_reasoning_effort": str(metadata["default_reasoning_effort"]),
             "default_reasoning_summary": str(metadata["default_reasoning_summary"]),
+            "supports_hosted_web_search": model.supports_hosted_web_search if model is not None else None,
         }
 
 

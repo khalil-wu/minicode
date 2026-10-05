@@ -7,3 +7,17 @@
   .mc-git-overview > aside { grid-column: 1 / -1; }
   .mc-git-overview > main { display: none; }
 }
+.mc-git-delivery { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+.mc-git-delivery input, .mc-git-delivery textarea, .mc-git-delivery select { width: 100%; box-sizing: border-box; min-width: 0; padding: 7px 8px; border: 1px solid var(--border-subtle); border-radius: 6px; background: var(--surface-base); color: var(--text-primary); font: inherit; }
+.mc-git-delivery textarea { resize: vertical; }
+.mc-git-delivery button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 10px; color: var(--text-primary); border: 1px solid var(--border-subtle); border-radius: 6px; background: var(--surface-soft); cursor: pointer; }
+.mc-git-delivery button:disabled { opacity: .5; cursor: default; }
+.mc-git-delivery summary { cursor: pointer; color: var(--text-secondary); padding-block: 4px; }
+.mc-git-delivery details input, .mc-git-delivery details textarea { margin-block: 4px; }
+.mc-git-delivery small { color: var(--text-muted); overflow-wrap: anywhere; }
+.mc-git-delivery p { font-size: var(--text-xs); white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0; }
+.mc-git-delivery p[role='alert'] { color: var(--state-danger); }
+.mc-git-delivery-row { display: flex; gap: 6px; align-items: center; }
+.mc-git-pr-connection { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--text-muted); }
+.mc-git-pr-connection p { flex: 1; min-width: 140px; }
+.mc-git-delivery .mc-select-trigger { width: 100%; justify-content: space-between; }

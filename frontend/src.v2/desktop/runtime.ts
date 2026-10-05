@@ -67,6 +67,12 @@ export interface DesktopEnvInfo {
   home: string;
 }
 
+export interface DesktopSandboxSetupResult {
+  ok: boolean;
+  cancelled?: boolean;
+  error?: string;
+}
+
 export interface BrowserTargetInfo {
   id: string;
   type: string;
@@ -127,6 +133,7 @@ export interface EmbeddedBrowserState {
 }
 
 export interface EmbeddedBrowserBounds {
+  viewport?: { width: number; height: number; mobile: boolean } | null;
   id: string;
   conversationId: string;
   x: number;
@@ -252,6 +259,9 @@ interface MiniCodeDesktop {
   };
   env: {
     detect(): Promise<Partial<DesktopEnvInfo>>;
+  };
+  sandbox: {
+    setup(): Promise<DesktopSandboxSetupResult>;
   };
   browser: {
     discover(endpoint?: string): Promise<BrowserDiscoveryResult>;

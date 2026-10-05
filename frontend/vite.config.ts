@@ -137,6 +137,10 @@ export default defineConfig(async ({ command, mode }) => {
               const feature = normalized.split("/monaco-editor/esm/vs/features/")[1].split("/")[0];
               return `monaco-contrib-${feature}`;
             }
+            if (normalized.includes("/monaco-editor/esm/vs/editor/contrib/")) {
+              const feature = normalized.split("/monaco-editor/esm/vs/editor/contrib/")[1].split("/")[0];
+              return `monaco-contrib-${feature}`;
+            }
             if (normalized.includes("/monaco-editor/esm/vs/editor/browser/")) return "monaco-editor-ui";
             if (normalized.includes("/monaco-editor/esm/vs/editor/common/")) return "monaco-editor-core";
             if (normalized.includes("/monaco-editor/esm/vs/platform/")) return "monaco-platform";

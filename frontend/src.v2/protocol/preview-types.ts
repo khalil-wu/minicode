@@ -75,6 +75,8 @@ export interface PreviewLaunchProcessInfo extends PreviewLaunchConfigInfo {
   cleanup_reason?: string;
   stderr_tail?: string[];
   output_tail?: PreviewServerOutputLine[];
+  exit_code?: number | null;
+  last_error?: string;
 }
 
 interface PreviewOwnedEvent {

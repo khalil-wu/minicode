@@ -13,6 +13,7 @@ from backend.permissions.context import ToolExecutionContext
 from backend.permissions.network import assess_network_url
 from ipaddress import ip_address
 from pathlib import Path
+from contextvars import ContextVar
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import url2pathname
@@ -28,6 +29,14 @@ DEFAULT_CDP_ENDPOINT = "http://127.0.0.1:9222"
 LOOPBACK_HOSTNAMES = {"localhost", "127.0.0.1", "::1"}
 
 API_IMAGE_MAX_BASE64_SIZE = 5 * 1024 * 1024
+BROWSER_OPERATION_SECONDS = 30.0
+browser_deadline: ContextVar[float | None] = ContextVar("browser_deadline", default=None)
+browser_submission: ContextVar[dict[str, Any] | None] = ContextVar("browser_submission", default=None)
+
+
+def browser_remaining_seconds() -> float:
+    deadline = browser_deadline.get()
+    return BROWSER_OPERATION_SECONDS if deadline is None else max(0.001, deadline - asyncio.get_running_loop().time())
 
 
 class _CDPSession:
@@ -39,18 +48,24 @@ class _CDPSession:
     async def call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         call_id = self._next_id
         self._next_id += 1
-        await self._websocket.send(json.dumps({"id": call_id, "method": method, "params": params or {}}))
-        while True:
-            raw = await self._websocket.recv()
-            message = json.loads(raw)
-            if message.get("id") != call_id:
-                self._remember_event(message)
-                continue
-            if "error" in message:
-                error = message.get("error") if isinstance(message.get("error"), dict) else {}
-                raise RuntimeError(str(error.get("message") or error or f"CDP call failed: {method}"))
-            result = message.get("result")
-            return result if isinstance(result, dict) else {}
+        async with asyncio.timeout(browser_remaining_seconds()):
+            submission = browser_submission.get()
+            if submission is not None and submission["mutates"] and (
+                method == "Page.navigate" or method == "Runtime.evaluate" or method.startswith("Input.")
+            ):
+                submission["submitted"] = True
+            await self._websocket.send(json.dumps({"id": call_id, "method": method, "params": params or {}}))
+            while True:
+                raw = await self._websocket.recv()
+                message = json.loads(raw)
+                if message.get("id") != call_id:
+                    self._remember_event(message)
+                    continue
+                if "error" in message:
+                    error = message.get("error") if isinstance(message.get("error"), dict) else {}
+                    raise RuntimeError(str(error.get("message") or error or f"CDP call failed: {method}"))
+                result = message.get("result")
+                return result if isinstance(result, dict) else {}
 
     async def drain_events(self, seconds: float) -> None:
         deadline = asyncio.get_running_loop().time() + max(0.0, seconds)
@@ -87,7 +102,10 @@ class _cdp_session:
             import websockets
         except ImportError as exc:  # pragma: no cover - dependency comes from uvicorn[standard] in normal installs
             raise RuntimeError("browser_control requires websockets for CDP actions") from exc
-        self._websocket = await websockets.connect(self._ws_url, max_size=16 * 1024 * 1024)
+        self._websocket = await websockets.connect(
+            self._ws_url, max_size=16 * 1024 * 1024,
+            open_timeout=browser_remaining_seconds(), close_timeout=0.1,
+        )
         return _CDPSession(self._websocket)
 
     async def __aexit__(self, exc_type, exc, tb) -> None:

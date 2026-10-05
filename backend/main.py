@@ -56,6 +56,8 @@ from backend.services.tool_registry_factory import build_tool_registry
 from backend.api.routes_health import _build_status_payload, get_mcp_manager
 from backend.api.routes_chat import router as chat_router
 from backend.api.routes_llm import router as llm_router
+from backend.api.routes_voice import router as voice_router
+from backend.api.routes_github import router as github_router
 from backend.api.routes_skills import router as skills_router
 from backend.api.routes_agents import router as agents_router
 from backend.api.routes_replay import router as replay_router
@@ -340,6 +342,8 @@ app.add_middleware(
 
 app.include_router(chat_router)
 app.include_router(llm_router)
+app.include_router(voice_router)
+app.include_router(github_router)
 app.include_router(skills_router)
 app.include_router(agents_router)
 app.include_router(replay_router)

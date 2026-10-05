@@ -23,6 +23,7 @@ type SelectMenuProps = {
   className?: string;
   style?: CSSProperties;
   menuMaxHeight?: number;
+  align?: "start" | "end";
 };
 
 const nodeText = (node: ReactNode): string => Children.toArray(node)
@@ -63,6 +64,7 @@ export const SelectMenu = ({
   className = "",
   style,
   menuMaxHeight = 280,
+  align = "start",
 }: SelectMenuProps) => {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 0, top: 0, width: 0, maxHeight: menuMaxHeight, above: false });
@@ -106,8 +108,9 @@ export const SelectMenu = ({
       const above = rect.top - 14;
       const useAbove = below < height && above > below;
       const maxHeight = Math.max(0, Math.min(menuMaxHeight, useAbove ? above : below));
-      const width = Math.min(rect.width, window.innerWidth - 16);
-      setPosition({ left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+      const width = Math.min(Math.max(rect.width, 220), window.innerWidth - 16);
+      const left = align === "end" ? rect.right - width : rect.left;
+      setPosition({ left: Math.max(8, Math.min(left, window.innerWidth - width - 8)),
         top: useAbove ? rect.top - 6 - Math.min(menu.scrollHeight, maxHeight) : rect.bottom + 6,
         width, maxHeight, above: useAbove });
     };
@@ -115,7 +118,7 @@ export const SelectMenu = ({
     const observer = new ResizeObserver(place);
     observer.observe(triggerRef.current!); observer.observe(menuRef.current!);
     return () => observer.disconnect();
-  }, [open, menuMaxHeight, options]);
+  }, [open, menuMaxHeight, options, align]);
 
   useEffect(() => {
     if (!open) return;
@@ -239,6 +242,7 @@ export const SelectMenu = ({
                   tabIndex={-1}
                   aria-selected={active}
                   data-value={option.value}
+                  title={option.label}
                   className="mc-select-option"
                   disabled={option.disabled}
                   onClick={() => selectValue(option.value)}

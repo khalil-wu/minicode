@@ -2,6 +2,7 @@ import { ArrowUp, Check, ChevronDown, ChevronRight, Hand, ListChecks, Plus, Rota
 import { memo, useEffect, useId, useRef, useState } from "react";
 import type { SendButtonState } from "../lib/send-state";
 import { useAppStore } from "../stores";
+import { VoiceInput } from "./VoiceInput";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { uploadComposerFiles } from "./uploads";
 import type { EffortLevel, PermissionMode } from "../stores/types";
@@ -12,6 +13,7 @@ import { selectableModelsForProvider } from "../lib/provider-models";
 import { ModelBrandIcon } from "../components/ModelBrandIcon";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { pushToast } from "../overlays/ToastContainer";
+import { Button } from "../components/Button";
 
 interface Props {
   sendState: SendButtonState;
@@ -61,6 +63,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   const modelsSource = useAppStore((s) => s.modelsSource);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
   const prMonitor = useAppStore((s) => s.prMonitor);
+  const prStatusIssue = useAppStore((s) => s.prStatusIssue);
   const setPermissionMode = useAppStore((s) => s.setPermissionMode);
   const setEffortLevel = useAppStore((s) => s.setEffortLevel);
   const fileInputId = useId();
@@ -240,7 +243,9 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
       workspace_root: owner.workingDirectory,
     };
     // git.pr_status is the semantic projection; admission alone does not enable automation.
-    sendClientCommand({ type: "git.pr_automation.set", ...scope, [automationKey]: next });
+    sendClientCommand({ type: "git.pr_automation.set", ...scope, [automationKey]: next,
+      ...(key === "autoMerge" ? { expected_pr_number: prMonitor.prNumber, expected_branch: owner.workspaceGit?.branch || "" } : {}),
+    });
   };
 
   const modelLabel = availableModelLabels[currentModel] || formatModelLabel(currentModel, "选择模型");
@@ -294,15 +299,33 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
           <ToggleChip
             label="自动修复"
             active={prMonitor.autoFix}
+            disabled={Boolean(prStatusIssue)}
             onClick={() => togglePRAutomation("autoFix")}
           />
           <ToggleChip
             label="自动合并"
             active={prMonitor.autoMerge}
+            disabled={Boolean(prStatusIssue)}
             onClick={() => togglePRAutomation("autoMerge")}
           />
         </div>
       )}
+
+      {prStatusIssue && <div role="status" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>
+        <ShieldAlert size={13} aria-hidden="true" />
+        <span style={{ flex: 1 }}>
+          {prStatusIssue.code === "auth_required" ? "GitHub 尚未连接。"
+            : prStatusIssue.code === "gh_unavailable" ? "GitHub 连接组件未就绪。"
+            : prStatusIssue.code === "permission_denied" ? "GitHub 无权访问当前仓库。"
+            : `PR 状态读取失败：${prStatusIssue.message}`}
+          {prMonitor && " 当前显示上次成功读取的结果。"}
+        </span>
+        <Button variant="ghost" size="sm" onClick={() => openSettings("workspaceGit")}>{prStatusIssue.code === "auth_required" ? "连接 GitHub" : "查看连接设置"}</Button>
+        <Button variant="ghost" size="sm" onClick={() => {
+          const owner = useAppStore.getState();
+          sendClientCommand({ type: "git.pr_status", conversation_id: owner.conversationId!, workspace_root: owner.workingDirectory });
+        }}>重试</Button>
+      </div>}
 
       <div
         className="composer-footer composer-footer-integrated"
@@ -375,7 +398,9 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
         {!minimal && <ContextUsageRing />}
 
         <div className="composer-model-controls" role="group" aria-label="模型与推理强度">
-        <div ref={dropdownRef} className="composer-model-picker relative">
+        <div ref={dropdownRef} className="composer-model-picker relative" onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) { setModelOpen(false); setEffortOpen(false); }
+        }}>
           <button
             type="button"
             onClick={() => {
@@ -390,6 +415,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             title={currentModel || "选择模型"}
           >
             <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{modelLabel}</span>
+            <ChevronDown size={13} aria-hidden="true" />
           </button>
           {supportsReasoningEffort && <button
             type="button"
@@ -407,17 +433,19 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             }}
           >{effortLabel}</button>}
           {modelOpen && (
-            <div className="mc-dropdown-menu composer-picker-menu" role="listbox" aria-label="选择模型" style={dropdownStyle("right")}>
+            <div className="mc-dropdown-menu composer-picker-menu composer-model-menu" role="listbox" aria-label="选择模型" style={{ ...dropdownStyle("right"), overflow: "hidden" }}>
               <div className="composer-menu-heading">选择模型</div>
+              <div className="composer-model-options">
               {selectableModels.length === 0 && <div className="composer-menu-empty">尚未配置模型</div>}
               {selectableModels.map((m) => (
-                  <button key={m} type="button" role="option" aria-selected={m === currentModel} onClick={() => switchModel(m)} style={{ ...dropdownItem, background: m === currentModel ? dropdownActiveBg : "transparent" }}>
+                  <button key={m} type="button" role="option" aria-selected={m === currentModel} className="composer-model-option" onClick={() => switchModel(m)} style={{ ...dropdownItem, display: "grid", gridTemplateColumns: "20px minmax(0, 1fr) 16px" }}>
                   <ModelBrandIcon model={m} size={16} />
-                  <span className="flex-1">{availableModelLabels[m] || m}</span>
-                  {m === currentModel && <Check size={14} style={{ color: "var(--accent-primary)" }} />}
+                  <span className="composer-model-option-label" title={availableModelLabels[m] || m}>{availableModelLabels[m] || m}</span>
+                  <Check size={14} aria-hidden="true" style={{ visibility: m === currentModel ? "visible" : "hidden" }} />
                 </button>
               ))}
-              <div className="mt-1 pt-1" style={{ borderTop: "1px solid var(--border-subtle)" }}>
+              </div>
+              <div className="composer-model-menu-footer">
                 <button
                   type="button"
                   role="option"
@@ -426,7 +454,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
                     setModelOpen(false);
                     openSettings("provider");
                   }}
-                  style={{ ...dropdownItem, color: "var(--accent-primary)" }}
+                  style={dropdownItem}
                 >
                   配置模型…
                 </button>
@@ -462,7 +490,8 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             <Square size={14} fill="currentColor" className="anim-icon-swap" />
           </button>
         ) : null}
-        <SendIconBtn sendState={sendState} onSend={onSend} disabledReason={disabledReason} />
+         <VoiceInput />
+         <SendIconBtn sendState={sendState} onSend={onSend} disabledReason={disabledReason} />
       </div>
     </div>
   );
@@ -492,7 +521,9 @@ const Picker = ({
   children: React.ReactNode;
   menuRole?: "listbox" | "dialog";
 }) => (
-  <div ref={refEl} className={`${className ?? "composer-permission-picker"} relative`}>
+  <div ref={refEl} className={`${className ?? "composer-permission-picker"} relative`} onBlur={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+  }}>
     <button
       type="button"
       onClick={() => {
@@ -662,8 +693,8 @@ const ContextUsageRing = memo(() => {
         conversation_id: conversationId || undefined,
         source: "usage_ring",
       })}
-       title="查看上下文与任务预算详情（/usage）"
-       aria-label="查看上下文与任务预算详情"
+       title="查看上下文占用与会话用量（/usage）"
+       aria-label="查看上下文与会话用量详情"
       className="composer-context-usage"
       style={{ background: "transparent", border: 0, padding: 0, cursor: "pointer" }}
     >
@@ -673,9 +704,10 @@ const ContextUsageRing = memo(() => {
 });
 ContextUsageRing.displayName = "ContextUsageRing";
 
-const ToggleChip = ({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) => (
+const ToggleChip = ({ label, active, onClick, disabled = false }: { label: string; active: boolean; onClick: () => void; disabled?: boolean }) => (
   <button
     onClick={onClick}
+    disabled={disabled}
     className="px-2 py-0.5 border cursor-pointer"
     style={{
       borderRadius: "var(--radius-sm, 4px)",
@@ -776,7 +808,7 @@ const dropdownStyle = (align: "left" | "right" = "left"): React.CSSProperties =>
   overflowY: "auto",
 });
 
-const dropdownActiveBg = "color-mix(in oklch, var(--accent-primary) 7%, var(--surface-page))";
+const dropdownActiveBg = "var(--surface-soft)";
 
 const dropdownItem: React.CSSProperties = {
   display: "flex",

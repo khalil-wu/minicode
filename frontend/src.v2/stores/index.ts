@@ -11,7 +11,8 @@ import { createApprovalSlice } from "./approval-slice";
 import { createControlPlaneSlice } from "./control-plane-slice";
 import { createInspectorSlice } from "./inspector-slice";
 import { createEditorSlice } from "./editor-slice";
-import { applyCodeTextScale, applyReducedMotion, applyTheme, applyTextScale } from "./shared-helpers";
+import { applyWorkbenchPreferences } from "../lib/workbench-preferences";
+import { applyCodeTextScale, applyReducedMotion, applyTheme, applyTextScale, persistEditorTabs, persistEditorLocation } from "./shared-helpers";
 
 export const useAppStore = create<AppStore>()(
   subscribeWithSelector((...a) => ({
@@ -25,6 +26,15 @@ export const useAppStore = create<AppStore>()(
     ...createInspectorSlice(...a),
     ...createEditorSlice(...a),
   })),
+);
+
+useAppStore.subscribe(
+  (state) => [state.workingDirectory, state.editorTabs, state.activeTabPath, state.activeEditorPath] as const,
+  ([workingDirectory, editorTabs, activeTabPath, activeEditorPath], previous) => {
+    if (workingDirectory !== previous[0] || editorTabs !== previous[1]) persistEditorTabs(editorTabs, workingDirectory);
+    persistEditorLocation({ workingDirectory, activeTabPath, activeEditorPath });
+  },
+  { equalityFn: (left, right) => left.every((value, index) => value === right[index]) },
 );
 
 export const syncSystemTheme = () => {
@@ -127,6 +137,7 @@ if (typeof window !== "undefined") {
   }
   applyTextScale(useAppStore.getState().textScale);
   applyCodeTextScale(useAppStore.getState().codeTextScale);
+  applyWorkbenchPreferences(useAppStore.getState().workbenchPreferences);
   applyReducedMotion(useAppStore.getState().reducedMotion);
   const colorSchemeMedia = typeof window.matchMedia === "function"
     ? window.matchMedia("(prefers-color-scheme: light)")

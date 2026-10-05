@@ -7,6 +7,9 @@ import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protoco
 import { inputStyle, preStyle } from "./settingsShared";
 import { openRightPanelFromSettings } from "../lib/settings-navigation";
 import { showConfirm } from "./DialogService";
+import { ProjectEnvironmentSettings } from "./ProjectEnvironmentSettings";
+import { MigrationSettings } from "./MigrationSettings";
+import { SandboxSettings } from "./SandboxSettings";
 
 const TOOLS: { key: keyof Pick<DesktopEnvInfo, "git" | "python" | "node" | "docker" | "ollama">; label: string; detail: string }[] = [
   { key: "git", label: "Git", detail: "版本控制和 Worktree" },
@@ -27,6 +30,7 @@ export const AdvancedTab = ({ active = true }: { active?: boolean }) => {
   const [newEnvName, setNewEnvName] = useState("");
   const [newEnvValue, setNewEnvValue] = useState("");
   const [newEnvDescription, setNewEnvDescription] = useState("");
+  const envValueInputRef = useRef<HTMLInputElement>(null);
   const [savingEnvName, setSavingEnvName] = useState("");
   const [deletingEnvNames, setDeletingEnvNames] = useState<Record<string, boolean>>({});
   const [diagResult, setDiagResult] = useState<Record<string, unknown> | null>(null);
@@ -84,16 +88,17 @@ export const AdvancedTab = ({ active = true }: { active?: boolean }) => {
     const name = newEnvName.trim();
     const value = newEnvValue;
     const description = newEnvDescription.trim();
+    const scope = envVars.find((variable) => variable.name === name)?.scope || "global";
     if (!name || !value || savingEnvName || deletingEnvNames[name]) return;
     const submittedDraft = envDraftRef.current;
     setSavingEnvName(name);
     try {
       const result = await sendClientCommandAwaitResult(
-        { type: "env.set", name, value, description },
+        { type: "env.set", name, value, description, scope },
         "env.set",
       );
       if (!commandResultSucceeded(result)) {
-        pushToast(`添加环境变量失败：${result.message || "后端未返回具体原因"}`, "error");
+        pushToast(`保存环境变量失败：${result.message || "后端未返回具体原因"}`, "error");
         return;
       }
       if (envDraftRef.current.name === submittedDraft.name && envDraftRef.current.value === submittedDraft.value
@@ -102,10 +107,10 @@ export const AdvancedTab = ({ active = true }: { active?: boolean }) => {
         setNewEnvValue("");
         setNewEnvDescription("");
       }
-      pushToast(`已添加环境变量：${name}`, "success");
+      pushToast(`已保存环境变量：${name}`, "success");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error || "未知错误");
-      pushToast(`添加环境变量失败：${message}`, "error");
+      pushToast(`保存环境变量失败：${message}`, "error");
     } finally {
       setSavingEnvName("");
     }
@@ -150,6 +155,9 @@ export const AdvancedTab = ({ active = true }: { active?: boolean }) => {
 
   return (
     <>
+      <ProjectEnvironmentSettings key={workingDirectory} workspaceRoot={workingDirectory} />
+      <MigrationSettings />
+      <SandboxSettings active={active} />
       <section className="settings-group">
         <div className="settings-section-heading settings-section-heading-row">
           <div>
@@ -204,7 +212,7 @@ export const AdvancedTab = ({ active = true }: { active?: boolean }) => {
       <section className="settings-group">
         <div className="settings-section-heading">
           <h3 className="settings-group-title">环境变量</h3>
-          <p className="settings-section-description">仅在工具执行时注入；敏感值不会在此处回显。</p>
+          <p className="settings-section-description">全局变量用于命令与 MCP 的下一次启动；专用变量只用于对应命令或服务。显式环境配置优先，模型登录凭据不自动注入。</p>
         </div>
         <div className="settings-card settings-env-card">
           {envListState === "loading" && <p role="status">正在读取环境变量…</p>}
@@ -215,8 +223,15 @@ export const AdvancedTab = ({ active = true }: { active?: boolean }) => {
           {envVars.map((variable) => (
             <div key={variable.name} className="settings-env-row">
               <code title={variable.name}>{variable.name}</code>
-              <span>{variable.description || "没有说明"}</span>
+              <span>{variable.description || "没有说明"}
+                <small className="settings-env-credential-state" data-missing={variable.credential_status === "missing"}>{variable.credential_status === "missing" ? "未存储／已失效 · 不会注入命令" : variable.credential_status === "stored" ? "已存储" : "存储状态待确认"}</small></span>
               <em>{variable.scope}</em>
+              <div className="settings-env-actions">
+              <button type="button" disabled={Boolean(deletingEnvNames[variable.name]) || Boolean(savingEnvName)}
+                aria-label={`重新保存环境变量 ${variable.name}`} onClick={() => {
+                  setNewEnvName(variable.name); setNewEnvDescription(variable.description); setNewEnvValue("");
+                  queueMicrotask(() => envValueInputRef.current?.focus());
+                }}>重新保存</button>
               <button
                 type="button"
                 disabled={Boolean(deletingEnvNames[variable.name]) || savingEnvName === variable.name}
@@ -226,14 +241,15 @@ export const AdvancedTab = ({ active = true }: { active?: boolean }) => {
               >
                 {deletingEnvNames[variable.name] ? "正在删除…" : "删除"}
               </button>
+              </div>
             </div>
           ))}
           {envVars.length === 0 && envListState === "ready" && <div className="settings-empty-inline">尚未配置环境变量。</div>}
           <div className="settings-env-editor">
             <input placeholder="变量名" value={newEnvName} onChange={(event) => setNewEnvName(event.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ""))} style={inputStyle} />
-            <input placeholder="变量值" type="password" value={newEnvValue} onChange={(event) => setNewEnvValue(event.target.value)} style={inputStyle} />
+            <input ref={envValueInputRef} placeholder="变量值" type="password" value={newEnvValue} onChange={(event) => setNewEnvValue(event.target.value)} style={inputStyle} />
             <input placeholder="说明（可选）" value={newEnvDescription} onChange={(event) => setNewEnvDescription(event.target.value)} style={inputStyle} />
-            <button type="button" className="settings-action-button" disabled={!newEnvName.trim() || !newEnvValue || Boolean(savingEnvName) || Boolean(deletingEnvNames[newEnvName])} onClick={() => void addEnvironmentVariable()}>{savingEnvName ? "正在添加…" : "添加"}</button>
+            <button type="button" className="settings-action-button" disabled={!newEnvName.trim() || !newEnvValue || Boolean(savingEnvName) || Boolean(deletingEnvNames[newEnvName])} onClick={() => void addEnvironmentVariable()}>{savingEnvName ? "正在保存…" : envVars.some((variable) => variable.name === newEnvName.trim()) ? "重新保存" : "添加"}</button>
           </div>
         </div>
       </section>

@@ -3,6 +3,43 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const manager = require("./pty-manager");
+const utils = require("./utils");
+
+test("native terminal inherits the desktop GitHub runtime while excluding authentication secrets", () => {
+  const path = require("node:path");
+  const pathKey = Object.keys(process.env).find((name) => name.toLowerCase() === "path") || "PATH";
+  const previousPath = process.env[pathKey];
+  const previousCommand = process.env.MINICODE_GH_COMMAND;
+  const previousToken = process.env.GH_TOKEN;
+  const githubDirectory = path.resolve(__dirname, "github-runtime", "bin");
+  let spawnEnvironment;
+  let onExit;
+  process.env[pathKey] = [githubDirectory, previousPath].filter(Boolean).join(path.delimiter);
+  process.env.MINICODE_GH_COMMAND = path.join(githubDirectory, "gh.exe");
+  process.env.GH_TOKEN = "not-forwarded-to-shell";
+  manager.init({
+    pty: { spawn: (_shell, _args, options) => {
+      spawnEnvironment = options.env;
+      return { pid: 0, process: "powershell", write: () => {}, resize: () => {}, kill: () => {},
+        onData: () => {}, onExit: (callback) => { onExit = callback; } };
+    } },
+    sanitizedPtyEnv: utils.sanitizedPtyEnv,
+    assertTrustedPath: (cwd) => cwd,
+    getMainWindow: () => null,
+  });
+  try {
+    const session = manager.spawnSession(process.cwd(), "conv_github_runtime");
+    assert.equal(spawnEnvironment[pathKey].split(path.delimiter)[0], githubDirectory);
+    assert.equal(spawnEnvironment.MINICODE_GH_COMMAND, path.join(githubDirectory, "gh.exe"));
+    assert.equal(spawnEnvironment.GH_TOKEN, undefined);
+    onExit({ exitCode: 0 });
+    manager.acknowledgeExitedSession(session.session_id, "conv_github_runtime");
+  } finally {
+    if (previousPath === undefined) delete process.env[pathKey]; else process.env[pathKey] = previousPath;
+    if (previousCommand === undefined) delete process.env.MINICODE_GH_COMMAND; else process.env.MINICODE_GH_COMMAND = previousCommand;
+    if (previousToken === undefined) delete process.env.GH_TOKEN; else process.env.GH_TOKEN = previousToken;
+  }
+});
 
 test("pty snapshots expose monotonic cursors for lossless renderer hydration", () => {
   let onData;

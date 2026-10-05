@@ -41,6 +41,7 @@ class _Manager:
 class _ConcurrentInventoryClient:
     def __init__(self) -> None:
         self.server_capabilities = MCPServerCapabilities(
+            tools=True,
             resources=True,
             resources_subscribe=True,
             resources_list_changed=True,
@@ -52,7 +53,7 @@ class _ConcurrentInventoryClient:
 
     async def _result(self, method: str, value):
         self.calls.append(method)
-        if len(self.calls) == 3:
+        if len(self.calls) == 4:
             self.all_started.set()
         await self.release.wait()
         return value
@@ -62,6 +63,9 @@ class _ConcurrentInventoryClient:
             "resources/list",
             [MCPResourceDef(uri="file:///guide.md", name="Guide", description="Project guide", mime_type="text/markdown")],
         )
+
+    async def list_tools(self):
+        return await self._result("tools/list", [SimpleNamespace(name="search_docs", description="Search documentation")])
 
     async def list_resource_templates(self):
         return await self._result(
@@ -92,6 +96,7 @@ def test_inventory_lists_standard_mcp_content_concurrently_on_explicit_call() ->
             "resources/list",
             "resources/templates/list",
             "prompts/list",
+            "tools/list",
         }
         client.release.set()
         return manager, await task
@@ -100,6 +105,7 @@ def test_inventory_lists_standard_mcp_content_concurrently_on_explicit_call() ->
 
     assert manager.client_lookups == ["docs"]
     assert inventory == {
+        "tools": [{"name": "search_docs", "description": "Search documentation"}],
         "server_name": "docs",
         "capabilities": {
             "resources": True,

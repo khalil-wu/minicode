@@ -8,7 +8,6 @@ import {
   readableTimelineTitle,
   describeRecordDetail,
   describeRecordDetails,
-  hasOutputPreview,
   getOutputPreview,
   getRecordOutputPreview,
   isHttpUrl,
@@ -19,6 +18,7 @@ import {
   type PlanUpdateStep,
   isWebFetchActivity,
   isWebFetchRecord,
+  webFetchEvidenceLabel,
   isBrowserRecord,
   browserFailureGuidance,
 } from "./activityCellHelpers";
@@ -128,10 +128,10 @@ export const ActivityCell = memo(function ActivityCell({
     isPartial || records.some((record) => record.status === "partial") ? "Partial" : "",
   ].filter(Boolean).join(" · ");
   const recordDetails = useMemo(
-    () => isExpanded && hasRecords
+    () => hasRecords
       ? describeRecordDetails(records.filter(record => record.name !== "update_plan" && (!isBrowserRecord(record) || records.length > 1)), developerMode)
       : [],
-    [records, developerMode, hasRecords, isExpanded],
+    [records, developerMode, hasRecords],
   );
   const planRecords = useMemo(
     () => records.filter((record) => planUpdateSteps(record).length > 0),
@@ -145,16 +145,13 @@ export const ActivityCell = memo(function ActivityCell({
     () => records.filter(isImageArtifactRecord),
     [records],
   );
-  const showDetailRows = hasRecords
-    && !isFileChange
-    && !isInlineAction
-    && (recordDetails.length > 0 || planRecords.length > 0);
+  const outputPreview = getOutputPreview(nonPlanRecords);
   const showOutputPreview = !isInlineAction
     && !isFileChange
     && !isFailed
     && !isPartial
     && !isRunning
-    && hasOutputPreview(nonPlanRecords);
+    && Boolean(outputPreview.trim());
   const inlineDisclosureRecords = useMemo(() => {
     if (!isInlineAction) return [];
     const showTargets = records.length > 1;
@@ -162,32 +159,48 @@ export const ActivityCell = memo(function ActivityCell({
       const target = recordInputTarget(record);
       const output = getRecordOutputPreview(record);
       const visibleOutput = output.trim() === target.trim() ? "" : output;
-      if (!showTargets && !visibleOutput) return [];
+      if (!(showTargets && target.trim()) && !visibleOutput.trim()) return [];
       return [{ record, target: showTargets ? target : "", output: visibleOutput }];
     });
   }, [isInlineAction, records]);
-  const canToggle = hasRecords && (!isInlineAction || isFailed || inlineDisclosureRecords.length > 0);
-
   const name = readableTimelineTitle(cell);
   const concreteToolTarget = records.length === 1
     ? recordInputTarget(records[0])
     : isBrowserAction ? [...new Set(browserRecords.map(recordInputTarget).filter(Boolean))].join(", ") : "";
   const detailValue = hasRecords ? concreteToolTarget : cell.subtitle?.trim();
   const detail = detailValue === name ? undefined : detailValue;
+  const visibleRecordDetails = recordDetails.filter((row) => row.label !== name || row.target !== (detail || "") || row.lineInfo || row.count > 1);
+  const showDetailRows = !isFileChange && !isInlineAction
+    && (visibleRecordDetails.length > 0 || planRecords.length > 0);
   const singleInlineDetail = isInlineAction && records.length === 1 ? describeRecordDetail(records[0], developerMode) : null;
   const changeDetails = useMemo(
     () => isFileChange ? buildChangeDetails(records) : [],
     [isFileChange, records],
   );
-  const hasChangeEvidence = isExpanded && isFileChange && changeDetails.length > 0;
-  const hasInlineEvidence = isExpanded && isInlineAction && inlineDisclosureRecords.length > 0;
-  const hasArtifactEvidence = isExpanded && !isFileChange && imageArtifactRecords.length > 0;
-  const hasGenericEvidence = isExpanded
-    && !isFileChange
+  const fetchBodyRecords = records.filter((record) => isWebFetchRecord(record) && record.artifactId);
+  const browserDetails = browserRecords.flatMap((record) => {
+    const output = getRecordOutputPreview(record);
+    const rawError = purifyToolErrorText(record.stderrPreview || (!output ? record.userSummary || record.errorInfo?.user_summary || record.errorInfo?.user_message : "") || "");
+    const error = rawError && !output.includes(rawError) ? rawError : "";
+    const expression = record.args.action === "evaluate" && typeof record.args.expression === "string" ? record.args.expression : "";
+    return expression.trim() || output.trim() || error.trim() ? [{ record, expression, output, error }] : [];
+  });
+  const errorDetails = records.flatMap((record) => {
+    if (isBrowserRecord(record) || !["failed", "blocked", "timeout", "cancelled", "partial"].includes(record.status)) return [];
+    const rawError = purifyToolErrorText(record.userSummary || record.errorInfo?.user_summary || getRecordOutputPreview(record) || record.stderrPreview || "");
+    if (isInlineAction && rawError.trim() === getRecordOutputPreview(record).trim()) return [];
+    const error = record.providerErrorType
+      ? normalizeAgentErrorMessage(rawError, { includeProviderDetails: false })
+      : normalizeToolErrorMessage(rawError);
+    return error.trim() ? [{ error, label: readableRecordLabel(record) }] : [];
+  });
+  const hasChangeEvidence = isFileChange && changeDetails.length > 0;
+  const hasInlineEvidence = isInlineAction && inlineDisclosureRecords.length > 0;
+  const hasArtifactEvidence = !isFileChange && imageArtifactRecords.length > 0;
+  const hasGenericEvidence = !isFileChange
     && !isInlineAction
     && (showDetailRows || showOutputPreview);
-  const hasErrorEvidence = isExpanded && !hasInlineEvidence && records.some((record) => !isBrowserRecord(record) && ["failed", "blocked", "timeout", "cancelled", "partial"].includes(record.status));
-  const showUnifiedEvidence = isExpanded && hasRecords;
+  const hasErrorEvidence = !hasInlineEvidence && errorDetails.length > 0;
   const glyphKind = activityGlyphKind(cell.activityKind, records[0]);
   const useToolIcon = !isFileChange && cell.activityKind !== "genericTool";
   const providerProgress: ProviderProgressSnapshot | undefined = cell.progress && {
@@ -218,6 +231,11 @@ export const ActivityCell = memo(function ActivityCell({
           0,
         ) || undefined,
   );
+  const canToggle = hasChangeEvidence || hasInlineEvidence || hasArtifactEvidence
+    || hasGenericEvidence || hasErrorEvidence
+    || fetchBodyRecords.length > 0 || browserDetails.length > 0
+    || Boolean(hasRecords && settledDuration);
+  const showUnifiedEvidence = isExpanded && canToggle;
 
   const cellStateClass = isRunning
     ? "activity-cell-running"
@@ -336,6 +354,10 @@ export const ActivityCell = memo(function ActivityCell({
         const notice = toolCleanupNotice(record.cleanupReceipt);
         return notice ? <div key={`cleanup-${record.id}`} className="activity-cell-detail-meta" role="status">{notice}</div> : null;
       })}
+      {records.filter(isWebFetchRecord).map((record) => {
+        const evidence = webFetchEvidenceLabel(record);
+        return evidence ? <div key={`fetch-evidence-${record.id}`} className="activity-cell-detail-meta" role="status">{evidence}</div> : null;
+      })}
       {browserRecords.filter((record) => ["failed", "blocked", "timeout", "cancelled", "partial"].includes(record.status)
         || record.transition === "waiting_approval" || record.waitingOn === "approval").map((record) => (
         <BrowserRecordNotice key={`browser-notice-${record.id}`} record={record} conversationId={ownerConversationId} showAction={browserRecords.length > 1} />
@@ -381,7 +403,7 @@ export const ActivityCell = memo(function ActivityCell({
                     {recordDetail.lineInfo && <span className="activity-cell-detail-meta">{recordDetail.lineInfo}</span>}
                   </div>
                 )}
-                {output && <pre className="activity-cell-inline-output">{output}</pre>}
+                {output.trim() && <pre className="activity-cell-inline-output">{output}</pre>}
               </div>
             );
           })}
@@ -402,7 +424,7 @@ export const ActivityCell = memo(function ActivityCell({
                   steps={planUpdateSteps(record)}
                 />
               ))}
-              {showDetailRows && recordDetails.filter((row) => row.label !== name || row.target !== (detail || "") || row.lineInfo || row.count > 1).map(({ label, target, targetKind, lineInfo, count }, i) => (
+              {showDetailRows && visibleRecordDetails.map(({ label, target, targetKind, lineInfo, count }, i) => (
                 <div key={`${label}-${target}-${i}`} className="activity-cell-detail-row">
                   <span className="activity-cell-detail-name">{label}</span>
                   {/* The header row already shows this cell's target. Repeating it
@@ -414,38 +436,41 @@ export const ActivityCell = memo(function ActivityCell({
                 </div>
               ))}
               {showOutputPreview && (
-                <pre className="activity-cell-output-pre">{getOutputPreview(nonPlanRecords)}</pre>
+                <pre className="activity-cell-output-pre">{outputPreview}</pre>
               )}
             </>
           )}
 
-          {browserRecords.map((record) => (
-            <BrowserRecordEvidence key={`browser-details-${record.id}`} record={record} />
+          {browserDetails.map(({ record, expression, output, error }) => (
+            <div key={`browser-details-${record.id}`} className="activity-cell-tool-detail-card">
+              {expression.trim() && <pre className="activity-cell-inline-output" aria-label="JavaScript">{expression}</pre>}
+              {output.trim() && <pre className="activity-cell-output-pre" aria-label="操作结果">{output}</pre>}
+              {error.trim() && <pre className="activity-cell-error-pre" aria-label="错误详情">{error}</pre>}
+            </div>
           ))}
 
           {/* Failed records use the same evidence frame as every other tool. */}
           {hasErrorEvidence && (
             <div className="activity-cell-error-detail">
-              {records.filter((record) => !isBrowserRecord(record) && ["failed", "blocked", "timeout", "cancelled", "partial"].includes(record.status)).map((record, i) => {
-                const rawError = purifyToolErrorText(record.userSummary || record.errorInfo?.user_summary || getRecordOutputPreview(record) || record.stderrPreview || "");
-                if (isInlineAction && rawError.trim() === getRecordOutputPreview(record).trim()) return null;
-                const error = record.providerErrorType
-                  ? normalizeAgentErrorMessage(rawError, { includeProviderDetails: false })
-                  : normalizeToolErrorMessage(rawError);
-                if (!error) return null;
-                const label = readableRecordLabel(record);
-                return (
-                  <div key={`error-${i}`} className="activity-cell-error-item">
-                    {records.length > 1 && label && <div className="activity-cell-error-label">{label}</div>}
-                    <pre className="activity-cell-error-pre">{error}</pre>
-                  </div>
-                );
-              })}
+              {errorDetails.map(({ error, label }, i) => (
+                <div key={`error-${i}`} className="activity-cell-error-item">
+                  {records.length > 1 && label && <div className="activity-cell-error-label">{label}</div>}
+                  <pre className="activity-cell-error-pre">{error}</pre>
+                </div>
+              ))}
             </div>
           )}
-          {settledDuration && <div className="activity-cell-detail-row">
-            <span className="activity-cell-detail-duration">{settledDuration}</span>
-          </div>}
+          {(fetchBodyRecords.length > 0 || settledDuration) && (
+            <div className="activity-cell-evidence-footer">
+              {fetchBodyRecords.map((record) => (
+                <button key={`fetch-body-${record.id}`} type="button" className="activity-cell-evidence-button" onClick={() => openArtifactPreview({
+                  artifactId: record.artifactId!, name: "页面正文", kind: "text",
+                  mediaType: record.artifactMediaType || "text/plain", conversationId: ownerConversationId,
+                })}>查看页面正文</button>
+              ))}
+              {settledDuration && <span className="activity-cell-detail-duration">{settledDuration}</span>}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -477,21 +502,6 @@ function BrowserRecordNotice({ record, conversationId, showAction }: {
         </div>)}
         <div className="error-cell-suggestion"><span>下一步：{guidance.nextStep}</span></div>
       </div>
-    </div>
-  );
-}
-
-function BrowserRecordEvidence({ record }: {
-  record: ActivityToolRecord;
-}) {
-  const output = getRecordOutputPreview(record);
-  const error = purifyToolErrorText(record.stderrPreview || (!output ? record.userSummary || record.errorInfo?.user_summary || record.errorInfo?.user_message : "") || "");
-  const action = String(record.args.action || "");
-  return (
-    <div className="activity-cell-tool-detail-card">
-      {action === "evaluate" && typeof record.args.expression === "string" && <pre className="activity-cell-inline-output" aria-label="JavaScript">{record.args.expression}</pre>}
-      {output && <pre className="activity-cell-output-pre" aria-label="操作结果">{output}</pre>}
-      {error && !output.includes(error) && <pre className="activity-cell-error-pre" aria-label="错误详情">{error}</pre>}
     </div>
   );
 }

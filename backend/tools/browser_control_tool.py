@@ -5,11 +5,13 @@ import base64
 import binascii
 import json
 import os
+from uuid import uuid4
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
+from backend.async_cleanup import retain_cleanup_task
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.base import (
     TOOL_SIDE_EFFECT_EXTERNAL,
@@ -52,6 +54,10 @@ from backend.tools.browser_support import (
     _validate_ws_url,
     API_IMAGE_MAX_BASE64_SIZE,
     DEFAULT_CDP_ENDPOINT,
+    BROWSER_OPERATION_SECONDS,
+    browser_deadline,
+    browser_submission,
+    browser_remaining_seconds,
 )
 
 
@@ -143,7 +149,10 @@ class BrowserControlTool(BaseTool):
         "For a blocked or policy-refused result, follow the provided guidance and preserve "
         "diagnostic detail; a policy refusal alone does not prove a launch failure. "
         "Navigation success means navigation was requested, not that the page is ready "
-        "or correct: inspect the actual URL, DOM/text and screenshot."
+        "or correct: inspect the actual URL, DOM/text and screenshot. "
+        "Operations have a 30-second deadline; wait_for_element uses its timeout_ms. "
+        "A timeout or cancellation can leave already submitted page actions running. "
+        "Read the cleanup evidence and inspect the page before retrying such actions."
     )
     permission = PermissionLevel.AUTO
     read_only = True
@@ -283,7 +292,7 @@ class BrowserControlTool(BaseTool):
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 30000,
-                        "description": "Milliseconds for wait_for_element (CDP default 5000); not a preview health-check timeout.",
+                        "description": "Total milliseconds for wait_for_element, including CDP setup (default 5000). Zero checks once with the normal 30-second operation limit; not a preview health-check timeout.",
                     },
                     "max_chars": {
                         "type": "integer",
@@ -383,7 +392,53 @@ class BrowserControlTool(BaseTool):
         validation = self.validate_input(args)
         if validation:
             return self._error_result(validation)
+        action = args["action"].strip().lower()
+        timeout = BROWSER_OPERATION_SECONDS
+        if action == "wait_for_element":
+            timeout_ms = args.get("timeout_ms", 5000)
+            if timeout_ms:
+                timeout = timeout_ms / 1000
+        deadline = asyncio.get_running_loop().time() + timeout
+        if context is not None and context.deadline_monotonic is not None:
+            deadline = min(deadline, context.deadline_monotonic)
+        submission = {"submitted": False, "mutates": action in self._WRITE_ACTIONS}
+        deadline_token = browser_deadline.set(deadline)
+        submission_token = browser_submission.set(submission)
+        try:
+            async with asyncio.timeout_at(deadline):
+                return await self._execute(args, context)
+        except asyncio.CancelledError as exc:
+            if submission["submitted"] and not hasattr(exc, "cleanup_receipt"):
+                exc.cleanup_receipt = self._uncertain_receipt(
+                    str(getattr(context, "tool_call_id", "") or "cdp"), "cancelled",
+                )
+            raise
+        except TimeoutError as exc:
+            receipt = getattr(exc.__cause__, "cleanup_receipt", {})
+            if submission["submitted"] and not receipt:
+                receipt = self._uncertain_receipt(str(getattr(context, "tool_call_id", "") or "cdp"), "timeout")
+            return ToolResult(
+                content=f"Browser operation '{action}' timed out. Inspect the page before retrying any submitted action.",
+                is_error=True, status="timeout", result_kind=self.result_kind,
+                cleanup_receipt=receipt,
+            )
+        finally:
+            browser_submission.reset(submission_token)
+            browser_deadline.reset(deadline_token)
 
+    @staticmethod
+    def _uncertain_receipt(operation_id: str, reason: str) -> dict[str, Any]:
+        return {
+            "resource_kind": "browser", "resource_id": operation_id, "reason": reason,
+            "requested": True, "acknowledged": False, "completed": False, "pending": 1,
+            "manual_recovery_required": True, "retry_safe": False, "execution_outcome": "uncertain",
+        }
+
+    async def _execute(
+        self,
+        args: dict[str, Any],
+        context: ToolExecutionContext | None = None,
+    ) -> ToolResult:
         action = str(args.get("action") or "").strip().lower()
         if action == "navigate":
             # A workspace HTML file (or a file:// URL pointing at one) is a
@@ -465,10 +520,12 @@ class BrowserControlTool(BaseTool):
                 return await self._scroll(endpoint, args)
             if action == "evaluate":
                 return await self._evaluate(endpoint, args)
+        except httpx.TimeoutException as exc:
+            raise TimeoutError("CDP HTTP request timed out") from exc
         except httpx.HTTPError as exc:
             return self._error_result(f"CDP HTTP request failed: {exc}")
-        except TimeoutError as exc:
-            return self._error_result(str(exc) or "CDP operation timed out")
+        except TimeoutError:
+            raise
         except RuntimeError as exc:
             return self._error_result(str(exc))
         except OSError as exc:
@@ -489,15 +546,33 @@ class BrowserControlTool(BaseTool):
             return self._error_result("Embedded browser commands require a conversation owner")
         payload = {key: value for key, value in args.items() if key != "cdp_endpoint"}
         payload["conversation_id"] = conversation_id
-        async with httpx.AsyncClient(timeout=None, follow_redirects=False, trust_env=False) as client:
-            response = await client.post(
-                f"{endpoint.rstrip('/')}/v1/command",
-                headers={"authorization": f"Bearer {token}"},
-                json=payload,
-            )
+        operation_id = "browser_" + uuid4().hex
+        payload["operation_id"] = operation_id
+        payload["operation_timeout_ms"] = max(1, int(browser_remaining_seconds() * 1000))
+        headers = {"authorization": f"Bearer {token}"}
+        async with httpx.AsyncClient(timeout=browser_remaining_seconds(), follow_redirects=False, trust_env=False) as client:
+            try:
+                response = await client.post(f"{endpoint.rstrip('/')}/v1/command", headers=headers, json=payload)
+            except (asyncio.CancelledError, httpx.TimeoutException) as exc:
+                reason = "timeout" if asyncio.get_running_loop().time() >= browser_deadline.get() else "cancelled"
+                receipt = await self._cancel_embedded_operation(endpoint, headers, operation_id, conversation_id, context, reason)
+                if isinstance(exc, asyncio.CancelledError):
+                    exc.cleanup_receipt = receipt
+                    raise
+                return ToolResult(
+                    content="Embedded browser operation timed out; inspect its recorded outcome before retrying.",
+                    is_error=True, status="timeout", result_kind=self.result_kind, cleanup_receipt=receipt,
+                )
         result = _json_dict(response.json())
         if response.status_code >= 400 or result.get("ok") is False:
-            return self._error_result(str(result.get("error") or f"Embedded browser command failed: HTTP {response.status_code}"))
+            receipt = result.get("cleanup_receipt") or {}
+            if receipt.get("pending"):
+                self._retain_embedded_operation(endpoint, headers, operation_id, conversation_id, receipt, context)
+            return ToolResult(
+                content=str(result.get("error") or f"Embedded browser command failed: HTTP {response.status_code}"),
+                is_error=True, status=result.get("status") or "failed", result_kind=self.result_kind,
+                cleanup_receipt=receipt,
+            )
 
         targets = _json_list(result.get("targets"))
         target = _json_dict(result.get("target"))
@@ -581,8 +656,49 @@ class BrowserControlTool(BaseTool):
             display_summary=labels.get(action, "浏览器操作完成"),
         )
 
+    async def _cancel_embedded_operation(self, endpoint, headers, operation_id, conversation_id, context, reason):
+        receipt = self._uncertain_receipt(operation_id, reason)
+        try:
+            async with asyncio.timeout(1), httpx.AsyncClient(timeout=1, follow_redirects=False, trust_env=False) as client:
+                response = await client.post(f"{endpoint.rstrip('/')}/v1/operation", headers=headers,
+                    json={"action": "cancel", "operation_id": operation_id, "conversation_id": conversation_id, "reason": reason})
+                response.raise_for_status()
+                receipt = response.json()["cleanup_receipt"]
+        except (httpx.HTTPError, TimeoutError):
+            # The remote command may still be running; a failed cancellation
+            # exchange cannot establish that the browser stopped executing it.
+            pass
+        if receipt.get("pending"):
+            self._retain_embedded_operation(endpoint, headers, operation_id, conversation_id, receipt, context)
+        return receipt
+
+    def _retain_embedded_operation(self, endpoint, headers, operation_id, conversation_id, receipt, context):
+        if context is None:
+            return
+        call_id = context.tool_call_id or self.name
+        context.cleanup_receipts.setdefault(call_id, {}).update(
+            completed=False, pending=1, retry_safe=False, resource_cleanup=receipt,
+        )
+
+        async def settle():
+            try:
+                async with httpx.AsyncClient(timeout=None, follow_redirects=False, trust_env=False) as client:
+                    response = await client.post(f"{endpoint.rstrip('/')}/v1/operation", headers=headers,
+                        json={"action": "wait", "operation_id": operation_id, "conversation_id": conversation_id})
+                    response.raise_for_status()
+                    observed = response.json()["cleanup_receipt"]
+            except httpx.HTTPError:
+                return
+            receipt.update(observed)
+            context.cleanup_receipts[call_id].update(
+                completed=receipt["completed"], pending=receipt["pending"],
+                resource_cleanup=receipt, cleanup_completed_after_deadline=receipt["completed"],
+            )
+
+        retain_cleanup_task(asyncio.create_task(settle()), context.pending_cleanup_tasks)
+
     async def _discover(self, endpoint: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        async with httpx.AsyncClient(timeout=None, follow_redirects=False, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=browser_remaining_seconds(), follow_redirects=False, trust_env=False) as client:
             version_resp = await client.get(_endpoint_url(endpoint, "/json/version"))
             version_resp.raise_for_status()
             targets_resp = await client.get(_endpoint_url(endpoint, "/json/list"))
@@ -595,7 +711,7 @@ class BrowserControlTool(BaseTool):
         return (await self._fetch_all_targets(endpoint))[: self._MAX_TARGETS]
 
     async def _fetch_all_targets(self, endpoint: str) -> list[dict[str, Any]]:
-        async with httpx.AsyncClient(timeout=None, follow_redirects=False, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=browser_remaining_seconds(), follow_redirects=False, trust_env=False) as client:
             response = await client.get(_endpoint_url(endpoint, "/json/list"))
             response.raise_for_status()
         return _json_list(response.json())

@@ -10,6 +10,7 @@ import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { gotoLine, openSearchPanel, search, searchKeymap } from "@codemirror/search";
 import { decodeMarkdownFragment, markdownHeadingSlug } from "../lib/markdown";
 import type { EditorTextSurface } from "./editor-text-surface";
+import type { WorkspaceBufferTransaction } from "./applyWorkspaceBufferEdits";
 import "./LiveMarkdownEditor.css";
 
 interface LiveMarkdownEditorProps {
@@ -25,6 +26,8 @@ interface LiveMarkdownEditorProps {
   scopeId: string;
   onChange: (value: string) => void;
   onMount: (editor: EditorTextSurface) => void;
+  bufferTransactions?: WorkspaceBufferTransaction[];
+  onConsumeBufferTransactions?: () => void;
 }
 
 export type MarkdownEditorSession = {
@@ -317,10 +320,10 @@ export const LiveMarkdownEditor = (props: LiveMarkdownEditorProps) => {
         }),
     ];
     const createState = () => EditorState.create({
-      doc: props.value,
+      doc: props.bufferTransactions?.[0]?.before ?? props.value,
       extensions: [
         markdown({ base: markdownLanguage }), history(), search(), focused, reviewLines,
-        lineConfig.current.of(EditorState.lineSeparator.of(sourceLineSeparator(props.value))),
+        lineConfig.current.of(EditorState.lineSeparator.of(sourceLineSeparator(props.bufferTransactions?.[0]?.before ?? props.value))),
         EditorState.transactionExtender.of((transaction) => {
           const eol = transaction.effects.find((effect) => effect.is(sourceEolChanged));
           return eol ? { effects: lineConfig.current.reconfigure(EditorState.lineSeparator.of(eol.value)) } : null;
@@ -346,6 +349,7 @@ export const LiveMarkdownEditor = (props: LiveMarkdownEditorProps) => {
     }
     const view = new EditorView({ state: cached?.state ?? createState(), parent: hostRef.current! });
     viewRef.current = view;
+    const sourceBeforeTransactions = props.bufferTransactions?.[0]?.before ?? props.value;
     if (cached) {
       // Each saved document owns its compartments, including callbacks. Mounting
       // a different document restores history without retaining the old view.
@@ -354,8 +358,8 @@ export const LiveMarkdownEditor = (props: LiveMarkdownEditorProps) => {
         editConfig.current.reconfigure([EditorState.readOnly.of(props.readOnly), EditorView.editable.of(!props.readOnly)]),
         wrapConfig.current.reconfigure(props.wordWrap === false ? [] : EditorView.lineWrapping),
       ];
-      if (view.state.sliceDoc() !== props.value) {
-        const sourceUpdate = externalSourceUpdate(view.state, props.value, lineConfig.current);
+      if (view.state.sliceDoc() !== sourceBeforeTransactions) {
+        const sourceUpdate = externalSourceUpdate(view.state, sourceBeforeTransactions, lineConfig.current);
         view.dispatch({ ...sourceUpdate, effects: [...effects, sourceUpdate.effects] });
       } else {
         view.dispatch({ effects });
@@ -387,6 +391,19 @@ export const LiveMarkdownEditor = (props: LiveMarkdownEditorProps) => {
         return commands[id] ? { run: () => { commands[id](view); } } : null;
       },
       focus: () => view.focus(),
+      saveViewState: () => {
+        const position = (offset: number) => {
+          const line = view.state.doc.lineAt(offset);
+          return { lineNumber: line.number, column: offset - line.from + 1 };
+        };
+        return { anchor: position(view.state.selection.main.anchor), head: position(view.state.selection.main.head), scrollTop: view.scrollDOM.scrollTop, scrollLeft: view.scrollDOM.scrollLeft };
+      },
+      restoreViewState: (saved) => {
+        const reading = saved as { anchor: { lineNumber: number; column: number }; head: { lineNumber: number; column: number }; scrollTop: number; scrollLeft: number };
+        view.dispatch({ selection: EditorSelection.range(sourceOffset(view.state.doc, reading.anchor.lineNumber, reading.anchor.column), sourceOffset(view.state.doc, reading.head.lineNumber, reading.head.column)) });
+        view.scrollDOM.scrollTop = reading.scrollTop;
+        view.scrollDOM.scrollLeft = reading.scrollLeft;
+      },
       executeEdits: (_source, edits) => {
         const eol = edits.find((edit) => edit.eol)?.eol;
         const changes = edits.map((edit) => ({ ...sourceRange(view.state.doc, edit.range), insert: Text.of(edit.text.split(/\r\n|\r|\n/)) }));
@@ -407,9 +424,26 @@ export const LiveMarkdownEditor = (props: LiveMarkdownEditorProps) => {
       onDidChangeCursorPosition: (handler) => { positionListeners.add(handler); },
       onDidChangeCursorSelection: (handler) => { selectionListeners.add(handler); },
       onDidChangeModelContent: (handler) => { contentListeners.add(handler); },
+      onDidScrollChange: (handler) => {
+        view.scrollDOM.addEventListener("scroll", handler);
+        const dispose = () => view.scrollDOM.removeEventListener("scroll", handler);
+        disposeListeners.add(dispose);
+        return { dispose };
+      },
       onDidChangeModel: () => {},
       onDidDispose: (handler) => { disposeListeners.add(handler); },
     };
+    for (const transaction of props.bufferTransactions ?? []) {
+      const range = (offset: number) => {
+        const lines = transaction.before.slice(0, offset).split(/\r\n|\r|\n/);
+        return { line: lines.length, column: lines.at(-1)!.length + 1 };
+      };
+      handle.executeEdits(transaction.label, transaction.edits.map((edit) => {
+        const start = range(edit.offset); const end = range(edit.offset + edit.length);
+        return { range: { startLineNumber: start.line, startColumn: start.column, endLineNumber: end.line, endColumn: end.column }, text: edit.text };
+      }));
+    }
+    if (props.bufferTransactions?.length) props.onConsumeBufferTransactions?.();
     propsRef.current.onMount(handle);
     notifyPosition(view);
     return () => {

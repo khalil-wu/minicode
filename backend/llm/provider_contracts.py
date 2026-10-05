@@ -55,7 +55,7 @@ _MODEL_KNOWN_KEYS = frozenset(
         "thinkingLevelMap", "thinking_level_map", "input", "cost",
         "contextWindow", "context_window", "maxContextWindow",
         "max_context_window", "maxTokens", "max_tokens", "headers",
-        "supports_custom_tools", "model_instructions", "responses_websocket", "native_compaction",
+        "supports_custom_tools", "supports_hosted_web_search", "model_instructions", "responses_websocket", "native_compaction",
         "parallel_tool_calls",
         "tool_mode",
     }
@@ -94,6 +94,7 @@ class ModelDefinition:
     headers: Mapping[str, str] = field(default_factory=dict)
     extra: Mapping[str, Any] = field(default_factory=dict)
     tool_mode: str = ""
+    supports_hosted_web_search: bool | None = None
 
     @property
     def model_id(self) -> str:
@@ -113,6 +114,8 @@ class ModelDefinition:
             result["headers"] = dict(self.headers)
         if self.supports_custom_tools:
             result["supports_custom_tools"] = True
+        if self.supports_hosted_web_search is not None:
+            result["supports_hosted_web_search"] = self.supports_hosted_web_search
         if self.responses_websocket:
             result["responses_websocket"] = True
         if self.native_compaction is not None:
@@ -150,6 +153,7 @@ class ModelDefinition:
         if self.thinking_level_map is not None:
             result["thinking_level_map"] = dict(self.thinking_level_map)
         result["supports_custom_tools"] = self.supports_custom_tools
+        result["supports_hosted_web_search"] = self.supports_hosted_web_search
         result["responses_websocket"] = self.responses_websocket
         result["native_compaction"] = self.native_compaction
         result["model_instructions"] = self.model_instructions
@@ -215,6 +219,7 @@ class ProviderAdapterSpec:
     model_instructions: str = ""
     parallel_tool_calls: bool | None = None
     tool_mode: str = ""
+    supports_hosted_web_search: bool | None = None
 
 
 @dataclass(frozen=True)

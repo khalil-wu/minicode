@@ -24,6 +24,7 @@ import type { RightStackTab } from "../stores/types";
 import { ContextMenu } from "../components/ContextMenu";
 import { SideChatPanel } from "../panels/SideChatPanel";
 import { formatShortcut } from "../lib/keyboard-shortcuts";
+import { projectAgentViews } from "../lib/agent-view-model";
 import { PanelSkeleton } from "./PanelSkeleton";
 import { ChunkErrorBoundary, SafeBoundary } from "./ChunkErrorBoundary";
 import { PanelErrorFallback } from "../components/PanelErrorFallback";
@@ -135,7 +136,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const diffReview = useAppStore((s) => s.diffReview);
   const gitChanges = useAppStore((s) => s.gitChanges);
   const mcpServers = useAppStore((s) => s.mcpServers);
-  const runningSubagents = subagents.filter((subagent) => subagent.status === "running").length;
+  const runningSubagents = useMemo(() => projectAgentViews(subagents).filter((agent) => agent.status === "running").length, [subagents]);
   const mcpErrors = mcpServers.filter((s) => s.status === "error").length;
   const gitChangeCount = gitChanges.workingTree.length + gitChanges.staged.length + gitChanges.untracked.length;
 

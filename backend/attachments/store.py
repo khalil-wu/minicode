@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +109,7 @@ class AttachmentStore:
         if len(content) > MAX_ATTACHMENT_CONTENT_CHARS:
             raise ValueError("Attachment content exceeds the 50 MB limit.")
         normalized_metadata = dict(metadata or {})
+        normalized_metadata.setdefault("created_at", time.time())
         owner_scopes = _metadata_owner_scopes(normalized_metadata)
         if owner_scopes:
             _write_owner_scopes(normalized_metadata, owner_scopes)
@@ -191,6 +193,19 @@ class AttachmentStore:
         )
         metadata = payload.get("metadata") if payload else None
         return dict(metadata) if isinstance(metadata, dict) else {}
+
+    def list_metadata(self, *, conversation_id: str, workspace_root: str) -> list[tuple[str, dict[str, Any]]]:
+        """List upload metadata using the same composite owner grants as reads."""
+        with self._lock:
+            if not self._index_ready:
+                self._rebuild_index()
+            artifact_ids = {artifact_id for ids in self._index.values() for artifact_id in ids}
+        items = []
+        for artifact_id in artifact_ids:
+            metadata = self.get_metadata(artifact_id, conversation_id=conversation_id, workspace_root=workspace_root)
+            if metadata:
+                items.append((artifact_id, metadata))
+        return items
 
     def update_extraction(
         self,

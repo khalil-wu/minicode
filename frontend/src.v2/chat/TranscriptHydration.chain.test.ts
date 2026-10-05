@@ -5,6 +5,28 @@ import { projectMessagesToTurns } from "./chatSurfaceState";
 import { getContentBlocks, getThinkingFromMessage, getToolCallsFromMessage } from "../lib/content-blocks";
 
 describe("canonical transcript schema boundaries", () => {
+  it.each(["partial", "timeout", "cancelled", "blocked"])("preserves typed %s status across legacy standalone tool results in either order", (status) => {
+    const call: BackendTranscriptMessage = { id: "assistant", role: "assistant", content: "", blocks: [
+      { type: "tool_call", record: { id: "call", name: "web_fetch", args: {}, status } },
+    ] };
+    const result = { id: "result", role: "tool", content: "retained output", tool_call_id: "call", name: "web_fetch", is_error: true } as BackendTranscriptMessage;
+    for (const transcript of [[call, result], [result, call]]) {
+      const messages = hydrateMessages(transcript);
+      expect(messages).toHaveLength(1);
+      expect(getToolCallsFromMessage(messages[0])[0]).toMatchObject({ status, outputPreview: "retained output" });
+    }
+  });
+
+  it.each(["partial", "timeout", "cancelled", "blocked", "failed"])("restores an explicit standalone %s outcome in either order", (status) => {
+    const call: BackendTranscriptMessage = { id: "assistant", role: "assistant", content: "", blocks: [
+      { type: "tool_call", record: { id: "call", name: "web_fetch", args: {}, status: "running" } },
+    ] };
+    const result = { id: "result", role: "tool", content: "terminal output", tool_call_id: "call", name: "web_fetch", status, is_error: false } as BackendTranscriptMessage;
+    for (const transcript of [[call, result], [result, call]]) {
+      const messages = hydrateMessages(transcript);
+      expect(getToolCallsFromMessage(messages[0])[0]).toMatchObject({ status, outputPreview: "terminal output" });
+    }
+  });
   it.each(["empty", "hidden-reasoning", "retracted-process"])("keeps an explicit %s block schema from becoming a legacy final answer", (kind) => {
     const blocks = kind === "empty" ? []
       : kind === "hidden-reasoning" ? [{ type: "thinking", content: "hidden", visibility: "hidden", provider_reasoning_type: "encrypted" }]

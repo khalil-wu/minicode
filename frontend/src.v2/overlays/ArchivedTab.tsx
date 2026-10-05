@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { Archive, MoreHorizontal, RotateCcw, Search, Trash2, X } from "lucide-react";
 import { useAppStore } from "../stores";
+import { SelectMenu } from "../components/SelectMenu";
 import { commandResultSucceeded, sendClientCommandAwaitResult, sendConversationDeleteCommand } from "../protocol/ws-outbox";
 import { workspaceDisplayName } from "../lib/workspace-display";
 import { Section } from "./settingsShared";
@@ -125,7 +126,7 @@ export const ArchivedTab = () => {
     <Section title="已归档任务" description={`${archived.length} 个任务已从会话列表隐藏。`}>
       {archived.length > 0 && <div className="settings-archive-filters">
         <label className="settings-search"><Search size={15} /><input aria-label="搜索已归档任务" placeholder="搜索标题或项目…" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-        <select aria-label="归档项目" value={project} onChange={(event) => setProject(event.target.value)}><option value="">全部项目</option>{projects.map((root) => <option key={root} value={root}>{workspaceDisplayName(root, "本机")}{root ? ` · ${root}` : ""}</option>)}</select>
+        <SelectMenu ariaLabel="归档项目" className="settings-select" style={{ width: 220 }} value={project} onValueChange={setProject}><option value="">全部项目</option>{projects.map((root) => <option key={root} value={root}>{workspaceDisplayName(root, "本机")}{root ? ` · ${root}` : ""}</option>)}</SelectMenu>
         <label>最后活动自<input type="date" aria-label="归档最后活动开始日期" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label>
         <label>至<input type="date" aria-label="归档最后活动结束日期" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label>
         <span className="settings-archive-count">{matching.length} / {archived.length} 个任务</span>

@@ -32,6 +32,34 @@ const fixture = (source: string) => {
 };
 
 describe("LiveMarkdownEditor", () => {
+  it("records unopened Markdown buffer replacements into native Undo when the document first mounts", () => {
+    const before = "# foo\r\n\r\n😀 foo\r\n";
+    const after = "# bar\r\n\r\n😀 foo\r\n";
+    const state = fixture(after);
+    const consumed = vi.fn();
+    render(<LiveMarkdownEditor {...state.props} bufferTransactions={[{ before, after, label: "project replace", edits: [{ offset: 2, length: 3, text: "bar" }] }]} onConsumeBufferTransactions={consumed} />);
+    expect(state.value()).toBe(after);
+    expect(consumed).toHaveBeenCalledOnce();
+    act(() => state.editor().getAction!("undo")!.run());
+    expect(state.value()).toBe(before);
+    act(() => state.editor().getAction!("redo")!.run());
+    expect(state.value()).toBe(after);
+  });
+  it("restores serialized reading position into a fresh Markdown editor without its in-memory session", () => {
+    const first = fixture("# Title\n\nFirst paragraph\n\nSecond paragraph\n\nLast line");
+    const rendered = render(<LiveMarkdownEditor {...first.props} />);
+    act(() => first.editor().setSelection!({ startLineNumber: 3, startColumn: 2, endLineNumber: 5, endColumn: 6 }));
+    const scroll = rendered.container.querySelector<HTMLElement>(".cm-scroller")!;
+    scroll.scrollTop = 170;
+    const saved = JSON.parse(JSON.stringify(first.editor().saveViewState!()));
+    rendered.unmount();
+    const restored = fixture(first.props.value);
+    const next = render(<LiveMarkdownEditor {...restored.props} />);
+    act(() => restored.editor().restoreViewState!(saved));
+    expect(restored.editor().getSelection()).toEqual({ startLineNumber: 3, startColumn: 2, endLineNumber: 5, endColumn: 6 });
+    expect(next.container.querySelector<HTMLElement>(".cm-scroller")!.scrollTop).toBe(170);
+    expect(restored.value()).toBe(first.props.value);
+  });
   it("restores a multi-line source range without losing its end position", () => {
     const state = fixture("first\nsecond line\nthird line\nlast");
     render(<LiveMarkdownEditor {...state.props} />);

@@ -112,10 +112,18 @@ def test_mounted_workspace_reaches_terminal_execution_and_preview_config(tmp_pat
     assert execute.await_args.args == ("pwd", str(nested))
     assert execute.await_args.kwargs["context"].workspace_root == workspace
     assert execute.await_args.kwargs["context"].conversation_id == session.active_conversation_id
-    event = session.send_event.await_args.args[0]
+    event, completed = [call.args[0] for call in session.send_event.await_args_list]
     assert event.type == "preview.launch.config"
+    assert event.data["conversation_id"] == session.active_conversation_id
     assert event.data["workspace_root"] == str(workspace)
+    assert len(event.data["configs"]) == 1
     assert event.data["configs"][0]["cwd"] == str(workspace)
+    assert event.data["configs"][0]["command"] == "npm run dev"
+    assert event.data["configs"][0]["source"] == "package.json"
+    assert completed.type == "command.result"
+    assert completed.data["command"] == "preview.launch.config"
+    assert completed.data["level"] == "success"
+    assert completed.data["data"] == event.data
 
 
 def test_message_cwd_keeps_the_existing_isolated_worktree(tmp_path: Path, monkeypatch) -> None:

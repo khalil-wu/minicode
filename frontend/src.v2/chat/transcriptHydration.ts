@@ -1,4 +1,4 @@
-import { normalizeToolDiff, type ToolCallRecord } from "../lib/tool-call-reducer";
+import { isTerminalToolCallStatus, normalizeToolDiff, type ToolCallRecord } from "../lib/tool-call-reducer";
 import { workspacePathComparisonKey } from "../lib/workspace-path";
 import {
   isHiddenProviderReasoning,
@@ -262,14 +262,8 @@ const toOutputFiles = (value: unknown): ToolCallRecord["outputFiles"] => {
   return files.length ? files : undefined;
 };
 
-const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
-  if (!value || typeof value !== "object") return null;
-  const tool = value as Record<string, unknown>;
-  const id = String(tool.id ?? "").trim();
-  const name = String(tool.name ?? "").trim();
-  if (!id || !name) return null;
-  const args = tool.args && typeof tool.args === "object" ? tool.args as Record<string, unknown> : {};
-  const rawStatus = String(tool.status ?? "running").toLowerCase();
+const normalizeHydratedToolStatus = (value: unknown): ToolCallRecord["status"] => {
+  const rawStatus = String(value ?? "running").toLowerCase();
   const status = rawStatus === "completed"
     ? "success"
     : rawStatus === "error"
@@ -277,13 +271,23 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
       : rawStatus === "waiting_approval"
         ? "pending"
         : rawStatus;
+  return (status === "pending" || status === "running" || status === "success" || status === "failed" || status === "blocked" || status === "partial" || status === "timeout" || status === "cancelled")
+    ? status
+    : "running";
+};
+
+const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
+  if (!value || typeof value !== "object") return null;
+  const tool = value as Record<string, unknown>;
+  const id = String(tool.id ?? "").trim();
+  const name = String(tool.name ?? "").trim();
+  if (!id || !name) return null;
+  const args = tool.args && typeof tool.args === "object" ? tool.args as Record<string, unknown> : {};
   return {
     id,
     name,
     args,
-    status: (status === "pending" || status === "running" || status === "success" || status === "failed" || status === "blocked" || status === "partial" || status === "timeout" || status === "cancelled")
-      ? status
-      : "running",
+    status: normalizeHydratedToolStatus(tool.status),
     transition: stringValue(tool.transition ?? tool.tool_transition),
     waitingOn: stringValue(tool.waitingOn ?? tool.waiting_on),
     blockingReason: stringValue(tool.blockingReason ?? tool.blocking_reason),
@@ -896,6 +900,7 @@ export const hydrateMessages = (
   const projected: ChatMessage[] = [];
   const pendingToolResults = new Map<string, {
     content: string;
+    status: ToolCallRecord["status"];
     failed: boolean;
     timestamp: number;
     projectedIndex: number;
@@ -908,12 +913,15 @@ export const hydrateMessages = (
     const sourceRole = String(source.role ?? "");
     if (sourceRole === "tool" || sourceRole === "tool_result" || sourceRole === "toolResult") {
       const callId = String(source.tool_call_id ?? source.toolCallId ?? "").trim();
+      const incomingStatus = normalizeHydratedToolStatus(source.status);
       let merged = false;
       for (let messageIndex = projected.length - 1; messageIndex >= 0 && !merged; messageIndex -= 1) {
         const candidate = projected[messageIndex];
         for (const block of candidate?.blocks ?? []) {
           if (block.type !== "tool_call" || block.record.id !== callId) continue;
-          block.record.status = source.is_error === true || source.isError === true ? "failed" : "success";
+          block.record.status = isTerminalToolCallStatus(incomingStatus) ? incomingStatus
+            : isTerminalToolCallStatus(block.record.status) ? block.record.status
+              : source.is_error === true || source.isError === true ? "failed" : "success";
           block.record.outputPreview = message.content;
           block.record.finishedAt = message.timestamp;
           merged = true;
@@ -930,6 +938,7 @@ export const hydrateMessages = (
         projected.push(message);
         pendingToolResults.set(callId, {
           content: output,
+          status: incomingStatus,
           failed: source.is_error === true || source.isError === true,
           timestamp: message.timestamp,
           projectedIndex,
@@ -945,7 +954,9 @@ export const hydrateMessages = (
       if (block.type !== "tool_call") continue;
       const pending = pendingToolResults.get(block.record.id);
       if (!pending) continue;
-      block.record.status = pending.failed ? "failed" : "success";
+      block.record.status = isTerminalToolCallStatus(pending.status) ? pending.status
+        : isTerminalToolCallStatus(block.record.status) ? block.record.status
+          : pending.failed ? "failed" : "success";
       block.record.outputPreview = pending.content;
       block.record.finishedAt = pending.timestamp;
       mergedToolResultIndexes.add(pending.projectedIndex);

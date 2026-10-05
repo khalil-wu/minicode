@@ -549,10 +549,14 @@ async def bootstrap_agent_loop(
                     "lifecycle runtime does not expose bind_tool_registry(registry)"
                 )
             bind_tool_registry(request.tool_registry)
-        elif bound_registry is not request.tool_registry:
-            # Rebinding would detach adapters from a registry that an in-flight
-            # turn may still own. MiniCode swaps the whole lifecycle generation
-            # on reload, so require the same ownership discipline here.
+        elif (
+            bound_registry is not request.tool_registry
+            and bound_registry.schema_source is not request.tool_registry.schema_source
+        ):
+            # Child registries fork the generation's capability maps and retain
+            # its schema source and extension adapters. They use the shared
+            # lifecycle through their own execution scope without rebinding it.
+            # An independently rebuilt registry still needs a fresh generation.
             raise RuntimeError(
                 "lifecycle runtime is already bound to a different ToolRegistry; "
                 "publish a fresh generation for the replacement session/registry"

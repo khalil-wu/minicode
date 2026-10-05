@@ -13,6 +13,7 @@ from typing import Any, TYPE_CHECKING
 from backend.agent.message import AgentEvent
 from backend.atomic_io import atomic_write_text, file_mutation_locks
 from backend.subprocesses import communicate, spawn_exec
+from backend.services.github_service import GitHubCommandError, github_cli_command, github_command_env, github_repository_context
 
 if TYPE_CHECKING:
     from backend.sandbox import SandboxPolicy
@@ -432,6 +433,7 @@ def git_pr_status_payload(
     pr: dict[str, Any] | None = None,
     checks: list[dict[str, str]] | None = None,
     error: str | None = None,
+    error_code: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "type": "git.pr_status",
@@ -440,6 +442,7 @@ def git_pr_status_payload(
     }
     if error is not None:
         payload["error"] = error
+        payload["error_code"] = error_code or "request_failed"
     return payload
 
 
@@ -472,31 +475,57 @@ async def fetch_git_pr_status_payload(workspace_root: Any) -> dict[str, Any]:
     if not resolved_workspace_root.is_dir():
         raise ValueError(f"Workspace does not exist or is not a directory: {resolved_workspace_root}")
     automation = read_pr_automation(resolved_workspace_root)
-    gh_path = shutil.which("gh")
+    try:
+        repository = await github_repository_context(resolved_workspace_root)
+    except (GitHubCommandError, OSError, asyncio.TimeoutError) as exc:
+        return {**git_pr_status_payload(error="暂时无法读取当前仓库信息，请刷新后重试。", error_code="repository_unavailable"),
+            "automation": automation, "diagnostic": str(exc)}
+    if not repository["eligible"] or not repository["branch"]:
+        return {**git_pr_status_payload(), "automation": automation, "github": repository}
+    gh_path = github_cli_command()
     if not gh_path:
-        payload = git_pr_status_payload(error="gh CLI not found")
+        payload = git_pr_status_payload(error="GitHub 连接组件尚未就绪。", error_code="gh_unavailable")
+        payload["diagnostic"] = "gh CLI not found"
         payload["automation"] = automation
+        payload["github"] = repository
         return payload
 
     try:
         code, out = await _run_gh_pr_view(gh_path, cwd=str(resolved_workspace_root))
         if code == 0 and out:
             pr_info, checks = parse_gh_pr_status(out)
-            # cc ghPrStatus guards: skip PRs from the default branch (gh pr
-            # view there returns the most recently MERGED PR) and merged or
-            # closed PRs — downstream auto_fix/auto_merge must never act on
-            # them.
+            # Only actual open PRs may drive automation. A branch named main
+            # can be a legitimate head (for example in a fork); branch names
+            # are not a substitute for the PR's authoritative state.
             state = str((pr_info or {}).get("state") or "").upper()
-            branch = str((pr_info or {}).get("branch") or "")
-            if state in {"MERGED", "CLOSED"} or branch in {"main", "master"}:
+            if state in {"MERGED", "CLOSED"}:
                 pr_info = None
                 checks = []
             payload = git_pr_status_payload(pr=pr_info, checks=checks)
-        else:
+        elif "no pull requests found" in out.lower() or "no open pull requests" in out.lower():
             payload = git_pr_status_payload()
-    except Exception as exc:
+        else:
+            message = out or f"gh pr view exited with code {code}"
+            detail = message.lower()
+            if any(term in detail for term in ("gh auth login", "not logged", "authentication", "401", "bad credentials")):
+                error_code = "auth_required"
+            elif any(term in detail for term in ("403", "forbidden", "resource not accessible")):
+                error_code = "permission_denied"
+            else:
+                error_code = "request_failed"
+            payload = git_pr_status_payload(error=message, error_code=error_code)
+    except (OSError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
         payload = git_pr_status_payload(error=str(exc))
     payload["automation"] = automation
+    payload["github"] = repository
+    if "error" in payload:
+        payload["diagnostic"] = payload["error"]
+        payload["error"] = {
+            "gh_unavailable": "GitHub 连接组件尚未就绪。",
+            "auth_required": "GitHub 尚未连接，请先连接账号。",
+            "permission_denied": "当前账号无法访问此仓库，请检查 GitHub 仓库权限。",
+            "request_failed": "暂时无法读取 PR 状态，请重试。",
+        }[payload["error_code"]]
     return payload
 
 
@@ -546,23 +575,31 @@ def write_pr_automation(workspace_root: Any, data: dict[str, Any]) -> dict[str, 
 async def set_git_pr_automation_payload(workspace_root: Any, data: dict[str, Any]) -> dict[str, Any]:
     current = read_pr_automation(workspace_root)
     auto_merge_error = ""
+    diagnostic = ""
     if "auto_merge" in data:
-        gh_path = shutil.which("gh")
-        if not gh_path:
-            auto_merge_error = "gh CLI not found; Auto-merge was not changed."
+        repository = await github_repository_context(Path(workspace_root))
+        gh_path = github_cli_command()
+        if not repository["eligible"]:
+            auto_merge_error = "当前仓库未关联 GitHub，自动合并设置未更改。"
+        elif not gh_path:
+            auto_merge_error = "GitHub 连接组件尚未就绪，自动合并设置未更改。"
         else:
             view_code, view_out = await _run_gh_pr_view(gh_path, cwd=str(workspace_root))
             pr_info = None
             if view_code == 0 and view_out:
-                pr_info, _checks = parse_gh_pr_status(view_out)
+                try:
+                    pr_info, _checks = parse_gh_pr_status(view_out)
+                except json.JSONDecodeError as exc:
+                    diagnostic = str(exc)
                 state = str((pr_info or {}).get("state") or "").upper()
-                branch = str((pr_info or {}).get("branch") or "")
-                if state != "OPEN" or branch in {"main", "master"}:
+                if state != "OPEN":
                     pr_info = None
             if not pr_info:
-                auto_merge_error = (
-                    "Auto-merge was not changed: no open PR is attached to this branch."
-                )
+                auto_merge_error = "尚未确认当前分支的开放 PR，自动合并设置未更改。"
+                diagnostic = diagnostic or view_out
+            elif (data.get("expected_pr_number") != pr_info["number"]
+                    or data.get("expected_branch") != repository["branch"]):
+                auto_merge_error = "当前 PR 或分支已经变化，请刷新后重新确认自动合并。"
             else:
                 code, output = await _run_gh_pr_merge_auto(
                     gh_path,
@@ -571,13 +608,18 @@ async def set_git_pr_automation_payload(workspace_root: Any, data: dict[str, Any
                     enabled=bool(data["auto_merge"]),
                 )
                 if code != 0:
-                    auto_merge_error = output or "The remote auto-merge update failed."
+                    auto_merge_error = "GitHub 未能更新自动合并设置，请重试。"
+                    diagnostic = output
     if not auto_merge_error:
         current = write_pr_automation(workspace_root, data)
+    else:
+        current = read_pr_automation(workspace_root)
     payload = await fetch_git_pr_status_payload(workspace_root)
     payload["automation"] = current
     if auto_merge_error:
         payload["error"] = auto_merge_error
+        payload["error_code"] = "auto_merge_failed"
+        payload["diagnostic"] = diagnostic
     return payload
 
 
@@ -591,6 +633,7 @@ async def _run_gh_pr_view(gh_path: str, *, cwd: str) -> tuple[int, str]:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
+        env=github_command_env(),
     )
     stdout, stderr = await communicate(proc, timeout=15)
     return proc.returncode or 0, (stdout or stderr or b"").decode(errors="replace").strip()
@@ -606,6 +649,7 @@ async def _run_gh_pr_merge_auto(gh_path: str, *, cwd: str, pr_number: int, enabl
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
+        env=github_command_env(),
     )
     stdout, stderr = await communicate(proc, timeout=20)
     return proc.returncode or 0, (stdout or stderr or b"").decode(errors="replace").strip()

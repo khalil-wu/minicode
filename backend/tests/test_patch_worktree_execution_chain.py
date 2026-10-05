@@ -158,6 +158,31 @@ def test_readonly_worktree_policy_does_not_gain_host_or_metadata_write(recorded_
     assert not any("add" in item["argv"] for item in captures)
 
 
+def test_native_linked_worktree_status_keeps_captured_repository_owner(recorded_git, monkeypatch):
+    repository, captures, runner_type = recorded_git
+    child = repository / ".minicode" / "worktrees" / "linked"
+    child.mkdir(parents=True)
+    policy = SandboxPolicy(workspace_root=repository, readable_roots=(repository,), allow_network=False)
+    context = ToolExecutionContext(permission=PermissionContext(), workspace_root=repository, sandbox_policy=policy)
+    monkeypatch.setattr(runner_type, "capability", lambda self, **kw: SimpleNamespace(backend="windows-elevated-wfp"))
+
+    async def run():
+        manager = await worktree_tools._resolve_worktree_manager(context)
+        return await asyncio.to_thread(manager.has_local_changes, child)
+
+    assert not asyncio.run(run())
+    operation = next(item for item in captures if "status" in item["argv"])
+    assert operation["cwd"] == repository
+    assert operation["argv"][operation["argv"].index("-C") + 1] == str(child)
+    effective = operation["policy"]
+    assert effective.workspace_root == policy.workspace_root and effective.workspace_roots == policy.workspace_roots
+    assert effective.permission_profile == policy.permission_profile
+    assert effective.allow_network == policy.allow_network
+    assert effective.timeout == worktree.WORKTREE_GIT_TIMEOUT_SECONDS
+    assert effective.resolve(cwd=repository).resolved_entries == policy.resolve(cwd=repository).resolved_entries
+    assert not any(root.is_path_writable(repository / ".git") for root in effective.resolve(cwd=repository).writable_roots)
+
+
 @pytest.mark.parametrize("failure", [ValueError("invalid configuration"), PermissionError("denied discovery"), FileNotFoundError("Git unavailable"), subprocess.TimeoutExpired("git", 1)])
 def test_worktree_discovery_failure_does_not_become_not_a_repository(recorded_git, monkeypatch, failure):
     repository, _, runner_type = recorded_git

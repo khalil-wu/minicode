@@ -457,7 +457,12 @@ async def test_disabling_auto_merge_updates_the_exact_remote_pr_before_local_sta
     monkeypatch.setattr(workspace_service.shutil, "which", lambda _: "gh")
     monkeypatch.setattr(workspace_service, "_run_gh_pr_view", view)
     monkeypatch.setattr(workspace_service, "_run_gh_pr_merge_auto", mutation)
-    result = await workspace_service.set_git_pr_automation_payload(tmp_path, {"auto_merge": False})
+    monkeypatch.setattr(workspace_service, "github_repository_context", AsyncMock(return_value={
+        "is_git_repo": True, "eligible": True, "host": "github.com", "branch": "feature",
+    }))
+    result = await workspace_service.set_git_pr_automation_payload(tmp_path, {
+        "auto_merge": False, "expected_pr_number": 7, "expected_branch": "feature",
+    })
     mutation.assert_awaited_once_with("gh", cwd=str(tmp_path), pr_number=7, enabled=False)
     assert result["automation"]["auto_merge"] is False
 

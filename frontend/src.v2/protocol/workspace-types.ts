@@ -104,7 +104,7 @@ export interface CommandResultEvent {
 
 export interface EnvListEvent {
   type: "env.list";
-  entries?: { name: string; description: string; scope: string }[];
+  entries?: { name: string; description: string; scope: string; credential_status?: "stored" | "missing" }[];
 }
 
 export interface GitPrStatusEvent extends WorkspaceOwnedEvent {
@@ -112,6 +112,7 @@ export interface GitPrStatusEvent extends WorkspaceOwnedEvent {
   pr?: { number: number; title: string; state: string; url: string; branch: string } | null;
   checks?: { name: string; status: string; url: string }[];
   error?: string;
+  error_code?: string;
   automation?: { auto_fix?: boolean; auto_merge?: boolean };
 }
 
@@ -298,6 +299,7 @@ export interface EnvSetCommand {
   name: string;
   value: string;
   description?: string;
+  scope?: string;
 }
 
 export interface EnvDeleteCommand {
@@ -325,6 +327,8 @@ export interface GitPrAutomationSetCommand {
   type: "git.pr_automation.set";
   auto_fix?: boolean;
   auto_merge?: boolean;
+  expected_pr_number?: number;
+  expected_branch?: string;
 }
 
 interface CheckpointOwnedCommand {

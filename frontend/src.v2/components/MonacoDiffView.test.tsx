@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { describe, expect, it } from "vitest";
 import { parseUnifiedDiffExcerpt, parseUnifiedDiffToOriginalModified } from "./MonacoDiffView";
 import { countUnifiedDiffLines, parseUnifiedDiffLines } from "../lib/unified-diff";

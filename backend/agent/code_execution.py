@@ -131,13 +131,12 @@ class CodeExecutionRuntime:
         report = {"cell_id": cell.id, "status": cell.status, "output": text,
                               **({"error": cell.error} if cell.error else {}), "image_count": len(images), "audio_count": len(audios),
                               **({"discarded_unawaited_tool_calls": cell.discarded_calls} if cell.discarded_calls else {})}
-        if contexts:
-            report["hook_context"] = contexts
         if live_cell is not None and cell.status == "running":
             report["pending_tools"] = list(live_cell.pending_tools.values())
         return ToolResult(json.dumps(report, ensure_ascii=False), images=images, audios=audios, is_error=cell.status in {"failed", "cancelled"},
                           status="cancelled" if cell.status == "cancelled" else "failed" if cell.status == "failed" else "success",
-                          display_summary="Script yielded" if cell.status == "running" else f"Script {cell.status}", runtime_metadata={"code_cell": report})
+                          display_summary="Script yielded" if cell.status == "running" else f"Script {cell.status}",
+                          runtime_metadata={"code_cell": report, "hook_model_context": contexts})
 
     async def _emit(self, cell: CodeCell, event: AgentEvent, source: ToolCallSource) -> None:
         await publish_tool_event(self.tool_context.run_context, event, source)

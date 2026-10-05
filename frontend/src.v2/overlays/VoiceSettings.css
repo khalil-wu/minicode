@@ -1,0 +1,15 @@
+.settings-row-control.voice-settings-device { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
+.voice-settings-device .mc-select-menu { flex: 1; min-width: 0; }
+.voice-service-status { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-xs); color: var(--text-muted); white-space: nowrap; }
+.voice-service-status[data-state="success"] { color: var(--state-success); }
+.voice-service-observation { padding: 0 20px 12px; font-size: var(--text-xs); color: var(--text-muted); }
+.voice-service-observation p, .voice-settings-error { color: var(--state-danger); overflow-wrap: anywhere; }
+.voice-service-actions { display: flex; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border-subtle); }
+.voice-service-config { display: grid; gap: 14px; padding: 16px 20px 20px; border-top: 1px solid var(--border-subtle); }
+.voice-service-config > label { display: grid; grid-template-columns: minmax(100px,1fr) minmax(180px,260px); align-items: center; gap: 16px; font-size: var(--text-sm); }
+.voice-service-config input { width: 100%; padding: 7px 10px; color: var(--text-primary); }
+.voice-service-config p { margin: 0; color: var(--text-muted); font-size: var(--text-xs); }
+@media (max-width: 620px) {
+  .voice-service-config > label { grid-template-columns: 1fr; gap: 5px; }
+  .voice-service-actions { flex-wrap: wrap; }
+}

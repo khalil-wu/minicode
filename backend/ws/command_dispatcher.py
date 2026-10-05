@@ -54,6 +54,12 @@ _CONVERSATION_LIFECYCLE_COMMAND_TYPES = {
 }
 
 
+def _requires_selected_conversation(command_type: str) -> bool:
+    return command_type.startswith(("subagent.", "terminal.", "preview.", "checkpoint.", "inspector.")) or command_type in {
+        "send_message", "agent.resume", "approval.file_diff", "context.compact", "context.fork", "context.side_query",
+    }
+
+
 def _is_conversation_lifecycle_command(command_type: str) -> bool:
     normalized = str(command_type or "").strip()
     return (
@@ -249,8 +255,25 @@ class SessionCommandDispatcher:
                 durable_queue.discard_pending_client_command(command_id)
                 await self._send_client_command_ack(command, duplicate=True)
                 continue
+            if not self._recovered_command_owner_ready(command):
+                # The durable ACK survives a cold session, but its selected
+                # conversation does not. Keep owner-dependent work pending
+                # until restore/switch has committed that owner.
+                continue
             await self._send_client_command_ack(command, duplicate=True)
             self._schedule_durable_client_command(command_id, connection_generation)
+
+    def _recovered_command_owner_ready(self, command: UserCommand) -> bool:
+        # These commands establish a conversation or address a target rather
+        # than requiring it to be the current command scope.
+        if command.type in {"session.restore", "session.sync", "user_message"} or command.type.startswith("conversation."):
+            return True
+        owner = str(command.data.get("owner_conversation_id")
+            or command.data.get("ownerConversationId") or command.data.get("conversation_id") or "").strip()
+        active_owner = str(self._session.active_conversation_id or "").strip()
+        if owner:
+            return owner == active_owner
+        return bool(active_owner) if _requires_selected_conversation(command.type) else True
 
     async def _report_durable_queue_load_error(self, evidence: dict[str, Any] | None) -> None:
         """Surface preserved queue or completion-record read errors on reconnect.
@@ -364,8 +387,16 @@ class SessionCommandDispatcher:
             if command_id and durable_queue is not None:
                 if durable_queue.has_client_command(command_id):
                     await self._send_client_command_ack(command, duplicate=True)
-                    self._schedule_durable_client_command(command_id, connection_generation)
+                    if self._recovered_command_owner_ready(command):
+                        self._schedule_durable_client_command(command_id, connection_generation)
                     continue
+                if _requires_selected_conversation(command.type) and not (
+                    command.data.get("owner_conversation_id") or command.data.get("ownerConversationId") or command.data.get("conversation_id")
+                ) and self._session.active_conversation_id:
+                    # Persist the selected owner with commands whose wire
+                    # shape permits omission. Replay must not reinterpret a
+                    # formerly owner-relative action in another conversation.
+                    command.data["owner_conversation_id"] = self._session.active_conversation_id
                 try:
                     persisted = durable_queue.persist_client_command(command)
                 except Exception:
@@ -669,6 +700,11 @@ class SessionCommandDispatcher:
                     await self._handle_command_inner(command)
             else:
                 await self._handle_command_inner(command)
+            if command.type in {"session.restore", "session.sync", "conversation.switch", "conversation.activate"}:
+                # Handlers return only after publishing the canonical owner
+                # and its restore/replay projection. A pending scoped command
+                # may now resume with its original idempotency key.
+                await self._replay_pending_client_commands(generation)
             return True
           except asyncio.CancelledError:
               raise

@@ -325,6 +325,7 @@ class ConversationRepository:
             clone.context_snapshot.pop("extension_cursor", None)
             clone.merged_into_conversation_id = ""
             clone.merged_at = ""
+            clone.worktree_registrations = []
 
             # A branch may inspect the same checkout, but it must not become a
             # second owner of an isolated worktree. Preserve the effective path
@@ -1146,6 +1147,35 @@ class ConversationRepository:
             record.worktree_path = worktree_path
             if git_isolated is not None:
                 record.git_isolated = bool(git_isolated)
+
+        return self._mutate_meta(conversation_id, mutate)
+
+    def register_worktree(
+        self, conversation_id: str, *, path: str, backend: str, workspace_root: str,
+    ) -> ConversationRecord | None:
+        from backend.atomic_io import canonical_file_path_key
+
+        path_key = canonical_file_path_key(path)
+        def mutate(record: ConversationRecord) -> None:
+            record.worktree_registrations = [
+                entry for entry in record.worktree_registrations
+                if canonical_file_path_key(entry["path"]) != path_key
+            ]
+            record.worktree_registrations.append({
+                "path": path, "backend": backend, "workspace_root": workspace_root,
+            })
+
+        return self._mutate_meta(conversation_id, mutate)
+
+    def unregister_worktree(self, conversation_id: str, *, path: str) -> ConversationRecord | None:
+        from backend.atomic_io import canonical_file_path_key
+
+        path_key = canonical_file_path_key(path)
+        def mutate(record: ConversationRecord) -> None:
+            record.worktree_registrations = [
+                entry for entry in record.worktree_registrations
+                if canonical_file_path_key(entry["path"]) != path_key
+            ]
 
         return self._mutate_meta(conversation_id, mutate)
 

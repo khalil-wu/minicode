@@ -29,11 +29,6 @@ from backend.tools.registry import ToolRegistry
 from backend.tools.tool_search import ToolSearchTool
 
 
-@pytest.fixture(autouse=True)
-def isolated_runtime(tmp_path, monkeypatch):
-    monkeypatch.setenv("MINICODE_STATE_ROOT", str(tmp_path / "state"))
-
-
 def report_from_message(message):
     text = message.content
     return json.JSONDecoder().raw_decode(text[text.index("{"):])[0]

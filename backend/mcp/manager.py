@@ -808,7 +808,13 @@ class MCPServerManager:
     ) -> MCPServerConfig:
         if not isinstance(raw_config, Mapping):
             raise ValueError(f"MCP server '{name}' from {source} must be an object")
-        conf = _resolve_mapping_placeholders(dict(raw_config))
+        from backend.runtime_env import vault_subprocess_env
+
+        environment = {**os.environ, **vault_subprocess_env(f"mcp:{name}")}
+        configured_env = raw_config.get("env", {})
+        if isinstance(configured_env, Mapping):
+            environment.update(_resolve_mapping_placeholders(dict(configured_env), environment))
+        conf = _resolve_mapping_placeholders(dict(raw_config), environment)
         unknown_fields = sorted(set(conf) - _MCP_SERVER_FIELDS)
         if unknown_fields:
             raise ValueError(
@@ -937,11 +943,11 @@ class MCPServerManager:
                     raise ValueError(
                         f"MCP server '{name}' from {source} env_vars contains an empty name/source"
                     )
-                if source_name not in os.environ:
+                if source_name not in environment:
                     raise ValueError(
                         f"MCP server '{name}' from {source} requires missing environment variable '{source_name}'"
                     )
-                env[target] = os.environ[source_name]
+                env.setdefault(target, environment[source_name])
         raw_cwd = conf.get("cwd")
         if raw_cwd is not None and not isinstance(raw_cwd, str):
             raise ValueError(f"MCP server '{name}' from {source} cwd must be a string")
@@ -1335,11 +1341,13 @@ class MCPServerManager:
         state = self._servers.get(name)
         if state is None:
             return
+        # Re-read references before the next launch; vault values may have changed.
+        config = {item.name: item for item in self.load_config()}[name]
         if not await self.stop_server(name):
             raise RuntimeError(
                 f"MCP server '{name}' is still shutting down and cannot restart"
             )
-        await self.start_server(state.config, force=True)
+        await self.start_server(config, force=True)
 
     async def oauth_login(self, name: str) -> None:
         """Run the official MCP SDK OAuth flow after an explicit user action."""
@@ -1945,15 +1953,15 @@ def _config_can_connect(config: MCPServerConfig) -> bool:
     )
 
 
-def _resolve_mapping_placeholders(value: Any) -> Any:
+def _resolve_mapping_placeholders(value: Any, environment: Mapping[str, str] | None = None) -> Any:
     if isinstance(value, dict):
         return {
-            key: _resolve_mapping_placeholders(item_value)
+            key: _resolve_mapping_placeholders(item_value, environment)
             for key, item_value in value.items()
         }
     if isinstance(value, list):
-        return [_resolve_mapping_placeholders(item) for item in value]
-    return _resolve_env_placeholders(value)
+        return [_resolve_mapping_placeholders(item, environment) for item in value]
+    return _resolve_env_placeholders(value, environment)
 
 
 def _optional_str(value: Any) -> str | None:

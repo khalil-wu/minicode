@@ -906,7 +906,12 @@ def test_side_responses_cache_opt_out_removes_key_options_and_breakpoint() -> No
 
 
 def test_side_responses_hosted_search_preserves_minicode_tool_controls() -> None:
-    adapter, responses = _adapter([_completed_response(text="search result")])
+    completed = _completed_response(text="search result")
+    completed.response.output = [SimpleNamespace(
+        type="web_search_call", id="search-side", status="completed",
+        action=SimpleNamespace(type="search", query="search"),
+    )]
+    adapter, responses = _adapter([completed])
 
     result = asyncio.run(
         adapter.side_query(
@@ -931,7 +936,7 @@ def test_side_responses_hosted_search_preserves_minicode_tool_controls() -> None
             "filters": {"allowed_domains": ["example.com"]},
         }
     ]
-    assert request["tool_choice"] == "auto"
+    assert request["tool_choice"] == "required"
     assert request["parallel_tool_calls"] is True
 
 

@@ -136,6 +136,7 @@ class AnthropicAdapter(LLMAdapter):
         max_context_window_source: str = "",
         max_context_window_verified: bool = False,
         tool_mode: str = "",
+        supports_hosted_web_search: bool | None = None,
     ) -> None:
         self._api_key = api_key
         self._provider_id = str(provider_id or "anthropic").strip() or "anthropic"
@@ -143,6 +144,7 @@ class AnthropicAdapter(LLMAdapter):
         self._model = model
         self._model_instructions = model_instructions
         self._tool_mode = tool_mode
+        self._declared_hosted_web_search_support = supports_hosted_web_search
         self._small_fast_model = str(small_fast_model or "").strip()
         self._base_url = base_url
         self._max_tokens = max(1, max_tokens or 8_000)
@@ -176,9 +178,11 @@ class AnthropicAdapter(LLMAdapter):
         self._tool_schema_cache = {}
 
     def supports_hosted_web_search(self) -> bool:
-        # Hosted search is part of the Anthropic provider contract. A custom
-        # Messages endpoint does not inherit it from a matching JSON shape.
-        return self._provider_id == "anthropic"
+        if self._declared_hosted_web_search_support is not None:
+            return self._declared_hosted_web_search_support
+        from urllib.parse import urlparse
+
+        return urlparse(self._base_url or "https://api.anthropic.com").hostname == "api.anthropic.com"
 
     def hosted_web_search_supports_blocked_domains(self) -> bool:
         return self.supports_hosted_web_search()
@@ -518,6 +522,7 @@ class AnthropicAdapter(LLMAdapter):
             request_tools = list(kwargs.get("tools") or [])
             request_tools.append(hosted_tool)
             kwargs["tools"] = request_tools
+            kwargs["tool_choice"] = {"type": "tool", "name": "web_search"}
 
         request_summary = _anthropic_safe_request_summary_from_payload(
             kwargs,
@@ -1525,6 +1530,8 @@ class AnthropicAdapter(LLMAdapter):
         )
         text_parts: list[str] = []
         search_sources: list[tuple[str, str]] = []
+        hosted_search = side_options is not None and side_options.hosted_web_search
+        saw_search_result = False
         usage: UsageInfo | None = None
         reported_raw_usage: dict[str, Any] | None = None
         saw_done = False
@@ -1548,6 +1555,14 @@ class AnthropicAdapter(LLMAdapter):
                     if event.finish_reason in {"max_tokens", "model_context_window_exceeded"}:
                         raise RuntimeError(f"Incomplete Anthropic completion returned, reason: {event.finish_reason}")
                     saw_done = True
+                    if hosted_search:
+                        for block in _anthropic_replay_content(event.provider_items) or []:
+                            if block.get("type") != "web_search_tool_result":
+                                continue
+                            result_content = block.get("content")
+                            if isinstance(result_content, Mapping) and result_content.get("type") == "web_search_tool_result_error":
+                                raise RuntimeError(f"Hosted web search failed: {result_content.get('error_code')}")
+                            saw_search_result = True
                     raw_sources = event.raw.get("search_sources")
                     if isinstance(raw_sources, list):
                         for source in raw_sources:
@@ -1573,6 +1588,8 @@ class AnthropicAdapter(LLMAdapter):
 
             if not saw_done:
                 raise RuntimeError("Claude stream ended before message_stop")
+            if hosted_search and not saw_search_result:
+                raise RuntimeError("Hosted web search returned no web_search_tool_result")
         finally:
             await stream.aclose()
             self.record_non_stream_usage(
@@ -1595,6 +1612,8 @@ class AnthropicAdapter(LLMAdapter):
             text = f"{text}\n\n{chr(10).join(source_lines)}".strip()
 
         if not text:
+            if hosted_search:
+                return "Search completed with no results."
             raise RuntimeError("Claude 返回空内容")
 
         return text

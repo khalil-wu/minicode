@@ -135,6 +135,9 @@ const runtimeConfig = {
     env: {
       detect: () => ipcRenderer.invoke("minicode:env:detect"),
     },
+    sandbox: {
+      setup: () => ipcRenderer.invoke("minicode:sandbox:setup"),
+    },
     browser: {
       discover: (endpoint) => ipcRenderer.invoke("minicode:browser:discover", endpoint),
       captureScreenshot: (endpoint, targetId) => ipcRenderer.invoke("minicode:browser:captureScreenshot", endpoint, targetId),

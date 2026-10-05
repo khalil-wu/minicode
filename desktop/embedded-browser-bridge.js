@@ -12,6 +12,7 @@ let starting = null;
 let endpoint = "";
 let accepting = false;
 const inFlight = new Set();
+const operations = new Map();
 
 function init(deps = {}) {
   manager = deps.manager || null;
@@ -45,13 +46,106 @@ function readJsonBody(request, maxBytes = 1_000_000) {
       } catch { reject(new Error("Request body must be valid UTF-8 JSON.")); }
     });
     request.on("error", reject);
+    request.on("aborted", () => reject(new Error("Browser request disconnected before admission.")));
   });
 }
 
 function sendJson(response, status, payload) {
+  if (response.destroyed) return;
   const body = JSON.stringify(payload);
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   response.end(body);
+}
+
+function operationReceipt(operation) {
+  const pending = !operation.settled;
+  return {
+    resource_kind: "browser", resource_id: operation.id, conversation_id: operation.owner,
+    reason: operation.reason || "completed", requested: operation.controller.signal.aborted,
+    acknowledged: true, completed: !pending, pending: pending ? 1 : 0,
+    retry_safe: !pending && !operation.submitted, manual_recovery_required: pending,
+    execution_outcome: pending ? "uncertain" : operation.status,
+    submitted: operation.submitted,
+  };
+}
+
+function createOperation(id, owner) {
+  const operation = { id, owner, controller: new AbortController(), started: false,
+    submitted: false, settled: false, status: "queued", reason: "", promise: null };
+  operations.set(id, operation);
+  return operation;
+}
+
+function cancelOperation(operation, reason) {
+  operation.reason = reason;
+  operation.controller.abort(new Error(`Browser operation ${reason}.`));
+  if (!operation.started) {
+    operation.settled = true;
+    operation.status = reason;
+  }
+}
+
+function ownedOperation(payload) {
+  const operation = operations.get(payload.operation_id);
+  if (operation && operation.owner !== payload.conversation_id) {
+    throw new Error("Browser operation belongs to another conversation.");
+  }
+  return operation;
+}
+
+async function executeOwnedCommand(payload, response) {
+  const id = payload.operation_id || crypto.randomUUID();
+  const existing = ownedOperation({ ...payload, operation_id: id });
+  if (existing) return { ok: false, status: existing.status,
+    error: "This browser operation was already admitted; inspect its recorded outcome instead of executing it again.",
+    cleanup_receipt: operationReceipt(existing) };
+  const operation = createOperation(id, payload.conversation_id);
+  operation.promise = Promise.resolve().then(async () => {
+    operation.controller.signal.throwIfAborted();
+    operation.started = true;
+    operation.status = "running";
+    return manager.executeControlCommand(payload, {
+      signal: operation.controller.signal,
+      onSubmitted() { operation.submitted = true; },
+    });
+  }).then((result) => {
+    operation.status = result?.ok === false ? "failed" : "completed";
+    return result;
+  }, (error) => {
+    operation.status = operation.controller.signal.aborted ? operation.reason : "failed";
+    return { ok: false, status: operation.status, error: error instanceof Error ? error.message : String(error) };
+  }).finally(() => {
+    operation.settled = true;
+    operation.promise = null;
+    if (!accepting) operations.delete(id);
+  });
+  const timeoutMs = payload.operation_timeout_ms ?? 30000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) {
+    cancelOperation(operation, "cancelled");
+    throw new Error("operation_timeout_ms must be between 1 and 30000.");
+  }
+  const timer = setTimeout(() => cancelOperation(operation, "timeout"), timeoutMs);
+  if (response.destroyed) cancelOperation(operation, "cancelled");
+  const disconnected = () => { if (!response.writableEnded) cancelOperation(operation, "cancelled"); };
+  response.once("close", disconnected);
+  const signal = operation.controller.signal;
+  let aborted;
+  const interrupted = new Promise((resolve) => {
+    aborted = () => resolve({ ok: false, status: operation.reason,
+      error: `Browser operation ${operation.reason}; submitted page actions may still complete.`,
+      cleanup_receipt: operationReceipt(operation) });
+    signal.addEventListener("abort", aborted, { once: true });
+    if (signal.aborted) aborted();
+  });
+  try {
+    const result = await Promise.race([operation.promise, interrupted]);
+    return { ...result, cleanup_receipt: operationReceipt(operation) };
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", aborted);
+    response.off("close", disconnected);
+    if (operation.settled) operation.promise = null;
+  }
 }
 
 async function handleRequest(request, response) {
@@ -62,13 +156,35 @@ async function handleRequest(request, response) {
   if (request.method === "GET" && request.url === "/v1/health") {
     return sendJson(response, 200, { ok: true, browser: "MiniCode Embedded Browser" });
   }
-  if (request.method !== "POST" || request.url !== "/v1/command") {
+  if (request.method !== "POST" || !["/v1/command", "/v1/operation"].includes(request.url)) {
     return sendJson(response, 404, { ok: false, error: "Not found" });
   }
   try {
     if (!manager?.executeControlCommand) throw new Error("Embedded browser manager is unavailable.");
     const payload = await readJsonBody(request);
-    const result = await manager.executeControlCommand(payload);
+    if (payload.operation_id != null && (typeof payload.operation_id !== "string" || !payload.operation_id
+      || typeof payload.conversation_id !== "string" || !payload.conversation_id)) {
+      throw new Error("Browser operation requires a string id and conversation owner.");
+    }
+    if (request.url === "/v1/operation") {
+      if (!payload.operation_id || !payload.conversation_id) throw new Error("Browser operation requires its id and conversation owner.");
+      let operation = ownedOperation(payload);
+      if (payload.action === "cancel") {
+        operation ||= createOperation(payload.operation_id, payload.conversation_id);
+        cancelOperation(operation, payload.reason === "timeout" ? "timeout" : "cancelled");
+      } else if (!["status", "wait"].includes(payload.action)) {
+        throw new Error("Unsupported browser operation control.");
+      }
+      if (!operation) return sendJson(response, 404, { ok: false, error: "Browser operation not found." });
+      if (payload.action === "wait" && operation.promise && !response.destroyed) {
+        let disconnected;
+        const closed = new Promise((resolve) => { disconnected = resolve; response.once("close", resolve); });
+        try { await Promise.race([operation.promise, closed]); }
+        finally { response.off("close", disconnected); }
+      }
+      return sendJson(response, 200, { ok: true, cleanup_receipt: operationReceipt(operation) });
+    }
+    const result = await executeOwnedCommand(payload, response);
     return sendJson(response, result?.ok === false ? 400 : 200, result || { ok: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -120,6 +236,7 @@ async function start() {
 
 async function stop() {
   accepting = false;
+  for (const operation of operations.values()) cancelOperation(operation, "cancelled");
   if (starting) await starting.catch(() => {});
   const active = server;
   if (!active) return;
@@ -130,6 +247,7 @@ async function stop() {
   active.closeAllConnections();
   await closed;
   if (inFlight.size) await Promise.allSettled(Array.from(inFlight));
+  for (const [id, operation] of operations) if (operation.settled) operations.delete(id);
   if (server === active) server = null;
   endpoint = "";
 }

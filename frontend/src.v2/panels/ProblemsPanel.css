@@ -1,0 +1,22 @@
+.mc-problems-panel { min-height: 0; height: 100%; display: flex; flex-direction: column; color: var(--text-primary); font-size: var(--mc-font-secondary); }
+.mc-problems-toolbar { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--border-subtle); flex-wrap: wrap; }
+.mc-problems-toolbar input, .mc-problems-toolbar select { min-width: 0; height: 30px; padding: 4px 8px; border: 1px solid var(--border-subtle); border-radius: var(--mc-control-radius); background: var(--surface-base); color: var(--text-primary); font: inherit; }
+.mc-problems-toolbar input { width: min(240px, 34vw); }
+.mc-problems-count { margin-left: auto; color: var(--text-muted); font-size: var(--mc-font-caption); }
+.mc-problems-list { min-height: 0; flex: 1; overflow: auto; padding: 3px 8px 12px; }
+.mc-problems-file-heading { width: 100%; display: flex; align-items: center; gap: 7px; padding: 7px 5px; border: 0; background: transparent; color: var(--text-secondary); font: inherit; text-align: left; cursor: pointer; }
+.mc-problems-file-heading span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-problems-file-heading small { color: var(--text-muted); font-size: var(--mc-font-caption); }
+.mc-problem-row { display: flex; align-items: center; border-radius: var(--radius-sm); padding-right: 3px; }
+.mc-problem-row:hover { background: var(--surface-hover); }
+.mc-problem-location { width: 100%; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 6px 5px 6px 24px; border: 0; background: transparent; color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; }
+.mc-problem-text { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mc-problem-meta { color: var(--text-muted); font-size: var(--mc-font-caption); white-space: nowrap; }
+.mc-problem-severity { flex: 0 0 auto; color: var(--text-muted); }
+.mc-problem-severity-error { color: var(--state-danger); }
+.mc-problem-severity-warning { color: var(--state-warning); }
+.mc-problem-fixes { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 12px 8px 46px; color: var(--text-muted); font-size: var(--mc-font-caption); }
+.mc-problem-fixes button { border: 1px solid var(--border-subtle); border-radius: var(--mc-control-radius); padding: 5px 9px; }
+.mc-problems-message, .mc-problems-error, .mc-problems-result { margin: 0; padding: 8px 12px; font-size: var(--mc-font-caption); color: var(--text-muted); overflow-wrap: anywhere; }
+.mc-problems-error { color: var(--state-danger); }
+.mc-problems-result { color: var(--text-secondary); }

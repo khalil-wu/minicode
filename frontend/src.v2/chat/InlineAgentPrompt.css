@@ -9,7 +9,6 @@
 
 .inline-prompt-card,
 .inline-approval-bar {
-  grid-template-columns: 24px minmax(0, 1fr) auto;
   display: grid;
   gap: 10px;
   min-width: 0;
@@ -19,7 +18,12 @@
   background: var(--surface-soft);
 }
 
+.inline-prompt-card {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .inline-approval-bar {
+  grid-template-columns: 24px minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
 }

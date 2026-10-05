@@ -277,6 +277,7 @@ const IPC_CAPABILITIES = new Set([
   "minicode:embeddedBrowser:getSettings", "minicode:embeddedBrowser:inspect",
   "minicode:embeddedBrowser:runAction", "minicode:embeddedBrowser:setBounds", "minicode:embeddedBrowser:setSettings",
   "minicode:deepLink:open", "minicode:diagnostics:export", "minicode:env:detect",
+  "minicode:sandbox:setup",
   "minicode:fs:listTree", "minicode:fs:readFile",
   "minicode:fs:deletePath",
   "minicode:fs:searchFiles", "minicode:notify",

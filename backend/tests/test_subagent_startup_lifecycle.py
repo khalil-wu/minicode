@@ -228,6 +228,56 @@ async def _launch(case, delivery: str, **arguments):
 
 
 @pytest.mark.asyncio
+async def test_parallel_children_keep_the_parent_lifecycle_registry_binding(startup_case):
+    from backend.extensions.runtime import ExtensionRunner
+
+    registry = startup_case.context.tool_registry
+    lifecycle = ExtensionRunner(cwd=startup_case.workspace)
+    lifecycle.bind_tool_registry(registry)
+    startup_case.context.run_context.lifecycle_runtime = lifecycle
+
+    launched = await asyncio.gather(*(
+        _launch(startup_case, "foreground", description=f"Parallel child {index}")
+        for index in range(3)
+    ))
+
+    assert all(not result.is_error for _, result in launched)
+    assert startup_case.model.calls == 3
+    assert lifecycle._tool_registry is registry
+    assert registry.get_tool("task") is startup_case.tool
+    assert all(startup_case.runtime.get_subagent(child_id).status == "completed" for child_id, _ in launched)
+
+
+@pytest.mark.asyncio
+async def test_independent_registry_still_requires_a_new_lifecycle_generation(startup_case, caplog):
+    from backend.agent.loop import AgentLoopSessionContext
+    from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
+    from backend.extensions.runtime import ExtensionRunner
+
+    parent_registry = startup_case.context.tool_registry
+    lifecycle = ExtensionRunner(cwd=startup_case.workspace)
+    lifecycle.bind_tool_registry(parent_registry)
+    session = AgentSession(
+        llm=startup_case.model, tool_registry=ToolRegistry(),
+        artifact_store=startup_case.tool._artifact_store,
+        permission_checker=PermissionChecker(PermissionSettings(), workspace_root=startup_case.workspace),
+        agent_settings=AgentSettings(max_iterations=1), token_budget=TokenBudget(),
+        lifecycle_runtime=lifecycle,
+    )
+    events = [event async for event in QueryEngine().submit(QuerySubmission(
+        user_message="Check the replacement registry", session=session,
+        runtime=AgentLoopSessionContext(workspace_root=startup_case.workspace,
+            run_context=RunContext(agent_runtime=startup_case.runtime, hook_manager=startup_case.hooks)),
+    ))]
+
+    assert startup_case.model.calls == 0
+    assert "already bound to a different ToolRegistry" in caplog.text
+    assert events[-1].data["status"] == "failed"
+    assert lifecycle._tool_registry is parent_registry
+    await session.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("rebuild_runtime", [False, True])
 async def test_team_owner_survives_next_turn_and_runtime_rebuild(startup_case, rebuild_runtime):
     from backend.tools.swarm_tools import TeamCreateTool, TeamDeleteTool, TeamListTool

@@ -192,6 +192,7 @@ export const fileIcon = (name: string, options: { size?: number; className?: str
     icon={officialFileIcon(name)}
     width={size}
     height={size}
+    style={{ width: size, height: size }}
     className={`mc-file-icon ${options.className ?? "file-tree-file-icon"}`}
     data-file-kind={fileGlyphKind(name)}
     aria-hidden="true"
@@ -233,6 +234,7 @@ export const folderIcon = (expanded: boolean, size = 18, name = ""): ReactNode =
     src={expanded ? open : closed}
     width={size}
     height={size}
+    style={{ width: size, height: size }}
     className="mc-file-icon file-tree-folder-icon"
     alt=""
     aria-hidden="true"

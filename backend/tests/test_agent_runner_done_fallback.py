@@ -678,6 +678,97 @@ def test_ui_agent_snapshot_never_persists_running_tool_as_summary() -> None:
     assert state["subagents"][0]["summary"] == "查询北京天气"
 
 
+def test_ui_agent_snapshot_keeps_all_children_and_live_identity_metadata() -> None:
+    state = None
+    for index in range(35):
+        state = _ui_agent_state_for_event(state, "subagent.start", {
+            "subagent_id": f"child-{index}", "parent_id": "parent", "role": "explore",
+            "record": {"agent_path": f"/root/child-{index}", "mailbox_epoch": 1,
+                       "teammate_name": f"Agent {index}", "team_name": "review",
+                       "depends_on": ["schema"], "read_only": True},
+        })
+    assert state is not None
+    assert len(state["subagents"]) == 35
+    assert state["subagents"][0]["id"] == "child-0"
+    state = _ui_agent_state_for_event(state, "subagent.progress", {
+        "subagent_id": "child-0", "status": "blocked",
+        "snapshot": {"agent_path": "/root/child-0", "mailbox_epoch": 1,
+                     "awaiting_plan_approval": True, "active_plan_request_id": "plan-0",
+                     "blocked_by": ["schema"], "is_idle": False},
+    })
+    assert state is not None
+    row = state["subagents"][0]
+    assert row["status"] == "blocked"
+    assert row["role"] == "explore"
+    assert row["agentPath"] == "/root/child-0"
+    assert row["parentRunId"] == "parent"
+    assert row["teammateName"] == "Agent 0"
+    assert row["teamName"] == "review"
+    assert row["awaitingPlanApproval"] is True
+    assert row["activePlanRequestId"] == "plan-0"
+    assert row["blockedBy"] == ["schema"]
+    assert row["readOnly"] is True
+    assert len(state["subagents"]) == 35
+
+
+def test_ui_agent_terminal_refresh_preserves_known_identity_but_clears_resolved_attention() -> None:
+    state = {"subagents": [{
+        "id": "child-known", "role": "explore", "status": "blocked",
+        "agentPath": "/root/known", "parentRunId": "parent-known", "taskId": "layout-task",
+        "teammateName": "Ada", "teamName": "review", "blockedBy": ["schema"],
+        "awaitingPlanApproval": True, "activePlanRequestId": "plan-known",
+    }]}
+    refreshed = _ui_agent_state_for_event(state, "subagent.done", {
+        "subagent_id": "child-known", "status": "completed", "summary": "完成布局检查",
+        "parent_run_id": "", "agent_path": "", "task_id": "",
+        "snapshot": {"parent_run_id": "", "agent_path": "", "task_id": "", "teammate_name": "", "team_name": "",
+                     "blocked_by": [], "awaiting_plan_approval": False, "active_plan_request_id": ""},
+    })
+    assert refreshed is not None
+    row = refreshed["subagents"][0]
+    assert row["status"] == "done"
+    assert row["summary"] == "完成布局检查"
+    assert row["parentRunId"] == "parent-known"
+    assert row["agentPath"] == "/root/known"
+    assert row["taskId"] == "layout-task"
+    assert row["teammateName"] == "Ada"
+    assert row["teamName"] == "review"
+    assert row["blockedBy"] == []
+    assert row["awaitingPlanApproval"] is False
+    assert row["activePlanRequestId"] == ""
+
+
+def test_ui_agent_reconcile_recovers_children_omitted_by_old_twenty_row_snapshot() -> None:
+    records = [{"subagent_id": f"child-{index}", "parent_run_id": "parent", "status": "completed",
+                "agent_path": f"/root/child-{index}", "mailbox_epoch": 1,
+                "teammate_name": f"Agent {index}", "objective": f"Task {index}"} for index in range(35)]
+
+    class Runtime:
+        def list_runs(self, *, conversation_id, include_subagents):
+            assert conversation_id == "conversation-owner"
+            assert include_subagents is True
+            return {"subagents": records}
+
+        def get_subagent_snapshot(self, subagent_id, *, include_result):
+            assert include_result is True
+            return next(record for record in records if record["subagent_id"] == subagent_id)
+
+        def get_run(self, _run_id):
+            return SimpleNamespace(conversation_id="conversation-owner")
+
+    state, changed = _reconcile_ui_agent_state_with_runtime(
+        {"subagents": [{"id": f"child-{index}", "status": "done"} for index in range(15, 35)]},
+        runtime=Runtime(), conversation_id="conversation-owner",
+    )
+    assert changed is True
+    assert len(state["subagents"]) == 35
+    assert {row["id"] for row in state["subagents"]} == {f"child-{index}" for index in range(35)}
+    first = next(row for row in state["subagents"] if row["id"] == "child-0")
+    assert first["agentPath"] == "/root/child-0"
+    assert first["teammateName"] == "Agent 0"
+    assert first["status"] == "done"
+
+
 def test_ui_agent_snapshot_does_not_regress_terminal_subagent_to_running() -> None:
     state = _ui_agent_state_for_event(None, "subagent.done", {
         "subagent_id": "sa-sticky",
@@ -699,6 +790,12 @@ def test_ui_agent_snapshot_does_not_regress_terminal_subagent_to_running() -> No
 
 def test_ui_agent_snapshot_reconciles_stale_running_child_from_durable_runtime() -> None:
     class _Runtime:
+        @staticmethod
+        def list_runs(*, conversation_id, include_subagents):
+            assert conversation_id == "conv-weather"
+            assert include_subagents is True
+            return {"subagents": [{"subagent_id": "sa-stale"}]}
+
         @staticmethod
         def get_subagent_snapshot(subagent_id, *, include_result=True):
             assert subagent_id == "sa-stale"
@@ -748,6 +845,7 @@ def test_ui_agent_snapshot_reconciles_stale_running_child_from_durable_runtime()
         "status": "done",
         "summary": "广州天气完成",
         "parentRunId": "run-parent",
+        "taskId": "sa-stale",
         "resultAvailable": True,
         "resultContent": "广州晴，31°C。",
         "durationMs": 14556,
@@ -781,6 +879,10 @@ def test_persisted_ui_agent_snapshot_is_repaired_before_restore(tmp_path, monkey
     )
 
     class _Runtime:
+        @staticmethod
+        def list_runs(*, conversation_id, include_subagents):
+            return {"subagents": [{"subagent_id": "sa-restored"}]}
+
         @staticmethod
         def get_subagent_snapshot(subagent_id, *, include_result=True):
             return {
@@ -856,6 +958,10 @@ def test_persisted_ui_agent_reconcile_keeps_projection_ownership_through_patch(
     )
 
     class _Runtime:
+        @staticmethod
+        def list_runs(*, conversation_id, include_subagents):
+            return {"subagents": [{"subagent_id": "sa-owned"}]}
+
         @staticmethod
         def get_subagent_snapshot(subagent_id, *, include_result=True):
             return {

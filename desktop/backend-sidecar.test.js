@@ -101,6 +101,7 @@ test("backend receives the packaged resources directory separately from user fol
   initialize({
     config: {
       pythonCommand: "C:\\Program Files\\MiniCode\\resources\\python-runtime\\python.exe",
+      githubCliCommand: "C:\\Program Files\\MiniCode\\resources\\github-runtime\\bin\\gh.exe",
       appResourcesDir: "C:\\Program Files\\MiniCode\\resources",
       desktopDir: "C:\\Users\\alice\\Desktop",
     },
@@ -117,11 +118,42 @@ test("backend receives the packaged resources directory separately from user fol
     "C:\\Program Files\\MiniCode\\resources",
   );
   assert.equal(spawnOptions.env.MINICODE_DESKTOP_DIR, "C:\\Users\\alice\\Desktop");
+  assert.equal(
+    spawnOptions.env.MINICODE_GH_COMMAND,
+    "C:\\Program Files\\MiniCode\\resources\\github-runtime\\bin\\gh.exe",
+  );
   const pathKey = Object.keys(spawnOptions.env).find((name) => name.toLowerCase() === "path");
   assert.equal(
     spawnOptions.env[pathKey].split(require("node:path").delimiter)[0],
     "C:\\Program Files\\MiniCode\\resources\\python-runtime",
   );
+  assert.equal(
+    spawnOptions.env[pathKey].split(require("node:path").delimiter)[1],
+    "C:\\Program Files\\MiniCode\\resources\\github-runtime\\bin",
+  );
+  releaseChild(child);
+});
+
+test("source desktop makes its prepared GitHub runtime available to the backend and shell tools", () => {
+  const path = require("node:path");
+  const child = createChild(152);
+  const sourceRoot = path.resolve(__dirname, "..");
+  const githubCliCommand = path.join(sourceRoot, "desktop", "github-runtime", "bin", "gh.exe");
+  let spawnOptions;
+  initialize({
+    config: { githubCliCommand, appResourcesDir: sourceRoot },
+    spawnProcess: (_command, _args, options) => {
+      spawnOptions = options;
+      return child;
+    },
+  });
+
+  backendSidecar.startBackendSidecar();
+
+  assert.equal(spawnOptions.env.MINICODE_APP_RESOURCES_DIR, sourceRoot);
+  assert.equal(spawnOptions.env.MINICODE_GH_COMMAND, githubCliCommand);
+  const pathKey = Object.keys(spawnOptions.env).find((name) => name.toLowerCase() === "path");
+  assert.equal(spawnOptions.env[pathKey].split(path.delimiter)[0], path.dirname(githubCliCommand));
   releaseChild(child);
 });
 

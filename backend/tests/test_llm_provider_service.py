@@ -115,6 +115,7 @@ def test_custom_anthropic_preserves_manual_model_without_cross_protocol_fallback
     ("openai", "responses"), ("anthropic", "anthropic"),
 ])
 def test_model_discovery_keeps_draft_candidates_out_of_saved_profiles(tmp_path, provider, wire_api) -> None:
+    from backend import config_helpers
     from backend.config import get_llm_settings_payload, save_llm_settings
 
     save_llm_settings({
@@ -130,7 +131,8 @@ def test_model_discovery_keeps_draft_candidates_out_of_saved_profiles(tmp_path, 
         },
     })
     before_payload = get_llm_settings_payload()
-    before_file = (tmp_path / "settings.json").read_bytes()
+    settings_file = config_helpers.SETTINGS_FILE
+    before_file = settings_file.read_bytes()
     calls = []
 
     async def discover(base_url, api_key, **_transport):
@@ -161,7 +163,7 @@ def test_model_discovery_keeps_draft_candidates_out_of_saved_profiles(tmp_path, 
     assert result["model_metadata"] == {"draft-model": {"context_window": 128_000}}
     assert result["configured_reasoning_effort"] == ""
     assert "_config" not in result
-    assert (tmp_path / "settings.json").read_bytes() == before_file
+    assert settings_file.read_bytes() == before_file
     assert get_llm_settings_payload() == before_payload
 
 

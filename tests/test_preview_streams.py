@@ -124,8 +124,9 @@ def test_preview_stop_handler_only_stops_the_current_workspace(monkeypatch, tmp_
     assert processes["previous"].process.returncode is None
     assert processes["current"].process.returncode == 0
     assert launcher._RUNNING == {"previous": processes["previous"]}
-    send_event.assert_awaited_once()
-    assert send_event.await_args.args[0].data["id"] == "current"
+    events = [call.args[0] for call in send_event.await_args_list]
+    assert events[0].type == "preview.launch.stopped" and events[0].data["id"] == "current"
+    assert events[1].type == "command.result" and events[1].data["command"] == "preview.launch.stop"
 
 
 @pytest.mark.parametrize("cwd", ["..", "nested"], ids=["outside", "inside"])

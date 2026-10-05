@@ -297,7 +297,7 @@ def test_preview_start_handler_does_not_accept_late_http_success(monkeypatch, tm
             "request_id": "start-lifecycle",
         })
 
-        verified = session.send_event.await_args.args[0]
+        verified = next(call.args[0] for call in session.send_event.await_args_list if call.args[0].type == "preview.verified")
         assert verified.type == "preview.verified"
         assert verified.data["ok"] is (completion == "live")
         assert verified.data["request_id"] == "start-lifecycle"

@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Coroutine
 
-from backend.runtime_env import sanitized_subprocess_env
+from backend.runtime_env import sanitized_subprocess_env, vault_subprocess_env
 from backend.subprocesses import spawn_exec, terminate_process_tree
 from backend.terminal.shell_commands import windows_powershell_native_tool_alias_prelude
 from backend.tools.output_limits import (
@@ -237,7 +237,7 @@ class TerminalSession:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self._initial_cwd,
-            env=sanitized_subprocess_env({"TERM": "dumb", "NO_COLOR": "1"}),
+            env=sanitized_subprocess_env({**vault_subprocess_env("run_command"), "TERM": "dumb", "NO_COLOR": "1"}),
         )
         self._started_at = time.time()
         self._output_buffer.clear()

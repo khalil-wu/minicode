@@ -53,6 +53,18 @@ const Fixture = ({ root = "/project" }) => {
 };
 
 describe("workspace index request lifecycle", () => {
+  it("shares native source ownership between the editor and Problems until the last consumer leaves", async () => {
+    const Pair = ({ second = true }) => <><Fixture key="editor" />{second && <Fixture key="problems" />}</>;
+    const { rerender, unmount } = render(<Pair />);
+    screen.getAllByText("初始化").forEach((button) => fireEvent.click(button));
+    await waitFor(() => expect(screen.getAllByText("ready:1")).toHaveLength(2));
+    expect(runtime.owners).toHaveLength(1);
+    const owner = runtime.owners[0];
+    rerender(<Pair second={false} />);
+    expect(owner.dispose).not.toHaveBeenCalled();
+    unmount();
+    expect(owner.dispose).toHaveBeenCalledOnce();
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     runtime.owners.length = 0;

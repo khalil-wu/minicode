@@ -26,7 +26,7 @@ export function collectConversationSources(messages: ChatMessage[]): Conversatio
     for (const link of references.links) {
       markdownTitles.set(link.url, link.label);
     }
-    const upsert = (url: string, title?: string, label?: string, articleTitle = false) => {
+    const upsert = (url: string, title?: string, label?: string, articleTitle = false, incomplete?: boolean) => {
       if (!URL.canParse(url)) return;
       const id = `source:${url}`;
       if (articleTitle && title) articleTitles.set(id, title);
@@ -38,12 +38,16 @@ export function collectConversationSources(messages: ChatMessage[]): Conversatio
       sources.delete(id);
       sources.set(id, {
         id, url, label: articleTitles.get(id) || named || previous?.label || pathLabel,
-        detail: host, messageId: markdownTitles.has(url) || named ? message.id : previous?.messageId || message.id,
+        detail: incomplete === undefined ? previous?.detail || host : `${host}${incomplete ? " · 内容不完整" : ""}`,
+        messageId: markdownTitles.has(url) || named ? message.id : previous?.messageId || message.id,
       });
     };
     for (const record of getToolCallsFromMessage(message)) {
       const url = String(record.sourceUrl || record.args.url || record.args.source_url || "");
-      if (record.extractionStatus !== "failed" && record.evidenceType === "fetched" && /^https?:\/\//i.test(url)) upsert(url);
+      if (record.extractionStatus !== "failed" && (record.status === "success" || record.status === "partial")
+        && record.evidenceType === "fetched" && /^https?:\/\//i.test(url)) {
+        upsert(url, undefined, undefined, false, record.extractionStatus === "partial" || record.status === "partial");
+      }
     }
     for (const [url, label] of markdownTitles) upsert(url, label);
     const citedIndexes = references.citationIndexes;

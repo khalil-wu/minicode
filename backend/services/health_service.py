@@ -9,7 +9,7 @@ from backend.commands.catalog import get_enabled_composer_command_catalog
 from backend.config import get_available_models, get_llm_provider, get_llm_settings_payload
 from backend.feature_flags import feature_flags_payload
 from backend.version import __version__
-from backend.services.workspace_service import readonly_git_policy, run_readonly_git
+from backend.services.workspace_api_service import run_ui_git_metadata
 
 
 def build_health_payload(*, bootstrap: Any | None, active_sessions: int) -> dict[str, Any]:
@@ -174,9 +174,8 @@ def build_doctor_payload(
 def build_git_doctor_payload(workspace_root: Any) -> dict[str, Any]:
     try:
         root = Path(workspace_root)
-        policy = readonly_git_policy(root)
-        branch_result = run_readonly_git(root, "branch", "--show-current", timeout=3, sandbox_policy=policy)
-        status_result = run_readonly_git(root, "status", "--porcelain=v1", sandbox_policy=policy)
+        branch_result = run_ui_git_metadata(root, "branch", "--show-current", timeout=3)
+        status_result = run_ui_git_metadata(root, "status", "--porcelain=v1")
         changes = [line for line in status_result.stdout.splitlines() if line.strip()]
         return {
             "available": branch_result.returncode == 0 or status_result.returncode == 0,

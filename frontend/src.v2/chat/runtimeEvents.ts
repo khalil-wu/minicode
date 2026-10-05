@@ -230,10 +230,13 @@ const isTerminalSubagentStatus = (status: SubagentState["status"]): boolean =>
 const subagentIncarnation = (
   payload: Record<string, unknown>,
   record?: Record<string, unknown> | null,
-): { agentPath?: string; mailboxEpoch?: number } => ({
-  agentPath: maybeString(payload.agent_path) ?? maybeString(record?.agent_path),
-  mailboxEpoch: maybeNumber(payload.mailbox_epoch) ?? maybeNumber(record?.mailbox_epoch),
-});
+): { agentPath?: string; mailboxEpoch?: number } => {
+  const snapshot = record ?? maybeObject(payload.record) ?? maybeObject(payload.snapshot);
+  return {
+    agentPath: maybeString(payload.agent_path) ?? maybeString(snapshot?.agent_path),
+    mailboxEpoch: maybeNumber(payload.mailbox_epoch) ?? maybeNumber(snapshot?.mailbox_epoch),
+  };
+};
 
 const isStaleSubagentIncarnation = (
   existing: SubagentState | undefined,
@@ -255,6 +258,7 @@ const subagentMetadataPatch = (
   payload: Record<string, unknown>,
   record?: Record<string, unknown> | null,
 ): Partial<SubagentState> => {
+  record = record ?? maybeObject(payload.record) ?? maybeObject(payload.snapshot);
   const value = (key: string, altKey?: string): unknown => payload[key] ?? (altKey ? payload[altKey] : undefined) ?? record?.[key] ?? (altKey ? record?.[altKey] : undefined);
   const now = Date.now();
   const patch: Partial<SubagentState> = { lastEventAt: now, lastProgressAt: now };
@@ -269,6 +273,13 @@ const subagentMetadataPatch = (
   const writeScope = maybeStringList(value("write_scope"));
   const background = maybeBoolean(value("background"));
   const readOnly = maybeBoolean(value("read_only"));
+  const needsInput = maybeBoolean(value("needs_input", "needsInput"));
+  const awaitingPlanApproval = maybeBoolean(value("awaiting_plan_approval", "awaitingPlanApproval"));
+  const isIdle = maybeBoolean(value("is_idle", "isIdle"));
+  const teammateName = maybeString(value("teammate_name", "teammateName"));
+  const teamName = maybeString(value("team_name", "teamName"));
+  const activePlanRequestId = value("active_plan_request_id", "activePlanRequestId");
+  const parentRunId = maybeString(value("parent_run_id")) ?? maybeString(value("parent_id"));
   const cleanupPending = maybeBoolean(value("cleanup_pending", "cleanupPending"));
   const rawCleanupReason = value("cleanup_reason", "cleanupReason");
   const cleanupReason = maybeString(rawCleanupReason);
@@ -286,6 +297,13 @@ const subagentMetadataPatch = (
   if (writeScope) patch.writeScope = writeScope;
   if (typeof background === "boolean") patch.background = background;
   if (typeof readOnly === "boolean") patch.readOnly = readOnly;
+  if (typeof needsInput === "boolean") patch.needsInput = needsInput;
+  if (typeof awaitingPlanApproval === "boolean") patch.awaitingPlanApproval = awaitingPlanApproval;
+  if (typeof isIdle === "boolean") patch.isIdle = isIdle;
+  if (teammateName) patch.teammateName = teammateName;
+  if (teamName) patch.teamName = teamName;
+  if (typeof activePlanRequestId === "string") patch.activePlanRequestId = activePlanRequestId;
+  if (parentRunId) patch.parentRunId = parentRunId;
   if (typeof cleanupPending === "boolean") patch.cleanupPending = cleanupPending;
   if (typeof rawCleanupReason === "string") patch.cleanupReason = cleanupReason ?? "";
   return patch;
@@ -1204,6 +1222,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         lastEventAt: now,
         lastProgressAt: lastProgressAt ?? now,
         messages: mergeSubagentMessages(existing?.messages, snapshotMessages(e)),
+        ...subagentMetadataPatch(ev as unknown as Record<string, unknown>),
         ...transcriptSnapshotPatch(ev, existing),
         ...transcriptDeltaPatch(ev, existing),
       };
@@ -1437,6 +1456,12 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const teamName = String(ev.team_name || "").trim();
       const planFilePath = String(ev.plan_file_path || "").trim();
       const planContent = String(ev.plan_content || "").trim();
+      s.updateSubagent(subagentId, {
+        awaitingPlanApproval: true,
+        activePlanRequestId: requestId,
+        ...(teammateName ? { teammateName } : {}),
+        ...(teamName ? { teamName } : {}),
+      }, conversationId);
       // The teammate is blocked on this decision until its own deadline turns
       // silence into a rejection, so it becomes a blocking prompt.
       s.setAskUser({
